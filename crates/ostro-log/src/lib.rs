@@ -1,3 +1,7 @@
-//! ostro-log: placeholder; vendored WAL / raft driver wired in plan 01-06 / 01-04.
+//! ostro-log: partition journal.
 //!
-//! This crate will wrap the vendored `ostro-wal` group-commit WAL (plan 01-06).
+//! Phase 2 builds the CRC-verified envelope on top of the vendored WAL
+//! (`ostro-wal`, a trimmed Chronik Stream group-commit WAL; see VENDORED.md).
+//! For now the crate only re-exports it.
+
+pub use ostro_wal;
