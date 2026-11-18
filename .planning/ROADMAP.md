@@ -152,7 +152,7 @@ Plans:
 - [x] 04-08-PLAN.md — ControlPlane trait, domain types, ApiError mapping, REST + utoipa OpenAPI + UI shell (API-01..04)
 - [ ] 04-09-PLAN.md — PHASE-4 GATE (Phase 2 complete) + StartRun fields 14..18 + Derived::Suspend (API-03)
 - [x] 04-10-PLAN.md — Step timeout + per-step fuel breach attribution (WF-02)
-- [ ] 04-11-PLAN.md — gRPC adapters + one-port REST/gRPC parity suite (API-01)
+- [x] 04-11-PLAN.md — gRPC adapters + one-port REST/gRPC parity suite (API-01)
 - [ ] 04-12-PLAN.md — Apply gaps: RunRecord fields, Running keyspace, Suspend CAS, InputAppended, query helpers (API-03, DISP-01/02)
 - [ ] 04-13-PLAN.md — TimerFired journaled as input + wake (Gap 3) (DISP-01, WF-07)
 - [ ] 04-14-PLAN.md — Dispatcher leader service: Executor trait, rebuild, no polling, soft leases (DISP-01/02/07)
@@ -298,7 +298,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 14/16 | In Progress | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
-| 4. Single-Node Server & Rust MVP | 9/20 | In Progress | - |
+| 4. Single-Node Server & Rust MVP | 10/20 | In Progress | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
