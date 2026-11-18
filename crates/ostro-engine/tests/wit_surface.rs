@@ -687,6 +687,7 @@ async fn replay_status(journal: Vec<Event>) -> (Option<String>, usize) {
         token_key: [1; 32],
         continue_as_new_events: r.engine().config().continue_as_new_events,
         sink: None,
+        hot: None,
     })
     .expect("host state");
     let mut store = Store::new(r.engine().engine(), state);

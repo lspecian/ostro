@@ -1,11 +1,15 @@
 //! Per-store resource limits (ENG-05): memory and table caps that trap on breach,
-//! plus a soft node-wide memory budget shared by every live instance.
+//! plus a soft node-wide memory budget shared by every live instance, and the
+//! [`ParkedRegistry`] that reacts to budget pressure by evicting the least recently
+//! parked hot-waiting activation (ENG-09).
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::MemoryExceeded;
 
@@ -19,6 +23,7 @@ pub struct NodeMemoryBudget {
     limit: u64,
     used: AtomicU64,
     pressure: Notify,
+    released: Notify,
 }
 
 impl NodeMemoryBudget {
@@ -27,6 +32,7 @@ impl NodeMemoryBudget {
             limit,
             used: AtomicU64::new(0),
             pressure: Notify::new(),
+            released: Notify::new(),
         })
     }
 
@@ -47,6 +53,7 @@ impl NodeMemoryBudget {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |u| {
                 Some(u.saturating_sub(bytes))
             });
+        self.released.notify_waiters();
     }
 
     pub fn used(&self) -> u64 {
@@ -64,6 +71,166 @@ impl NodeMemoryBudget {
     /// Notified whenever a charge leaves the budget over its limit.
     pub fn pressure(&self) -> &Notify {
         &self.pressure
+    }
+
+    /// Woken (all current waiters) whenever bytes are released.
+    pub fn released(&self) -> &Notify {
+        &self.released
+    }
+}
+
+/// How long the eviction loop waits for an evicted activation to drop its store
+/// (releasing its memory) before re-checking the budget.
+const EVICT_SETTLE: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Default)]
+struct ParkedInner {
+    tick: u64,
+    next_id: u64,
+    /// id -> (parked-at tick, eviction token).
+    parked: HashMap<u64, (u64, CancellationToken)>,
+}
+
+/// Registry of hot-waiting (parked) activations, evicted least-recently-parked first
+/// while the [`NodeMemoryBudget`] is over its limit.
+///
+/// Only parked activations are registered, so budget pressure can never interrupt a
+/// running activation (it is evicted, if at all, only once it parks). An activation
+/// that parks while the budget is over is registered like any other and wakes the
+/// loop, so older parked activations are evicted before it. The eviction
+/// loop is one tokio task listening on [`NodeMemoryBudget::pressure`]; it is started
+/// on construction when a runtime is current, and (re)started lazily by
+/// [`ParkedRegistry::park`] otherwise (e.g. after the runtime it ran on was dropped).
+#[derive(Debug)]
+pub struct ParkedRegistry {
+    inner: Mutex<ParkedInner>,
+    budget: Arc<NodeMemoryBudget>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    me: Weak<ParkedRegistry>,
+}
+
+impl ParkedRegistry {
+    pub fn new(budget: Arc<NodeMemoryBudget>) -> Arc<Self> {
+        let reg = Arc::new_cyclic(|me| Self {
+            inner: Mutex::new(ParkedInner::default()),
+            budget,
+            task: Mutex::new(None),
+            me: me.clone(),
+        });
+        if tokio::runtime::Handle::try_current().is_ok() {
+            reg.ensure_task();
+        }
+        reg
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ParkedInner> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Start the eviction loop unless it is running. Requires a current tokio runtime.
+    fn ensure_task(&self) {
+        let mut task = self.task.lock().unwrap_or_else(|p| p.into_inner());
+        if task.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
+        let me = self.me.clone();
+        let budget = self.budget.clone();
+        *task = Some(tokio::spawn(async move {
+            loop {
+                budget.pressure().notified().await;
+                let Some(reg) = me.upgrade() else { return };
+                reg.relieve().await;
+            }
+        }));
+    }
+
+    /// Evict least-recently-parked activations while the budget is over its limit.
+    async fn relieve(&self) {
+        while self.budget.is_over() {
+            let Some(token) = self.pop_oldest() else {
+                return;
+            };
+            // Arm before cancelling so a release racing the cancel is not missed.
+            let released = self.budget.released().notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            token.cancel();
+            metrics::counter!("ostro_activation_budget_evictions_total").increment(1);
+            tracing::debug!(
+                used = self.budget.used(),
+                limit = self.budget.limit(),
+                "budget pressure: evicting least recently parked activation"
+            );
+            // Let the evicted activation drop its store before deciding again.
+            let _ = tokio::time::timeout(EVICT_SETTLE, released).await;
+        }
+    }
+
+    fn pop_oldest(&self) -> Option<CancellationToken> {
+        let mut inner = self.lock();
+        let id = inner
+            .parked
+            .iter()
+            .min_by_key(|(_, (tick, _))| *tick)
+            .map(|(id, _)| *id)?;
+        inner.parked.remove(&id).map(|(_, t)| t)
+    }
+
+    /// Register a parked activation; it stays registered until the guard drops.
+    /// Must be called from within a tokio runtime.
+    pub fn park(&self) -> ParkGuard {
+        self.ensure_task();
+        let token = CancellationToken::new();
+        let id = {
+            let mut inner = self.lock();
+            inner.tick += 1;
+            inner.next_id += 1;
+            let (id, tick) = (inner.next_id, inner.tick);
+            inner.parked.insert(id, (tick, token.clone()));
+            id
+        };
+        // Parking while over budget: let the LRU decide who goes (older parked
+        // activations first, this one only if nothing older is left).
+        if self.budget.is_over() {
+            self.budget.pressure().notify_one();
+        }
+        ParkGuard {
+            reg: self.me.clone(),
+            id,
+            token,
+        }
+    }
+
+    /// Number of currently parked activations.
+    pub fn parked_count(&self) -> usize {
+        self.lock().parked.len()
+    }
+
+    pub fn budget(&self) -> &Arc<NodeMemoryBudget> {
+        &self.budget
+    }
+}
+
+/// Registration of one parked activation; dropping it unregisters.
+#[derive(Debug)]
+pub struct ParkGuard {
+    reg: Weak<ParkedRegistry>,
+    id: u64,
+    token: CancellationToken,
+}
+
+impl ParkGuard {
+    /// Cancelled when budget pressure evicts this activation.
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+}
+
+impl Drop for ParkGuard {
+    fn drop(&mut self) {
+        if let Some(reg) = self.reg.upgrade() {
+            reg.lock().parked.remove(&self.id);
+        }
     }
 }
 
@@ -267,5 +434,48 @@ mod tests {
         drop(l);
         assert!(!budget.is_over());
         assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn parked_registry_evicts_least_recently_parked_first() {
+        let budget = NodeMemoryBudget::new(100);
+        let reg = ParkedRegistry::new(budget.clone());
+        let a = reg.park();
+        let b = reg.park();
+        let c = reg.park();
+        assert_eq!(reg.parked_count(), 3);
+        // A running activation pushes the budget over; the oldest parked is evicted.
+        budget.charge(150);
+        tokio::time::timeout(Duration::from_secs(2), a.token().cancelled())
+            .await
+            .expect("oldest parked evicted");
+        // Its release brings the budget back under: nobody else is evicted.
+        budget.release(100);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!b.token().is_cancelled());
+        assert!(!c.token().is_cancelled());
+        assert_eq!(reg.parked_count(), 2);
+        drop(b);
+        assert_eq!(reg.parked_count(), 1);
+        drop(c);
+        drop(a);
+        assert_eq!(reg.parked_count(), 0);
+    }
+
+    #[test]
+    fn parked_registry_starts_lazily_without_runtime() {
+        let budget = NodeMemoryBudget::new(10);
+        let reg = ParkedRegistry::new(budget.clone());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            let g = reg.park();
+            budget.charge(20);
+            tokio::time::timeout(Duration::from_secs(2), g.token().cancelled())
+                .await
+                .expect("evicted");
+        });
     }
 }

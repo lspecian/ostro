@@ -126,6 +126,7 @@ async fn activate(guest: &str, journal: Vec<Event>) -> (RunOut, Store<HostState>
         token_key: [7; 32],
         continue_as_new_events: h.engine.config().continue_as_new_events,
         sink: None,
+        hot: None,
     })
     .expect("host state");
     let mut store = Store::new(h.engine.engine(), state);

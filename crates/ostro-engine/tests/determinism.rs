@@ -10,8 +10,8 @@
 //! - The det-basic journal is pinned by a golden snapshot (first replay-corpus entry).
 //!
 //! All tests share one `Runtime` whose `FakeClock` is frozen (step 0): live timestamps
-//! then depend only on the journal (`max(clock, last command ts)`), so every record
-//! is reproducible without building a fresh engine per run.
+//! then depend only on the journal (`max(clock, last command ts, max journal ts)`), so
+//! every record is reproducible without building a fresh engine per run.
 
 mod common;
 

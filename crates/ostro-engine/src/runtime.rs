@@ -20,6 +20,7 @@ use crate::env::{Clock, SystemClock};
 use crate::error::EngineError;
 use crate::host::bindings::WorkflowPre;
 use crate::host::state::{HostInit, HostState, build_linker};
+use crate::limits::ParkedRegistry;
 use crate::sink::{Activate, ActivationOutcome, ActivationSink, RunRef};
 use crate::validate::validate_component;
 
@@ -58,6 +59,7 @@ impl Default for RuntimeOptions {
 pub struct Runtime {
     engine: OstroEngine,
     linker: Linker<HostState>,
+    parked: Arc<ParkedRegistry>,
     pub(crate) opts: RuntimeOptions,
 }
 
@@ -111,11 +113,18 @@ impl Runtime {
     pub fn new(cfg: EngineConfig, opts: RuntimeOptions) -> Result<Self, EngineError> {
         let engine = OstroEngine::new(cfg)?;
         let linker = build_linker(engine.engine())?;
+        let parked = ParkedRegistry::new(engine.budget().clone());
         Ok(Self {
             engine,
             linker,
+            parked,
             opts,
         })
+    }
+
+    /// Registry of hot-waiting activations (LRU eviction under node budget pressure).
+    pub fn parked(&self) -> &Arc<ParkedRegistry> {
+        &self.parked
     }
 
     pub fn engine(&self) -> &OstroEngine {
@@ -180,6 +189,7 @@ impl Runtime {
             token_key: self.opts.token_key,
             continue_as_new_events: cfg.continue_as_new_events,
             sink: None,
+            hot: None,
         })
         .map_err(|e| EngineError::Wasmtime(wasmtime::format_err!("describe state: {e:?}")))?;
         let mut store = Store::new(self.engine.engine(), state);

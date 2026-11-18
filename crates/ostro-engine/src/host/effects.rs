@@ -5,8 +5,20 @@
 //! replay-core command and returns the op id = the seq of its scheduling event (on
 //! replay: the recorded event's seq). `wait` builds completions only from journaled
 //! input events; effect/child outcomes are decoded from the exact recorded bytes
-//! (ENG-04). An unsatisfied live wait traps with [`Evict`] `WaitUnsatisfied` and
-//! appends nothing.
+//! (ENG-04).
+//!
+//! An unsatisfied live wait either evicts or parks hot (ENG-09, plan 03-11). It parks
+//! only when every op it still waits on can resolve within `engine.hot_wait` (timers
+//! due within the window, effects in flight) and an input channel exists. Parking
+//! first flushes the pending intents (so the leader can schedule the timers/effects),
+//! registers with the [`ParkedRegistry`](crate::limits::ParkedRegistry), then waits for
+//! committed inputs, delivering them to the replay core and re-checking the wait. It traps with
+//! [`Evict`] `HotWaitElapsed` / `BudgetPressure` / `External` when the window elapses,
+//! budget pressure picks it, or the activation is cancelled. Otherwise an unsatisfied
+//! wait traps with `WaitUnsatisfied` and appends nothing. The guest sees the same
+//! completions either way (a hot-waited and an evict-and-replay run journal the same
+//! events). Only channel receives and the flush await happen inside the import, which
+//! keeps it thin on the guest's fiber stack.
 
 use ostro_types::journal::{
     AwaitTokenCreated, CANCELLATION_OP, ChildStarted, CommandArgs, CommandHash, CommandKind,
@@ -14,14 +26,32 @@ use ostro_types::journal::{
     OpCancelled, OpId, OpOutput, SignalWaitStarted, TimerStarted, command_args, decode_result,
 };
 
-use crate::error::{Evict, EvictReason};
+use crate::error::{Evict, EvictReason, Fenced};
 use crate::host::bindings::ostro::runtime::effects::{
     self as wit, AwaitToken, ChildOptions, Completion, Host, HttpRequest, ObjectRequest,
     SqlRequest, WaitMode,
 };
 use crate::host::bindings::ostro::runtime::types::{Datetime, Payload};
-use crate::host::state::{HostState, trap, violation};
+use crate::host::state::{HostState, HotWait, trap, violation};
 use crate::replay::{CommandResult, WaitOutcome, token};
+use crate::sink::AppendError;
+
+fn evict<T>(reason: EvictReason) -> wasmtime::Result<T> {
+    Err(wasmtime::Error::new(Evict { reason }))
+}
+
+/// Trap for a failed pre-park flush, mapped like the driver's own flush errors (03-08).
+fn flush_trap(e: AppendError) -> wasmtime::Error {
+    match e {
+        AppendError::Fenced => wasmtime::Error::new(Fenced),
+        AppendError::Conflict { .. } => wasmtime::Error::new(Evict {
+            reason: EvictReason::AppendConflict,
+        }),
+        AppendError::Unavailable(_) => wasmtime::Error::new(Evict {
+            reason: EvictReason::External,
+        }),
+    }
+}
 
 fn meta(hash: CommandHash) -> CommandMeta {
     CommandMeta {
@@ -115,6 +145,104 @@ impl HostState {
                 Err(f) => Err(convert::failure_to_wit(f)),
             },
         })
+    }
+
+    fn completions(&self, ops: Vec<OpId>) -> wasmtime::Result<Vec<Completion>> {
+        ops.into_iter().map(|op| self.completion(op)).collect()
+    }
+
+    /// Whether an unsatisfied wait on `ops` may park hot: hot-wait wiring present and
+    /// every still-open op (except the cancellation op) a timer due within `hot_wait`
+    /// of logical now or an in-flight effect.
+    ///
+    /// The node budget is deliberately not checked here: parking over budget registers
+    /// this activation as the most recently parked and wakes the LRU, which evicts
+    /// older parked activations first (refusing to park the newest would invert LRU
+    /// and race the eviction loop).
+    fn hot_waitable(&self, ops: &[OpId]) -> bool {
+        let Some(hot) = &self.hot else {
+            return false;
+        };
+        let now = self.replay.logical_now_nanos();
+        let window = u64::try_from(hot.hot_wait.as_nanos()).unwrap_or(u64::MAX);
+        let mut open = ops
+            .iter()
+            .copied()
+            .filter(|&op| op != CANCELLATION_OP && self.replay.completion_for(op).is_none())
+            .peekable();
+        if open.peek().is_none() {
+            return false;
+        }
+        open.all(|op| match self.replay.op_kind(op).map(|e| &e.body) {
+            Some(EventBody::TimerStarted(t)) => t.fire_at_nanos.saturating_sub(now) <= window,
+            Some(EventBody::EffectScheduled(_)) => true,
+            _ => false,
+        })
+    }
+
+    /// Unsatisfied live wait: park hot if possible, else evict (`WaitUnsatisfied`).
+    async fn park_or_evict(
+        &mut self,
+        ops: &[OpId],
+        mode: ostro_types::journal::WaitMode,
+        hash: CommandHash,
+    ) -> wasmtime::Result<Vec<Completion>> {
+        if !self.hot_waitable(ops) {
+            return evict(EvictReason::WaitUnsatisfied);
+        }
+        // Intents must be committed before parking so the leader can schedule them.
+        self.flush().await.map_err(flush_trap)?;
+        let Some(mut hot) = self.hot.take() else {
+            return evict(EvictReason::WaitUnsatisfied);
+        };
+        let r = self.parked(&mut hot, ops, mode, hash).await;
+        self.hot = Some(hot);
+        r
+    }
+
+    async fn parked(
+        &mut self,
+        hot: &mut HotWait,
+        ops: &[OpId],
+        mode: ostro_types::journal::WaitMode,
+        hash: CommandHash,
+    ) -> wasmtime::Result<Vec<Completion>> {
+        let guard = hot.parked.park();
+        let deadline = tokio::time::Instant::now() + hot.hot_wait;
+        let mut inputs_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                _ = hot.cancel.cancelled() => return evict(EvictReason::External),
+                _ = guard.token().cancelled() => return evict(EvictReason::BudgetPressure),
+                ev = hot.inputs.recv(), if inputs_open => {
+                    let Some(ev) = ev else {
+                        // No more inputs can arrive; wait out the window (or a cancel).
+                        inputs_open = false;
+                        continue;
+                    };
+                    let mut batch = vec![ev];
+                    while let Ok(ev) = hot.inputs.try_recv() {
+                        batch.push(ev);
+                    }
+                    if let Err(e) = self.replay.deliver_inputs(batch) {
+                        // The delivered inputs do not continue this activation's
+                        // journal: re-dispatch replays the committed one.
+                        tracing::warn!(error = %e, "hot wait: undeliverable inputs");
+                        return evict(EvictReason::AppendConflict);
+                    }
+                    if let WaitOutcome::Resolved(list) =
+                        self.replay.wait(ops, mode, hash).map_err(trap)?
+                    {
+                        drop(guard);
+                        return self.completions(list);
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    return evict(EvictReason::HotWaitElapsed);
+                }
+            }
+        }
     }
 }
 
@@ -265,10 +393,8 @@ impl Host for HostState {
         let mode = convert::wait_mode_from_wit(mode);
         let hash = self.hash(&CommandArgs::Wait { ops: &ops, mode })?;
         match self.replay.wait(&ops, mode, hash).map_err(trap)? {
-            WaitOutcome::Pending => Err(wasmtime::Error::new(Evict {
-                reason: EvictReason::WaitUnsatisfied,
-            })),
-            WaitOutcome::Resolved(list) => list.into_iter().map(|op| self.completion(op)).collect(),
+            WaitOutcome::Pending => self.park_or_evict(&ops, mode, hash).await,
+            WaitOutcome::Resolved(list) => self.completions(list),
         }
     }
 }

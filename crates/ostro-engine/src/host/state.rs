@@ -11,7 +11,7 @@
 //! the store-aware per-step fuel functions (`begin-step`, `[method]step.complete`).
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ostro_types::journal::{
     CommandArgs, CommandHash, CommandKind, CommandMeta, Continuation, Event, EventBody, Failure,
@@ -27,7 +27,7 @@ use crate::host::bindings::exports::ostro::runtime::workflows as wit_workflows;
 use crate::host::bindings::ostro::runtime::journal as wit_journal;
 use crate::host::bindings::ostro::runtime::types as wit_types;
 use crate::host::bindings::{StepRep, ostro::runtime::types::StepOptions};
-use crate::limits::{HasLimits, OstroLimiter};
+use crate::limits::{HasLimits, OstroLimiter, ParkedRegistry};
 use crate::replay::{CommandResult, ReplayError, ReplayState};
 use crate::sink::{ActivationSink, AppendError, RunRef};
 
@@ -57,6 +57,28 @@ pub struct HostInit {
     /// `engine.continue_as_new_events`.
     pub continue_as_new_events: u64,
     pub sink: Option<Arc<dyn ActivationSink>>,
+    /// Hot-wait wiring (ENG-09); `None` = every unsatisfied wait evicts.
+    pub hot: Option<HotWait>,
+}
+
+/// What an activation needs to park a wait hot instead of evicting (ENG-09).
+pub struct HotWait {
+    /// Input events committed for this run while the activation is parked.
+    pub inputs: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    /// External eviction (`Activate.cancel`).
+    pub cancel: tokio_util::sync::CancellationToken,
+    /// Node registry of parked activations (budget-pressure LRU eviction).
+    pub parked: Arc<ParkedRegistry>,
+    /// `engine.hot_wait`: max park time; also bounds how far ahead a timer may fire.
+    pub hot_wait: Duration,
+}
+
+impl std::fmt::Debug for HotWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HotWait")
+            .field("hot_wait", &self.hot_wait)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A bounded byte buffer: excess bytes are dropped and counted.
@@ -156,6 +178,8 @@ pub struct HostState {
     pub(crate) step_fuel: Option<StepFuel>,
     /// A step with a fuel budget was dropped open; outer fuel to restore lazily.
     pub(crate) fuel_restore: Option<u64>,
+    /// Hot-wait wiring; `None` disables parking.
+    pub(crate) hot: Option<HotWait>,
 }
 
 impl std::fmt::Debug for HostState {
@@ -192,6 +216,7 @@ impl HostState {
             completed_steps: std::collections::HashSet::new(),
             step_fuel: None,
             fuel_restore: None,
+            hot: init.hot,
         })
     }
 
@@ -222,7 +247,7 @@ impl HostState {
         self.replay.take_pending()
     }
 
-    /// Deliver committed input events (03-08 hot wait).
+    /// Deliver committed input events (hot wait, 03-11).
     pub fn deliver_inputs(&mut self, events: Vec<Event>) -> Result<(), ReplayError> {
         self.replay.deliver_inputs(events)
     }

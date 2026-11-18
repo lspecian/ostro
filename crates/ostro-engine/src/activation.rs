@@ -4,8 +4,10 @@
 //! An activation instantiates the prepared component in a fresh store over the
 //! committed journal, calls `run`, flushes the live events it journaled and reports
 //! exactly one [`ActivationOutcome`] via `sink.done`. A wait that cannot be satisfied
-//! traps with [`Evict`]; the driver flushes the pending events after the trap unwinds
-//! and drops the store, and the next dispatch replays the (longer) journal.
+//! either parks hot (when `Activate.inputs` is provided and the wait can resolve
+//! within `engine.hot_wait`, see `host::effects`) or traps with [`Evict`]; the driver
+//! flushes the pending events after the trap unwinds and drops the store, and the next
+//! dispatch replays the (longer) journal.
 //!
 //! Every attempt-ending error is classified by [`classify`] into an
 //! [`AttemptFailure`] reason code; a failure ends only this attempt (the store is
@@ -20,10 +22,10 @@ use wasmtime::{Store, Trap};
 
 use crate::engine::configure_store;
 use crate::error::{
-    AttemptFailure, Evict, EvictReason, GuestExit, NonDeterminism, ProtocolViolation,
+    AttemptFailure, Evict, EvictReason, Fenced, GuestExit, NonDeterminism, ProtocolViolation,
 };
 use crate::host::bindings::ostro::runtime::types as wit_types;
-use crate::host::state::{HostInit, HostState, RunReturn, run_return_from_wit};
+use crate::host::state::{HostInit, HostState, HotWait, RunReturn, run_return_from_wit};
 use crate::limits::{Breach, HasLimits};
 use crate::replay::ReplayError;
 use crate::runtime::{Prepared, Runtime};
@@ -36,11 +38,13 @@ pub enum Classified {
     Evict(EvictReason),
     /// The attempt failed.
     Failure(AttemptFailure),
+    /// A flush inside the guest call (before parking a hot wait) was fenced.
+    Fenced,
 }
 
 /// Classify a `call_run` error.
 ///
-/// Order: [`NonDeterminism`] → [`Evict`] → [`ProtocolViolation`] → [`GuestExit`] →
+/// Order: [`NonDeterminism`] → [`Evict`] → [`Fenced`] → [`ProtocolViolation`] → [`GuestExit`] →
 /// limiter breach (`Breach::Memory`/`Table` → `MemoryExceeded`; a memory cap breach
 /// is a limiter error, not a [`Trap`]) → `Trap::OutOfFuel` → `FuelExhausted`,
 /// `Trap::Interrupt` → `Timeout`, `Trap::StackOverflow` → `StackOverflow` →
@@ -52,6 +56,9 @@ pub fn classify(e: &wasmtime::Error, breach: Option<Breach>, stderr_tail: &str) 
     }
     if let Some(ev) = e.downcast_ref::<Evict>() {
         return Classified::Evict(ev.reason);
+    }
+    if e.downcast_ref::<Fenced>().is_some() {
+        return Classified::Fenced;
     }
     if let Some(pv) = e.downcast_ref::<ProtocolViolation>() {
         return Classified::Failure(AttemptFailure::ProtocolViolation(pv.0.clone()));
@@ -155,15 +162,21 @@ async fn execute(
 ) -> ActivationOutcome {
     let engine = rt.engine();
     let cfg = engine.config();
-    // Hot-wait input delivery (`act.inputs`) is not consumed yet: an unsatisfied wait
-    // always evicts and the next dispatch replays the longer journal.
     let Activate {
         run,
         attempt,
         journal,
+        inputs,
         cancel,
         ..
     } = act;
+    // Without an input channel every unsatisfied wait evicts.
+    let hot = inputs.map(|inputs| HotWait {
+        inputs,
+        cancel: cancel.clone(),
+        parked: rt.parked().clone(),
+        hot_wait: cfg.hot_wait,
+    });
     let state = match HostState::new(HostInit {
         run,
         attempt,
@@ -175,6 +188,7 @@ async fn execute(
         token_key: rt.opts.token_key,
         continue_as_new_events: cfg.continue_as_new_events,
         sink: Some(sink),
+        hot,
     }) {
         Ok(s) => s,
         Err(e) => {
@@ -260,6 +274,8 @@ async fn execute(
                 Classified::Evict(reason) => {
                     flush_then(st, ActivationOutcome::Evicted { reason }).await
                 }
+                // The attempt lost ownership: nothing more may be appended.
+                Classified::Fenced => ActivationOutcome::Fenced,
                 Classified::Failure(f @ AttemptFailure::NonDeterminism(_)) => {
                     ActivationOutcome::AttemptFailed(f)
                 }
@@ -304,6 +320,7 @@ mod tests {
             class(wasmtime::Error::new(ProtocolViolation("twice".into()))),
             Classified::Failure(AttemptFailure::ProtocolViolation("twice".into()))
         );
+        assert_eq!(class(wasmtime::Error::new(Fenced)), Classified::Fenced);
         assert_eq!(
             class(wasmtime::Error::new(GuestExit(7))),
             Classified::Failure(AttemptFailure::GuestExit(7))

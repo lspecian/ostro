@@ -7,16 +7,24 @@
 //! child / token completions, signals, cancellation) between activations, exactly as
 //! the partition leader would commit them. [`replay_journal`] re-runs a recorded
 //! journal and counts what it appends (0 for a faithful replay of a terminal journal).
+//!
+//! With [`Script::live`] the sink also delivers inputs *live* (hot wait, plan 03-11):
+//! each activation gets an input channel, and every `TimerStarted` / `EffectScheduled`
+//! the sink accepts schedules its scripted completion after the given delay. The
+//! completion is committed to the journal (seq = journal length) and sent to the open
+//! activation, or left in the journal for the next activation if none is open.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use ostro_types::journal::{
     CancelRequested, ChildCompleted, EffectCompleted, EffectRequest, ErrorInfo, Event, EventBody,
     Failure, OpId, OpOutput, Payload, RngSeed, RunStarted, SignalReceived, TimerFired,
     TokenCompleted, encode_result,
 };
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
 use crate::env::Clock;
@@ -156,6 +164,9 @@ pub struct Script {
     pub max_activations: u32,
     /// Fire every started timer on eviction (default true).
     pub fire_timers: bool,
+    /// Live input delivery: completions of accepted timers/effects are committed and
+    /// sent to the open activation after this delay (default `None` = off).
+    pub live: Option<Duration>,
 }
 
 impl Default for Script {
@@ -164,6 +175,7 @@ impl Default for Script {
             rules: Vec::new(),
             max_activations: 100,
             fire_timers: true,
+            live: None,
         }
     }
 }
@@ -185,6 +197,13 @@ impl Script {
 
     pub fn fire_timers(mut self, on: bool) -> Self {
         self.fire_timers = on;
+        self
+    }
+
+    /// Deliver timer fires and effect completions live, `delay` after the sink accepts
+    /// the scheduling event (needs a hot-wait-capable runtime to resume in-activation).
+    pub fn live(mut self, delay: Duration) -> Self {
+        self.live = Some(delay);
         self
     }
 
@@ -238,12 +257,65 @@ pub struct FakeState {
     pub append_count: u32,
     fence_on: Vec<u32>,
     conflict_on: Vec<u32>,
+    /// Live delivery script (when [`Script::live`] is set).
+    live: Option<Script>,
+    /// Input channel of the open activation per run (live delivery).
+    senders: HashMap<RunRef, UnboundedSender<Event>>,
 }
 
 /// In-memory [`ActivationSink`]: the Phase 3 stand-in for the partition leader.
 #[derive(Debug, Default)]
 pub struct FakeSink {
-    state: Mutex<FakeState>,
+    state: Arc<Mutex<FakeState>>,
+}
+
+fn lock_state(state: &Mutex<FakeState>) -> MutexGuard<'_, FakeState> {
+    state.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Commit the live completion of `op` (unless already answered) and send it to the
+/// run's open activation.
+fn commit_live(state: &Mutex<FakeState>, run: &RunRef, op: OpId) {
+    let mut st = lock_state(state);
+    let Some(script) = st.live.clone() else {
+        return;
+    };
+    let Some(journal) = st.journals.get_mut(run) else {
+        return;
+    };
+    if journal.iter().any(|e| e.body.completes_op() == Some(op)) {
+        return;
+    }
+    let last_ts = journal.last().map_or(0, |e| e.ts_nanos);
+    let (ts_nanos, body) = match journal.get(op as usize).map(|e| &e.body) {
+        Some(EventBody::TimerStarted(t)) => (
+            t.fire_at_nanos.max(last_ts),
+            EventBody::TimerFired(TimerFired { op }),
+        ),
+        Some(EventBody::EffectScheduled(e)) => {
+            let out = script
+                .effect_fn()
+                .map_or_else(|| Err(unsupported()), |f| f(&e.request));
+            (
+                last_ts,
+                EventBody::EffectCompleted(EffectCompleted {
+                    op,
+                    outcome: encode_result(&out),
+                }),
+            )
+        }
+        _ => return,
+    };
+    let ev = Event {
+        seq: journal.len() as u64,
+        ts_nanos,
+        body,
+    };
+    journal.push(ev.clone());
+    if let Some(tx) = st.senders.get(run) {
+        // A closed channel (activation ended) leaves the input for the next one.
+        let _ = tx.send(ev);
+    }
 }
 
 impl FakeSink {
@@ -263,12 +335,47 @@ impl FakeSink {
                     _ => {}
                 }
             }
+            if script.live.is_some() {
+                st.live = Some(script.clone());
+            }
         }
         sink
     }
 
     fn lock(&self) -> MutexGuard<'_, FakeState> {
-        self.state.lock().unwrap_or_else(|p| p.into_inner())
+        lock_state(&self.state)
+    }
+
+    /// Open a live input channel for `run`'s next activation; returns the committed
+    /// journal and the receiver, atomically (no input can fall between the two).
+    pub fn open_live(&self, run: &RunRef) -> (Vec<Event>, UnboundedReceiver<Event>) {
+        let (tx, rx) = unbounded_channel();
+        let mut st = self.lock();
+        st.senders.insert(run.clone(), tx);
+        (st.journals.get(run).cloned().unwrap_or_default(), rx)
+    }
+
+    /// Close `run`'s live input channel (the activation ended).
+    pub fn close_live(&self, run: &RunRef) {
+        self.lock().senders.remove(run);
+    }
+
+    /// Compute and commit the scripted inputs for `run`'s open ops atomically (so a
+    /// concurrent live completion can neither duplicate nor reorder them); returns how
+    /// many were committed.
+    fn commit_scripted(
+        &self,
+        run: &RunRef,
+        script: &Script,
+        activations: u32,
+        signals_used: &mut [bool],
+    ) -> usize {
+        let mut st = self.lock();
+        let j = st.journals.entry(run.clone()).or_default();
+        let inputs = scripted_inputs(j, script, activations, signals_used);
+        let n = inputs.len();
+        j.extend(inputs);
+        n
     }
 
     /// Install `journal` (committed) for `run`, owned by `attempt`.
@@ -357,6 +464,23 @@ impl ActivationSink for FakeSink {
             return Err(AppendError::Unavailable("bad seqs".to_string()));
         }
         let count = events.len();
+        if let Some(script) = &st.live {
+            let delay = script.live.unwrap_or_default();
+            for e in &events {
+                let deliver = match &e.body {
+                    EventBody::TimerStarted(_) => script.fire_timers,
+                    EventBody::EffectScheduled(_) => true,
+                    _ => false,
+                };
+                if deliver {
+                    let (state, run, op) = (self.state.clone(), run.clone(), e.seq);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        commit_live(&state, &run, op);
+                    });
+                }
+            }
+        }
         st.journals.entry(run.clone()).or_default().extend(events);
         st.batches.push((run.clone(), from_seq, count));
         Ok(from_seq + count as u64)
@@ -504,6 +628,7 @@ fn latest_status(journal: &[Event]) -> Option<String> {
 /// and the run is re-activated over the full journal. Stops on any non-evicted
 /// outcome, when a `WaitUnsatisfied` eviction gets no new inputs (stuck), or after
 /// `script.max_activations`. Conflict / external evictions re-activate without inputs.
+/// With [`Script::live`] each activation gets a live input channel (hot wait).
 pub async fn drive_to_completion(
     rt: &Runtime,
     p: &Prepared,
@@ -521,6 +646,13 @@ pub async fn drive_to_completion(
     let mut activations = 0u32;
     let outcome = loop {
         activations += 1;
+        let (journal, inputs) = if script.live.is_some() {
+            let (journal, rx) = sink.open_live(&run);
+            (journal, Some(rx))
+        } else {
+            (sink.journal(&run), None)
+        };
+        let start_len = journal.len();
         let outcome = rt
             .activate(
                 p,
@@ -528,25 +660,29 @@ pub async fn drive_to_completion(
                     run: run.clone(),
                     attempt: 1,
                     module_sha: p.sha,
-                    journal: sink.journal(&run),
-                    inputs: None,
+                    journal,
+                    inputs,
                     cancel: CancellationToken::new(),
                 },
                 sink.clone(),
             )
             .await;
+        sink.close_live(&run);
         let ActivationOutcome::Evicted { reason } = outcome else {
             break outcome;
         };
         if activations >= script.max_activations {
             break outcome;
         }
-        let journal = sink.journal(&run);
-        let inputs = scripted_inputs(&journal, &script, activations, &mut signals_used);
-        if inputs.is_empty() && reason == EvictReason::WaitUnsatisfied {
+        let committed = sink.commit_scripted(&run, &script, activations, &mut signals_used);
+        // Live completions committed since this activation started also count as news.
+        let live_news = sink
+            .journal(&run)
+            .get(start_len..)
+            .is_some_and(|tail| tail.iter().any(|e| e.body.completes_op().is_some()));
+        if committed == 0 && !live_news && reason == EvictReason::WaitUnsatisfied {
             break outcome;
         }
-        sink.commit_inputs(&run, inputs);
     };
     let journal = sink.journal(&run);
     Drive {
