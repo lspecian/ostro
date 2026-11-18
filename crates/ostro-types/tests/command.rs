@@ -9,9 +9,9 @@ use ostro_types::command::{
     self, AttemptGranted, AttemptTokenMsg, CancelTimer, ChildCompleted, CompleteRun,
     ConflictPolicy, CronStart, Derived, EnqueueReady, EventsAppended, InboundBatch, InboundMsg,
     JournalEvent, OutboxMsg, OutboxTruncated, ParentRef, ScheduleTimer, SendMessage, Signal,
-    StartRun, TerminalStatus, TimerFired, decode_command, encode_command,
+    StartChild, StartRun, TerminalStatus, TimerFired, decode_command, encode_command,
 };
-use ostro_types::{AttemptToken, Command, Epoch, PartitionId, PayloadRef, RunId};
+use ostro_types::{AttemptToken, Command, Epoch, IdError, PartitionId, PayloadRef, RunId};
 use proptest::prelude::*;
 
 const GOLDEN: &str = include_str!("golden/commands.txt");
@@ -313,4 +313,116 @@ proptest! {
         let _ = decode_command(&b);
         let _ = decode_command(&b[..p]);
     }
+}
+
+// ---- Task 2: routing + validation helpers -------------------------------------------------
+
+#[test]
+fn routing_target_partition_every_kind() {
+    for p in 0..16u16 {
+        for m in outbox_all(p) {
+            assert_eq!(m.target_partition(), Ok(PartitionId(p)), "{m:?}");
+        }
+    }
+}
+
+#[test]
+fn routing_child_completed_targets_parent_not_child() {
+    let m = &outbox_all(4)[1];
+    assert_eq!(m.target_partition(), Ok(PartitionId(4)));
+}
+
+#[test]
+fn routing_malformed_run_id_is_error() {
+    let bad = vec![0u8; 17];
+    let mut msgs = outbox_all(2);
+    for m in &mut msgs {
+        use command::outbox_msg::Kind;
+        match m.kind.as_mut().unwrap() {
+            Kind::StartChild(s) => s.start.as_mut().unwrap().run_id = bad.clone(),
+            Kind::ChildCompleted(c) => c.parent_run = bad.clone(),
+            Kind::Signal(s) => s.target_run = bad.clone(),
+            Kind::CancelRun(c) => c.target_run = bad.clone(),
+            Kind::CronStart(c) => c.start.as_mut().unwrap().run_id = bad.clone(),
+        }
+        assert_eq!(m.target_partition(), Err(IdError::BadLength(17)), "{m:?}");
+    }
+    // Missing nested start / missing kind are errors too, never panics.
+    assert!(OutboxMsg { kind: None }.target_partition().is_err());
+    let no_start = OutboxMsg {
+        kind: Some(command::outbox_msg::Kind::StartChild(StartChild { start: None })),
+    };
+    assert!(no_start.target_partition().is_err());
+}
+
+#[test]
+fn routing_start_run_id_length_checked() {
+    let mut s = sample_start(5);
+    assert_eq!(s.run_id(), Ok(run(5, 0x11)));
+    for len in [0usize, 1, 17, 19, 36] {
+        s.run_id = vec![0; len];
+        assert_eq!(s.run_id(), Err(IdError::BadLength(len)));
+    }
+    let parent = sample_start(5).parent.unwrap();
+    assert_eq!(parent.run_id(), Ok(run(1, 0x22)));
+}
+
+#[test]
+fn routing_events_appended_helpers() {
+    let mut ea = EventsAppended {
+        run_id: run(3, 0x77).as_bytes().to_vec(),
+        token: token(2, 5),
+        from_seq: 4,
+        events: (4..8)
+            .map(|seq| JournalEvent {
+                seq,
+                kind: 16,
+                payload: None,
+            })
+            .collect(),
+        derived: vec![],
+    };
+    assert_eq!(ea.run_id(), Ok(run(3, 0x77)));
+    assert_eq!(
+        ea.token(),
+        Ok(AttemptToken {
+            epoch: Epoch(2),
+            n: 5
+        })
+    );
+    assert!(ea.events_contiguous_from(4));
+    assert!(!ea.events_contiguous_from(3));
+    assert!(!ea.events_contiguous_from(5));
+    ea.events[2].seq = 9;
+    assert!(!ea.events_contiguous_from(4));
+    ea.events.clear();
+    assert!(ea.events_contiguous_from(4));
+    ea.events.push(JournalEvent {
+        seq: u64::MAX,
+        kind: 0,
+        payload: None,
+    });
+    ea.events.push(JournalEvent {
+        seq: 0,
+        kind: 0,
+        payload: None,
+    });
+    assert!(!ea.events_contiguous_from(u64::MAX), "no wrap-around");
+    ea.token = None;
+    assert!(ea.token().is_err());
+    ea.run_id = vec![1, 2, 3];
+    assert_eq!(ea.run_id(), Err(IdError::BadLength(3)));
+}
+
+#[test]
+fn routing_timer_fired_run_id() {
+    let mut t = TimerFired {
+        run_id: run(8, 0x12).as_bytes().to_vec(),
+        op: 1,
+        due_at_ms: 2,
+        fired_at_ms: 3,
+    };
+    assert_eq!(t.run_id(), Ok(run(8, 0x12)));
+    t.run_id.pop();
+    assert_eq!(t.run_id(), Err(IdError::BadLength(17)));
 }
