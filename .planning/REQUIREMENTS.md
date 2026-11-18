@@ -18,10 +18,10 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Storage & Log
 
-- [ ] **STOR-01**: Each partition has an append-only journal on the vendored WAL with group commit; every batch carries the envelope `{epoch, codec_ver, crc32c, cmds}`
+- [x] **STOR-01**: Each partition has an append-only journal on the vendored WAL with group commit; every batch carries the envelope `{epoch, codec_ver, crc32c, cmds}`
 - [ ] **STOR-02**: Every journal read verifies CRC; a corrupt record outside a torn tail fails the partition open instead of being skipped
 - [ ] **STOR-03**: On restart the log end is recovered by scanning segments; a torn tail is truncated
-- [ ] **STOR-04**: An Ostro-owned `ReplicatedLog` trait (append, HW, epoch cache, ISR) exists from day one; single node runs it with RF=1, ISR={self}
+- [x] **STOR-04**: An Ostro-owned `ReplicatedLog` trait (append, HW, epoch cache, ISR) exists from day one; single node runs it with RF=1, ISR={self}
 - [ ] **STOR-05**: Partition state machine applies committed commands deterministically into redb (`Durability::None` + periodic `Immediate` checkpoint of `applied_offset`); apply never passes HW. *Superseded engine (Phase 1 S3 decision): fjall 3.1.13 with one `WriteBatch` per apply batch + `persist(SyncAll)` checkpoint every 100 ms/256 batches; recovery replays the WAL from the state's `applied_offset`. See PROJECT.md Key Decisions.*
 - [ ] **STOR-06**: Deleting a partition's state store and restarting rebuilds byte-identical state (rolling state hash matches)
 - [ ] **STOR-07**: fsync/write errors (EIO, ENOSPC) are fatal for the affected partition and are never retried or reported as success
@@ -249,10 +249,10 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | FOUND-04 | Phase 1 | Complete |
 | FOUND-05 | Phase 1 | Partial (local x86_64 musl green; remote aarch64/macOS legs human_needed) |
 | FOUND-06 | Phase 1 | Complete |
-| STOR-01 | Phase 2 | Pending |
+| STOR-01 | Phase 2 | Complete |
 | STOR-02 | Phase 2 | Pending |
 | STOR-03 | Phase 2 | Pending |
-| STOR-04 | Phase 2 | Pending |
+| STOR-04 | Phase 2 | Complete |
 | STOR-05 | Phase 2 | Pending |
 | STOR-06 | Phase 2 | Pending |
 | STOR-07 | Phase 2 | Pending |
