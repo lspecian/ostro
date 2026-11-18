@@ -1,3 +1,4 @@
+// Vendored from chronik-stream@08715f4 crates/chronik-raft/src/driver.rs; modified by Ostro (see VENDORED.md).
 //! Event-driven Raft driver.
 //!
 //! One OS thread owns the `RawNode` and its [`RaftLogStore`]. It wakes for a

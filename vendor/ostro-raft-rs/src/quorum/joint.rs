@@ -1,4 +1,5 @@
 // Copyright 2020 TiKV Project Authors. Licensed under Apache-2.0.
+// Vendored from chronik-stream@08715f4 crates/raft/src/quorum/joint.rs; modified by Ostro (see VENDORED.md).
 
 use super::{AckedIndexer, VoteResult};
 use crate::util::Union;

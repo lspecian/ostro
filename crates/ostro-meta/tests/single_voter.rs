@@ -32,8 +32,14 @@ fn count(result: &[u8]) -> u64 {
 }
 
 async fn start_and_propose(dir: &std::path::Path, data: &[u8]) -> u64 {
-    let driver = RaftDriver::start(dir, DriverConfig::new(1), &[1], CounterSm::default(), NullOutbox)
-        .expect("driver starts");
+    let driver = RaftDriver::start(
+        dir,
+        DriverConfig::new(1),
+        &[1],
+        CounterSm::default(),
+        NullOutbox,
+    )
+    .expect("driver starts");
     let h = driver.handle();
     let leader = tokio::time::timeout(Duration::from_secs(5), h.wait_for_leader())
         .await
