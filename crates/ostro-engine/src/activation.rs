@@ -211,9 +211,11 @@ async fn execute(
         let call = wf
             .ostro_runtime_workflows()
             .call_run(&mut store, &workflow, &input);
+        // Cancellation wins ties: an already-cancelled activation never runs guest code.
         tokio::select! {
-            r = call => Some(r),
+            biased;
             _ = cancel.cancelled() => None,
+            r = call => Some(r),
         }
     };
 
