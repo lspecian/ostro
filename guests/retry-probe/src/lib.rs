@@ -8,6 +8,12 @@
 //! - `nonretryable`: fails `non-retryable("permanent")`.
 //! - `requeue`: policy max 3, initial 5 s, max 5 s (> `engine.hot_wait`); always fails.
 //! - `nopolicy`: no retry policy; fails once.
+//! - `hang:T` (plan 04-10): `timeout-ms` T, policy max 2 / 10 ms; the body spins forever,
+//!   so every attempt is interrupted by the step timeout.
+//! - `quick`: `timeout-ms` 5000; the body succeeds at once (`ok:quick`).
+//! - `burn`: step fuel budget 1,000,000 and a policy max 3; the body spins forever, so the
+//!   step's fuel runs out (recorded as non-retryable `fuel_exhausted`).
+//! - `spin`: spins forever OUTSIDE any step (activation wall deadline applies).
 //!
 //! Raw wit-bindgen (no SDK dependency). The guest loops on `retry-now`, re-running the
 //! body in the same activation. The run always completes with a summary of the step's
@@ -47,7 +53,39 @@ fn policy(max: u32, initial: u64, max_interval: u64, non_retryable: &[&str]) -> 
     }
 }
 
+/// Busy loop that never returns (interrupted by a deadline or fuel exhaustion).
+fn spin_forever() -> ! {
+    let mut x: u64 = 0;
+    loop {
+        x = std::hint::black_box(x.wrapping_add(1));
+    }
+}
+
 fn options(mode: &str) -> StepOptions {
+    if let Some(t) = mode.strip_prefix("hang:") {
+        return StepOptions {
+            retry: Some(policy(2, 10, 10, &[])),
+            timeout_ms: Some(t.parse().unwrap_or(200)),
+            fuel: None,
+        };
+    }
+    match mode {
+        "quick" => {
+            return StepOptions {
+                retry: Some(policy(2, 10, 10, &[])),
+                timeout_ms: Some(5_000),
+                fuel: None,
+            };
+        }
+        "burn" => {
+            return StepOptions {
+                retry: Some(policy(3, 10, 10, &[])),
+                timeout_ms: None,
+                fuel: Some(1_000_000),
+            };
+        }
+        _ => {}
+    }
     let retry = match mode {
         "fatal" => Some(policy(4, 10, 40, &["fatal"])),
         "nonretryable" | "exhaust" => Some(policy(4, 10, 40, &[])),
@@ -67,6 +105,12 @@ fn options(mode: &str) -> StepOptions {
 fn body(mode: &str) -> Result<Payload, Failure> {
     let run = BODY_RUNS.fetch_add(1, Ordering::SeqCst) + 1;
     match mode {
+        "quick" => Ok(Payload {
+            content_type: TEXT.to_string(),
+            data: b"quick".to_vec(),
+        }),
+        "burn" => spin_forever(),
+        m if m.starts_with("hang:") => spin_forever(),
         "fatal" => Err(err("fatal")),
         "nonretryable" => Err(Failure::NonRetryable(ErrorInfo {
             kind: "permanent".to_string(),
@@ -100,6 +144,9 @@ fn summary(r: &Result<Payload, Failure>) -> String {
 
 fn probe(input: Payload) -> Result<RunResult, Failure> {
     let mode = String::from_utf8_lossy(&input.data).into_owned();
+    if mode == "spin" {
+        spin_forever();
+    }
     let outcome = match journal::begin_step("probe", &options(&mode)) {
         StepStart::Replayed(r) => r,
         StepStart::Execute(s) => loop {

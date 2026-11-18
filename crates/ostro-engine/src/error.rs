@@ -20,6 +20,10 @@ pub enum EvictReason {
         /// Unix nanos at which the next attempt of the step is due.
         retry_at_nanos: u64,
     },
+    /// A live step was interrupted by its `timeout-ms` or its fuel budget and its
+    /// failure was journaled with no retry left (`StepCompleted(Err(..))`): re-activate
+    /// immediately; the run continues from replay (WF-02, plan 04-10).
+    StepInterrupted,
 }
 
 impl EvictReason {
@@ -32,6 +36,7 @@ impl EvictReason {
             Self::External => "external",
             Self::AppendConflict => "append_conflict",
             Self::StepBackoff { .. } => "step_backoff",
+            Self::StepInterrupted => "step_interrupted",
         }
     }
 }
@@ -160,6 +165,7 @@ mod tests {
             "step_backoff"
         );
         assert_eq!(EvictReason::WaitUnsatisfied.code(), "wait_unsatisfied");
+        assert_eq!(EvictReason::StepInterrupted.code(), "step_interrupted");
         for (f, code) in [
             (AttemptFailure::FuelExhausted, "fuel_exhausted"),
             (AttemptFailure::Timeout, "timeout"),
