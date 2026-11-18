@@ -1,0 +1,7 @@
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+# aarch64-unknown-linux-musl is added by the CI aarch64 runner (`rustup target add`)
+# so dev machines do not download it on every toolchain install.
+targets = ["x86_64-unknown-linux-musl", "wasm32-wasip2"]
+profile = "minimal"

@@ -1,0 +1,8 @@
+Ostro — Copyright 2026 Luis Specian. Licensed under Apache-2.0.
+
+This product includes software from Chronik Stream
+(https://github.com/lspecian/chronik-stream), Apache-2.0,
+commit 08715f4867c9f40e409c68d8e212bd9479d620c0.
+
+This product includes software from TiKV raft-rs v0.7.0
+(https://github.com/tikv/raft-rs), Copyright TiKV Project Authors, Apache-2.0.
