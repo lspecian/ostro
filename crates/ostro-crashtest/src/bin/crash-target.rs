@@ -1,5 +1,12 @@
-//! `crash-target <data_dir> <seed> [--partitions N]`: a Leader-mode node under seeded load,
-//! killed with SIGKILL by tests/crash_loop.rs (plan 02-15).
+//! `crash-target <data_dir> <seed> [--partitions N] [--pipeline N] [--blob-pct N]
+//! [--journal-mib N] [--memtable-mib N] [--workers N] [--cache-mib N]`: a Leader-mode node
+//! under seeded load, killed with SIGKILL by tests/crash_loop.rs (plan 02-15) and
+//! tests/reopen_time.rs (plan 02-16).
+//!
+//! Defaults: 4 partitions, one load task per partition, 2% of starts with a blob input,
+//! `StoreConfig::default()`. `--pipeline N` runs N independent load tasks per partition
+//! (N submits in flight, so group commit batches them); the store flags override the
+//! matching `StoreConfig` field (MiB for sizes).
 //!
 //! Prints `READY` once the node is open, then one line per command whose outcome was
 //! `Accepted`, only after that outcome arrived (WAL fsync + apply commit):
@@ -20,7 +27,9 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use ostro_crashtest::{Rng, ack_line};
-use ostro_partition::{ApplyOutcome, Node, NodeConfig, PartitionHandle, PartitionSlot};
+use ostro_partition::{
+    ApplyOutcome, Node, NodeConfig, PartitionHandle, PartitionSlot, StoreConfig,
+};
 use ostro_types::command::{
     AttemptGranted, AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EventsAppended,
     JournalEvent, OutboxMsg, ScheduleTimer, SendMessage, Signal, StartRun, TerminalStatus, derived,
@@ -50,7 +59,10 @@ fn emit(line: &str) {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: crash-target <data_dir> <seed> [--partitions N]");
+    eprintln!(
+        "usage: crash-target <data_dir> <seed> [--partitions N] [--pipeline N] [--blob-pct N] \
+         [--journal-mib N] [--memtable-mib N] [--workers N] [--cache-mib N]"
+    );
     std::process::exit(2);
 }
 
@@ -79,15 +91,23 @@ fn main() {
     let dir = PathBuf::from(&args[0]);
     let seed: u64 = args[1].parse().unwrap_or_else(|_| usage());
     let mut partitions: u16 = 4;
+    let mut pipeline: u64 = 1;
+    let mut blob_pct: u64 = 2;
+    let mut store = StoreConfig::default();
     let mut rest = args[2..].iter();
     while let Some(a) = rest.next() {
+        let v: u64 = rest
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| usage());
         match a.as_str() {
-            "--partitions" => {
-                partitions = rest
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(|| usage());
-            }
+            "--partitions" => partitions = u16::try_from(v).unwrap_or_else(|_| usage()),
+            "--pipeline" => pipeline = v.max(1),
+            "--blob-pct" => blob_pct = v.min(100),
+            "--journal-mib" => store.max_journaling_size = v << 20,
+            "--memtable-mib" => store.max_memtable_size = v << 20,
+            "--workers" => store.worker_threads = usize::try_from(v.max(1)).unwrap_or(1),
+            "--cache-mib" => store.cache_size = v << 20,
             _ => usage(),
         }
     }
@@ -98,7 +118,9 @@ fn main() {
         .build()
         .expect("tokio runtime");
     rt.block_on(async move {
-        let node = match Node::open(NodeConfig::new(dir, count)).await {
+        let mut cfg = NodeConfig::new(dir, count);
+        cfg.store = store;
+        let node = match Node::open(cfg).await {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("crash-target: node open failed: {e}");
@@ -115,13 +137,20 @@ fn main() {
         let mut tasks = Vec::new();
         for p in count.ids() {
             if let Some(h) = node.handle(p) {
-                let rng = Rng::new(seed.wrapping_mul(1_000_003).wrapping_add(u64::from(p.0)));
-                tasks.push(tokio::spawn(load(
-                    h.clone(),
-                    partitions,
-                    rng,
-                    Arc::clone(&shared),
-                )));
+                for k in 0..pipeline {
+                    let rng = Rng::new(
+                        seed.wrapping_mul(1_000_003)
+                            .wrapping_add(u64::from(p.0))
+                            .wrapping_add(k << 32),
+                    );
+                    tasks.push(tokio::spawn(load(
+                        h.clone(),
+                        partitions,
+                        rng,
+                        Arc::clone(&shared),
+                        blob_pct,
+                    )));
+                }
             }
         }
         for t in tasks {
@@ -161,7 +190,13 @@ async fn submit(
     }
 }
 
-async fn load(h: PartitionHandle<ostro_log::Rf1Log>, count: u16, mut rng: Rng, shared: Shared) {
+async fn load(
+    h: PartitionHandle<ostro_log::Rf1Log>,
+    count: u16,
+    mut rng: Rng,
+    shared: Shared,
+    blob_pct: u64,
+) {
     let me = h.partition();
     let mut live: Vec<Live> = Vec::new();
     loop {
@@ -173,7 +208,7 @@ async fn load(h: PartitionHandle<ostro_log::Rf1Log>, count: u16, mut rng: Rng, s
             let mut ids = Vec::with_capacity(k);
             for _ in 0..k {
                 let id = RunId::new_v7(me);
-                let input = if rng.chance(2) {
+                let input = if rng.chance(blob_pct) {
                     let big = Bytes::from(rng.bytes(300 * 1024));
                     match h.prepare_payload(big).await {
                         Ok(r) => Some(r),

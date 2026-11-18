@@ -180,11 +180,26 @@ pub fn run_and_kill(
     env: &[(&str, &str)],
     run_for: Duration,
 ) -> Result<TargetRun, String> {
+    run_and_kill_with(bin, dir, seed, partitions, &[], env, run_for)
+}
+
+/// [`run_and_kill`] with extra `crash-target` arguments (e.g. `--pipeline 8`,
+/// `--journal-mib 128`; see the binary's usage).
+pub fn run_and_kill_with(
+    bin: &Path,
+    dir: &Path,
+    seed: u64,
+    partitions: u16,
+    args: &[String],
+    env: &[(&str, &str)],
+    run_for: Duration,
+) -> Result<TargetRun, String> {
     let mut cmd = Proc::new(bin);
     cmd.arg(dir)
         .arg(seed.to_string())
         .arg("--partitions")
         .arg(partitions.to_string())
+        .args(args)
         .env_remove("FAILPOINTS")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -471,6 +486,30 @@ pub fn record_spans(path: &Path) -> Result<Vec<(u64, u64)>, String> {
         pos += len;
     }
     Ok(out)
+}
+
+/// Total size in bytes of every regular file under `path` (0 if it does not exist).
+pub fn dir_bytes(path: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    rd.filter_map(Result::ok)
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_bytes(&e.path()),
+            Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// The 1-minute load average from `/proc/loadavg` (`None` where unavailable).
+pub fn loadavg() -> Option<f64> {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()?
+        .split_ascii_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Iteration count for the crash loops: `OSTRO_CRASH_ITERS` or `default`.

@@ -25,6 +25,10 @@ bytes.workspace = true
 tempfile.workspace = true
 fail = { workspace = true, optional = true }
 
+[dev-dependencies]
+# apply_throughput.rs captures the machine's batch/checkpoint histograms with a test recorder.
+metrics.workspace = true
+
 [[bin]]
 name = "crash-target"
 path = "src/bin/crash-target.rs"
