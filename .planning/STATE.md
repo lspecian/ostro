@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-11-18T17:24:52.927Z"
-last_activity: 2026-11-18 — Completed 01-03-PLAN.md (S2 spike apparatus)
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-11-18T17:28:09.076Z"
+last_activity: "2026-11-18 — Completed 01-02-PLAN.md (S3 redb durability spike: redb FAILS 90k rule; fjall recommended)"
 progress:
   total_phases: 14
   completed_phases: 0
   total_plans: 8
-  completed_plans: 2
-  percent: 25
+  completed_plans: 3
+  percent: 38
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 ## Current Position
 
 Phase: 1 of 14 (Foundation, Vendoring & Spikes)
-Plan: 2 of 8 in current phase (01-01, 01-03 complete)
+Plan: 3 of 8 in current phase (01-01, 01-02, 01-03 complete)
 Status: In progress
-Last activity: 2026-11-18 — Completed 01-03-PLAN.md (S2 spike apparatus: shared WIT, py/ts/rust guests, wasmtime 50.0.2 harness)
+Last activity: 2026-11-18 — Completed 01-02-PLAN.md (S3 redb durability spike: redb FAILS 90k rule at 62k cmds/s; fjall 242k)
 
-Progress: [███░░░░░░░] 25%
+Progress: [████░░░░░░] 38%
 
 ## Performance Metrics
 
@@ -52,6 +52,7 @@ Progress: [███░░░░░░░] 25%
 *Updated after each plan completion*
 | Phase 01 P01 | 4min | 3 tasks | 37 files |
 | Phase 01 P03 | 12min | 2 tasks | 12 files |
+| Phase 01 P02 | 22min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Unused workspace-dependency warnings (metrics, thiserror, tracing, prost-build) accepted until plans 01-04/01-06 consume them
 - [Phase 01]: S2 harness defines unknown imports as traps (no wasmtime-wasi); WASI-touching probes report traps as findings
 - [Phase 01]: S2 smoke: TS completed resource steps are never dropped without explicit Symbol.dispose; Rust std HashMap traps without a WASI random shim
+- [Phase 01]: S3: redb 4.6 FAILS the 90k cmds/s rule (T2 median 62,404 cmds/s; T3 no-fsync only 90.6k, so CPU-bound). fjall 3.1.13 T2 analogue reaches 242k cmds/s. Recommend fjall for STOR-05 pending fjall crash test + read-path bench and user confirmation
+- [Phase 01]: S3: redb T2 crash sanity 5/5. After kill -9 the db reopens at exactly the last durable checkpoint; None commits are discarded, so recovery replays the WAL from checkpointed_offset
 
 ### Pending Todos
 
@@ -87,9 +90,10 @@ Open research gaps, from research/SUMMARY.md:
 - Pin policy: Wasmtime 48 LTS vs tracking monthly releases to 60 LTS. (Phase 1 decision)
 - Fixed partition count (P=16 single node / 64 cluster) must be confirmed before Phase 5 freezes the format.
 - The MVP is larger than docs/02. Streaming and debounce/singleton are already v2. The saga helper (WF-10) is a candidate cut if scope pressure appears.
+- Storage engine choice for STOR-05: redb failed S3 rule, fjall recommended; needs user confirmation in FOUND-06 decision logging (01-08)
 
 ## Session Continuity
 
-Last session: 2026-11-18T17:24:52.926Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-11-18T17:28:06.010Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
