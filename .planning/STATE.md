@@ -146,6 +146,8 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
+- [03-11] Logical time must be monotonic over ALL journaled events (include input-event timestamps such as TimerFired in the max), not only guest commands — found by 03-09 (frozen clock shows backwards ts; with cluster clock skew `now()` after `sleep` could precede timer fire). Re-bless determinism golden snapshot deliberately.
+- [02-12] Fix doc comment on `CursorMeta.outbox_truncated` in ostro-partition store/values.rs: apply treats it as "rows up to and including this seq deleted".
 - [HUMAN] Create GitHub remote, push, and confirm CI legs green (lint, linux-x86_64-musl, linux-aarch64-musl, macos-aarch64, linux-x86_64-gnu) — closes FOUND-05. See 01-VERIFICATION.md.
 
 ### Blockers/Concerns
