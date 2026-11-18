@@ -21,7 +21,9 @@ const P: PartitionId = PartitionId(0);
 /// Three segments, epochs 1, 1, 2.
 const LOG: &[&[(u32, u64)]] = &[&[(1, 3), (1, 2)], &[(1, 4), (1, 1)], &[(2, 5), (2, 2)]];
 
-fn expect_corrupt(r: Result<ostro_log::RecoveryReport, LogError>) -> (std::path::PathBuf, u64, i64, i64, Corruption) {
+fn expect_corrupt(
+    r: Result<ostro_log::RecoveryReport, LogError>,
+) -> (std::path::PathBuf, u64, i64, i64, Corruption) {
     match r {
         Err(LogError::Corrupt {
             partition,
@@ -35,7 +37,11 @@ fn expect_corrupt(r: Result<ostro_log::RecoveryReport, LogError>) -> (std::path:
             (segment, byte_pos, first, last, reason)
         }
         Err(e) => panic!("expected Corrupt, got {e:?}"),
-        Ok(r) => panic!("expected Corrupt, recovery succeeded: leo {:?} torn {:?}", r.leo, r.torn.map(|t| t.reason)),
+        Ok(r) => panic!(
+            "expected Corrupt, recovery succeeded: leo {:?} torn {:?}",
+            r.leo,
+            r.torn.map(|t| t.reason)
+        ),
     }
 }
 
@@ -81,7 +87,10 @@ async fn bit_flip_in_sealed_segment_fails_open() {
     assert_eq!(first, victim.base.as_i64());
     assert_eq!(last, (victim.end().0 - 1) as i64);
     assert!(
-        matches!(reason, Corruption::FrameCrc { .. } | Corruption::Envelope(_)),
+        matches!(
+            reason,
+            Corruption::FrameCrc { .. } | Corruption::Envelope(_)
+        ),
         "{reason:?}"
     );
 }
@@ -137,7 +146,14 @@ async fn envelope_crc_mismatch_under_valid_frame_fails_open() {
     // Damage a command byte (past the 32-byte header); re-encode the frame so
     // its CRC matches the damaged bytes.
     canonical_data[envelope::HEADER_LEN + 6] ^= 0x20;
-    let forged = WalRecord::new_v2(topic, partition, canonical_data, base_offset, last_offset, record_count);
+    let forged = WalRecord::new_v2(
+        topic,
+        partition,
+        canonical_data,
+        base_offset,
+        last_offset,
+        record_count,
+    );
     let bytes = forged.to_bytes().unwrap();
     assert_eq!(bytes.len() as u64, victim.len);
     overwrite(&victim.segment, victim.byte_pos, &bytes);
@@ -146,7 +162,10 @@ async fn envelope_crc_mismatch_under_valid_frame_fails_open() {
     assert_eq!(seg, victim.segment);
     assert_eq!(pos, victim.byte_pos);
     assert!(
-        matches!(reason, Corruption::Envelope(EnvelopeError::CrcMismatch { .. })),
+        matches!(
+            reason,
+            Corruption::Envelope(EnvelopeError::CrcMismatch { .. })
+        ),
         "{reason:?}"
     );
 }
@@ -167,7 +186,10 @@ async fn record_from_another_partition_fails_open() {
     let (seg, _, _, _, reason) = expect_corrupt(recover_partition(d.path(), P, Offset(0)));
     assert_eq!(seg, dst);
     assert!(
-        matches!(reason, Corruption::Misplaced { .. } | Corruption::Envelope(_)),
+        matches!(
+            reason,
+            Corruption::Misplaced { .. } | Corruption::Envelope(_)
+        ),
         "{reason:?}"
     );
 }
@@ -222,7 +244,10 @@ fn error_message_names_location() {
         byte_pos: 42,
         first: 10,
         last: 12,
-        reason: Corruption::Gap { expected: 9, found: 10 },
+        reason: Corruption::Gap {
+            expected: 9,
+            found: 10,
+        },
     };
     let s = e.to_string();
     assert!(s.contains("partition 3"), "{s}");
@@ -262,7 +287,10 @@ fn verify_record_frame_crc() {
 #[test]
 fn verify_record_not_v2() {
     let rec = WalRecord::new(0, None, b"v1".to_vec(), 0);
-    assert_eq!(verify_record(&rec, Offset(0), P).unwrap_err(), Corruption::NotV2);
+    assert_eq!(
+        verify_record(&rec, Offset(0), P).unwrap_err(),
+        Corruption::NotV2
+    );
 }
 
 #[test]
@@ -282,11 +310,17 @@ fn verify_record_wrong_partition_and_gap() {
     let rec = make_record(PartitionId(2), 1, Offset(0), 1);
     assert!(matches!(
         verify_record(&rec, Offset(0), P).unwrap_err(),
-        Corruption::Misplaced { partition: 2, base: 0 }
+        Corruption::Misplaced {
+            partition: 2,
+            base: 0
+        }
     ));
     let rec = make_record(P, 1, Offset(5), 1);
     assert_eq!(
         verify_record(&rec, Offset(4), P).unwrap_err(),
-        Corruption::Gap { expected: 4, found: 5 }
+        Corruption::Gap {
+            expected: 4,
+            found: 5
+        }
     );
 }

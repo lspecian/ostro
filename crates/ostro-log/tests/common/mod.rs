@@ -89,13 +89,15 @@ pub async fn write_batches(
     wal.shutdown().await;
     drop(wal);
     // Locate the segment just written: the highest-numbered file.
-    let segs = ostro_log::recovery::list_segments(
-        &ostro_log::recovery::segment_dir(wal_dir, pid),
-        pid,
-    )
-    .unwrap();
+    let segs =
+        ostro_log::recovery::list_segments(&ostro_log::recovery::segment_dir(wal_dir, pid), pid)
+            .unwrap();
     let seg = segs.last().expect("segment written").1.clone();
-    assert_eq!(std::fs::metadata(&seg).unwrap().len(), pos, "segment length");
+    assert_eq!(
+        std::fs::metadata(&seg).unwrap().len(),
+        pos,
+        "segment length"
+    );
     for w in &mut out {
         w.segment = seg.clone();
     }

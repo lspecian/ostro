@@ -32,7 +32,7 @@ pub const DEFAULT_MAX_ENVELOPE_BYTES: usize = 4 << 20;
 const CRC_OFF: usize = 28;
 
 /// Envelope verification failures.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum EnvelopeError {
     /// Fewer than [`HEADER_LEN`] bytes.
     #[error("envelope shorter than the {HEADER_LEN}-byte header")]
