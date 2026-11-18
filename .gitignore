@@ -11,3 +11,5 @@ ci/deny-fixtures/**/target/
 # guests/: each plan adds guest crates under `members = ["*"]`, so a committed lock
 # would be a cross-plan conflict point; versions are pinned exactly in guests/Cargo.toml.
 guests/Cargo.lock
+# sdks/rust/: separate SDK workspace; versions pinned exactly in its manifests (target/ above).
+sdks/rust/Cargo.lock
