@@ -41,7 +41,7 @@ fn evict<T>(reason: EvictReason) -> wasmtime::Result<T> {
 }
 
 /// Trap for a failed pre-park flush, mapped like the driver's own flush errors (03-08).
-fn flush_trap(e: AppendError) -> wasmtime::Error {
+pub(crate) fn flush_trap(e: AppendError) -> wasmtime::Error {
     match e {
         AppendError::Fenced => wasmtime::Error::new(Fenced),
         AppendError::Conflict { .. } => wasmtime::Error::new(Evict {

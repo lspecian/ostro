@@ -14,12 +14,21 @@ wasmtime::component::bindgen!({
 });
 
 /// Host representation of a `journal.step` resource handle.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StepRep {
-    /// Journal sequence number assigned at `begin-step`.
+    /// Journal sequence number reserved for the current attempt (moves to the next
+    /// seq after each journaled `StepAttemptFailed`).
     pub seq: u64,
     /// Step name as passed to `begin-step`.
     pub name: String,
     /// Remaining fuel when the step began (for `fuel_used` accounting).
     pub fuel_before: Option<u64>,
+    /// 1-based number of the attempt currently running (WF-02).
+    pub attempt: u32,
+    /// The step's retry policy (`step-options.retry`).
+    pub retry: Option<crate::retry::RetryPolicy>,
+    /// `step-options.timeout-ms` (enforced by plan 04-10).
+    pub timeout_ms: Option<u64>,
+    /// `step-options.fuel`: per-attempt fuel budget.
+    pub fuel_budget: Option<u64>,
 }

@@ -3,9 +3,10 @@
 //! `HostState` owns one activation's [`ReplayState`] and implements every
 //! `ostro:runtime@0.1.0` import (see `context.rs`, `journal.rs`, `effects.rs`, `log.rs`)
 //! plus [`GuestEnv`] for the deterministic WASI shim and [`HasLimits`] for the store
-//! limiter. Imports are `async fn` per the bindgen flags but never await anything: the
-//! only awaiting method is [`HostState::flush`], called by the activation driver (03-08)
-//! outside guest code.
+//! limiter. Imports are `async fn` per the bindgen flags; the only ones that await are
+//! a hot-parked `wait` (flush + park, 03-11) and a retried `[method]step.complete`
+//! (flush + in-activation backoff sleep, WF-02). [`HostState::flush`] is otherwise
+//! called by the activation driver (03-08) outside guest code.
 //!
 //! [`build_linker`] assembles the single production linker: ostro bindings + WASI shim +
 //! the store-aware per-step fuel functions (`begin-step`, `[method]step.complete`).
@@ -180,6 +181,11 @@ pub struct HostState {
     pub(crate) fuel_restore: Option<u64>,
     /// Hot-wait wiring; `None` disables parking.
     pub(crate) hot: Option<HotWait>,
+    /// Max delay of an in-activation step retry (`engine.hot_wait`, WF-02); longer
+    /// delays evict with `StepBackoff`.
+    pub(crate) retry_window: Duration,
+    /// Cancels an in-activation retry sleep (external eviction).
+    pub(crate) retry_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl std::fmt::Debug for HostState {
@@ -216,8 +222,22 @@ impl HostState {
             completed_steps: std::collections::HashSet::new(),
             step_fuel: None,
             fuel_restore: None,
+            retry_window: init.hot.as_ref().map_or(Duration::ZERO, |h| h.hot_wait),
+            retry_cancel: None,
             hot: init.hot,
         })
+    }
+
+    /// Step-retry wiring (WF-02): retries due within `window` sleep in the host and
+    /// return `retry-now`; `cancel` interrupts that sleep. Without this call the window
+    /// is the hot-wait window (zero without hot-wait wiring: every retry evicts).
+    pub fn set_step_retry(
+        &mut self,
+        window: Duration,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) {
+        self.retry_window = window;
+        self.retry_cancel = cancel;
     }
 
     pub fn run_ref(&self) -> &RunRef {
@@ -463,7 +483,8 @@ fn apply_fuel_restore(store: &mut StoreContextMut<'_, HostState>) -> wasmtime::R
 ///
 /// Wasmtime 50's bindgen `store` flag needs the component-model-async `Accessor`
 /// machinery, which Ostro does not enable, so the two fuel-aware functions are defined
-/// with `func_wrap` (shadowing the bindgen ones) and receive `StoreContextMut`.
+/// with `func_wrap` / `func_wrap_async` (shadowing the bindgen ones) and receive
+/// `StoreContextMut`.
 pub fn build_linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
     let mut linker: Linker<HostState> = Linker::new(engine);
     Workflow::add_to_linker::<_, HasSelf<_>>(&mut linker, |h| h)?;
@@ -486,20 +507,26 @@ pub fn build_linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
                 Ok((start,))
             },
         )?;
-        inst.func_wrap(
+        // Async: a retried step flushes its attempt failure and sleeps the backoff in
+        // the host before returning `retry-now` (WF-02).
+        inst.func_wrap_async(
             "[method]step.complete",
             |mut store: StoreContextMut<'_, HostState>,
              (step, outcome): (
                 Resource<StepRep>,
                 Result<wit_types::Payload, wit_types::Failure>,
-            )|
-             -> wasmtime::Result<(wit_journal::CompletionAck,)> {
-                let fuel = store.get_fuel().ok();
-                let (ack, restore) = store.data_mut().complete_step_impl(step, outcome, fuel)?;
-                if let Some(f) = restore {
-                    store.set_fuel(f)?;
-                }
-                Ok((ack,))
+            )| {
+                Box::new(async move {
+                    let fuel = store.get_fuel().ok();
+                    let (ack, set) = store
+                        .data_mut()
+                        .complete_step_impl(step, outcome, fuel)
+                        .await?;
+                    if let Some(f) = set {
+                        store.set_fuel(f)?;
+                    }
+                    Ok((ack,))
+                })
             },
         )?;
     }

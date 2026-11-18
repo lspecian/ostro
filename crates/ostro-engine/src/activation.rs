@@ -7,7 +7,9 @@
 //! either parks hot (when `Activate.inputs` is provided and the wait can resolve
 //! within `engine.hot_wait`, see `host::effects`) or traps with [`Evict`]; the driver
 //! flushes the pending events after the trap unwinds and drops the store, and the next
-//! dispatch replays the (longer) journal.
+//! dispatch replays the (longer) journal. A step retry whose backoff exceeds the
+//! hot-wait window evicts with `StepBackoff { retry_at_nanos }` after its
+//! `StepAttemptFailed` is flushed (WF-02); the run is re-dispatched at `retry_at`.
 //!
 //! Every attempt-ending error is classified by [`classify`] into an
 //! [`AttemptFailure`] reason code; a failure ends only this attempt (the store is
@@ -147,6 +149,10 @@ pub(crate) async fn run_activation(
     let outcome = execute(rt, p, act, sink.clone()).instrument(span).await;
     metrics::counter!("ostro_activation_outcomes_total", "outcome" => outcome_code(&outcome))
         .increment(1);
+    if let ActivationOutcome::Evicted { reason } = &outcome {
+        metrics::counter!("ostro_activation_evictions_total", "reason" => reason.code())
+            .increment(1);
+    }
     metrics::histogram!("ostro_activation_duration_seconds")
         .record(started.elapsed().as_secs_f64());
     sink.done(&run, attempt, outcome.clone()).await;
@@ -177,7 +183,7 @@ async fn execute(
         parked: rt.parked().clone(),
         hot_wait: cfg.hot_wait,
     });
-    let state = match HostState::new(rt.host_init(p, run, attempt, journal, Some(sink), hot)) {
+    let mut state = match HostState::new(rt.host_init(p, run, attempt, journal, Some(sink), hot)) {
         Ok(s) => s,
         Err(e) => {
             return ActivationOutcome::AttemptFailed(AttemptFailure::ProtocolViolation(match e {
@@ -186,6 +192,8 @@ async fn execute(
             }));
         }
     };
+    // Step retries due within the hot-wait window sleep in-activation (WF-02).
+    state.set_step_retry(cfg.hot_wait, Some(cancel.clone()));
     let (workflow, input) = {
         let rs = state.replay().run();
         (

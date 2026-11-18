@@ -221,6 +221,16 @@ impl ReplayState {
         self.last_cmd_ts
     }
 
+    /// Live "now": the timestamp a live event appended now would get at least
+    /// (`max(clock, last command ts, max journal ts)`). Reads the clock; used only for
+    /// live decisions whose result is journaled (step retry `retry_at`, WF-02).
+    pub fn live_now_nanos(&self) -> u64 {
+        self.clock
+            .now_unix_nanos()
+            .max(self.last_cmd_ts)
+            .max(self.max_ts)
+    }
+
     /// Hash version of the next recorded guest command, so the adapter can hash with the
     /// version that was recorded. `None` when live.
     pub fn next_command_hash_ver(&self) -> Option<u8> {
