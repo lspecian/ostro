@@ -1,0 +1,8 @@
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "apply must be deterministic; timestamps come from commands" },
+  { path = "std::time::Instant::now", reason = "apply must be deterministic; only machine.rs/leader/* may read clocks (with #[allow])" },
+]
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "iteration order is random; use BTreeMap" },
+  { path = "std::collections::HashSet", reason = "iteration order is random; use BTreeSet" },
+]

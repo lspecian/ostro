@@ -7,11 +7,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+ostro-types.workspace = true
 ostro-wal.workspace = true
 tokio.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+metrics.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true
