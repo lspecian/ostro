@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 wit-bindgen = "=0.63.0"
 rand = "=0.9.5"
+sha2 = "=0.10.9"
 
 [profile.release]
 opt-level = "s"
