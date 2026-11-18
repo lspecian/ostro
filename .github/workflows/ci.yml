@@ -125,6 +125,10 @@ jobs:
       - if: ${{ !matrix.zig }}
         name: cargo test
         run: cargo test --workspace --locked
+      - if: matrix.name == 'linux-x86_64-gnu'
+        name: Failpoint suites
+        # keep in sync with FAILPOINT_CRATES in scripts/ci-local.sh
+        run: cargo test -p ostro-wal --features failpoints --locked -- --test-threads=1
       - if: matrix.os == 'macos-15'
         name: cargo build --release (ostro) + build-info
         run: |

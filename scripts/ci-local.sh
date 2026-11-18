@@ -24,6 +24,10 @@ for arg in "$@"; do
 done
 
 MUSL_TARGET="x86_64-unknown-linux-musl"
+# Crates with a `failpoints` feature whose fault-injection suites run in the
+# "failpoint suites" step (single-threaded: the fail registry is global).
+# Later Phase 2 plans append ostro-log, ostro-partition, ostro-blob.
+FAILPOINT_CRATES=(ostro-wal)
 WORKFLOW=".github/workflows/ci.yml"
 
 declare -a NAMES=() RESULTS=() TIMES=()
@@ -73,6 +77,17 @@ check_build() {
     echo "build produced warnings"
     return 1
   fi
+}
+
+check_failpoints() {
+  local c
+  for c in "${FAILPOINT_CRATES[@]}"; do
+    # ostro-wal is vendored and excluded from workspace clippy; lint the rest.
+    if [[ "$c" != "ostro-wal" ]]; then
+      cargo clippy -p "$c" --features failpoints --all-targets --locked -- -D warnings || return 1
+    fi
+    cargo test -p "$c" --features failpoints --locked -- --test-threads=1 || return 1
+  done
 }
 
 check_forbidden_crates() {
@@ -155,6 +170,7 @@ step "cargo fmt --check" cargo fmt --all --check
 step "cargo clippy -D warnings" check_clippy
 step "cargo build (warning-free)" check_build
 step "cargo test" cargo test --workspace --locked
+step "failpoint suites" check_failpoints
 step "cargo deny check" cargo deny check
 step "check-vendored.sh" bash scripts/check-vendored.sh
 step "check-deny-fixtures.sh" bash scripts/check-deny-fixtures.sh
