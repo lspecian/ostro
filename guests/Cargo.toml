@@ -1,0 +1,20 @@
+# Guest workflow components (wasm32-wasip2). Separate from the root workspace:
+# build with `cargo build --release --target wasm32-wasip2 --manifest-path guests/Cargo.toml`.
+# Guest versions are pinned exactly here; guests/Cargo.lock is not committed (see .gitignore).
+[workspace]
+resolver = "3"
+members = ["*"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+wit-bindgen = "=0.63.0"
+rand = "=0.9.5"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

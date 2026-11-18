@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "vendor/*"]
-exclude = ["spikes", "ci/deny-fixtures"]
+exclude = ["spikes", "ci/deny-fixtures", "guests"]
 
 [workspace.package]
 version = "0.1.0"
@@ -43,3 +43,16 @@ lto = "fat"
 codegen-units = 1
 strip = "debuginfo"
 # panic strategy: leave default (unwind) until Phase 3 decides (catch_unwind around guest calls)
+
+# Cranelift is slow unoptimised; optimise it even in dev/test builds (Phase 3).
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3

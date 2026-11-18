@@ -8,3 +8,6 @@ spikes/**/out/
 spikes/**/target/
 spikes/**/*.wasm
 ci/deny-fixtures/**/target/
+# guests/: each plan adds guest crates under `members = ["*"]`, so a committed lock
+# would be a cross-plan conflict point; versions are pinned exactly in guests/Cargo.toml.
+guests/Cargo.lock

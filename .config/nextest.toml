@@ -1,0 +1,8 @@
+# cargo-nextest configuration (shared by Phases 2 and 3; edit additively).
+
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+fail-fast = false
+retries = 0
