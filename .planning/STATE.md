@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-05-PLAN.md
-last_updated: "2026-11-18T17:45:00.000Z"
-last_activity: "2026-11-18 — Completed 01-05-PLAN.md (S2 measurements and report)"
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-11-18T17:42:00.000Z"
+last_activity: "2026-11-18 — Completed 01-06-PLAN.md (ostro-wal vendored, ostro-log wired, check-vendored.sh)"
 progress:
   total_phases: 14
   completed_phases: 0
   total_plans: 8
-  completed_plans: 5
-  percent: 63
+  completed_plans: 6
+  percent: 75
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 ## Current Position
 
 Phase: 1 of 14 (Foundation, Vendoring & Spikes)
-Plan: 5 of 8 in current phase (01-01 to 01-05 complete)
+Plan: 6 of 8 in current phase (01-01 to 01-06 complete)
 Status: In progress
-Last activity: 2026-11-18 — Completed 01-05-PLAN.md (S2 report: NFR-2.3 met for py/ts/rust, Python 6.5 MB/instance, no reseed after pre-init, Recommendation: resource)
+Last activity: 2026-11-18 — Completed 01-06-PLAN.md (ostro-wal vendored with metrics facade and no io_uring/bincode/env reads; ostro-log smoke test; VENDORED.md complete; scripts/check-vendored.sh)
 
-Progress: [██████░░░░] 63%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Progress: [██████░░░░] 63%
 | Phase 01 P02 | 22min | 2 tasks | 10 files |
 | Phase 01 P04 | 8min | 3 tasks | 41 files |
 | Phase 01 P05 | 25min | 2 tasks | 9 files |
+| Phase 01 P06 | 8min | 2 tasks | 21 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,9 @@ Recent decisions affecting current work:
 - [Phase 01]: S2: NFR-2.3 met (instantiate p50 py ~450 us, ts/rust 10-20 us); Python 6.5 MB RSS/instance -> recommend Python embedded by default under NFR-1.3 budgets, not workers
 - [Phase 01]: S2: componentize-py/js do NOT reseed after pre-init; host-driven reseed works in all three; Rust wasip2 imports 16 wasi:*@0.2.12 interfaces (not 17)
 - [Phase 01]: S2: Python component = 38 core instances; wasmtime default pool fits only 26 live Python instances (ENG-08); only Rust builds reproducible
+- [Phase 01]: ostro-wal: CHRONIK_* env knobs replaced by config (new GroupCommitConfig::tail_cache_bytes; Default = low_resource; 250MB rotation const); io_uring/AsyncIoConfig/bincode removed; metrics facade ostro_wal_batches_total + ostro_wal_batch_records
+- [Phase 01]: ostro-wal is_raft_topic backpressure exemption uses reserved prefix `__ostro_` (was __chronik_metadata); V2 WalRecord::verify_checksum is a no-op, so the Phase 2 envelope must carry its own CRC32C
+- [Phase 01]: scripts/check-vendored.sh is the provenance gate (needs jq); 01-07 CI should run it
 
 ### Pending Todos
 
@@ -93,7 +97,7 @@ Open research gaps, from research/SUMMARY.md:
 - ~~Do componentize-py/js reseed randomness after pre-init?~~ Answered by S2 (01-05): no; SDKs must reseed/patch from ctx.
 - ~~Python per-instance memory vs NFR-2.~~ Answered by S2 (01-05): about 6.5 MB/instance; recommend embedded by default (decision logged in 01-08).
 - macOS notarization entitlement for Cranelift. (Phase 1 smoke test)
-- Does any WAL V2 recovery path decode `canonical_data` as Kafka? (Phase 2)
+- ~~Does any WAL V2 recovery path decode `canonical_data` as Kafka?~~ Answered in 01-06: no. The only decoder (`extract_offset_range`) had zero callers and was deleted.
 - Wasmtime 50.0.2 default stack and pool sizes. (Phase 3)
 - Pin policy: Wasmtime 48 LTS vs tracking monthly releases to 60 LTS. (Phase 1 decision)
 - Fixed partition count (P=16 single node / 64 cluster) must be confirmed before Phase 5 freezes the format.
@@ -102,6 +106,6 @@ Open research gaps, from research/SUMMARY.md:
 
 ## Session Continuity
 
-Last session: 2026-11-18T17:45:00.000Z
-Stopped at: Completed 01-05-PLAN.md
+Last session: 2026-11-18T17:42:00.000Z
+Stopped at: Completed 01-06-PLAN.md
 Resume file: None
