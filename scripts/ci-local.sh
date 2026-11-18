@@ -147,7 +147,7 @@ check_zig() {
 
 check_musl_release() {
   cargo zigbuild --release --locked -p ostro --target "$MUSL_TARGET" || return 1
-  local bin="target/${MUSL_TARGET}/release/ostro" desc info
+  local bin="${CARGO_TARGET_DIR:-target}/${MUSL_TARGET}/release/ostro" desc info
   desc="$(file "$bin")"
   echo "$desc"
   if ! grep -Eq 'statically linked|static-pie linked' <<<"$desc"; then
