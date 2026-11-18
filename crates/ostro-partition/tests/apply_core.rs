@@ -3,21 +3,24 @@
 //! intents, payload limits, outbox emission, read budget and the rolling hash.
 
 use bytes::Bytes;
+use ostro_log::VerifiedBatch;
 use ostro_partition::apply::{
-    Action, ApplyOutcome, Cursor, InvalidCode, RejectReason, START_DELAY_OP, apply_command,
+    Action, ApplyOutcome, Cursor, InvalidCode, RejectReason, START_DELAY_OP, apply_chunk,
+    apply_command, fold_hash,
 };
 use ostro_partition::store::keys::{
-    dedupe_key, event_key, payload_key, ready_key, run_key, timer_key,
+    children_key, dedupe_key, event_key, outbox_key, payload_key, ready_key, run_key, timer_key,
 };
 use ostro_partition::store::values::{self, ReadySlot, ReadyValue, RunRecord, RunStatus};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
-    AttemptGranted, AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EnqueueReady,
-    EventsAppended, JournalEvent, ScheduleTimer, StartRun, TerminalStatus, derived, encode_command,
+    AttemptGranted, AttemptTokenMsg, ChildCompleted, CompleteRun, ConflictPolicy, Derived,
+    EnqueueReady, EventsAppended, JournalEvent, OutboxMsg, ParentRef, ScheduleTimer, SendMessage,
+    Signal, StartRun, TerminalStatus, derived, encode_command, outbox_msg,
 };
 use ostro_types::{
-    AttemptToken, Command, Epoch, INLINE_PAYLOAD_LIMIT, PartitionCount, PartitionId, PayloadRef,
-    RunId,
+    AttemptToken, Command, Epoch, INLINE_PAYLOAD_LIMIT, Offset, PartitionCount, PartitionId,
+    PayloadRef, RunId,
 };
 use prost::Message;
 
@@ -550,4 +553,462 @@ fn malformed() {
     assert_eq!(h.cur.next.0, 2);
     // dir handle kept alive for the store's lifetime
     assert!(h.dir.path().exists());
+}
+
+// ---------------------------------------------------------------- rolling hash
+
+const FOLD_GOLDEN: &str = "PLACEHOLDER";
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+#[test]
+fn rolling_hash_golden() {
+    let h0 = [0u8; 32];
+    let got = fold_hash(&h0, Offset(0), 0, b"x");
+    // First principles: blake3(prev ‖ off_le ‖ code ‖ bytes).
+    let mut input = Vec::new();
+    input.extend_from_slice(&h0);
+    input.extend_from_slice(&0u64.to_le_bytes());
+    input.push(0);
+    input.extend_from_slice(b"x");
+    assert_eq!(got, *blake3::hash(&input).as_bytes());
+    assert_eq!(hex(&got), FOLD_GOLDEN);
+    // Every input byte matters.
+    assert_ne!(fold_hash(&h0, Offset(1), 0, b"x"), got);
+    assert_ne!(fold_hash(&h0, Offset(0), 1, b"x"), got);
+    assert_ne!(fold_hash(&h0, Offset(0), 0, b"y"), got);
+}
+
+#[test]
+fn rolling_hash_outcome_codes_frozen() {
+    use RejectReason::*;
+    let r = rid(0, 1);
+    let cases: Vec<(ApplyOutcome, u8)> = vec![
+        (ApplyOutcome::Accepted, 0),
+        (ApplyOutcome::Duplicate { existing: None }, 1),
+        (rej(StaleEpoch { current: Epoch(0) }), 16),
+        (rej(Fenced { current: None }), 17),
+        (rej(SeqMismatch { expected: 0 }), 18),
+        (
+            rej(SeqGap {
+                expected: 0,
+                found: 1,
+            }),
+            19,
+        ),
+        (rej(RunNotFound), 20),
+        (rej(RunTerminal), 21),
+        (rej(RunExists), 22),
+        (rej(IdempotencyConflict { existing: r }), 23),
+        (rej(PayloadTooLarge), 24),
+        (rej(WrongPartition), 25),
+        (rej(Invalid(InvalidCode::Decode)), 26),
+        (rej(Invalid(InvalidCode::FieldTooLong)), 26),
+    ];
+    for (o, code) in cases {
+        assert_eq!(o.code(), code, "{o:?}");
+        assert_eq!(o.is_accepted(), code == 0);
+    }
+}
+
+fn signal_to(target: &RunId) -> Derived {
+    intent(derived::Intent::SendMessage(SendMessage {
+        msg: Some(OutboxMsg {
+            kind: Some(outbox_msg::Kind::Signal(Signal {
+                target_run: target.as_bytes().to_vec(),
+                name: "s".into(),
+                payload: inline(b"p"),
+            })),
+        }),
+    }))
+}
+
+fn complete(status: TerminalStatus) -> Derived {
+    intent(derived::Intent::CompleteRun(CompleteRun {
+        status: status as i32,
+        result: inline(b"out"),
+        completed_at_ms: 9,
+    }))
+}
+
+/// A 200-command mix of accepted, duplicate and rejected commands.
+fn workload() -> Vec<(u32, Bytes)> {
+    let enc = |c: &Command| encode_command(c);
+    let mut v = vec![(1, enc(&la(1)))];
+    let mut i = 0u8;
+    while v.len() < 200 {
+        i += 1;
+        let r = rid(0, i);
+        let mut s = start(&r);
+        if i % 3 == 0 {
+            s.ready_at_ms = 1_000 + u64::from(i);
+        }
+        v.push((1, enc(&Command::start_run(s))));
+        v.push((1, enc(&grant(&r, 1, 1))));
+        let sched = intent(derived::Intent::ScheduleTimer(ScheduleTimer {
+            op: 1,
+            due_at_ms: 5_000 + u64::from(i),
+        }));
+        v.push((
+            1,
+            enc(&events(
+                &r,
+                (1, 1),
+                0,
+                vec![ev(0), ev(1)],
+                vec![sched, signal_to(&rid(5, i))],
+            )),
+        ));
+        v.push((0, enc(&start_cmd(&rid(0, 200 + i)))));
+        v.push((1, enc(&grant(&r, 1, 1))));
+        let mut keyed = start(&rid(0, 100 + i));
+        keyed.idempotency_key = b"k".to_vec();
+        v.push((1, enc(&Command::start_run(keyed))));
+        v.push((
+            1,
+            enc(&events(
+                &r,
+                (1, 1),
+                2,
+                vec![ev(2)],
+                vec![complete(TerminalStatus::Completed)],
+            )),
+        ));
+        v.push((1, Bytes::from_static(&[0xff, 0xff, 0xff])));
+    }
+    v.truncate(200);
+    v
+}
+
+type ChunkResult = ([u8; 32], [u8; 32], Vec<(Offset, ApplyOutcome)>);
+
+fn apply_in_chunks(k: usize) -> ChunkResult {
+    let mut h = H::new(0);
+    let mut outs = Vec::new();
+    for chunk in workload().chunks(k) {
+        let mut batches: Vec<VerifiedBatch> = Vec::new();
+        let mut off = h.cur.next;
+        for (env, bytes) in chunk {
+            match batches.last_mut() {
+                Some(vb) if vb.epoch == Epoch(*env) => vb.commands.push(bytes.clone()),
+                _ => batches.push(VerifiedBatch {
+                    epoch: Epoch(*env),
+                    base: off,
+                    commands: vec![bytes.clone()],
+                }),
+            }
+            off = off.next();
+        }
+        let mut b = h.store.batch();
+        let mut acts = Vec::new();
+        outs.extend(apply_chunk(&mut b, &mut h.cur, &batches, &mut acts).expect("chunk"));
+        let mu = h.cur.meta_update();
+        b.commit(&mu).expect("commit");
+    }
+    (h.cur.hash, h.store.digest().expect("digest"), outs)
+}
+
+#[test]
+fn rolling_hash_chunking_invariant() {
+    let one = apply_in_chunks(1);
+    let seven = apply_in_chunks(7);
+    let all = apply_in_chunks(200);
+    assert_eq!(one.2.len(), 200);
+    for (i, (off, _)) in one.2.iter().enumerate() {
+        assert_eq!(off.0, i as u64);
+    }
+    let codes: std::collections::BTreeSet<u8> = one.2.iter().map(|(_, o)| o.code()).collect();
+    for c in [0, 1, 16, 17, 26] {
+        assert!(
+            codes.contains(&c),
+            "workload lacks outcome code {c}: {codes:?}"
+        );
+    }
+    assert_eq!(one.2, seven.2);
+    assert_eq!(one.2, all.2);
+    assert_eq!(one.0, seven.0);
+    assert_eq!(one.0, all.0);
+    assert_eq!(one.1, seven.1);
+    assert_eq!(one.1, all.1);
+    assert_ne!(one.0, [0u8; 32]);
+}
+
+#[test]
+fn rolling_hash_rejections() {
+    let mut h = H::new(0);
+    assert_eq!(h.apply(1, &la(1)), ApplyOutcome::Accepted);
+    let prev = h.cur.hash;
+    let off = h.cur.next;
+    let bytes = encode_command(&start_cmd(&rid(0, 1)));
+    let (o, _, _) = h.apply_raw(0, &bytes);
+    assert_eq!(o, rej(RejectReason::StaleEpoch { current: Epoch(1) }));
+    assert_ne!(h.cur.hash, prev);
+    assert_eq!(h.cur.hash, fold_hash(&prev, off, 16, &bytes));
+    assert_eq!(h.cur.next, off.next());
+    let m = h.store.read_meta().expect("meta");
+    assert_eq!(m.state_hash, h.cur.hash);
+    assert_eq!(m.applied, h.cur.next);
+}
+
+// ---------------------------------------------------------------- read budget
+
+#[test]
+fn reads_budget() {
+    let mut h = H::new(0);
+    assert_eq!(h.apply(1, &la(1)), ApplyOutcome::Accepted);
+
+    let mut keyed = start(&rid(0, 1));
+    keyed.idempotency_key = b"k".to_vec();
+    let (o, _, reads) = h.apply_raw(1, &encode_command(&Command::start_run(keyed.clone())));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(reads <= 1, "keyed StartRun did {reads} reads");
+    let (o, _, reads) = h.apply_raw(1, &encode_command(&Command::start_run(keyed)));
+    assert!(matches!(o, ApplyOutcome::Duplicate { .. }));
+    assert!(reads <= 1, "duplicate keyed StartRun did {reads} reads");
+
+    // A child run (parent in partition 3) so completion emits ChildCompleted.
+    let r = rid(0, 2);
+    let mut s = start(&r);
+    s.parent = Some(ParentRef {
+        run_id: rid(3, 1).as_bytes().to_vec(),
+        op: 4,
+    });
+    let (o, _, reads) = h.apply_raw(1, &encode_command(&Command::start_run(s)));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(reads <= 1, "StartRun did {reads} reads");
+
+    let (o, _, reads) = h.apply_raw(1, &encode_command(&grant(&r, 1, 1)));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(reads <= 1, "AttemptGranted did {reads} reads");
+
+    let sched = intent(derived::Intent::ScheduleTimer(ScheduleTimer {
+        op: 1,
+        due_at_ms: 50,
+    }));
+    let rdy = intent(derived::Intent::EnqueueReady(EnqueueReady {
+        ready_at_ms: 60,
+    }));
+    let cmd = events(
+        &r,
+        (1, 1),
+        0,
+        vec![ev(0), ev(1), ev(2)],
+        vec![
+            sched,
+            rdy,
+            signal_to(&rid(5, 1)),
+            complete(TerminalStatus::Completed),
+        ],
+    );
+    let (o, a, reads) = h.apply_raw(1, &encode_command(&cmd));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(reads <= 1, "EventsAppended did {reads} reads");
+    assert!(a.contains(&Action::OutboxAppended {
+        target: PartitionId(3),
+        seq: 1
+    }));
+}
+
+// ---------------------------------------------------------------- outbox
+
+fn outbox_row(h: &H, target: u16, seq: u64) -> Option<OutboxMsg> {
+    h.get(Table::Outbox, &outbox_key(target, seq))
+        .map(|v| OutboxMsg::decode(&*v).expect("prost outbox"))
+}
+
+#[test]
+fn outbox_emit() {
+    let (mut h, r) = running(0, 1);
+    let (o, a) = h.apply_act(
+        1,
+        &events(&r, (1, 1), 0, vec![], vec![signal_to(&rid(5, 1))]),
+    );
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert_eq!(
+        a,
+        vec![Action::OutboxAppended {
+            target: PartitionId(5),
+            seq: 1
+        }]
+    );
+    let msg = outbox_row(&h, 5, 1).expect("row (5,1)");
+    assert_eq!(msg.target_partition().unwrap(), PartitionId(5));
+
+    assert_eq!(
+        h.apply(
+            1,
+            &events(&r, (1, 1), 0, vec![], vec![signal_to(&rid(5, 2))])
+        ),
+        ApplyOutcome::Accepted
+    );
+    assert!(outbox_row(&h, 5, 2).is_some());
+    let (_, a) = h.apply_act(
+        1,
+        &events(&r, (1, 1), 0, vec![], vec![signal_to(&rid(9, 1))]),
+    );
+    assert_eq!(
+        a,
+        vec![Action::OutboxAppended {
+            target: PartitionId(9),
+            seq: 1
+        }]
+    );
+    assert!(outbox_row(&h, 9, 1).is_some());
+    // Same-partition targets go through the outbox too.
+    assert_eq!(
+        h.apply(
+            1,
+            &events(&r, (1, 1), 0, vec![], vec![signal_to(&rid(0, 1))])
+        ),
+        ApplyOutcome::Accepted
+    );
+    assert!(outbox_row(&h, 0, 1).is_some());
+    let want = std::collections::BTreeMap::from([(0u16, 2u64), (5, 3), (9, 2)]);
+    assert_eq!(h.cur.meta.outbox_next_seq, want);
+
+    // Target outside the partition count.
+    assert_eq!(
+        h.apply(
+            1,
+            &events(&r, (1, 1), 0, vec![], vec![signal_to(&rid(20, 1))])
+        ),
+        rej(RejectReason::Invalid(InvalidCode::BadRunId))
+    );
+
+    // Persisted and reloaded on reopen.
+    let H { dir, store, cur } = h;
+    drop(store);
+    let (_store, meta) = PartitionStore::open(
+        dir.path(),
+        PartitionId(0),
+        PartitionCount::new(16).unwrap(),
+        &StoreConfig::default(),
+    )
+    .expect("reopen");
+    assert_eq!(meta.cursor.outbox_next_seq, want);
+    assert_eq!(Cursor::from_meta(&meta).hash, cur.hash);
+    assert_eq!(meta.applied, cur.next);
+}
+
+#[test]
+fn outbox_child() {
+    let (mut h, r) = running(0, 1);
+    let c = rid(4, 7);
+    let mut cs = start(&c);
+    cs.parent = Some(ParentRef {
+        run_id: r.as_bytes().to_vec(),
+        op: 3,
+    });
+    let send = intent(derived::Intent::SendMessage(SendMessage {
+        msg: Some(OutboxMsg::start_child(cs)),
+    }));
+    let (o, a) = h.apply_act(1, &events(&r, (1, 1), 0, vec![ev(0)], vec![send]));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert_eq!(
+        a,
+        vec![Action::OutboxAppended {
+            target: PartitionId(4),
+            seq: 1
+        }]
+    );
+    assert!(outbox_row(&h, 4, 1).is_some());
+    assert!(h.get(Table::Children, &children_key(&r, &c)).is_some());
+    assert_eq!(h.run(&r).expect("run").children, 1);
+
+    // The child, applied on its own partition, reports back on completion.
+    let mut ch = H::new(2);
+    let child = rid(2, 1);
+    let mut s = start(&child);
+    s.parent = Some(ParentRef {
+        run_id: rid(0, 1).as_bytes().to_vec(),
+        op: 3,
+    });
+    assert_eq!(ch.apply(0, &Command::start_run(s)), ApplyOutcome::Accepted);
+    assert_eq!(
+        ch.run(&child).expect("child").parent,
+        Some((*rid(0, 1).as_bytes(), 3))
+    );
+    assert_eq!(ch.apply(0, &grant(&child, 0, 1)), ApplyOutcome::Accepted);
+    let (o, a) = ch.apply_act(
+        0,
+        &events(
+            &child,
+            (0, 1),
+            0,
+            vec![],
+            vec![complete(TerminalStatus::Failed)],
+        ),
+    );
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert_eq!(
+        a,
+        vec![
+            Action::RunCompleted {
+                run: child,
+                status: RunStatus::Failed
+            },
+            Action::OutboxAppended {
+                target: PartitionId(0),
+                seq: 1
+            }
+        ]
+    );
+    let msg = outbox_row(&ch, 0, 1).expect("ChildCompleted row");
+    assert_eq!(
+        msg.kind,
+        Some(outbox_msg::Kind::ChildCompleted(ChildCompleted {
+            parent_run: rid(0, 1).as_bytes().to_vec(),
+            child_run: child.as_bytes().to_vec(),
+            op: 3,
+            status: TerminalStatus::Failed as i32,
+            result: inline(b"out"),
+        }))
+    );
+}
+
+// ---------------------------------------------------------------- apply_chunk
+
+#[test]
+fn apply_chunk_multi_batch() {
+    let mut h = H::new(0);
+    let enc = |c: &Command| encode_command(c);
+    let batches = vec![
+        VerifiedBatch {
+            epoch: Epoch(0),
+            base: Offset(0),
+            commands: vec![enc(&start_cmd(&rid(0, 1)))],
+        },
+        VerifiedBatch {
+            epoch: Epoch(1),
+            base: Offset(1),
+            commands: vec![enc(&la(1)), enc(&start_cmd(&rid(0, 2)))],
+        },
+        VerifiedBatch {
+            epoch: Epoch(0),
+            base: Offset(3),
+            commands: vec![enc(&start_cmd(&rid(0, 3)))],
+        },
+    ];
+    let mut b = h.store.batch();
+    let mut acts = Vec::new();
+    let outs = apply_chunk(&mut b, &mut h.cur, &batches, &mut acts).expect("chunk");
+    let mu = h.cur.meta_update();
+    b.commit(&mu).expect("commit");
+    assert_eq!(
+        outs,
+        vec![
+            (Offset(0), ApplyOutcome::Accepted),
+            (Offset(1), ApplyOutcome::Accepted),
+            (Offset(2), ApplyOutcome::Accepted),
+            (
+                Offset(3),
+                rej(RejectReason::StaleEpoch { current: Epoch(1) })
+            ),
+        ]
+    );
+    assert_eq!(acts.len(), 2);
+    assert_eq!(h.cur.next, Offset(4));
+    assert!(h.run(&rid(0, 3)).is_none());
 }
