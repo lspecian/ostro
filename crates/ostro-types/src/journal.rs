@@ -7,18 +7,72 @@
 //! engine host) derives Phase 2's `Derived` intents (ScheduleTimer, SendMessage,
 //! CompleteRun, ...) from these journal events.
 //!
-//! This module holds TYPES ONLY; the canonical codec and per-kind command hash are added
-//! by plan 03-02 in this same file.
-//!
 //! The types here mirror the WIT 0.1 types but are Ostro-owned, so WIT bindgen types
 //! never leak into the on-disk journal.
+//!
+//! # Event codec (v1, [`EVENT_CODEC_VER`])
+//!
+//! [`encode_event`] produces `(kind, bytes)` where `kind = EventKind as u32` and
+//! `bytes = [EVENT_CODEC_VER] ‖ postcard((ts_nanos, <variant payload struct>))`. `seq` is
+//! NOT inside the bytes: Phase 2's `JournalEvent { seq, kind, payload }` carries it.
+//! [`decode_event`] rejects unknown kinds, unknown versions, truncated input and trailing
+//! bytes; it never skips anything.
+//!
+//! # Recorded-result codec (v1, [`RESULT_CODEC_VER`])
+//!
+//! [`encode_result`] stores `postcard(value)` with `codec_ver = RESULT_CODEC_VER`; used for
+//! `Result<Payload, Failure>` (steps) and `Result<OpOutput, Failure>` (effects, children).
+//! On replay these exact bytes are returned to the guest (ENG-04).
+//!
+//! Postcard is used only for the Ostro-owned mirror and payload structs in this module.
+//! Its layout depends on field order and enum variant order, so **adding, removing or
+//! reordering a field or variant of any type reachable from an event or result requires
+//! bumping [`EVENT_CODEC_VER`] / [`RESULT_CODEC_VER`]** (and a decoder for the old version).
+//! The golden vectors in `tests/golden/journal_v1.txt` fail CI on any drift.
+//!
+//! # Command hash (v1, [`HASH_VER`])
+//!
+//! `command_hash = sha256(b"ostro/cmd" ‖ [hash_ver] ‖ [CommandKind as u8] ‖ canonical_args)[..16]`.
+//! The canonical argument layout is hand-specified (no serde), so additive WIT changes
+//! and dependency bumps never change existing hashes. Primitive encodings:
+//!
+//! | primitive | encoding |
+//! |-----------|----------|
+//! | string | u32 LE byte length ‖ UTF-8 bytes |
+//! | digested blob | 32-byte sha256 of the raw bytes (no length prefix) |
+//! | inline blob (SQL bytea) | u32 LE length ‖ bytes |
+//! | u64 / u32 / i64 | little-endian |
+//! | u8 / bool | one byte (bool: 0 / 1) |
+//! | f64 | LE IEEE-754 bits; every NaN canonicalised to `0x7ff8000000000000` |
+//! | list | u32 LE count ‖ items in guest order |
+//!
+//! Per-kind hashed fields, in order:
+//!
+//! | kind (code) | hashed fields | not hashed |
+//! |-------------|---------------|------------|
+//! | Step (1) | name: string | |
+//! | Http (2) | method: string, url: string, sha256(body), header names: list<string> ASCII-lower-cased and byte-sorted | header values (may hold `{{secret:..}}` templates), timeout, idempotency key, redact list, retry policy |
+//! | Sql (3) | connection: string, statement: string, sha256(params) where params = list of (tag u8 ‖ value) | exactly_once |
+//! | Object (4) | connection: string, op: string, key: string, sha256(body) | |
+//! | Sleep (5) | duration_ms: u64 | |
+//! | SleepUntil (6) | seconds: u64, nanoseconds: u32 | |
+//! | WaitSignal (7) | name: string | timeout |
+//! | StartChild (8) | workflow: string, sha256(input bytes) | queue, version, detached, run timeout |
+//! | CreateAwaitToken (9) | nothing (kind only) | timeout |
+//! | CancelOp (10) | op: u64 | |
+//! | Wait (11) | ops: list<u64>, mode: u8 (0 All, 1 Any) | |
+//! | Patch (12) | change_id: string | |
+//! | SetStatus (13) | nothing (kind only: status text changes never break replay) | status JSON |
+//! | Terminal (14) | nothing (kind only: output changes never break replay) | output / failure |
+//!
+//! SQL param tags: 0 Null (no value), 1 Boolean (u8), 2 Int8 (i64 LE), 3 Float8 (f64),
+//! 4 Numeric (string), 5 Text (string), 6 Bytea (inline blob), 7 Json (string),
+//! 8 Timestamptz (seconds u64 ‖ nanoseconds u32). An absent HTTP/object body hashes as
+//! the empty body.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-
-// The canonical codec (postcard) and command hash (sha2) are added by plan 03-02 in this
-// file; anchored so cargo's unused-dependency lint stays quiet until then.
-use postcard as _;
-use sha2 as _;
+use sha2::{Digest, Sha256};
 
 /// Version of the command-hash spec stored in every [`CommandMeta`].
 pub const HASH_VER: u8 = 1;
@@ -536,7 +590,10 @@ pub struct Event {
     pub body: EventBody,
 }
 
-/// Arguments of a guest command, input to the per-kind command-hash spec (plan 03-02).
+/// Arguments of a guest command, input to the per-kind command-hash spec (see module docs).
+///
+/// Build effect args with [`command_args`], which keeps only hashed fields (e.g. header
+/// names, never header values).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandArgs<'a> {
     Step {
@@ -607,6 +664,390 @@ impl CommandArgs<'_> {
             Self::SetStatus => CommandKind::SetStatus,
             Self::Terminal => CommandKind::Terminal,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Codec
+// ---------------------------------------------------------------------------
+
+/// Journal codec / hash error. Unknown kinds and versions are errors, never skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodecError {
+    /// `JournalEvent.kind` is not a known [`EventKind`] code.
+    UnknownKind(u32),
+    /// Codec or hash version not supported by this node (written by a newer node?).
+    UnsupportedVersion(u8),
+    /// Bytes do not decode (truncated, trailing bytes, invalid contents).
+    Malformed(String),
+    /// The payload does not match the event kind it was stored under.
+    KindMismatch { kind: u32 },
+}
+
+impl std::fmt::Display for CodecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownKind(k) => write!(f, "unknown journal event kind {k}"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported journal codec/hash version {v}"),
+            Self::Malformed(m) => write!(f, "malformed journal bytes: {m}"),
+            Self::KindMismatch { kind } => {
+                write!(f, "journal payload does not match event kind {kind}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CodecError {}
+
+impl EventKind {
+    /// Kind for a stored code; `None` for unknown codes.
+    pub fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            1 => Self::RunStarted,
+            16 => Self::StepCompleted,
+            17 => Self::TimerStarted,
+            18 => Self::EffectScheduled,
+            19 => Self::SignalWaitStarted,
+            20 => Self::ChildStarted,
+            21 => Self::AwaitTokenCreated,
+            22 => Self::OpCancelled,
+            23 => Self::WaitResolved,
+            24 => Self::PatchMarker,
+            25 => Self::StatusPublished,
+            26 => Self::RunCompleted,
+            27 => Self::RunFailed,
+            28 => Self::RunContinuedAsNew,
+            64 => Self::TimerFired,
+            65 => Self::EffectCompleted,
+            66 => Self::SignalReceived,
+            67 => Self::ChildCompleted,
+            68 => Self::TokenCompleted,
+            69 => Self::CancelRequested,
+            _ => return None,
+        })
+    }
+}
+
+fn postcard_bytes<T: Serialize + ?Sized>(v: &T) -> Vec<u8> {
+    // Every type serialised here is an Ostro-owned struct/enum of sized primitives,
+    // strings, vecs and options: postcard serialisation into a Vec cannot fail.
+    postcard::to_allocvec(v).expect("postcard serialisation of journal types is infallible")
+}
+
+/// Postcard-decode exactly one value; trailing bytes are an error.
+fn postcard_exact<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
+    let (v, rest) =
+        postcard::take_from_bytes::<T>(bytes).map_err(|e| CodecError::Malformed(e.to_string()))?;
+    if !rest.is_empty() {
+        return Err(CodecError::Malformed(format!(
+            "{} trailing bytes",
+            rest.len()
+        )));
+    }
+    Ok(v)
+}
+
+/// Encode an event as `(kind, bytes)`; see the module docs for the layout.
+pub fn encode_event(ev: &Event) -> (u32, Vec<u8>) {
+    fn enc<T: Serialize>(ts: u64, p: &T) -> Vec<u8> {
+        let mut out = vec![EVENT_CODEC_VER];
+        out.extend_from_slice(&postcard_bytes(&(ts, p)));
+        out
+    }
+    let ts = ev.ts_nanos;
+    let bytes = match &ev.body {
+        EventBody::RunStarted(p) => enc(ts, p),
+        EventBody::StepCompleted(p) => enc(ts, p),
+        EventBody::TimerStarted(p) => enc(ts, p),
+        EventBody::EffectScheduled(p) => enc(ts, p),
+        EventBody::SignalWaitStarted(p) => enc(ts, p),
+        EventBody::ChildStarted(p) => enc(ts, p),
+        EventBody::AwaitTokenCreated(p) => enc(ts, p),
+        EventBody::OpCancelled(p) => enc(ts, p),
+        EventBody::WaitResolved(p) => enc(ts, p),
+        EventBody::PatchMarker(p) => enc(ts, p),
+        EventBody::StatusPublished(p) => enc(ts, p),
+        EventBody::RunCompleted(p) => enc(ts, p),
+        EventBody::RunFailed(p) => enc(ts, p),
+        EventBody::RunContinuedAsNew(p) => enc(ts, p),
+        EventBody::TimerFired(p) => enc(ts, p),
+        EventBody::EffectCompleted(p) => enc(ts, p),
+        EventBody::SignalReceived(p) => enc(ts, p),
+        EventBody::ChildCompleted(p) => enc(ts, p),
+        EventBody::TokenCompleted(p) => enc(ts, p),
+        EventBody::CancelRequested(p) => enc(ts, p),
+    };
+    (ev.body.kind().code(), bytes)
+}
+
+/// Decode an event stored as `(seq, kind, bytes)`.
+pub fn decode_event(seq: u64, kind: u32, bytes: &[u8]) -> Result<Event, CodecError> {
+    let k = EventKind::from_code(kind).ok_or(CodecError::UnknownKind(kind))?;
+    let (&ver, rest) = bytes
+        .split_first()
+        .ok_or_else(|| CodecError::Malformed("empty event bytes".into()))?;
+    if ver != EVENT_CODEC_VER {
+        return Err(CodecError::UnsupportedVersion(ver));
+    }
+    fn dec<T: DeserializeOwned>(
+        rest: &[u8],
+        wrap: fn(T) -> EventBody,
+    ) -> Result<(u64, EventBody), CodecError> {
+        let (ts, p) = postcard_exact::<(u64, T)>(rest)?;
+        Ok((ts, wrap(p)))
+    }
+    let (ts_nanos, body) = match k {
+        EventKind::RunStarted => dec(rest, EventBody::RunStarted),
+        EventKind::StepCompleted => dec(rest, EventBody::StepCompleted),
+        EventKind::TimerStarted => dec(rest, EventBody::TimerStarted),
+        EventKind::EffectScheduled => dec(rest, EventBody::EffectScheduled),
+        EventKind::SignalWaitStarted => dec(rest, EventBody::SignalWaitStarted),
+        EventKind::ChildStarted => dec(rest, EventBody::ChildStarted),
+        EventKind::AwaitTokenCreated => dec(rest, EventBody::AwaitTokenCreated),
+        EventKind::OpCancelled => dec(rest, EventBody::OpCancelled),
+        EventKind::WaitResolved => dec(rest, EventBody::WaitResolved),
+        EventKind::PatchMarker => dec(rest, EventBody::PatchMarker),
+        EventKind::StatusPublished => dec(rest, EventBody::StatusPublished),
+        EventKind::RunCompleted => dec(rest, EventBody::RunCompleted),
+        EventKind::RunFailed => dec(rest, EventBody::RunFailed),
+        EventKind::RunContinuedAsNew => dec(rest, EventBody::RunContinuedAsNew),
+        EventKind::TimerFired => dec(rest, EventBody::TimerFired),
+        EventKind::EffectCompleted => dec(rest, EventBody::EffectCompleted),
+        EventKind::SignalReceived => dec(rest, EventBody::SignalReceived),
+        EventKind::ChildCompleted => dec(rest, EventBody::ChildCompleted),
+        EventKind::TokenCompleted => dec(rest, EventBody::TokenCompleted),
+        EventKind::CancelRequested => dec(rest, EventBody::CancelRequested),
+    }?;
+    Ok(Event {
+        seq,
+        ts_nanos,
+        body,
+    })
+}
+
+/// Encode a recorded result (ENG-04).
+pub fn encode_result<T: Serialize>(v: &T) -> RecordedResult {
+    RecordedResult {
+        codec_ver: RESULT_CODEC_VER,
+        bytes: postcard_bytes(v),
+    }
+}
+
+/// Decode a recorded result; unknown version or trailing bytes are errors.
+pub fn decode_result<T: DeserializeOwned>(r: &RecordedResult) -> Result<T, CodecError> {
+    if r.codec_ver != RESULT_CODEC_VER {
+        return Err(CodecError::UnsupportedVersion(r.codec_ver));
+    }
+    postcard_exact(&r.bytes)
+}
+
+// ---------------------------------------------------------------------------
+// Command hash
+// ---------------------------------------------------------------------------
+
+const HASH_DOMAIN: &[u8] = b"ostro/cmd";
+const CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
+
+fn sha256(b: &[u8]) -> [u8; 32] {
+    Sha256::digest(b).into()
+}
+
+/// Canonical writer: the single place primitive layouts are defined (module docs table).
+#[derive(Default)]
+struct Canon(Vec<u8>);
+
+impl Canon {
+    fn len(&mut self, n: usize) {
+        // Guest memory is wasm32 (< 4 GiB), so lengths always fit; overflow is a bug.
+        self.u32(u32::try_from(n).expect("canonical length exceeds u32"));
+    }
+    fn str(&mut self, s: &str) {
+        self.len(s.len());
+        self.0.extend_from_slice(s.as_bytes());
+    }
+    fn blob(&mut self, b: &[u8]) {
+        self.len(b.len());
+        self.0.extend_from_slice(b);
+    }
+    fn bytes_digest(&mut self, b: &[u8]) {
+        self.0.extend_from_slice(&sha256(b));
+    }
+    fn u64(&mut self, v: u64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn i64(&mut self, v: i64) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u32(&mut self, v: u32) {
+        self.0.extend_from_slice(&v.to_le_bytes());
+    }
+    fn u8(&mut self, v: u8) {
+        self.0.push(v);
+    }
+    fn f64(&mut self, v: f64) {
+        self.u64(if v.is_nan() {
+            CANONICAL_NAN
+        } else {
+            v.to_bits()
+        });
+    }
+    fn list<T>(&mut self, items: &[T], mut f: impl FnMut(&mut Self, &T)) {
+        self.len(items.len());
+        for it in items {
+            f(self, it);
+        }
+    }
+    fn sql_value(&mut self, v: &SqlValue) {
+        match v {
+            SqlValue::Null => self.u8(0),
+            SqlValue::Boolean(b) => {
+                self.u8(1);
+                self.u8(u8::from(*b));
+            }
+            SqlValue::Int8(i) => {
+                self.u8(2);
+                self.i64(*i);
+            }
+            SqlValue::Float8(f) => {
+                self.u8(3);
+                self.f64(*f);
+            }
+            SqlValue::Numeric(s) => {
+                self.u8(4);
+                self.str(s);
+            }
+            SqlValue::Text(s) => {
+                self.u8(5);
+                self.str(s);
+            }
+            SqlValue::Bytea(b) => {
+                self.u8(6);
+                self.blob(b);
+            }
+            SqlValue::Json(s) => {
+                self.u8(7);
+                self.str(s);
+            }
+            SqlValue::Timestamptz {
+                seconds,
+                nanoseconds,
+            } => {
+                self.u8(8);
+                self.u64(*seconds);
+                self.u32(*nanoseconds);
+            }
+        }
+    }
+}
+
+/// Hand-specified canonical argument bytes (hash v1; see module docs).
+pub fn canonical_args(args: &CommandArgs<'_>) -> Vec<u8> {
+    let mut c = Canon::default();
+    match args {
+        CommandArgs::Step { name } => c.str(name),
+        CommandArgs::Http {
+            method,
+            url,
+            body,
+            header_names,
+        } => {
+            c.str(method);
+            c.str(url);
+            c.bytes_digest(body);
+            let mut names: Vec<String> = header_names
+                .iter()
+                .map(|n| n.to_ascii_lowercase())
+                .collect();
+            names.sort_unstable();
+            c.list(&names, |c, n| c.str(n));
+        }
+        CommandArgs::Sql {
+            connection,
+            statement,
+            params,
+        } => {
+            c.str(connection);
+            c.str(statement);
+            let mut p = Canon::default();
+            p.list(params, Canon::sql_value);
+            c.bytes_digest(&p.0);
+        }
+        CommandArgs::Object {
+            connection,
+            op,
+            key,
+            body,
+        } => {
+            c.str(connection);
+            c.str(op);
+            c.str(key);
+            c.bytes_digest(body);
+        }
+        CommandArgs::Sleep { duration_ms } => c.u64(*duration_ms),
+        CommandArgs::SleepUntil {
+            seconds,
+            nanoseconds,
+        } => {
+            c.u64(*seconds);
+            c.u32(*nanoseconds);
+        }
+        CommandArgs::WaitSignal { name } => c.str(name),
+        CommandArgs::StartChild { workflow, input } => {
+            c.str(workflow);
+            c.bytes_digest(input);
+        }
+        CommandArgs::CancelOp { op } => c.u64(*op),
+        CommandArgs::Wait { ops, mode } => {
+            c.list(ops, |c, op| c.u64(*op));
+            c.u8(match mode {
+                WaitMode::All => 0,
+                WaitMode::Any => 1,
+            });
+        }
+        CommandArgs::Patch { change_id } => c.str(change_id),
+        CommandArgs::CreateAwaitToken | CommandArgs::SetStatus | CommandArgs::Terminal => {}
+    }
+    c.0
+}
+
+/// Command hash: `sha256(b"ostro/cmd" ‖ [hash_ver] ‖ [kind] ‖ canonical_args)[..16]`.
+///
+/// Only [`HASH_VER`] is supported; any other version (e.g. a journal written by a newer
+/// node) is [`CodecError::UnsupportedVersion`].
+pub fn command_hash(hash_ver: u8, args: &CommandArgs<'_>) -> Result<CommandHash, CodecError> {
+    if hash_ver != HASH_VER {
+        return Err(CodecError::UnsupportedVersion(hash_ver));
+    }
+    let mut h = Sha256::new();
+    h.update(HASH_DOMAIN);
+    h.update([hash_ver, args.kind() as u8]);
+    h.update(canonical_args(args));
+    let d: [u8; 32] = h.finalize().into();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&d[..16]);
+    Ok(CommandHash(out))
+}
+
+/// Hash arguments for an effect request; keeps only hashed fields (header names, not values).
+pub fn command_args(req: &EffectRequest) -> CommandArgs<'_> {
+    match req {
+        EffectRequest::Http(r) => CommandArgs::Http {
+            method: &r.method,
+            url: &r.url,
+            body: r.body.as_deref().unwrap_or(&[]),
+            header_names: r.headers.iter().map(|h| h.name.as_str()).collect(),
+        },
+        EffectRequest::Sql(r) => CommandArgs::Sql {
+            connection: &r.connection,
+            statement: &r.statement,
+            params: &r.params,
+        },
+        EffectRequest::Object(r) => CommandArgs::Object {
+            connection: &r.connection,
+            op: &r.op,
+            key: &r.key,
+            body: r.body.as_deref().unwrap_or(&[]),
+        },
     }
 }
 

@@ -17,7 +17,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Vec<u8> {
-    assert!(s.len() % 2 == 0, "odd hex length");
+    assert!(s.len().is_multiple_of(2), "odd hex length");
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
@@ -148,8 +148,7 @@ fn golden_events() -> Vec<(&'static str, Event)> {
                     meta: meta(4),
                     request: EffectRequest::Sql(SqlRequest {
                         connection: "main".into(),
-                        statement: "insert into t values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"
-                            .into(),
+                        statement: "insert into t values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)".into(),
                         params: all_sql_values(),
                         exactly_once: true,
                     }),
@@ -358,7 +357,10 @@ fn golden_results() -> Vec<(&'static str, RecordedResult)> {
                 details: None,
             }))),
         ),
-        ("step_err_timeout", encode_result(&Step::Err(Failure::Timeout))),
+        (
+            "step_err_timeout",
+            encode_result(&Step::Err(Failure::Timeout)),
+        ),
         (
             "step_err_cancelled",
             encode_result(&Step::Err(Failure::Cancelled)),
@@ -378,7 +380,10 @@ fn golden_results() -> Vec<(&'static str, RecordedResult)> {
             "op_sql",
             encode_result(&Op::Ok(OpOutput::Sql(SqlResult {
                 columns: vec!["a".into(), "b".into()],
-                rows: vec![all_sql_values()[..5].to_vec(), all_sql_values()[5..].to_vec()],
+                rows: vec![
+                    all_sql_values()[..5].to_vec(),
+                    all_sql_values()[5..].to_vec(),
+                ],
                 rows_affected: 2,
             }))),
         ),
@@ -403,10 +408,7 @@ fn golden_results() -> Vec<(&'static str, RecordedResult)> {
             "op_cancel_requested",
             encode_result(&Op::Ok(OpOutput::CancelRequested)),
         ),
-        (
-            "op_err_timeout",
-            encode_result(&Op::Err(Failure::Timeout)),
-        ),
+        ("op_err_timeout", encode_result(&Op::Err(Failure::Timeout))),
     ]
 }
 
@@ -442,7 +444,12 @@ fn golden_hashes() -> Vec<(&'static str, CommandHash)> {
                 body: &[1, 2, 3],
             },
         ),
-        ("sleep", CommandArgs::Sleep { duration_ms: 60_000 }),
+        (
+            "sleep",
+            CommandArgs::Sleep {
+                duration_ms: 60_000,
+            },
+        ),
         (
             "sleep_until",
             CommandArgs::SleepUntil {
@@ -494,7 +501,11 @@ fn render() -> String {
         out.push_str(&format!("event {kind} {name} {}\n", hex(&bytes)));
     }
     for (name, r) in golden_results() {
-        out.push_str(&format!("result {name} {:02x}{}\n", r.codec_ver, hex(&r.bytes)));
+        out.push_str(&format!(
+            "result {name} {:02x}{}\n",
+            r.codec_ver,
+            hex(&r.bytes)
+        ));
     }
     for (name, h) in golden_hashes() {
         out.push_str(&format!("hash {name} {}\n", hex(&h.0)));
@@ -547,7 +558,11 @@ fn assert_event_eq(a: &Event, b: &Event) {
     if a != b {
         // Fall back to byte comparison: NaN-bearing events are equal iff they re-encode
         // identically, and the bit pattern of every Float8 must survive.
-        assert_eq!(encode_event(a), encode_event(b), "events differ: {a:?} vs {b:?}");
+        assert_eq!(
+            encode_event(a),
+            encode_event(b),
+            "events differ: {a:?} vs {b:?}"
+        );
     }
 }
 
@@ -587,7 +602,11 @@ fn golden_event_codec() {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(bits, vec![1.5f64.to_bits(), ODD_NAN], "f64 bits must survive");
+            assert_eq!(
+                bits,
+                vec![1.5f64.to_bits(), ODD_NAN],
+                "f64 bits must survive"
+            );
         }
     }
 }
@@ -654,8 +673,14 @@ fn http_req(headers: &[(&str, &str)], url: &str) -> HttpRequest {
 fn hash_ignores_unhashed_fields() {
     // Header values and header order are not hashed; header-name case is canonicalised.
     // Callers build CommandArgs from the request via `command_args`, which keeps names only.
-    let a = http_req(&[("Authorization", "Bearer {{secret:a}}"), ("X-Id", "1")], "https://x/a");
-    let mut b = http_req(&[("x-id", "2"), ("authorization", "Bearer other")], "https://x/a");
+    let a = http_req(
+        &[("Authorization", "Bearer {{secret:a}}"), ("X-Id", "1")],
+        "https://x/a",
+    );
+    let mut b = http_req(
+        &[("x-id", "2"), ("authorization", "Bearer other")],
+        "https://x/a",
+    );
     b.timeout_ms = Some(99_999);
     b.idempotency_key = Some("k".into());
     b.redact = vec!["authorization".into()];
@@ -792,7 +817,10 @@ fn canonical_args_layout_is_hand_specified() {
         header_names: vec!["B", "a"],
     });
     assert_eq!(c.len(), (4 + 3) + (4 + 1) + 32 + 4 + (4 + 1) + (4 + 1));
-    assert_eq!(&c[c.len() - 14..], &[2, 0, 0, 0, 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'b']);
+    assert_eq!(
+        &c[c.len() - 14..],
+        &[2, 0, 0, 0, 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'b']
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -892,13 +920,16 @@ fn arb_payload() -> impl Strategy<Value = Payload> {
 }
 
 fn arb_error_info() -> impl Strategy<Value = ErrorInfo> {
-    (arb_string(), arb_string(), proptest::option::of(arb_payload())).prop_map(
-        |(kind, message, details)| ErrorInfo {
+    (
+        arb_string(),
+        arb_string(),
+        proptest::option::of(arb_payload()),
+    )
+        .prop_map(|(kind, message, details)| ErrorInfo {
             kind,
             message,
             details,
-        },
-    )
+        })
 }
 
 fn arb_failure() -> impl Strategy<Value = Failure> {
@@ -975,14 +1006,16 @@ fn arb_body() -> impl Strategy<Value = EventBody> {
         bytes,
     });
     prop_oneof![
-        (arb_meta(), arb_string(), rr, any::<u64>()).prop_map(|(meta, name, outcome, fuel_used)| {
-            EventBody::StepCompleted(StepCompleted {
-                meta,
-                name,
-                outcome,
-                fuel_used,
-            })
-        }),
+        (arb_meta(), arb_string(), rr, any::<u64>()).prop_map(
+            |(meta, name, outcome, fuel_used)| {
+                EventBody::StepCompleted(StepCompleted {
+                    meta,
+                    name,
+                    outcome,
+                    fuel_used,
+                })
+            }
+        ),
         (arb_meta(), any::<u64>()).prop_map(|(meta, fire_at_nanos)| {
             EventBody::TimerStarted(TimerStarted {
                 meta,
@@ -990,8 +1023,9 @@ fn arb_body() -> impl Strategy<Value = EventBody> {
             })
         }),
         any::<u64>().prop_map(|op| EventBody::TimerFired(TimerFired { op })),
-        (arb_meta(), proptest::collection::vec(any::<u64>(), 0..6))
-            .prop_map(|(meta, completed)| EventBody::WaitResolved(WaitResolved { meta, completed })),
+        (arb_meta(), proptest::collection::vec(any::<u64>(), 0..6)).prop_map(
+            |(meta, completed)| EventBody::WaitResolved(WaitResolved { meta, completed })
+        ),
         (arb_meta(), arb_string(), proptest::option::of(any::<u64>())).prop_map(
             |(meta, name, timeout_ms)| EventBody::SignalWaitStarted(SignalWaitStarted {
                 meta,
