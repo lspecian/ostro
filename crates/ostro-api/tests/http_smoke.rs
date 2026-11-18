@@ -1,5 +1,9 @@
 //! One-port mux smoke test: HTTP/1.1 `GET /healthz` and a gRPC health check are both
-//! answered by `ostro_api::router()` on the same ephemeral listener.
+//! answered by `ostro_api::router(..)` on the same ephemeral listener.
+
+use std::sync::Arc;
+
+use ostro_api::fake::FakeControlPlane;
 
 use ostro_proto::health::v1::{CheckRequest, health_client::HealthClient};
 
@@ -10,9 +14,13 @@ async fn http1_and_grpc_on_one_listener() {
         .expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     let server = tokio::spawn(async move {
-        axum::serve(listener, ostro_api::router())
-            .await
-            .expect("serve");
+        let cp = Arc::new(FakeControlPlane::new());
+        axum::serve(
+            listener,
+            ostro_api::router(cp, ostro_api::ApiConfig::default()),
+        )
+        .await
+        .expect("serve");
     });
 
     // (a) HTTP/1.1 health endpoint.

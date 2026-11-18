@@ -29,6 +29,7 @@ fake = ["dep:sha2"]
 
 [dev-dependencies]
 ostro-api = { path = ".", features = ["fake"] }
+insta.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
 

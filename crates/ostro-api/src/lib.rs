@@ -2,18 +2,18 @@
 //!
 //! [`domain::ControlPlane`] is the transport-neutral contract every adapter calls.
 
+use std::sync::Arc;
+
 pub mod domain;
 pub mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+mod openapi;
+pub mod rest;
 
 pub use domain::ControlPlane;
 pub use error::{ApiError, ErrorCode};
-
-// Phase 4 dependency anchors still awaiting the REST/OpenAPI surface (04-08 Task 2).
-use jiff as _;
-use tower_http as _;
-use utoipa_axum as _;
+pub use openapi::openapi;
 
 use ostro_proto::health::v1::{
     CheckRequest, CheckResponse,
@@ -41,11 +41,39 @@ pub fn tls_provider() -> rustls::crypto::CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()
 }
 
-/// Build the combined HTTP router: tonic gRPC services plus `GET /healthz`.
-pub fn router() -> axum::Router {
+/// HTTP API limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApiConfig {
+    /// Body limit of `PUT /v1/modules/{sha256}` only.
+    pub max_module_bytes: usize,
+    /// Body limit of every other route.
+    pub max_request_bytes: usize,
+}
+
+impl Default for ApiConfig {
+    /// 64 MiB modules, 4 MiB requests (matches ostro-server's `[api]` defaults).
+    fn default() -> Self {
+        ApiConfig {
+            max_module_bytes: 64 * 1024 * 1024,
+            max_request_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
+
+/// The UI shell page with the server version filled in.
+pub fn ui_shell_html() -> String {
+    include_str!("ui_shell.html").replace("{{version}}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Build the combined one-port router: REST (`/v1/...`), `/openapi.json`, `/healthz`,
+/// `/readyz`, the UI shell at `/`, and the tonic gRPC services.
+pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
+    let (rest, _doc) = rest::api_routes(cfg.max_module_bytes).split_for_parts();
     let grpc = tonic::service::Routes::new(HealthServer::new(HealthSvc)).into_axum_router();
-    axum::Router::new()
-        .route("/healthz", axum::routing::get(|| async { "ok" }))
+    rest.with_state(cp)
+        // Route-level limits (the module upload) are inner layers and win over this one.
+        .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .merge(grpc)
 }
 
@@ -55,7 +83,16 @@ mod tests {
 
     #[test]
     fn router_builds() {
-        let _r: axum::Router = router();
+        let cp: Arc<dyn ControlPlane> = Arc::new(fake::FakeControlPlane::new());
+        let _r: axum::Router = router(cp, ApiConfig::default());
+    }
+
+    #[test]
+    fn ui_shell_has_version_and_openapi_link() {
+        let html = ui_shell_html();
+        assert!(html.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!html.contains("{{version}}"));
+        assert!(html.contains("/openapi.json"));
     }
 
     #[tokio::test]

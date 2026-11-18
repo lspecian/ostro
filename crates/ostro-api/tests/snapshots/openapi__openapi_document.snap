@@ -1,0 +1,1330 @@
+---
+source: crates/ostro-api/tests/openapi.rs
+expression: pretty
+---
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ostro API",
+    "description": "Ostro control plane: modules, workflows and runs. The same operations are served over gRPC (ostro.api.v1) on the same port.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Web UI shell (placeholder until the UI phase).",
+        "operationId": "ui_shell",
+        "responses": {
+          "200": {
+            "description": "UI shell",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness: always 200.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Process is alive",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "The OpenAPI document of this API.",
+        "operationId": "openapi_json",
+        "responses": {
+          "200": {
+            "description": "OpenAPI document",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readiness: 200 iff meta has a leader and every partition is ready.",
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "Ready",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not ready",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/modules/{sha256}": {
+      "get": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "Get a stored module.",
+        "operationId": "get_module",
+        "parameters": [
+          {
+            "name": "sha256",
+            "in": "path",
+            "description": "Lowercase hex sha256",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModuleDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "Upload a Wasm module (content-addressed, idempotent).",
+        "operationId": "upload_module",
+        "parameters": [
+          {
+            "name": "sha256",
+            "in": "path",
+            "description": "Lowercase hex sha256 of the body",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "description": "Source language hint (\"rust\", \"python\", \"typescript\").",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw Wasm component bytes",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/WasmBytes"
+              }
+            },
+            "application/wasm": {
+              "schema": {
+                "$ref": "#/components/schemas/WasmBytes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Module already existed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadModuleResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Module stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "sha256 mismatch or invalid module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Workflow version registered by another module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Module exceeds api.max_module_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "List runs.",
+        "operationId": "list_runs",
+        "parameters": [
+          {
+            "name": "workflow",
+            "in": "query",
+            "description": "Workflow filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Status filter.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/RunStatusDto"
+            }
+          },
+          {
+            "name": "queue",
+            "in": "query",
+            "description": "Queue filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Tag filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "created_after",
+            "in": "query",
+            "description": "Created at or after (RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "created_before",
+            "in": "query",
+            "description": "Created before (RFC 3339).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 100, capped at 1000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Token from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter or page token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get a run.",
+        "operationId": "get_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/history": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "A page of a run's history.",
+        "operationId": "run_history",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from_seq",
+            "in": "query",
+            "description": "First seq to return (inclusive, default 0).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 100, max 1000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "List workflows.",
+        "operationId": "list_workflows",
+        "responses": {
+          "200": {
+            "description": "All workflows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListWorkflowsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{name}/active": {
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Activate a workflow version.",
+        "operationId": "activate_workflow",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Expected record version (alternative to expected_version)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActivateWorkflowBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated workflow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown workflow or version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Record version mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{name}/runs": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Start a run.",
+        "operationId": "start_run",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Existing run returned (idempotency key)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartRunResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Run created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown workflow or version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency key used (conflict_policy=reject); details.existing_run_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Workflow has no active version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActivateWorkflowBody": {
+        "type": "object",
+        "description": "Activation body.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "expected_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Required current record version (alternatively the `If-Match` header).",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Version to activate.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConflictPolicyDto": {
+        "type": "string",
+        "description": "Idempotency-key collision policy.",
+        "enum": [
+          "return_existing",
+          "reject"
+        ]
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "REST error envelope.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail",
+            "description": "The error."
+          }
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "description": "REST error payload.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "snake_case code: invalid_argument, not_found, conflict, precondition_failed,\npayload_too_large, unavailable, internal."
+          },
+          "details": {
+            "description": "Structured details, when present."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable message."
+          }
+        }
+      },
+      "HistoryEventDto": {
+        "type": "object",
+        "description": "One history event.",
+        "required": [
+          "seq",
+          "kind",
+          "ts",
+          "ts_ms",
+          "summary",
+          "details"
+        ],
+        "properties": {
+          "details": {
+            "description": "Details (embedded JSON)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Kind."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Journal seq.",
+            "minimum": 0
+          },
+          "summary": {
+            "type": "string",
+            "description": "One-line summary."
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event time (RFC 3339)."
+          },
+          "ts_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Event time, ms since the Unix epoch.",
+            "minimum": 0
+          }
+        }
+      },
+      "HistoryResponse": {
+        "type": "object",
+        "description": "History page.",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryEventDto"
+            },
+            "description": "Events, ascending seq."
+          },
+          "next_from_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`from_seq` of the next page, if any.",
+            "minimum": 0
+          }
+        }
+      },
+      "ListWorkflowsResponse": {
+        "type": "object",
+        "description": "Workflow listing.",
+        "required": [
+          "workflows"
+        ],
+        "properties": {
+          "workflows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowDto"
+            },
+            "description": "Workflows by name."
+          }
+        }
+      },
+      "ModuleDto": {
+        "type": "object",
+        "description": "A stored module.",
+        "required": [
+          "sha256",
+          "size_bytes",
+          "workflows",
+          "uploaded_at",
+          "uploaded_at_ms"
+        ],
+        "properties": {
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Source language, when known."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Lowercase hex sha256."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          },
+          "uploaded_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Upload time (RFC 3339)."
+          },
+          "uploaded_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Upload time, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "workflows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRefDto"
+            },
+            "description": "Exported workflows."
+          }
+        }
+      },
+      "RunDto": {
+        "type": "object",
+        "description": "Full run view.",
+        "required": [
+          "run_id",
+          "workflow",
+          "version",
+          "module_sha256",
+          "queue",
+          "status",
+          "tags",
+          "priority",
+          "created_at",
+          "created_at_ms"
+        ],
+        "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Current attempt.",
+            "minimum": 0
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Completion time (RFC 3339)."
+          },
+          "completed_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Completion time, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "concurrency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Concurrency key."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time (RFC 3339)."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "failure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Failure message."
+          },
+          "module_sha256": {
+            "type": "string",
+            "description": "Implementing module."
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Priority."
+          },
+          "published_status": {
+            "description": "Latest published status (embedded JSON)."
+          },
+          "queue": {
+            "type": "string",
+            "description": "Queue."
+          },
+          "result": {
+            "description": "Result of a completed run (embedded JSON)."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatusDto",
+            "description": "Status."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant."
+          },
+          "traceparent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "W3C traceparent."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Version.",
+            "minimum": 0
+          },
+          "workflow": {
+            "type": "string",
+            "description": "Workflow."
+          }
+        }
+      },
+      "RunListResponse": {
+        "type": "object",
+        "description": "A page of runs.",
+        "required": [
+          "runs"
+        ],
+        "properties": {
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Token for the next page, if any."
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunSummaryDto"
+            },
+            "description": "Runs."
+          }
+        }
+      },
+      "RunStatusDto": {
+        "type": "string",
+        "description": "Run status.",
+        "enum": [
+          "scheduled",
+          "ready",
+          "running",
+          "completed",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "RunSummaryDto": {
+        "type": "object",
+        "description": "Run listing row.",
+        "required": [
+          "run_id",
+          "workflow",
+          "version",
+          "status",
+          "queue",
+          "created_at",
+          "created_at_ms",
+          "tags"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time (RFC 3339)."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "queue": {
+            "type": "string",
+            "description": "Queue."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatusDto",
+            "description": "Status."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Version.",
+            "minimum": 0
+          },
+          "workflow": {
+            "type": "string",
+            "description": "Workflow."
+          }
+        }
+      },
+      "StartRunBody": {
+        "type": "object",
+        "description": "Start-run body.",
+        "properties": {
+          "concurrency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Concurrency key."
+          },
+          "conflict_policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConflictPolicyDto",
+                "description": "Collision policy (default `return_existing`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "delay_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Delay before the run becomes ready, ms.",
+            "minimum": 0
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Idempotency key."
+          },
+          "input": {
+            "description": "Workflow input (any JSON value; defaults to null)."
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Priority."
+          },
+          "queue": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Queue override."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant."
+          },
+          "traceparent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "W3C traceparent."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Explicit version (else the active one).",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "StartRunResponse": {
+        "type": "object",
+        "description": "Start-run result.",
+        "required": [
+          "run_id",
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "boolean",
+            "description": "`false` when an existing run was returned."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          }
+        }
+      },
+      "UploadModuleResponse": {
+        "type": "object",
+        "description": "Upload result.",
+        "required": [
+          "module",
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "boolean",
+            "description": "`false` on idempotent re-upload."
+          },
+          "module": {
+            "$ref": "#/components/schemas/ModuleDto",
+            "description": "The stored module."
+          }
+        }
+      },
+      "WasmBytes": {
+        "type": "string",
+        "format": "binary",
+        "description": "Raw Wasm component bytes (documentation-only schema of the upload body)."
+      },
+      "WorkflowDto": {
+        "type": "object",
+        "description": "A workflow.",
+        "required": [
+          "name",
+          "versions",
+          "record_version"
+        ],
+        "properties": {
+          "active_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Active version.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Name."
+          },
+          "record_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Record version (CAS token for activation; also accepted via `If-Match`).",
+            "minimum": 0
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowVersionDto"
+            },
+            "description": "Versions, ascending."
+          }
+        }
+      },
+      "WorkflowRefDto": {
+        "type": "object",
+        "description": "Workflow name + version.",
+        "required": [
+          "name",
+          "version"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Workflow name."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Workflow version.",
+            "minimum": 0
+          }
+        }
+      },
+      "WorkflowVersionDto": {
+        "type": "object",
+        "description": "One workflow version.",
+        "required": [
+          "version",
+          "module_sha256"
+        ],
+        "properties": {
+          "default_queue": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Default queue."
+          },
+          "module_sha256": {
+            "type": "string",
+            "description": "Implementing module."
+          },
+          "run_timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Default run timeout in ms.",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Version.",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "modules",
+      "description": "Wasm module storage"
+    },
+    {
+      "name": "workflows",
+      "description": "Workflow versions and activation"
+    },
+    {
+      "name": "runs",
+      "description": "Starting and inspecting runs"
+    },
+    {
+      "name": "health",
+      "description": "Liveness and readiness"
+    },
+    {
+      "name": "meta",
+      "description": "API document and UI shell"
+    }
+  ]
+}
