@@ -147,7 +147,7 @@ Plans:
 - [x] 04-03-PLAN.md — ostro.api.v1 protos (Modules, Workflows, Runs) via protox (API-01)
 - [x] 04-04-PLAN.md — StepAttemptFailed (kind 29, additive) + pure retry decision + replay attempt chains (WF-02)
 - [x] 04-05-PLAN.md — Rust SDK runtime crate (sdks/rust/ostro-sdk): bindings, Ctx, step runner, ops, join!/select!, export! (SDK-01)
-- [ ] 04-06-PLAN.md — #[workflow]/#[step] macros + trybuild + SDK test guests validated on the engine (SDK-01, WF-01, WF-07)
+- [x] 04-06-PLAN.md — #[workflow]/#[step] macros + trybuild + SDK test guests validated on the engine (SDK-01, WF-01, WF-07)
 - [x] 04-07-PLAN.md — Host step retry: retry-now, StepBackoff eviction, Runtime::prepared(sha) (WF-02)
 - [ ] 04-08-PLAN.md — ControlPlane trait, domain types, ApiError mapping, REST + utoipa OpenAPI + UI shell (API-01..04)
 - [ ] 04-09-PLAN.md — PHASE-4 GATE (Phase 2 complete) + StartRun fields 14..18 + Derived::Suspend (API-03)
@@ -298,7 +298,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 14/16 | In Progress | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
-| 4. Single-Node Server & Rust MVP | 6/20 | In Progress | - |
+| 4. Single-Node Server & Rust MVP | 7/20 | In Progress | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
