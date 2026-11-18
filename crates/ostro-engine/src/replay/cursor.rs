@@ -18,7 +18,7 @@ use ostro_types::journal::{
 use crate::env::{Clock, RandomStream};
 use crate::error::{NonDeterminism, ProtocolViolation};
 
-use super::rng::{ChaChaStream, RngStreams, insecure_seed, uuid_v7};
+use super::rng::{ChaChaStream, RngStreams, insecure_seed, step_seed, uuid_v7};
 
 const OPEN_STEP: &str = "journaled command inside an open step";
 const RUN_RETURNED: &str = "run returned";
@@ -107,6 +107,8 @@ pub struct ReplayState {
     pub(super) pending: Vec<Event>,
     pub(super) run: RunStarted,
     pub(super) rng: RngStreams,
+    /// Run-level streams saved while a live step's step-local streams are active.
+    pub(super) outer_rng: Option<RngStreams>,
     /// Seq reserved by a live `begin_step` that has not completed yet.
     pub(super) open_step: Option<u64>,
     /// Ts of the most recent consumed/appended guest command (`accepted_at` before any).
@@ -170,6 +172,7 @@ impl ReplayState {
             cursor: 1,
             pending: Vec::new(),
             rng: RngStreams::new(&run.rng_seed),
+            outer_rng: None,
             open_step: None,
             last_cmd_ts: run.accepted_at_nanos,
             last_cmd_seq: 0,
@@ -358,7 +361,19 @@ impl ReplayState {
         }
         let seq = self.next_seq;
         self.open_step = Some(seq);
+        // The closure runs live only: give it step-local randomness so it never moves
+        // the run-level streams (which replay, skipping the closure, would not move).
+        let local = RngStreams::new(&step_seed(&self.run.rng_seed, seq));
+        self.outer_rng = Some(std::mem::replace(&mut self.rng, local));
         Ok(StepBegin::Live { seq })
+    }
+
+    /// Close the open step (if any) and restore the run-level random streams.
+    fn close_step(&mut self) {
+        self.open_step = None;
+        if let Some(outer) = self.outer_rng.take() {
+            self.rng = outer;
+        }
     }
 
     /// Append the `StepCompleted` for the open step at its reserved seq and close the guard.
@@ -374,7 +389,7 @@ impl ReplayState {
                 body.summary()
             )));
         }
-        self.open_step = None;
+        self.close_step();
         self.append_live(seq, body);
         Ok(())
     }
@@ -382,7 +397,7 @@ impl ReplayState {
     /// Drop an open step without journaling it; its reserved seq is released.
     pub fn abandon_step(&mut self, seq: u64) {
         if self.open_step == Some(seq) {
-            self.open_step = None;
+            self.close_step();
         }
     }
 
@@ -391,7 +406,7 @@ impl ReplayState {
     /// terminal event, which is compared through `command(Terminal, ..)`. An open step is
     /// abandoned (it never completed, so nothing was journaled).
     pub fn finish(&mut self) -> Result<(), ReplayError> {
-        self.open_step = None;
+        self.close_step();
         match self.next_guest_command() {
             Some(i) if !is_terminal(self.journal[i].body.kind()) => {
                 let ev = &self.journal[i];

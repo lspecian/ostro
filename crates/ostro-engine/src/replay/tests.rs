@@ -969,3 +969,63 @@ proptest! {
         }
     }
 }
+
+/// Regression (03-11): randomness drawn inside a live step's closure (skipped on
+/// replay) must not move the run-level streams. Before the fix, a value drawn outside
+/// any step after a live step differed from the same draw after that step was
+/// replayed, so hot-waited and evict-and-replay runs journaled different bytes, and a
+/// command derived from such a value would diverge on replay.
+#[test]
+fn step_closure_randomness_does_not_leak() {
+    let actual = || "s".to_owned();
+    let seed = RngSeed([7; 32]);
+    let run_level = |n: usize| {
+        let mut s = ChaChaStream::new(&seed, RandomStream::CtxRandom);
+        (0..n).map(|_| s.next_u64()).last().unwrap()
+    };
+
+    // Record: a live step draws ctx and uuid randomness; then a draw outside any step.
+    let mut st = fresh();
+    let seq = match st.begin_step(h(1), &actual).unwrap() {
+        StepBegin::Live { seq } => seq,
+        StepBegin::Replayed(_) => panic!("live"),
+    };
+    let inside = st.rng(RandomStream::CtxRandom).next_u64();
+    let _uuid = st.new_uuid_v7();
+    st.complete_step(seq, body_for(CommandKind::Step, h(1)))
+        .unwrap();
+    let after_live = st.rng(RandomStream::CtxRandom).next_u64();
+    st.take_pending();
+    let journal = st.journal().to_vec();
+
+    assert_eq!(
+        after_live,
+        run_level(1),
+        "run-level stream untouched by the step"
+    );
+    let mut local = ChaChaStream::new(&rng::step_seed(&seed, seq), RandomStream::CtxRandom);
+    assert_eq!(
+        inside,
+        local.next_u64(),
+        "step-local stream = step_seed(seed, seq)"
+    );
+    assert_ne!(inside, after_live);
+
+    // Replay: the closure is skipped; the same draw yields the same value.
+    let mut st = replay(journal);
+    assert!(matches!(
+        st.begin_step(h(1), &actual).unwrap(),
+        StepBegin::Replayed(_)
+    ));
+    assert_eq!(st.rng(RandomStream::CtxRandom).next_u64(), after_live);
+
+    // An abandoned live step restores the run-level streams too.
+    let mut st = fresh();
+    let seq = match st.begin_step(h(1), &actual).unwrap() {
+        StepBegin::Live { seq } => seq,
+        StepBegin::Replayed(_) => panic!("live"),
+    };
+    st.rng(RandomStream::CtxRandom).next_u64();
+    st.abandon_step(seq);
+    assert_eq!(st.rng(RandomStream::CtxRandom).next_u64(), run_level(1));
+}

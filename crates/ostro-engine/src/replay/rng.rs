@@ -5,6 +5,13 @@
 //! [0u8; 8]`, block counter starting at 0. Output is the raw keystream consumed
 //! sequentially, so the same seed yields the same bytes in the same order on every
 //! replay. The encoding is pinned by golden vectors (computed independently).
+//!
+//! Code inside a live step's closure is skipped on replay, so it must not move the
+//! run-level streams: while a live step is open the replay core swaps in a step-local
+//! set of streams seeded with [`step_seed`]`(run seed, step seq)` and restores the
+//! run-level streams when the step closes (03-11). Values drawn inside a step are thus
+//! independent of activation boundaries, and values drawn outside steps are the same
+//! whether earlier steps ran live or were replayed.
 
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -15,6 +22,8 @@ use crate::env::RandomStream;
 
 /// Domain separator for `wasi:random/insecure-seed`.
 const INSECURE_SEED_DOMAIN: &[u8] = b"ostro/insecure-seed/v1";
+/// Domain separator for step-local stream seeds.
+const STEP_SEED_DOMAIN: &[u8] = b"ostro/step-rng/v1";
 
 /// One deterministic ChaCha20 keystream.
 pub struct ChaChaStream {
@@ -94,6 +103,16 @@ pub fn insecure_seed(seed: &RngSeed) -> (u64, u64) {
     a.copy_from_slice(&d[..8]);
     b.copy_from_slice(&d[8..16]);
     (u64::from_le_bytes(a), u64::from_le_bytes(b))
+}
+
+/// Seed of the step-local streams of the live step journaled at `seq`:
+/// `sha256(b"ostro/step-rng/v1" || run seed || seq as u64 LE)`.
+pub fn step_seed(seed: &RngSeed, seq: u64) -> RngSeed {
+    let mut h = Sha256::new();
+    h.update(STEP_SEED_DOMAIN);
+    h.update(seed.0);
+    h.update(seq.to_le_bytes());
+    RngSeed(h.finalize().into())
 }
 
 /// RFC 9562 UUIDv7: 48-bit big-endian `now_ms`, version 7, then 74 random bits from
