@@ -28,6 +28,21 @@ mimalloc = "0.1.52"
 clap = { version = "4.6.8", features = ["derive", "env"] }
 tempfile = "3"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+# Phase 3 engine / journal (shared pins; Phase 2 reuses serde/postcard/sha2/thiserror/tracing/proptest)
+ostro-types = { path = "crates/ostro-types" }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+sha2 = "0.11"
+hmac = "0.13"
+# exact: the deterministic RNG keystream must never change
+chacha20 = "=0.10.2"
+async-trait = "0.1.92"
+thiserror = "2"
+tokio-util = "0.7.20"
+tracing = "0.1"
+metrics = "0.24.6"
+proptest = "1.12.0"
+insta = "1"
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

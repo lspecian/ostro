@@ -3,6 +3,8 @@
 //! The command envelope (log header, partition `Command` framing, fencing)
 //! lands in Phase 2; `journal::Event` payload semantics land in Phase 3.
 
+pub mod journal;
+
 /// Version of the on-disk / on-wire codec.
 pub const CODEC_VERSION: u16 = 1;
 
