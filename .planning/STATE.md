@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 
 Phase: 2 and 3 of 14 (planning in parallel; Phase 1 complete)
 Plan: 0 of TBD in current phases
-Phase 2 plan: 1 of 16 complete (02-02 WAL patches P1/P2/P3 done; 02-01 Wave 0 pending)
+Phase 2 plan: 2 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2: 02-03/02-04 next)
 Phase 3 plan: 3 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next; 03-02 journal codec + command hash v1 done; 03-06 AOT cache + compile pool done)
 Status: Planning Phases 2 (Durable Partition Log & State Machine) and 3 (Deterministic Wasm Engine & WIT 0.1)
-Phase 2 last activity: 2026-11-18 — Completed 02-02-PLAN.md (vendored WAL poison-on-I/O-error, dir fsync, failpoints; failpoint CI step)
+Phase 2 last activity: 2026-11-18 — Completed 02-01-PLAN.md (fjall 3.1.13 replaces redb; Phase 2 deps pinned; deny green with fjall tree; ostro-testkit; nextest crash profile)
 Phase 3 last activity: 2026-11-18 — Completed 03-06-PLAN.md (HMAC-authenticated AOT disk cache + bounded single-flight compile pool; ENG-07)
 Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 
@@ -64,6 +64,7 @@ Progress: [█░░░░░░░░░] 7% (1/14 phases)
 | Phase 01 P08 | 14min | 2 tasks | 11 files |
 | Phase 03 P01 | 25min | 3 tasks | 35 files |
 | Phase 02 P02 | 14min | 2 tasks | 8 files |
+| Phase 02 P01 | 10min | 2 tasks | 17 files |
 | Phase 03 P02 | 15min | 1 tasks | 3 files |
 | Phase 03 P06 | 20min | 2 tasks | 3 files |
 
@@ -106,6 +107,8 @@ Recent decisions affecting current work:
 - [Phase 01 / 01-08]: Python embedded by default (6.5 MB RSS/instance, NFR-2.3 met with >20x margin, confirmed on a quiet machine); pools sized per language class (Python = 38 core instances/instance; default pool fits 26 Python instances), workers remain the scaling path. Revisit memory in Phase 9 with a realistic stdlib footprint
 - [Phase 02 / 02-02]: ostro-wal is fail-stop per partition: any write/fsync (or seal/rotate/truncate) I/O error poisons the queue (WalError::Poisoned, worker stops, GroupCommitWal::is_poisoned); poison flag checked under the pending lock; truncate_to on a poisoned partition returns Poisoned. Recovery = reopen the WAL
 - [Phase 02 / 02-02]: Failpoint suites run single-threaded via FAILPOINT_CRATES in scripts/ci-local.sh (+ linux-x86_64-gnu CI step); later Phase 2 crates append themselves and need `failpoints = ["dep:fail", "fail/failpoints"]`
+- [Phase 02 / 02-01]: fjall =3.1.13 replaces redb in the workspace; deny.toml allows 0BSD (varint-rs) and BSL-1.0 (xxhash-rust) for fjall's tree
+- [Phase 02 / 02-01]: Phase 2 crates anchor deps wired ahead of use with `use x as _;` (ostro-types/log/partition/blob lib.rs); ostro-partition/clippy.toml bans clocks + HashMap/HashSet; storage tests use ostro_testkit::fs::tempdir + corrupt::* (offline corruption)
 - [Phase 03 / 03-01]: guests/ is a separate cargo workspace (excluded from root, guests/Cargo.lock gitignored, deps pinned exactly); integration tests get guest wasm via tests/common::guest_wasm(name)
 - [Phase 03 / 03-01]: Toolchain cargo has a per-crate `unused_dependencies` lint; deps wired before their consuming plan are anchored with `use x as _;` (engine lib.rs: chacha20/hmac/metrics/tracing; ostro-types journal.rs: postcard/sha2)
 - [Phase 03 / 03-01]: Journal EventKind codes pinned: RunStarted=1, guest commands 16–28, inputs 64–69 (ranges 1–15 run record, 16–63 commands, 64–127 inputs, 128+ reserved)
