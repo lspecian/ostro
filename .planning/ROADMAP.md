@@ -58,7 +58,17 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. `VENDORED.md` lists every vendored file with its source path, Chronik commit `08715f4` and local modifications. Nothing in the workspace references the Chronik repo.
   3. CI runs and passes on linux x86_64 and aarch64 (musl via cargo-zigbuild with mimalloc) and on macOS. cargo-deny fails the build when a duplicate tonic/prost/hyper/axum/opentelemetry version or a disallowed licence is introduced.
   4. The S2 report gives Python/TS guest `.wasm`/AOT size, instance memory and cold start, and the pre-init randomness behaviour. The S3 report gives redb throughput per durability tier. Three decisions are logged in PROJECT.md: step handle (resource vs u64), redb vs fjall, and the Wasmtime pin policy.
-**Plans**: TBD
+**Plans**: 8 plans (5 waves)
+
+Plans:
+- [ ] 01-01-PLAN.md — Workspace skeleton (11 crates with real deps) on Rust 1.100.0 + cargo-deny policy and negative fixtures (W1)
+- [ ] 01-02-PLAN.md — Spike S3: redb durability-tier benchmark, crash sanity, report vs 90k cmds/s rule (W1)
+- [ ] 01-03-PLAN.md — Spike S2 apparatus: shared WIT, py/ts/rust guests, Wasmtime 50.0.2 harness (W1)
+- [ ] 01-04-PLAN.md — Vendor + modernise raft stack (ostro-raft-proto/-rs/-driver), wire ostro-meta, start VENDORED.md (W2)
+- [ ] 01-05-PLAN.md — Spike S2 measurements and report (sizes, instantiate, memory, cold start, randomness, step handle) (W2)
+- [ ] 01-06-PLAN.md — Vendor + modernise WAL (ostro-wal), wire ostro-log, complete VENDORED.md, check-vendored.sh (W3)
+- [ ] 01-07-PLAN.md — Local CI gate (incl. musl zigbuild) + GitHub Actions matrix; remote legs human_needed (W4)
+- [ ] 01-08-PLAN.md — Quiet-machine confirmation runs + log the three decisions in PROJECT.md (W5)
 **Research flag**: Guest toolchain behaviour under `--stub-wasi` (measure, don't assume)
 
 ### Phase 2: Durable Partition Log & State Machine
@@ -231,7 +241,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation, Vendoring & Spikes | 0/TBD | Not started | - |
+| 1. Foundation, Vendoring & Spikes | 0/8 | Planned | - |
 | 2. Durable Partition Log & State Machine | 0/TBD | Not started | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 0/TBD | Not started | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |
