@@ -32,7 +32,7 @@
 use bytes::Bytes;
 use prost::Message;
 
-use crate::ids::{AttemptToken, Epoch};
+use crate::ids::{AttemptToken, Epoch, IdError, PartitionId, RunId};
 use crate::payload::PayloadRef;
 
 /// One partition command (an element of an envelope's `cmds`).
@@ -548,5 +548,82 @@ impl OutboxMsg {
                 start: Some(start),
             })),
         }
+    }
+}
+
+/// A required message field is absent (e.g. an [`EventsAppended`] without a token).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("missing required field `{0}`")]
+pub struct MissingField(pub &'static str);
+
+/// Parse an embedded run id. An absent bytes field decodes as empty and yields
+/// `IdError::BadLength(0)`.
+fn parse_run_id(b: &[u8]) -> Result<RunId, IdError> {
+    RunId::from_bytes(b)
+}
+
+impl StartRun {
+    /// The run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+}
+
+impl ParentRef {
+    /// The parent run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+}
+
+impl TimerFired {
+    /// The run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+}
+
+impl EventsAppended {
+    /// The run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+
+    /// The fencing token; `Err` when absent.
+    pub fn token(&self) -> Result<AttemptToken, MissingField> {
+        self.token
+            .map(AttemptToken::from)
+            .ok_or(MissingField("token"))
+    }
+
+    /// Whether `events[i].seq == from_seq + i` for every event (no wrap-around). True for an
+    /// empty event list.
+    pub fn events_contiguous_from(&self, from_seq: u64) -> bool {
+        self.events
+            .iter()
+            .enumerate()
+            .all(|(i, e)| from_seq.checked_add(i as u64) == Some(e.seq))
+    }
+}
+
+impl OutboxMsg {
+    /// The partition this message must be delivered to, read from the embedded run id (no lookup):
+    /// `StartChild`/`CronStart` -> the new run, `ChildCompleted` -> the parent, `Signal`/`CancelRun`
+    /// -> the target run. A missing kind or nested start counts as an empty run id
+    /// (`IdError::BadLength(0)`).
+    pub fn target_partition(&self) -> Result<PartitionId, IdError> {
+        use outbox_msg::Kind;
+        fn start_id(s: &Option<StartRun>) -> &[u8] {
+            s.as_ref().map_or(&[], |s| &s.run_id)
+        }
+        let id: &[u8] = match &self.kind {
+            None => &[],
+            Some(Kind::StartChild(c)) => start_id(&c.start),
+            Some(Kind::CronStart(c)) => start_id(&c.start),
+            Some(Kind::ChildCompleted(c)) => &c.parent_run,
+            Some(Kind::Signal(s)) => &s.target_run,
+            Some(Kind::CancelRun(c)) => &c.target_run,
+        };
+        parse_run_id(id).map(|r| r.partition())
     }
 }

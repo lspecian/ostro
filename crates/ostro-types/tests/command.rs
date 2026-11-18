@@ -350,7 +350,9 @@ fn routing_malformed_run_id_is_error() {
     // Missing nested start / missing kind are errors too, never panics.
     assert!(OutboxMsg { kind: None }.target_partition().is_err());
     let no_start = OutboxMsg {
-        kind: Some(command::outbox_msg::Kind::StartChild(StartChild { start: None })),
+        kind: Some(command::outbox_msg::Kind::StartChild(StartChild {
+            start: None,
+        })),
     };
     assert!(no_start.target_partition().is_err());
 }
