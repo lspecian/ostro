@@ -1,0 +1,1094 @@
+// Vendored from chronik-stream@08715f4 crates/chronik-wal/src/manager.rs; modified by Ostro (see VENDORED.md).
+
+//! WAL manager for coordinating segments and partitions
+
+use std::sync::Arc;
+use tracing::{info, debug, warn, instrument};
+use serde::{Serialize, Deserialize};
+
+use crate::{
+    config::WalConfig,
+    error::{Result, WalError},
+    record::WalRecord,
+    group_commit::{GroupCommitWal, GroupCommitConfig},
+    segment_index::PartitionIndex,
+    RecoveryResult,
+};
+
+/// Topic-partition identifier
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TopicPartition {
+    pub topic: String,
+    pub partition: i32,
+}
+
+/// WAL manager coordinating all partitions
+/// v1.3.53+: ONLY uses GroupCommitWal for zero-loss guarantee on all acks modes
+/// Old PartitionWal system removed to eliminate duplicate writes (bug fix)
+pub struct WalManager {
+    config: WalConfig,
+    /// Group commit WAL for zero-loss durability with PostgreSQL-style batching
+    /// This is the ONLY WAL system now - old partitions-based WAL removed
+    group_commit_wal: Arc<GroupCommitWal>,
+    /// Sparse offset → byte position per partition, so a read seeks into the
+    /// segments instead of scanning them (RP-9). Built as the log grows and
+    /// rebuilt whenever a file shrinks under it.
+    read_index: dashmap::DashMap<(String, i32), Arc<tokio::sync::Mutex<PartitionIndex>>>,
+    /// One per partition, held by whoever moves records between the WAL and
+    /// the archive or cuts either: the indexer while it archives a segment, a
+    /// follower while it truncates a divergent log. Without it the indexer can
+    /// read a segment, lose it to a truncation, and upload it after the
+    /// truncation cleaned the archive — leaving the discarded records servable.
+    archive_locks: dashmap::DashMap<(String, i32), Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl WalManager {
+    /// Create a new WAL manager
+    #[instrument(skip(config), fields(data_dir = %config.data_dir.display()))]
+    pub async fn new(config: WalConfig) -> Result<Self> {
+        // Create data directory if it doesn't exist
+        tokio::fs::create_dir_all(&config.data_dir).await?;
+
+        // Ostro: upstream constructed a CheckpointManager and an FsyncBatcher
+        // here that were never used afterwards; both were removed.
+
+        // Initialize GroupCommitWal for zero-loss durability (v1.3.54+)
+        // Default profile: low (optimized for latency). Ostro: no env override;
+        // callers wanting another profile use GroupCommitWal directly with an
+        // explicit GroupCommitConfig.
+        let mut group_commit_config = GroupCommitConfig::default();
+
+        // Wire WalConfig rotation settings to GroupCommitConfig
+        if config.rotation.max_segment_size > 0 {
+            group_commit_config.rotation_size_bytes = config.rotation.max_segment_size;
+        }
+        info!(
+            "GroupCommitWal configured: batch_size={}, batch_MB={}, wait_ms={}, queue_depth={} (profile: low; set GroupCommitConfig fields to change)",
+            group_commit_config.max_batch_size,
+            group_commit_config.max_batch_bytes / 1_000_000,
+            group_commit_config.max_wait_time_ms,
+            group_commit_config.max_queue_depth
+        );
+
+        let group_commit_wal = Arc::new(GroupCommitWal::new(
+            config.data_dir.clone(),
+            group_commit_config,
+        ));
+
+        info!("WAL manager initialized successfully with group commit (v1.3.53: old PartitionWal removed)");
+
+        Ok(Self {
+            config,
+            group_commit_wal,
+            read_index: dashmap::DashMap::new(),
+            archive_locks: dashmap::DashMap::new(),
+        })
+    }
+    
+    /// Recover WAL from disk
+    /// v1.3.53+: GroupCommitWal handles its own recovery internally, no need for partition scanning
+    #[instrument(skip(config), fields(data_dir = %config.data_dir.display()))]
+    pub async fn recover(config: &WalConfig) -> Result<Self> {
+        info!("Starting WAL recovery from {:?} (v1.3.53: using GroupCommitWal only)", config.data_dir);
+
+        // Create a new manager instance - GroupCommitWal handles recovery internally
+        let manager = Self::new(config.clone()).await?;
+
+        info!("WAL manager recovered successfully (GroupCommitWal-based)");
+        Ok(manager)
+    }
+
+
+
+    /// Append records to a partition (v1.3.52+: Delegates to GroupCommitWal)
+    ///
+    /// REPLACED: This method now delegates to GroupCommitWal instead of using segment buffers.
+    /// All writes go through group commit for zero-loss guarantee with batched fsync.
+    ///
+    /// For legacy callers without acks parameter, we use acks=1 (wait for fsync).
+    #[instrument(skip(self, records), fields(
+        topic = %topic,
+        partition = partition,
+        record_count = records.len()
+    ))]
+    pub async fn append(
+        &self,
+        topic: String,
+        partition: i32,
+        records: Vec<WalRecord>,
+    ) -> Result<()> {
+        // Delegate to GroupCommitWal with acks=1 (default: wait for fsync)
+        // This ensures backward compatibility while using the new group commit system
+        for record in records {
+            self.group_commit_wal.append(
+                topic.clone(),
+                partition,
+                record,
+                1, // acks=1: wait for fsync (safe default)
+            ).await?;
+        }
+
+        debug!("WAL append completed via group commit (acks=1 default)");
+        Ok(())
+    }
+
+    /// Append a CanonicalRecord batch as a V2 WAL record
+    /// Takes pre-serialized canonical data to avoid circular dependencies
+    /// v1.3.51+: Added offset metadata parameters
+    ///
+    /// This is the LEGACY method that uses buffered writes + periodic flush.
+    /// For zero-loss guarantee, use append_canonical_with_acks() instead.
+    #[instrument(skip(self, canonical_data), fields(
+        topic = %topic,
+        partition = partition,
+        data_size = canonical_data.len(),
+        base_offset = base_offset,
+        last_offset = last_offset
+    ))]
+    pub async fn append_canonical(
+        &self,
+        topic: String,
+        partition: i32,
+        canonical_data: Vec<u8>,
+        base_offset: i64,
+        last_offset: i64,
+        record_count: i32,
+    ) -> Result<()> {
+        // Create V2 WAL record with offset metadata
+        let wal_record = WalRecord::new_v2(
+            topic.clone(),
+            partition,
+            canonical_data,
+            base_offset,
+            last_offset,
+            record_count,
+        );
+
+        // Append as a single record
+        self.append(topic, partition, vec![wal_record]).await
+    }
+
+    /// Append a CanonicalRecord batch with acknowledgment mode (Option 4 + Option 2)
+    ///
+    /// This method implements the group commit strategy for zero data loss:
+    /// - acks=0: Enqueue without waiting (still zero-loss via background commit)
+    /// - acks=1: Enqueue and wait for fsync (zero data loss)
+    /// - acks=-1: Enqueue and wait for fsync (zero data loss, same as acks=1 for single node)
+    ///
+    /// v1.3.52+: Complete GroupCommitWal integration - ALL acks modes have zero-loss guarantee
+    #[instrument(skip(self, canonical_data), fields(
+        topic = %topic,
+        partition = partition,
+        acks = acks,
+        data_size = canonical_data.len(),
+        base_offset = base_offset,
+        last_offset = last_offset
+    ))]
+    pub async fn append_canonical_with_acks(
+        &self,
+        topic: String,
+        partition: i32,
+        canonical_data: Vec<u8>,
+        base_offset: i64,
+        last_offset: i64,
+        record_count: i32,
+        acks: i16,
+    ) -> Result<()> {
+        // Create V2 WAL record with offset metadata
+        let wal_record = WalRecord::new_v2(
+            topic.clone(),
+            partition,
+            canonical_data,
+            base_offset,
+            last_offset,
+            record_count,
+        );
+
+        // Route to GroupCommitWal - it handles all acks modes with zero-loss guarantee
+        // - acks=0: Enqueues without waiting, background worker commits
+        // - acks=1/-1: Enqueues and waits for fsync via oneshot channel
+        // PostgreSQL-style batching amortizes fsync cost across multiple writes
+        self.group_commit_wal.append(
+            topic,
+            partition,
+            wal_record,
+            acks,
+        ).await?;
+
+        debug!("WAL record appended via group commit: acks={}", acks);
+
+        Ok(())
+    }
+
+    /// [`Self::append_canonical_with_acks`] split in two: enqueue now, and
+    /// return the fsync wait to the caller.
+    ///
+    /// For a producer that assigns offsets: reserve the range and call this
+    /// under one per-partition lock, so the WAL holds batches in offset order,
+    /// then release the lock and await the returned wait. Readers walk the WAL
+    /// in file order and hand out the first batch at or past the requested
+    /// offset, so a batch appended *after* a higher-offset one is skipped by
+    /// every consumer — it is in the log and unreachable.
+    pub async fn append_canonical_enqueued(
+        &self,
+        topic: String,
+        partition: i32,
+        canonical_data: Vec<u8>,
+        base_offset: i64,
+        last_offset: i64,
+        record_count: i32,
+        acks: i16,
+    ) -> Result<crate::group_commit::CommitWait> {
+        let wal_record = WalRecord::new_v2(
+            topic.clone(),
+            partition,
+            canonical_data,
+            base_offset,
+            last_offset,
+            record_count,
+        );
+        self.group_commit_wal
+            .append_enqueued(topic, partition, wal_record, acks)
+            .await
+    }
+
+
+    /// One past the highest offset this partition has fsynced.
+    ///
+    /// A leader assigns offsets before it writes them, so its *assigned* log end
+    /// runs ahead of what it can actually serve. Followers are told the
+    /// assigned end, ask for an offset inside that gap, and get an empty
+    /// response — which they can only respond to by backing off and asking
+    /// again. This is the number that says what a fetch can really be answered
+    /// with. `None` means nothing has been committed under this process.
+    pub fn durable_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.group_commit_wal.durable_end_offset(topic, partition)
+    }
+
+    /// Read records from a specific offset
+    #[instrument(skip(self), fields(
+        topic = topic,
+        partition = partition,
+        offset = offset,
+        max_records = max_records
+    ))]
+    /// Read records from WAL
+    /// v1.3.65+: Reads from all WAL segments (both sealed and active) with rotation support
+    pub async fn read_from(
+        &self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+        max_records: usize,
+    ) -> Result<Vec<WalRecord>> {
+        self.read_from_bounded(topic, partition, offset, max_records, usize::MAX)
+            .await
+    }
+
+    /// [`read_from`](Self::read_from), stopping at `max_bytes` of records — the
+    /// first batch always, then nothing that would cross the budget. Fetch
+    /// paths must use this: a message count is no bound on the work a read
+    /// does (see `PartitionIndex::read_from_bounded`).
+    pub async fn read_from_bounded(
+        &self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+        max_records: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<WalRecord>> {
+        debug!(
+            "Reading from WAL (GroupCommitWal): topic={}, partition={}, offset={}, max_records={}, max_bytes={}",
+            topic, partition, offset, max_records, max_bytes
+        );
+
+        // Reads that want the end of the log — a follower replicating, a
+        // consumer keeping up — are answered from memory. The scan below reads
+        // and parses the whole active segment, so without this every such fetch
+        // costs O(segment size) and grows until rotation (RP-9).
+        if let Some(cached) = self
+            .group_commit_wal
+            .read_tail(topic, partition, offset, max_records, max_bytes)
+            .await
+        {
+            debug!(
+                "WAL read served from tail cache: {} records for {}/{} from offset {}",
+                cached.len(), topic, partition, offset
+            );
+            return Ok(cached);
+        }
+
+        // Everything else seeks.
+        //
+        // This used to enumerate the partition directory, read each segment
+        // file in full, and parse it from byte zero — materialising every
+        // record's payload before the offset filter discarded it, because the
+        // offsets trail the payload on the wire. It cost O(segment size) per
+        // fetch and grew with the file until rotation at 250MB.
+        //
+        // `PartitionIndex` keeps a sparse offset → byte position map per
+        // segment, extended as the log grows, so each byte is parsed once ever
+        // rather than once per read. See `segment_index`.
+        let partition_dir = self.config.data_dir
+            .join(topic)
+            .join(partition.to_string());
+
+        if !partition_dir.exists() {
+            debug!("Partition directory does not exist: {:?}", partition_dir);
+            return Err(WalError::SegmentNotFound(
+                format!("{}/{}", topic, partition)
+            ));
+        }
+
+        let index = self
+            .read_index
+            .entry((topic.to_string(), partition))
+            .or_insert_with(|| {
+                Arc::new(tokio::sync::Mutex::new(PartitionIndex::new(
+                    partition_dir,
+                    partition,
+                )))
+            })
+            .clone();
+
+        let records = {
+            let mut index = index.lock().await;
+            index.read_from_bounded(offset, max_records, max_bytes).await?
+        };
+
+        debug!(
+            "WAL read completed: {} records for {}/{} from offset {}",
+            records.len(), topic, partition, offset
+        );
+        Ok(records)
+    }
+
+    /// Get the maximum offset for a partition by scanning only WAL record headers.
+    /// This is dramatically more memory-efficient than `read_from` with `usize::MAX`
+    /// because it skips `canonical_data` (the bulk of each record) entirely.
+    /// Memory usage: ~120MB per partition (one segment file) vs ~1.5GB with full read.
+    pub async fn get_max_offset_for_partition(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<Option<i64>> {
+        let partition_dir = self.config.data_dir
+            .join(topic)
+            .join(partition.to_string());
+
+        if !partition_dir.exists() {
+            return Ok(None);
+        }
+
+        // Find all WAL segment files for this partition
+        let mut wal_files = Vec::new();
+        let mut entries = tokio::fs::read_dir(&partition_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                if filename.starts_with(&format!("wal_{}_", partition)) && filename.ends_with(".log") {
+                    wal_files.push(path);
+                }
+            }
+        }
+
+        if wal_files.is_empty() {
+            return Ok(None);
+        }
+
+        // Sort by segment ID (ascending) so the last file has the highest offsets
+        wal_files.sort_by_key(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| {
+                    s.strip_prefix(&format!("wal_{}_", partition))
+                        .and_then(|rest| rest.strip_suffix(".log"))
+                        .and_then(|seg_id| seg_id.parse::<u64>().ok())
+                })
+                .unwrap_or(0)
+        });
+
+        // Scan segment files in REVERSE order (most recent first).
+        // Stop as soon as we find a valid last_offset.
+        let mut global_max_offset: i64 = -1;
+
+        for wal_file_path in wal_files.iter().rev() {
+            let file_data = tokio::fs::read(&wal_file_path).await?;
+            if file_data.is_empty() {
+                continue;
+            }
+
+            // Scan record headers WITHOUT allocating canonical_data
+            let mut cursor = 0;
+            let mut found_any = false;
+
+            while cursor < file_data.len() {
+                use byteorder::{LittleEndian, ReadBytesExt};
+                use std::io::Cursor as IoCursor;
+
+                if cursor + 12 > file_data.len() {
+                    break;
+                }
+
+                let record_start = cursor;
+                let mut rdr = IoCursor::new(&file_data[cursor..]);
+
+                let magic = rdr.read_u16::<LittleEndian>().unwrap();
+                let version = rdr.read_u8().unwrap();
+                let _flags = rdr.read_u8().unwrap();
+                let _length = rdr.read_u32::<LittleEndian>().unwrap();
+                let _crc32 = rdr.read_u32::<LittleEndian>().unwrap();
+
+                if magic != 0xCA7E || version != 2 {
+                    break;
+                }
+
+                // Read topic_len and skip topic bytes
+                let topic_len = match rdr.read_u16::<LittleEndian>() {
+                    Ok(len) => len as usize,
+                    Err(_) => break,
+                };
+                // Skip topic bytes
+                let new_pos = rdr.position() as usize + topic_len;
+                if new_pos > file_data.len() - cursor { break; }
+                rdr.set_position(new_pos as u64);
+
+                // Skip partition (i32)
+                if rdr.read_i32::<LittleEndian>().is_err() { break; }
+
+                // Read canonical_data_len and SKIP the data (key optimization)
+                let canonical_data_len = match rdr.read_u32::<LittleEndian>() {
+                    Ok(len) => len as usize,
+                    Err(_) => break,
+                };
+                let skip_pos = rdr.position() as usize + canonical_data_len;
+                if skip_pos > file_data.len() - cursor { break; }
+                rdr.set_position(skip_pos as u64);
+
+                // Read base_offset and last_offset
+                let _base_offset = match rdr.read_i64::<LittleEndian>() {
+                    Ok(o) => o,
+                    Err(_) => break,
+                };
+                let last_offset = match rdr.read_i64::<LittleEndian>() {
+                    Ok(o) => o,
+                    Err(_) => break,
+                };
+
+                // Skip record_count
+                if rdr.read_i32::<LittleEndian>().is_err() { break; }
+
+                if last_offset > global_max_offset {
+                    global_max_offset = last_offset;
+                }
+                found_any = true;
+
+                cursor = record_start + rdr.position() as usize;
+            }
+
+            // If we found records in this (most recent) segment, we're done
+            if found_any {
+                break;
+            }
+        }
+
+        if global_max_offset >= 0 {
+            debug!("Max offset for {}-{}: {} (scanned {} segment files)",
+                   topic, partition, global_max_offset, wal_files.len());
+            Ok(Some(global_max_offset))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get recovery statistics (v1.3.53+: scans GroupCommitWal directory structure for partitions)
+    pub fn get_recovery_result(&self) -> RecoveryResult {
+        let partitions_list = self.get_partitions();
+
+        RecoveryResult {
+            total_records: 0,  // Don't calculate total, just indicate partitions exist
+            partitions: partitions_list.len(),
+            corrupted_segments: 0,
+            last_offsets: Vec::new(),
+        }
+    }
+
+    /// Get all partitions for recovery (v1.3.53+: scans GroupCommitWal directory structure)
+    pub fn get_partitions(&self) -> Vec<TopicPartition> {
+        use std::fs;
+
+        let mut partitions = Vec::new();
+        let data_dir = &self.config.data_dir;
+
+        // Scan {data_dir}/{topic}/{partition}/ directories
+        if let Ok(topic_entries) = fs::read_dir(data_dir) {
+            for topic_entry in topic_entries.flatten() {
+                if let Ok(topic_name) = topic_entry.file_name().into_string() {
+                    let topic_path = topic_entry.path();
+                    if topic_path.is_dir() {
+                        // Scan partition subdirectories
+                        if let Ok(partition_entries) = fs::read_dir(&topic_path) {
+                            for partition_entry in partition_entries.flatten() {
+                                if let Ok(partition_name) = partition_entry.file_name().into_string() {
+                                    if let Ok(partition) = partition_name.parse::<i32>() {
+                                        // Check if any WAL file exists for this partition
+                                        // Pattern: wal_{partition}_{segment_id}.log (v1.3.66+: supports rotation)
+                                        let partition_dir = topic_path.join(&partition_name);
+                                        if let Ok(wal_files) = fs::read_dir(&partition_dir) {
+                                            let has_wal_file = wal_files.flatten().any(|entry| {
+                                                entry.file_name()
+                                                    .to_str()
+                                                    .map(|name| name.starts_with(&format!("wal_{}_", partition)) && name.ends_with(".log"))
+                                                    .unwrap_or(false)
+                                            });
+
+                                            if has_wal_file {
+                                                partitions.push(TopicPartition {
+                                                    topic: topic_name.clone(),
+                                                    partition,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        partitions
+    }
+
+    /// Get reference to the GroupCommitWal instance (v2.2.10)
+    /// Needed for setting commit callbacks for async response delivery (CRITICAL FIX #7)
+    pub fn group_commit_wal(&self) -> &Arc<GroupCommitWal> {
+        &self.group_commit_wal
+    }
+
+    /// Get the record count for a partition from WAL (v1.3.53+: reads from GroupCommitWal)
+    ///
+    /// Returns the total number of records in the WAL for this partition.
+    /// This is a conservative estimate used during recovery - the actual high watermark
+    /// calculation happens at a higher level with access to CanonicalRecord.
+    pub async fn get_partition_record_count(&self, topic: &str, partition: i32) -> Result<usize> {
+        // Read all records from this partition (uses GroupCommitWal files)
+        let records = self.read_from(topic, partition, 0, usize::MAX).await?;
+        Ok(records.len())
+    }
+
+    /// Truncate WAL segments before the given offset
+    /// Returns the number of segments truncated
+    /// v1.3.53+: No-op, GroupCommitWal manages truncation internally via rotation
+    pub async fn truncate_before(
+        &self,
+        _topic: &str,
+        _partition: i32,
+        _offset: i64,
+    ) -> Result<usize> {
+        // GroupCommitWal handles truncation via segment rotation
+        // Old WAL segments are rotated out when they reach max size
+        Ok(0)
+    }
+    
+    /// Discard every record at or above `target_offset` — suffix truncation.
+    ///
+    /// The mirror image of [`Self::delete_records_before`], and the only
+    /// operation here that removes records from the *tail*. A follower calls it
+    /// when it learns its log diverged from the leader's (RP-3.3).
+    ///
+    /// Returns where the log actually ends, which may be **below**
+    /// `target_offset` when the target fell inside a batch — resume from the
+    /// returned offset, not the requested one. See
+    /// [`GroupCommitWal::truncate_to`] for the full contract.
+    /// The lock serialising archive moves and truncations for one partition.
+    /// See the `archive_locks` field.
+    pub fn archive_lock(&self, topic: &str, partition: i32) -> Arc<tokio::sync::Mutex<()>> {
+        self.archive_locks
+            .entry((topic.to_string(), partition))
+            .or_default()
+            .clone()
+    }
+
+    pub async fn truncate_to(
+        &self,
+        topic: &str,
+        partition: i32,
+        target_offset: i64,
+    ) -> Result<crate::truncate::TruncateOutcome> {
+        self.group_commit_wal
+            .truncate_to(topic, partition, target_offset)
+            .await
+    }
+
+    /// Physically delete WAL segment files that fall entirely below `log_start_offset`.
+    ///
+    /// This backs the Kafka DeleteRecords API: after a partition's log start offset is
+    /// advanced, any sealed segment whose highest offset is strictly below the new low
+    /// watermark holds only deleted records and can be reclaimed. Matching Kafka, this
+    /// only removes whole segments — a segment that straddles the watermark is kept, and
+    /// the active (highest-id, currently-written) segment is never touched.
+    ///
+    /// Returns the number of segment files deleted.
+    pub async fn delete_records_before(
+        &self,
+        topic: &str,
+        partition: i32,
+        log_start_offset: i64,
+    ) -> Result<usize> {
+        if log_start_offset <= 0 {
+            return Ok(0);
+        }
+
+        let partition_dir = self.config.data_dir
+            .join(topic)
+            .join(partition.to_string());
+        if !partition_dir.exists() {
+            return Ok(0);
+        }
+
+        // Collect (segment_id, path) for every WAL segment file in this partition.
+        let mut wal_files: Vec<(u64, std::path::PathBuf)> = Vec::new();
+        let mut entries = tokio::fs::read_dir(&partition_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                let prefix = format!("wal_{}_", partition);
+                if let Some(seg_id) = filename
+                    .strip_prefix(&prefix)
+                    .and_then(|rest| rest.strip_suffix(".log"))
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    wal_files.push((seg_id, path));
+                }
+            }
+        }
+
+        if wal_files.len() <= 1 {
+            // Only the active segment exists — nothing sealed to reclaim.
+            return Ok(0);
+        }
+
+        wal_files.sort_by_key(|(seg_id, _)| *seg_id);
+        // Never delete the active segment (highest id, still being written).
+        let active_seg_id = wal_files.last().map(|(id, _)| *id).unwrap_or(u64::MAX);
+
+        let mut deleted = 0usize;
+        for (seg_id, path) in wal_files.iter() {
+            if *seg_id == active_seg_id {
+                continue;
+            }
+            // Determine this segment's highest offset by scanning record headers.
+            let file_data = match tokio::fs::read(path).await {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("DeleteRecords: could not read segment {:?}: {}", path, e);
+                    continue;
+                }
+            };
+            let seg_last_offset = match Self::scan_segment_last_offset(&file_data) {
+                Some(o) => o,
+                None => continue, // empty/unparseable — leave it alone
+            };
+
+            // Only reclaim segments whose ENTIRE range is below the watermark.
+            if seg_last_offset < log_start_offset {
+                if let Err(e) = self.group_commit_wal.delete_segment_file(topic, partition, *seg_id) {
+                    warn!("DeleteRecords: failed to delete segment {}:{}:{}: {}", topic, partition, seg_id, e);
+                } else {
+                    deleted += 1;
+                }
+            }
+        }
+
+        if deleted > 0 {
+            info!(
+                "DeleteRecords: reclaimed {} WAL segment(s) below offset {} for {}-{}",
+                deleted, log_start_offset, topic, partition
+            );
+        }
+        Ok(deleted)
+    }
+
+    /// Scan a WAL segment file's V2 record headers and return the highest `last_offset`,
+    /// without allocating record bodies. Returns None if no valid records are found.
+    fn scan_segment_last_offset(file_data: &[u8]) -> Option<i64> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        use std::io::Cursor as IoCursor;
+
+        let mut cursor = 0usize;
+        let mut max_last: i64 = -1;
+        while cursor < file_data.len() {
+            if cursor + 12 > file_data.len() {
+                break;
+            }
+            let record_start = cursor;
+            let mut rdr = IoCursor::new(&file_data[cursor..]);
+
+            let magic = rdr.read_u16::<LittleEndian>().ok()?;
+            let version = rdr.read_u8().ok()?;
+            let _flags = rdr.read_u8().ok()?;
+            let _length = rdr.read_u32::<LittleEndian>().ok()?;
+            let _crc32 = rdr.read_u32::<LittleEndian>().ok()?;
+
+            if magic != 0xCA7E || version != 2 {
+                break;
+            }
+
+            let topic_len = rdr.read_u16::<LittleEndian>().ok()? as usize;
+            let new_pos = rdr.position() as usize + topic_len;
+            if new_pos > file_data.len() - cursor { break; }
+            rdr.set_position(new_pos as u64);
+
+            if rdr.read_i32::<LittleEndian>().is_err() { break; } // partition
+
+            let canonical_data_len = rdr.read_u32::<LittleEndian>().ok()? as usize;
+            let skip_pos = rdr.position() as usize + canonical_data_len;
+            if skip_pos > file_data.len() - cursor { break; }
+            rdr.set_position(skip_pos as u64);
+
+            let _base_offset = rdr.read_i64::<LittleEndian>().ok()?;
+            let last_offset = rdr.read_i64::<LittleEndian>().ok()?;
+            if rdr.read_i32::<LittleEndian>().is_err() { break; } // record_count
+
+            if last_offset > max_last {
+                max_last = last_offset;
+            }
+            cursor = record_start + rdr.position() as usize;
+        }
+
+        if max_last >= 0 { Some(max_last) } else { None }
+    }
+
+    /// Flush all partitions to disk (v1.3.53+: No-op, GroupCommitWal flushes automatically)
+    pub async fn flush_all(&self) -> Result<()> {
+        // GroupCommitWal handles flushing via background workers
+        // Periodic flusher runs every 50ms by default
+        info!("flush_all: GroupCommitWal flushes automatically via background workers");
+        Ok(())
+    }
+    
+    /// Read next record after the given offset
+    ///
+    /// Returns the first record with base_offset >= offset + 1.
+    /// This provides an iterator-like API for walking through WAL records.
+    ///
+    /// Note: For fully streaming reads that don't load files into memory,
+    /// a more advanced implementation with file cursors would be needed.
+    /// This version reuses read_from with max_records=1 for simplicity.
+    #[instrument(skip(self), fields(
+        offset = offset,
+        found_record = tracing::field::Empty
+    ))]
+    pub async fn read_next(&self, offset: i64) -> Result<Option<WalRecord>> {
+        // Read from offset + 1 to get the next record after the given offset
+        // We look across all partitions (this is a simple implementation)
+        // A more efficient version would track partition state
+
+        let partitions = self.get_partitions();
+
+        for tp in partitions {
+            // Read records starting from offset + 1
+            let records = self.read_from(&tp.topic, tp.partition, offset + 1, 1).await?;
+
+            if let Some(record) = records.into_iter().next() {
+                debug!("Found next record after offset {}", offset);
+                return Ok(Some(record));
+            }
+        }
+
+        debug!("No more records after offset {}", offset);
+        Ok(None)
+    }
+
+    /// Read records from a topic-partition (v1.3.53+: uses read_from with GroupCommitWal)
+    pub async fn read(
+        &self,
+        tp: TopicPartition,
+        offset: i64,
+        _max_bytes: usize,
+    ) -> Result<Vec<WalRecord>> {
+        debug!("Reading from WAL: topic={}, partition={}, offset={}", tp.topic, tp.partition, offset);
+        self.read_from(&tp.topic, tp.partition, offset, usize::MAX).await
+    }
+
+    /// Get the latest offset for a topic-partition (v1.3.53+: reads from GroupCommitWal file)
+    pub async fn get_latest_offset(&self, tp: TopicPartition) -> Result<i64> {
+        // Read all records to find last offset
+        let records = self.read_from(&tp.topic, tp.partition, 0, usize::MAX).await?;
+
+        if records.is_empty() {
+            Ok(0)
+        } else {
+            // Get last offset from last V2 record
+            if let Some(WalRecord::V2 { last_offset, .. }) = records.last() {
+                Ok(*last_offset)
+            } else {
+                Ok(0)
+            }
+        }
+    }
+    
+
+    /// Get list of sealed segment IDs ready for archival (v1.3.62+: Now implemented!)
+    pub fn get_sealed_segments(&self) -> Vec<String> {
+        let sealed = self.group_commit_wal.get_sealed_segments();
+        debug!("get_sealed_segments: Found {} sealed segments", sealed.len());
+
+        // Convert SealedSegmentInfo to segment ID strings (topic:partition:segment_id)
+        sealed
+            .iter()
+            .map(|info| format!("{}:{}:{}", info.topic, info.partition, info.segment_id))
+            .collect()
+    }
+
+    /// Sealed segments with the byte size each held when it was sealed.
+    ///
+    /// The size lets the indexer tell "I have already indexed this exact
+    /// segment" from "this segment grew since I last saw it", so it can skip
+    /// re-reading (and re-publishing) work it has already done.
+    pub fn get_sealed_segments_with_size(&self) -> Vec<(String, u64)> {
+        self.group_commit_wal
+            .get_sealed_segments()
+            .iter()
+            .map(|info| {
+                (
+                    format!("{}:{}:{}", info.topic, info.partition, info.segment_id),
+                    info.size_bytes,
+                )
+            })
+            .collect()
+    }
+
+    /// Seal segments that have been idle for longer than the threshold.
+    /// This ensures data gets indexed even if topics go quiet.
+    /// Returns the number of segments sealed.
+    ///
+    /// v2.2.16: Added to fix the issue where low-volume topics never get
+    /// their data indexed because WAL segments never seal.
+    pub async fn seal_stale_segments(&self, max_idle_secs: u64) -> usize {
+        self.group_commit_wal.seal_stale_segments(max_idle_secs).await
+    }
+
+    /// Clean up all WAL state for a deleted topic.
+    /// Removes partition queues and sealed segments for the topic.
+    pub async fn cleanup_topic(&self, topic: &str) {
+        self.group_commit_wal.cleanup_topic(topic).await;
+    }
+
+    /// Read all records from a specific sealed segment (v1.3.62+: Now reads from sealed file)
+    pub async fn read_segment(&self, segment_id: &str) -> Result<Vec<WalRecord>> {
+        // Parse segment_id format: "topic:partition:segment_id"
+        let parts: Vec<&str> = segment_id.split(':').collect();
+        if parts.len() != 3 {
+            return Err(WalError::SegmentNotFound(format!("Invalid segment ID format: {}", segment_id)));
+        }
+
+        let topic = parts[0];
+        let partition: i32 = parts[1].parse()
+            .map_err(|_| WalError::SegmentNotFound(format!("Invalid partition in segment ID: {}", segment_id)))?;
+        let seg_id: u64 = parts[2].parse()
+            .map_err(|_| WalError::SegmentNotFound(format!("Invalid segment_id in segment ID: {}", segment_id)))?;
+
+        // Get sealed segment info
+        let sealed = self.group_commit_wal.get_sealed_segments();
+        let segment_info = sealed.iter().find(|s|
+            s.topic == topic && s.partition == partition && s.segment_id == seg_id
+        ).ok_or_else(|| WalError::SegmentNotFound(format!("Sealed segment not found: {}", segment_id)))?;
+
+        // Read the file
+        debug!("Reading sealed segment file: {:?}", segment_info.file_path);
+        let data = tokio::fs::read(&segment_info.file_path).await
+            .map_err(|e| WalError::Io(std::io::Error::new(
+                e.kind(),
+                format!("Failed to read segment file {:?}: {}", segment_info.file_path, e)
+            )))?;
+
+        info!("Read {} bytes from segment file {:?}", data.len(), segment_info.file_path);
+
+        let mut records = Vec::new();
+        let mut offset = 0;
+        let mut parse_errors = 0;
+
+        while offset < data.len() {
+            // Need at least 12 bytes for V2 header or 28 bytes for V1 header
+            if offset + 12 > data.len() {
+                debug!("Reached end of file at offset {} (remaining {} bytes)", offset, data.len() - offset);
+                break;
+            }
+
+            match WalRecord::from_bytes(&data[offset..]) {
+                Ok(record) => {
+                    // Calculate TOTAL record size (header + body)
+                    // V1: 28 bytes fixed header + body
+                    // V2: 12 bytes fixed header + body (length field contains body size)
+                    let total_size = if record.is_v2() {
+                        12 + record.get_length() as usize  // V2: 12-byte header + body
+                    } else {
+                        record.get_length() as usize  // V1: length includes full record
+                    };
+
+                    debug!("Parsed record at offset {} (total_size={}, is_v2={})", offset, total_size, record.is_v2());
+                    records.push(record);
+                    offset += total_size;
+                }
+                Err(e) => {
+                    parse_errors += 1;
+                    warn!("Failed to parse record {} at offset {} in segment {}: {}", parse_errors, offset, segment_id, e);
+                    if parse_errors > 3 {
+                        warn!("Too many parse errors, stopping at offset {}/{}", offset, data.len());
+                        break;
+                    }
+                    // Try skipping ahead
+                    offset += 1;
+                }
+            }
+        }
+
+        info!("Read {} records from sealed segment {} ({} bytes, {} parse errors)",
+              records.len(), segment_id, data.len(), parse_errors);
+
+        Ok(records)
+    }
+
+    /// Delete a sealed segment after archival. Returns whether a file was
+    /// removed — `false` when the segment was not tracked or already gone.
+    pub async fn delete_segment(&self, segment_id: &str) -> Result<bool> {
+        // Parse segment_id format: "topic:partition:segment_id"
+        let parts: Vec<&str> = segment_id.split(':').collect();
+        if parts.len() != 3 {
+            return Err(WalError::SegmentNotFound(format!("Invalid segment ID format: {}", segment_id)));
+        }
+
+        let topic = parts[0];
+        let partition: i32 = parts[1].parse()
+            .map_err(|_| WalError::SegmentNotFound(format!("Invalid partition in segment ID: {}", segment_id)))?;
+        let seg_id: u64 = parts[2].parse()
+            .map_err(|_| WalError::SegmentNotFound(format!("Invalid segment_id in segment ID: {}", segment_id)))?;
+
+        self.remove_segment(topic, partition, seg_id)
+    }
+
+    /// Remove a sealed segment's file after S3 upload. Returns whether a file was removed.
+    pub fn remove_segment(&self, topic: &str, partition: i32, segment_id: u64) -> Result<bool> {
+        self.group_commit_wal.remove_segment(topic, partition, segment_id)
+    }
+
+    /// Get current segment state for a topic/partition (for checkpointing)
+    ///
+    /// Returns (segment_id, position) where:
+    /// - segment_id: Current WAL segment number
+    /// - position: Current byte position within the segment
+    ///
+    /// Returns None if the partition doesn't exist in the WAL.
+    pub fn get_segment_state(&self, topic: &str, partition: i32) -> Option<(u64, u64)> {
+        self.group_commit_wal.get_segment_state(topic, partition)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use crate::config::{
+        CompressionType, CheckpointConfig, RecoveryConfig,
+        RotationConfig, FsyncConfig
+    };
+
+    async fn setup_test_manager() -> (WalManager, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            enabled: true,
+            data_dir: temp_dir.path().to_path_buf(),
+            segment_size: 1024 * 1024, // 1MB
+            flush_interval_ms: 100,
+            flush_threshold: 1000,
+            compression: CompressionType::None,
+            checkpointing: CheckpointConfig::default(),
+            recovery: RecoveryConfig::default(),
+            rotation: RotationConfig::default(),
+            fsync: FsyncConfig::default(),
+        };
+
+        let manager = WalManager::new(config).await.unwrap();
+        (manager, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn test_truncate_before() {
+        let (manager, _temp_dir) = setup_test_manager().await;
+
+        // Truncate is now a no-op in v1.3.53+ with GroupCommitWal
+        let truncated = manager.truncate_before("test-topic", 0, 10).await.unwrap();
+        assert_eq!(truncated, 0, "GroupCommitWal truncate should return 0");
+    }
+
+    #[tokio::test]
+    async fn test_get_partitions() {
+        let (manager, _temp_dir) = setup_test_manager().await;
+
+        // Initially no partitions
+        let partitions = manager.get_partitions();
+        assert_eq!(partitions.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_recovery() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            enabled: true,
+            data_dir: temp_dir.path().to_path_buf(),
+            segment_size: 1024 * 1024,
+            flush_interval_ms: 100,
+            flush_threshold: 1000,
+            compression: CompressionType::None,
+            checkpointing: CheckpointConfig::default(),
+            recovery: RecoveryConfig::default(),
+            rotation: RotationConfig::default(),
+            fsync: FsyncConfig::default(),
+        };
+
+        // Create and write some data using GroupCommitWal
+        {
+            let manager = WalManager::new(config.clone()).await.unwrap();
+
+            // Write V2 records to test partition (using append_canonical_with_acks)
+            for partition in 0..3 {
+                for i in 0..5 {
+                    let canonical_data = format!("test-data-p{}-{}", partition, i).into_bytes();
+                    manager.append_canonical_with_acks(
+                        "test-topic".to_string(),
+                        partition,
+                        canonical_data,
+                        i,
+                        i,
+                        1,
+                        1, // acks=1
+                    ).await.unwrap();
+                }
+            }
+
+            // GroupCommitWal flushes automatically via background workers
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+
+        // Recover from disk
+        let recovered_manager = WalManager::recover(&config).await.unwrap();
+
+        // Recovery scans disk and finds all 3 partitions we wrote to
+        let recovery_result = recovered_manager.get_recovery_result();
+        assert_eq!(recovery_result.partitions, 3);
+        assert_eq!(recovery_result.total_records, 0); // total_records not tracked, just partition existence
+    }
+}
+
+impl WalManager {
+    /// Shutdown the WAL manager and flush all pending data
+    /// This seals all active WAL segments to disk so they can be indexed
+    pub async fn shutdown(&self) {
+        info!("Shutting down WAL manager...");
+        self.group_commit_wal.shutdown().await;
+        info!("WAL manager shutdown complete");
+    }
+}

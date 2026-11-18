@@ -1,0 +1,29 @@
+# Ostro-authored manifest replacing chronik-stream@08715f4 crates/chronik-wal/Cargo.toml
+# (see VENDORED.md). No Chronik crates, no tokio-uring, no bincode, no chrono.
+[package]
+name = "ostro-wal"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Vendored Chronik Stream write-ahead log (group commit, segments, segment index, truncation)"
+publish = false
+
+[dependencies]
+tokio = { version = "1.54", features = ["fs", "io-util", "sync", "rt", "time", "macros"] }
+bytes = "1"
+byteorder = "1.5"
+tracing = "0.1"
+thiserror = "2"
+dashmap = "6"
+crc32fast = "1.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+metrics = "0.24.6"
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["full", "test-util"] }
+tempfile = "3"
+
+# Vendored code keeps upstream style and does not inherit [workspace.lints].
+[lints.rust]

@@ -1,0 +1,2 @@
+# Vendored code: keep upstream formatting so diffs against chronik-stream@08715f4 stay readable.
+disable_all_formatting = true
