@@ -11,18 +11,29 @@ mod common;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use ostro_engine::config::EngineConfig;
+use ostro_engine::engine::configure_store;
+use ostro_engine::error::{AttemptFailure, EvictReason};
+use ostro_engine::host::bindings::Workflow;
+use ostro_engine::host::bindings::ostro::runtime::types as wit_types;
+use ostro_engine::host::state::{HostInit, HostState};
+use ostro_engine::replay::token;
 use ostro_engine::runtime::{Prepared, Runtime, RuntimeOptions};
-use ostro_engine::sink::{ActivationOutcome, RunRef};
+use ostro_engine::sink::{Activate, ActivationOutcome, RunRef};
 use ostro_engine::testkit::{
-    DEFAULT_ACCEPTED_AT, Drive, FakeClock, Rule, RunSpec, Script, drive_to_completion,
+    DEFAULT_ACCEPTED_AT, Drive, FakeClock, FakeSink, Rule, RunSpec, Script, drive_to_completion,
     replay_journal,
 };
 use ostro_types::journal::{
     CANCELLATION_OP, Continuation, EffectRequest, Event, EventBody, EventKind, Failure, Header,
-    HttpResponse, OpOutput, Payload, SqlResult, SqlValue, decode_result,
+    HttpResponse, OpOutput, Payload, SqlResult, SqlValue, TokenCompleted, decode_result,
 };
+use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
+use wasmtime::Store;
+use wasmtime::component::Component;
 
 const PARTITION: u16 = 7;
 const RUN_ID: &str = "run-wit-1";
@@ -165,8 +176,13 @@ fn full_effects_rule() -> Rule {
 }
 
 fn full_script() -> Script {
+    script_with(full_effects_rule())
+}
+
+/// Children, the `go` signal, tokens and timers all completed; effects by `effects`.
+fn script_with(effects: Rule) -> Script {
     Script::new()
-        .rule(full_effects_rule())
+        .rule(effects)
         .rule(Rule::CompleteChildren(Arc::new(
             |_wf: &str, _in: &Payload| Ok(OpOutput::Child(text("child-out"))),
         )))
@@ -479,4 +495,458 @@ async fn continue_as_new_suggested_threshold() {
     let d = drive_to_completion(rt(), &p, spec("can", &3u32.to_le_bytes()), Script::new()).await;
     assert_eq!(output_text(&d.outcome), "counter=3 suggested=false");
     assert_replays(rt(), &p, &d).await;
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: WIT-04 / WIT-05 / WIT-06 + exact effect bytes (ENG-04)
+// ---------------------------------------------------------------------------
+
+fn token_event(journal: &[Event]) -> (u64, String) {
+    journal
+        .iter()
+        .find_map(|e| match &e.body {
+            EventBody::AwaitTokenCreated(t) => Some((e.seq, t.token.clone())),
+            _ => None,
+        })
+        .expect("AwaitTokenCreated")
+}
+
+/// An external caller holding only the token string: everything it needs (partition,
+/// run, op) comes out of the token; it never sees a run id from anywhere else.
+fn complete_by_token(sink: &FakeSink, tok: &str, payload: Payload) {
+    assert!(token::verify(tok, &TOKEN_KEY), "caller verifies the token");
+    let parts = token::parse(tok).expect("parse token");
+    let run = RunRef {
+        partition: parts.partition,
+        run_id: parts.run_id,
+    };
+    let journal = sink.journal(&run);
+    assert!(!journal.is_empty(), "token routes to an existing run");
+    let next = journal.len() as u64;
+    let ts = journal.last().map_or(0, |e| e.ts_nanos);
+    sink.commit_inputs(
+        &run,
+        vec![Event {
+            seq: next,
+            ts_nanos: ts,
+            body: EventBody::TokenCompleted(TokenCompleted {
+                op: parts.op,
+                payload,
+            }),
+        }],
+    );
+}
+
+async fn activate_once(rt: &Runtime, p: &Prepared, sink: &Arc<FakeSink>) -> ActivationOutcome {
+    let run = run_ref();
+    rt.activate(
+        p,
+        Activate {
+            run: run.clone(),
+            attempt: 1,
+            module_sha: p.sha,
+            journal: sink.journal(&run),
+            inputs: None,
+            cancel: CancellationToken::new(),
+        },
+        sink.clone(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn await_token_roundtrip() {
+    let p = surface_guest();
+
+    // Scripted leader completing every token.
+    let d = drive_to_completion(
+        rt(),
+        &p,
+        spec("token", b""),
+        Script::new().rule(Rule::CompleteTokens(text("hello"))),
+    )
+    .await;
+    assert_eq!(
+        d.outcome,
+        ActivationOutcome::Completed {
+            output: text("hello")
+        }
+    );
+    let (seq, tok) = token_event(&d.journal);
+    assert!(tok.starts_with("ot1_"), "{tok}");
+    let parts = token::parse(&tok).expect("parse");
+    assert_eq!(parts.partition, PARTITION);
+    assert_eq!(parts.run_id, RUN_ID);
+    assert_eq!(parts.op, seq, "token embeds the op = AwaitTokenCreated seq");
+    assert!(token::verify(&tok, &TOKEN_KEY));
+    assert!(!token::verify(&tok, &[8; 32]));
+    assert!(token::parse("ot1_not-a-token").is_none());
+    assert_replays(rt(), &p, &d).await;
+
+    // A caller holding only the token completes the run.
+    let sink = Arc::new(FakeSink::new());
+    let s = spec("token", b"");
+    sink.seed(run_ref(), vec![s.run_started_event(&p.module_hash_hex)], 1);
+    assert_eq!(
+        activate_once(rt(), &p, &sink).await,
+        ActivationOutcome::Evicted {
+            reason: EvictReason::WaitUnsatisfied
+        }
+    );
+    let (_, tok2) = token_event(&sink.journal(&run_ref()));
+    assert_eq!(
+        tok2, tok,
+        "token is deterministic for (partition, run, op, key)"
+    );
+    complete_by_token(&sink, &tok2, text("hello"));
+    assert_eq!(
+        activate_once(rt(), &p, &sink).await,
+        ActivationOutcome::Completed {
+            output: text("hello")
+        }
+    );
+}
+
+#[tokio::test]
+async fn await_token_replay_without_key() {
+    let p = surface_guest();
+    let d = drive_to_completion(
+        rt(),
+        &p,
+        spec("token", b""),
+        Script::new().rule(Rule::CompleteTokens(text("hello"))),
+    )
+    .await;
+    let (_, tok) = token_event(&d.journal);
+
+    // Different node key: replay returns the recorded token, never re-mints.
+    let other = runtime_with(EngineConfig::default(), [1; 32]);
+    let op = prepare_on(&other);
+    let sink = Arc::new(FakeSink::new());
+    sink.seed(run_ref(), d.journal.clone(), 1);
+    let outcome = activate_once(&other, &op, &sink).await;
+    assert_eq!(outcome, d.outcome);
+    assert_eq!(sink.appended_events(&run_ref()), 0);
+    let (_, replayed_tok) = token_event(&sink.journal(&run_ref()));
+    assert_eq!(replayed_tok, tok);
+    assert_replays(&other, &op, &d).await;
+
+    // A fresh run on the other key mints a different token for the same
+    // (partition, run, op), so the identical string above is the recorded one.
+    let d2 = drive_to_completion(
+        &other,
+        &op,
+        spec("token", b""),
+        Script::new().rule(Rule::CompleteTokens(text("hello"))),
+    )
+    .await;
+    let (_, tok_other) = token_event(&d2.journal);
+    assert_ne!(tok_other, tok, "key changes the MAC");
+    assert_eq!(
+        token::parse(&tok_other).expect("parse"),
+        token::parse(&tok).expect("parse")
+    );
+}
+
+#[tokio::test]
+async fn set_status_journaled_once() {
+    let p = surface_guest();
+    let d = drive_to_completion(rt(), &p, spec("status", b"a"), Script::new()).await;
+    assert_eq!(output_text(&d.outcome), "ok");
+    assert_eq!(d.latest_status.as_deref(), Some("a!"));
+    let statuses: Vec<&str> = d
+        .journal
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::StatusPublished(s) => Some(s.json.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses, ["a", "a!"], "one event per set-status call");
+    assert_replays(rt(), &p, &d).await;
+}
+
+/// Replay `journal` directly on a [`HostState`] (production linker) and return the
+/// status the host would publish (`HostState::latest_status`).
+async fn replay_status(journal: Vec<Event>) -> (Option<String>, usize) {
+    let r = rt();
+    let comp =
+        Component::new(r.engine().engine(), common::guest_wasm("wit-surface")).expect("component");
+    let (workflow, input) = match &journal[0].body {
+        EventBody::RunStarted(rs) => (rs.workflow.clone(), rs.input.clone()),
+        _ => panic!("journal[0] must be RunStarted"),
+    };
+    let state = HostState::new(HostInit {
+        run: run_ref(),
+        attempt: 1,
+        module_hash_hex: surface_guest().module_hash_hex.clone(),
+        journal,
+        clock: r.clock().clone(),
+        limiter: r.engine().new_limiter(),
+        wall_deadline: Instant::now() + Duration::from_secs(60),
+        token_key: [1; 32],
+        continue_as_new_events: r.engine().config().continue_as_new_events,
+        sink: None,
+    })
+    .expect("host state");
+    let mut store = Store::new(r.engine().engine(), state);
+    configure_store(&mut store, r.engine().config().activation_fuel).expect("store");
+    let wf = Workflow::instantiate_async(&mut store, &comp, r.linker())
+        .await
+        .expect("instantiate");
+    let out = wf
+        .ostro_runtime_workflows()
+        .call_run(
+            &mut store,
+            &workflow,
+            &wit_types::Payload {
+                content_type: input.content_type,
+                data: input.data,
+            },
+        )
+        .await
+        .expect("replay must not trap");
+    assert!(out.is_ok(), "{out:?}");
+    let pending = store.data_mut().take_pending().len();
+    (store.data().latest_status.clone(), pending)
+}
+
+#[tokio::test]
+async fn set_status_changed_text_no_divergence() {
+    let p = surface_guest();
+    let d = drive_to_completion(rt(), &p, spec("status", b"a"), Script::new()).await;
+    let mut journal = d.journal.clone();
+    let mut edits = ["x", "y"].into_iter();
+    for e in &mut journal {
+        if let EventBody::StatusPublished(s) = &mut e.body {
+            s.json = edits.next().expect("two statuses").to_string();
+        }
+    }
+    assert!(edits.next().is_none(), "both statuses edited");
+
+    // Kind-only hash: the changed text never diverges.
+    let (outcome, appended) = replay_journal(rt(), &p, run_ref(), journal.clone()).await;
+    assert_eq!(outcome, ActivationOutcome::Completed { output: text("ok") });
+    assert_eq!(appended, 0);
+
+    // The status the host publishes comes from the journal, not the guest's text.
+    let (status, pending) = replay_status(journal).await;
+    assert_eq!(status.as_deref(), Some("y"));
+    assert_eq!(pending, 0, "replay records nothing new");
+}
+
+#[tokio::test]
+async fn non_retryable_failure() {
+    let p = surface_guest();
+    let d = drive_to_completion(rt(), &p, spec("non-retryable", b""), Script::new()).await;
+    match &d.outcome {
+        ActivationOutcome::Failed {
+            failure: Failure::NonRetryable(e),
+        } => {
+            assert_eq!(e.kind, "bad-input");
+            assert_eq!(e.message, "input rejected");
+        }
+        other => panic!("expected Failed(NonRetryable), got {other:?}"),
+    }
+    match d.journal.last().map(|e| &e.body) {
+        Some(EventBody::RunFailed(f)) => {
+            assert!(matches!(&f.failure, Failure::NonRetryable(e) if e.kind == "bad-input"));
+        }
+        other => panic!("journal must end RunFailed, got {other:?}"),
+    }
+    assert_replays(rt(), &p, &d).await;
+}
+
+#[tokio::test]
+async fn step_failure_recorded() {
+    let p = surface_guest();
+    let d = drive_to_completion(rt(), &p, spec("step-fail", b""), Script::new()).await;
+    let step = d
+        .journal
+        .iter()
+        .find_map(|e| match &e.body {
+            EventBody::StepCompleted(s) => Some(s.clone()),
+            _ => None,
+        })
+        .expect("StepCompleted");
+    assert_eq!(step.name, "flaky");
+    let r: Result<Payload, Failure> = decode_result(&step.outcome).expect("decode");
+    assert!(
+        matches!(&r, Err(Failure::Retryable(e)) if e.kind == "flaky"),
+        "{r:?}"
+    );
+    assert!(
+        matches!(
+            &d.outcome,
+            ActivationOutcome::Failed { failure: Failure::Retryable(e) } if e.kind == "flaky"
+        ),
+        "{:?}",
+        d.outcome
+    );
+    // Replay hands the recorded failure back to the guest (it never re-runs the body).
+    assert_replays(rt(), &p, &d).await;
+}
+
+#[tokio::test]
+async fn run_info_deadline() {
+    let p = surface_guest();
+    let d = drive_to_completion(rt(), &p, spec("info", b""), Script::new()).await;
+    let out = output_text(&d.outcome);
+    let f = line_fields(&format!("info {out}"), "info");
+    assert_eq!(f["run-id"], RUN_ID);
+    assert_eq!(f["workflow"], "info");
+    assert_eq!(f["version"], "1");
+    assert_eq!(f["attempt"], "1");
+    assert_eq!(f["module-hash"], p.module_hash_hex);
+    assert_eq!(
+        f["deadline"],
+        format!(
+            "{}.{}",
+            DEADLINE_NANOS / 1_000_000_000,
+            DEADLINE_NANOS % 1_000_000_000
+        ),
+        "deadline = accepted_at + 30 s"
+    );
+    assert_eq!(f["tenant"], "None");
+    assert_eq!(f["continued-from"], "None");
+    // The run is partition-qualified by its RunRef; the token carries both.
+    assert_eq!(run_ref().partition, PARTITION);
+    assert_replays(rt(), &p, &d).await;
+
+    let mut no_deadline = spec("info", b"");
+    no_deadline.deadline_nanos = None;
+    let d = drive_to_completion(rt(), &p, no_deadline, Script::new()).await;
+    assert!(output_text(&d.outcome).contains("deadline=none"));
+}
+
+fn sha_hex(b: &[u8]) -> String {
+    Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
+}
+
+/// The guest's dump line for an http completion, computed from the recorded bytes.
+fn expected_http_line(op: u64, r: &HttpResponse) -> String {
+    let headers: Vec<String> = r
+        .headers
+        .iter()
+        .map(|h| format!("{}={}", h.name, h.value))
+        .collect();
+    format!(
+        "op {op}: http {} [{}] body-sha256 {}",
+        r.status,
+        headers.join(","),
+        sha_hex(&r.body)
+    )
+}
+
+#[tokio::test]
+async fn effect_bytes_exact() {
+    let p = surface_guest();
+    let body: Vec<u8> = (0..4096u32)
+        .map(|i| (0x80 | (i * 31) as u8) | 0x40)
+        .collect();
+    assert!(
+        String::from_utf8(body.clone()).is_err(),
+        "body must be non-UTF-8"
+    );
+    let resp = HttpResponse {
+        status: 200,
+        headers: vec![
+            Header {
+                name: "set-cookie".to_string(),
+                value: "b=2".to_string(),
+            },
+            Header {
+                name: "x-z".to_string(),
+                value: "last-first".to_string(),
+            },
+            Header {
+                name: "set-cookie".to_string(),
+                value: "a=1".to_string(),
+            },
+        ],
+        body,
+    };
+    let script = script_with(Rule::CompleteEffects(Arc::new(
+        move |req: &EffectRequest| match req {
+            EffectRequest::Http(_) => Ok(OpOutput::Http(resp.clone())),
+            _ => Ok(OpOutput::Object(vec![0xff, 0x00, 0xfe])),
+        },
+    )));
+    let d = drive_to_completion(rt(), &p, spec("surface", b""), script).await;
+    let out = output_text(&d.outcome);
+
+    let http_op = seq_of(&d.journal, EventKind::EffectScheduled, 0);
+    let recorded = d
+        .journal
+        .iter()
+        .find_map(|e| match &e.body {
+            EventBody::EffectCompleted(c) if c.op == http_op => Some(c.outcome.clone()),
+            _ => None,
+        })
+        .expect("EffectCompleted for http");
+    let decoded: Result<OpOutput, Failure> = decode_result(&recorded).expect("decode");
+    let Ok(OpOutput::Http(rec)) = decoded else {
+        panic!("recorded http outcome: {decoded:?}")
+    };
+    assert_eq!(rec.body.len(), 4096);
+    let want = expected_http_line(http_op, &rec);
+    assert!(
+        want.contains("[set-cookie=b=2,x-z=last-first,set-cookie=a=1]"),
+        "{want}"
+    );
+    assert!(
+        out.lines().any(|l| l == want),
+        "guest dump must match the recorded bytes:\nwant {want}\nin:\n{out}"
+    );
+    assert_replays(rt(), &p, &d).await;
+}
+
+#[tokio::test]
+async fn effect_unsupported_default() {
+    let p = surface_guest();
+    let d = drive_to_completion(rt(), &p, spec("surface", b""), Script::new()).await;
+    let out = output_text(&d.outcome);
+    for nth in 0..3 {
+        let op = seq_of(&d.journal, EventKind::EffectScheduled, nth);
+        assert!(
+            out.contains(&format!("op {op}: failed non-retryable:unsupported")),
+            "effect op {op} must fail unsupported:\n{out}"
+        );
+    }
+    // Children default to unsupported as well (recorded, not waited on by surface).
+    let child = seq_of(&d.journal, EventKind::ChildStarted, 0);
+    let child_out = d
+        .journal
+        .iter()
+        .find_map(|e| match &e.body {
+            EventBody::ChildCompleted(c) if c.op == child => Some(c.outcome.clone()),
+            _ => None,
+        })
+        .expect("ChildCompleted");
+    let decoded: Result<OpOutput, Failure> = decode_result(&child_out).expect("decode");
+    assert!(
+        matches!(&decoded, Err(Failure::NonRetryable(e)) if e.kind == "unsupported"),
+        "{decoded:?}"
+    );
+    assert_replays(rt(), &p, &d).await;
+}
+
+#[tokio::test]
+async fn nested_step_is_protocol_violation() {
+    let p = surface_guest();
+    let d = drive_to_completion(rt(), &p, spec("nested-step", b""), Script::new()).await;
+    match &d.outcome {
+        ActivationOutcome::AttemptFailed(f @ AttemptFailure::ProtocolViolation(msg)) => {
+            assert!(msg.contains("inside an open step"), "{msg}");
+            assert!(!f.retryable(), "protocol violations are not retryable");
+        }
+        other => panic!("expected AttemptFailed(ProtocolViolation), got {other:?}"),
+    }
+    assert!(
+        !kinds(&d.journal).contains(&EventKind::TimerStarted),
+        "the nested command is never journaled"
+    );
 }
