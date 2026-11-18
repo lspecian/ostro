@@ -18,10 +18,7 @@ pub mod sink;
 pub mod testkit;
 pub mod validate;
 
-// Dependencies wired in plan 03-01 for later Phase 3 plans (ENG-04 RNG/hash derivation,
-// observability). Anchored here so cargo's unused-dependency lint stays quiet until the
-// owning modules consume them; harmless afterwards.
+// Dependencies wired in plan 03-01 for later Phase 3 plans (ENG-04 RNG derivation).
+// Anchored here so cargo's unused-dependency lint stays quiet until the owning modules
+// consume them; harmless afterwards. (hmac/metrics/tracing are used by `cache`.)
 use chacha20 as _;
-use hmac as _;
-use metrics as _;
-use tracing as _;

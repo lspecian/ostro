@@ -25,10 +25,13 @@ fn pinned_engine() -> Engine {
     Engine::new(&pinned_config()).expect("engine")
 }
 
-/// An engine whose configuration differs (different compat hash).
+/// An engine whose configuration differs (different compat hash). The opt level alone
+/// changes the compat hash but Wasmtime still loads such artefacts; the guard size is a
+/// tunable Wasmtime's deserialize checks, so cross-loading A's artefact is rejected.
 fn other_engine() -> Engine {
     let mut c = pinned_config();
-    c.cranelift_opt_level(wasmtime::OptLevel::None);
+    c.cranelift_opt_level(wasmtime::OptLevel::None)
+        .memory_guard_size(1 << 16);
     Engine::new(&c).expect("engine")
 }
 
@@ -328,5 +331,8 @@ async fn compat_miss_recompiles() {
     let c = cache_b.component(sha, &wasm).await.unwrap();
     assert_smoke_runs(&engine_b, &c);
     let s = cache_b.stats();
-    assert_eq!((s.incompatible_total, s.compiles, s.tamper_total), (1, 1, 0));
+    assert_eq!(
+        (s.incompatible_total, s.compiles, s.tamper_total),
+        (1, 1, 0)
+    );
 }

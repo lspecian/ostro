@@ -8,18 +8,21 @@
 //! this engine. Every artefact on disk therefore carries an HMAC-SHA256 trailer keyed
 //! with a node-local secret ([`load_or_create_key`]). Loads read the whole file into
 //! memory, verify the trailer in constant time and only then deserialize *from those
-//! in-memory bytes*. `Component::deserialize_file` is never used: it would re-open and
+//! in-memory bytes*. The file-based deserialize API is never used: it would re-open and
 //! mmap the file after verification (TOCTOU).
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use wasmtime::component::Component;
+
+use crate::error::EngineError;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -35,7 +38,7 @@ const WASMTIME_VERSION: &str = "wasmtime=50.0.2";
 /// `std::hash::Hasher` adapter that feeds a SHA-256 digest.
 ///
 /// Wasmtime only exposes its compatibility hash as `impl Hash`; feeding it into
-/// `DefaultHasher` would make the key depend on an algorithm that is unspecified across
+/// std's default SipHash hasher would make the key depend on an algorithm that is unspecified across
 /// Rust releases, so it is fed into SHA-256 instead. `finish` is never used.
 struct Sha256Hasher(Sha256);
 
@@ -329,5 +332,118 @@ impl DiskCache {
             let _ = std::fs::remove_file(&tmp);
         }
         res
+    }
+}
+
+type Flight = Arc<tokio::sync::OnceCell<Result<Component, String>>>;
+
+/// AOT cache facade: L1 disk cache + bounded, single-flight compile pool.
+///
+/// Phase 4 deploy calls [`AotCache::component`] at upload time so modules are compiled at
+/// deploy (ENG-07), and plan 03-11 builds the L2 `InstancePre` LRU on top of this.
+pub struct AotCache {
+    disk: DiskCache,
+    engine: wasmtime::Engine,
+    permits: Arc<tokio::sync::Semaphore>,
+    inflight: Mutex<HashMap<String, Flight>>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl AotCache {
+    /// Open the cache in `dir` (creating `dir/aot/`) with at most `compile_permits`
+    /// concurrent compiles (minimum 1).
+    pub fn new(
+        dir: &Path,
+        key: [u8; 32],
+        engine: wasmtime::Engine,
+        compile_permits: usize,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            disk: DiskCache::new(dir, key)?,
+            engine,
+            permits: Arc::new(tokio::sync::Semaphore::new(compile_permits.max(1))),
+            inflight: Mutex::new(HashMap::new()),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        })
+    }
+
+    /// The underlying disk cache.
+    pub fn disk(&self) -> &DiskCache {
+        &self.disk
+    }
+
+    pub fn stats(&self) -> CacheStatsSnapshot {
+        self.disk.stats()
+    }
+
+    /// Highest number of compiles observed running at once (test hook).
+    pub fn max_concurrent_compiles(&self) -> usize {
+        self.max_active.load(Ordering::Relaxed)
+    }
+
+    /// The compiled component for the module `wasm` whose SHA-256 is `sha`.
+    ///
+    /// Concurrent calls for the same cache key share one flight: one disk lookup and, on
+    /// a miss, one compile. Compiles run on the blocking pool behind the semaphore.
+    pub async fn component(&self, sha: [u8; 32], wasm: &[u8]) -> Result<Component, EngineError> {
+        let key = cache_key(&self.engine, &sha);
+        let flight: Flight = {
+            let mut map = self.inflight.lock().expect("inflight lock poisoned");
+            map.entry(key.clone()).or_default().clone()
+        };
+        let res = flight
+            .get_or_init(|| self.lookup_or_compile(key.clone(), wasm))
+            .await
+            .clone();
+        {
+            let mut map = self.inflight.lock().expect("inflight lock poisoned");
+            if map.get(&key).is_some_and(|f| Arc::ptr_eq(f, &flight)) {
+                map.remove(&key);
+            }
+        }
+        res.map_err(EngineError::Cache)
+    }
+
+    async fn lookup_or_compile(&self, key: String, wasm: &[u8]) -> Result<Component, String> {
+        let stats = self.disk.stats.clone();
+        let (disk, engine, k) = (self.disk.clone(), self.engine.clone(), key.clone());
+        let hit = tokio::task::spawn_blocking(move || disk.get(&engine, &k))
+            .await
+            .map_err(|e| format!("disk lookup task failed: {e}"))?;
+        if let Some(c) = hit {
+            stats.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(c);
+        }
+        stats.misses.fetch_add(1, Ordering::Relaxed);
+
+        let _permit = self
+            .permits
+            .acquire()
+            .await
+            .map_err(|e| format!("compile pool closed: {e}"))?;
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(now, Ordering::SeqCst);
+        let wasm: Arc<[u8]> = wasm.into();
+        let (disk, engine) = (self.disk.clone(), self.engine.clone());
+        let compiled = tokio::task::spawn_blocking(move || -> Result<Component, String> {
+            let cwasm = engine
+                .precompile_component(&wasm)
+                .map_err(|e| format!("compile failed: {e:#}"))?;
+            if let Err(e) = disk.put(&key, &cwasm) {
+                // Not fatal: the run proceeds and the next load recompiles.
+                tracing::warn!(key = %key, error = %e, "failed to persist AOT artefact");
+            }
+            // SAFETY: `cwasm` was just produced in memory by `precompile_component` on
+            // this same engine and never left the process.
+            unsafe { Component::deserialize(&engine, &cwasm) }
+                .map_err(|e| format!("deserialize of fresh artefact failed: {e:#}"))
+        })
+        .await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        let component = compiled.map_err(|e| format!("compile task failed: {e}"))??;
+        stats.compiles.fetch_add(1, Ordering::Relaxed);
+        Ok(component)
     }
 }
