@@ -25,12 +25,12 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **STOR-05**: Partition state machine applies committed commands deterministically into redb (`Durability::None` + periodic `Immediate` checkpoint of `applied_offset`); apply never passes HW. *Superseded engine (Phase 1 S3 decision): fjall 3.1.13 with one `WriteBatch` per apply batch + `persist(SyncAll)` checkpoint every 100 ms/256 batches; recovery replays the WAL from the state's `applied_offset`. See PROJECT.md Key Decisions.*
 - [ ] **STOR-06**: Deleting a partition's state store and restarting rebuilds byte-identical state (rolling state hash matches)
 - [ ] **STOR-07**: fsync/write errors (EIO, ENOSPC) are fatal for the affected partition and are never retried or reported as success
-- [ ] **STOR-08**: WAL segments are deleted only below the last durable state checkpoint, and no GC/retention task runs before startup recovery has completed (readiness barrier)
+- [x] **STOR-08**: WAL segments are deleted only below the last durable state checkpoint, and no GC/retention task runs before startup recovery has completed (readiness barrier)
 - [x] **STOR-09**: Fixed partition count configured at creation (default 16 single-node, 64 cluster); run ids embed their partition so any node routes without lookup
 - [x] **STOR-10**: Each new leadership term begins with a `LeaderAnnounced{epoch}` log entry; executors receive `(epoch, attempt)` fencing tokens validated at apply time
 - [x] **STOR-11**: Validation of appended commands happens at apply time; `AppendAck` is sent only after apply
 - [ ] **STOR-12**: Cross-partition messages (child start/complete, signals to other runs, cancel cascades, cron starts) go through a per-partition outbox and shuffler with `(src_partition, seq)` deduplication
-- [ ] **STOR-13**: Timers are loaded lazily in a time window; `TimerFired` is idempotent
+- [x] **STOR-13**: Timers are loaded lazily in a time window; `TimerFired` is idempotent
 - [x] **STOR-14**: Large payloads (> 256 KiB inline limit) are stored in the blob store and referenced from the journal
 
 ### Metadata
@@ -256,12 +256,12 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | STOR-05 | Phase 2 | Pending |
 | STOR-06 | Phase 2 | Pending |
 | STOR-07 | Phase 2 | Pending |
-| STOR-08 | Phase 2 | Pending |
+| STOR-08 | Phase 2 | Complete |
 | STOR-09 | Phase 2 | Complete |
 | STOR-10 | Phase 2 | Complete |
 | STOR-11 | Phase 2 | Complete |
 | STOR-12 | Phase 2 | Pending |
-| STOR-13 | Phase 2 | Pending |
+| STOR-13 | Phase 2 | Complete |
 | STOR-14 | Phase 2 | Complete |
 | META-01 | Phase 4 | Pending |
 | META-02 | Phase 4 | Pending |
