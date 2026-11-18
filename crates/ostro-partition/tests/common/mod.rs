@@ -184,3 +184,39 @@ pub fn start_cmd(run: &RunId) -> Command {
 pub fn cfg() -> MachineConfig {
     MachineConfig::default()
 }
+
+/// Open a node with `p` partitions under `dir` in `mode` (default configs otherwise).
+pub async fn open_node(
+    dir: &Path,
+    p: u16,
+    mode: ostro_partition::StartMode,
+) -> ostro_partition::Node {
+    let mut cfg = ostro_partition::NodeConfig::new(
+        dir.to_path_buf(),
+        PartitionCount::new(p).expect("non-zero"),
+    );
+    cfg.mode = mode;
+    timeout(T, ostro_partition::Node::open(cfg))
+        .await
+        .expect("node open timed out")
+        .expect("node open")
+}
+
+/// Recursively copy `src` into `dst` (created).
+pub fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("mkdir");
+    for e in std::fs::read_dir(src).expect("read_dir") {
+        let e = e.expect("entry");
+        let to = dst.join(e.file_name());
+        if e.file_type().expect("file type").is_dir() {
+            copy_dir(&e.path(), &to);
+        } else {
+            std::fs::copy(e.path(), &to).expect("copy");
+        }
+    }
+}
+
+/// A fresh run id on partition `p`.
+pub fn run_on(p: u16) -> RunId {
+    RunId::new_v7(PartitionId(p))
+}
