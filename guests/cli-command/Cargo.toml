@@ -1,0 +1,11 @@
+[package]
+name = "cli-command"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# A plain wasm32-wasip2 binary: the component exports wasi:cli/run, not
+# ostro:runtime/workflows. Deploy-time validation must reject it.
+[[bin]]
+name = "cli-command"
+path = "src/main.rs"
