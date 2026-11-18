@@ -13,6 +13,27 @@ pub enum EvictReason {
     External,
     /// `append` reported a sequence conflict.
     AppendConflict,
+    /// A live step failed retryably and its next attempt is due later than
+    /// `engine.hot_wait` (or a re-activation found the last attempt's `retry_at` still in
+    /// the future): the run should be re-dispatched at `retry_at_nanos` (WF-02).
+    StepBackoff {
+        /// Unix nanos at which the next attempt of the step is due.
+        retry_at_nanos: u64,
+    },
+}
+
+impl EvictReason {
+    /// Stable metrics label.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::WaitUnsatisfied => "wait_unsatisfied",
+            Self::HotWaitElapsed => "hot_wait_elapsed",
+            Self::BudgetPressure => "budget_pressure",
+            Self::External => "external",
+            Self::AppendConflict => "append_conflict",
+            Self::StepBackoff { .. } => "step_backoff",
+        }
+    }
 }
 
 /// Activation evicted; carried as a trap payload out of host calls.
@@ -134,6 +155,11 @@ mod tests {
             "nondeterminism: seq=3 expected=step \"a\" actual=sleep"
         );
         assert!(!AttemptFailure::ProtocolViolation("x".into()).retryable());
+        assert_eq!(
+            EvictReason::StepBackoff { retry_at_nanos: 7 }.code(),
+            "step_backoff"
+        );
+        assert_eq!(EvictReason::WaitUnsatisfied.code(), "wait_unsatisfied");
         for (f, code) in [
             (AttemptFailure::FuelExhausted, "fuel_exhausted"),
             (AttemptFailure::Timeout, "timeout"),

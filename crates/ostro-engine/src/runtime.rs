@@ -231,6 +231,13 @@ impl Runtime {
         Ok(self.l2().insert(prepared, self.opts.instance_pre_capacity))
     }
 
+    /// The prepared module with SHA-256 `sha` if it is in the L2 cache (bumps its LRU
+    /// recency). Never reads, hashes or compiles module bytes and never touches the L1
+    /// AOT cache: the executor's hot path for already-deployed modules.
+    pub fn prepared(&self, sha: &[u8; 32]) -> Option<Arc<Prepared>> {
+        self.l2().get(sha)
+    }
+
     /// AOT cache counters; `None` without a cache dir.
     pub fn cache_stats(&self) -> Option<CacheStatsSnapshot> {
         self.aot.as_ref().map(AotCache::stats)
