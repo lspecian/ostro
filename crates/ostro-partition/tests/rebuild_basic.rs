@@ -7,15 +7,12 @@ mod common;
 use bytes::Bytes;
 use common::{T, copy_dir, open_node, run_on, start_run};
 use ostro_log::ReplicatedLog;
-use ostro_partition::store::keys::outbox_prefix;
-use ostro_partition::{ApplyOutcome, Node, PartitionRouter, StartMode, Table};
+use ostro_partition::{ApplyOutcome, Node, StartMode, Table};
 use ostro_types::command::{
-    AttemptTokenMsg, CompleteRun, Derived, EventsAppended, InboundBatch, InboundMsg, JournalEvent,
-    OutboxMsg, OutboxTruncated, ScheduleTimer, SendMessage, Signal, TerminalStatus, derived,
-    outbox_msg,
+    AttemptTokenMsg, CompleteRun, Derived, EventsAppended, JournalEvent, OutboxMsg, ScheduleTimer,
+    SendMessage, Signal, TerminalStatus, derived, outbox_msg,
 };
 use ostro_types::{AttemptToken, Command, PartitionId, PayloadRef, RunId};
-use prost::Message;
 use tokio::time::timeout;
 
 const P: u16 = 4;
@@ -115,41 +112,46 @@ async fn workload(node: &Node) {
             }
         }
     }
-    // shuffle: deliver each outbox through the router, then truncate it
-    let router = node.router();
-    for src in 0..P {
-        let h = node.handle(PartitionId(src)).expect("ready");
-        for target in 0..P {
-            let rows = h
-                .reader()
-                .prefix(Table::Outbox, &outbox_prefix(target), usize::MAX)
-                .expect("outbox");
-            if rows.is_empty() {
-                continue;
-            }
-            let msgs: Vec<InboundMsg> = rows
-                .iter()
-                .map(|(k, v)| InboundMsg {
-                    seq: u64::from_be_bytes(k[2..].try_into().expect("seq")),
-                    msg: Some(OutboxMsg::decode(&v[..]).expect("outbox msg")),
-                })
-                .collect();
-            let upto = msgs.last().expect("non-empty").seq;
-            let batch = InboundBatch {
-                src: u32::from(src),
-                msgs,
-            };
-            let o = timeout(T, router.deliver(PartitionId(target), batch))
-                .await
-                .expect("deliver timed out")
-                .expect("deliver");
-            assert_eq!(o, ApplyOutcome::Accepted);
-            let trunc = Command::outbox_truncated(OutboxTruncated {
-                target: u32::from(target),
-                upto_seq: upto,
-            });
-            assert_eq!(submit(node, src, trunc).await, ApplyOutcome::Accepted);
+    // The live shuffler (02-13) delivers every outbox and truncates it.
+    settle(node).await;
+    for p in 0..P {
+        let h = node.handle(PartitionId(p)).expect("ready");
+        let inbox = h
+            .reader()
+            .prefix(Table::Inbox, &[], usize::MAX)
+            .expect("inbox");
+        assert!(
+            !inbox.is_empty(),
+            "partition {p} received no cross-partition signal"
+        );
+    }
+}
+
+/// Wait until every outbox is empty and no partition's log has grown for 300 ms (the
+/// leader services, shuffler and timers, have nothing left to append).
+async fn settle(node: &Node) {
+    common::wait_drained(node, T).await;
+    let ends = || -> Vec<u64> {
+        (0..P)
+            .map(|p| {
+                node.handle(PartitionId(p))
+                    .expect("ready")
+                    .log()
+                    .log_end()
+                    .0
+            })
+            .collect()
+    };
+    let deadline = tokio::time::Instant::now() + T;
+    let mut last = ends();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let now = ends();
+        if now == last && common::outbox_rows(node) == 0 {
+            return;
         }
+        assert!(tokio::time::Instant::now() < deadline, "node never settled");
+        last = now;
     }
 }
 
