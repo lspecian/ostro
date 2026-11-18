@@ -18,7 +18,8 @@ pub struct CursorMeta {
     pub epoch_history: Vec<(u32, u64)>,
     /// Next outbox sequence number per target partition.
     pub outbox_next_seq: BTreeMap<u16, u64>,
-    /// Outbox rows below this seq (per target) have been truncated.
+    /// Highest truncated outbox seq per target: rows up to and including this seq have
+    /// been deleted (absent = 0, nothing truncated; seqs start at 1).
     pub outbox_truncated: BTreeMap<u16, u64>,
 }
 
