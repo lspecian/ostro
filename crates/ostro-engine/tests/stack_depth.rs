@@ -44,6 +44,7 @@ fn runtime(cfg: EngineConfig) -> Runtime {
         RuntimeOptions {
             clock: Arc::new(FakeClock::new(DEFAULT_ACCEPTED_AT)),
             token_key: [3; 32],
+            ..RuntimeOptions::default()
         },
     )
     .expect("runtime")

@@ -25,6 +25,7 @@ fn runtime_with_step(step_nanos: u64) -> Runtime {
         RuntimeOptions {
             clock: Arc::new(FakeClock::with_step(DEFAULT_ACCEPTED_AT, step_nanos)),
             token_key: [9; 32],
+            ..RuntimeOptions::default()
         },
     )
     .expect("runtime")

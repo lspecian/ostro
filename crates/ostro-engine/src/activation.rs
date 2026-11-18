@@ -25,7 +25,7 @@ use crate::error::{
     AttemptFailure, Evict, EvictReason, Fenced, GuestExit, NonDeterminism, ProtocolViolation,
 };
 use crate::host::bindings::ostro::runtime::types as wit_types;
-use crate::host::state::{HostInit, HostState, HotWait, RunReturn, run_return_from_wit};
+use crate::host::state::{HostState, HotWait, RunReturn, run_return_from_wit};
 use crate::limits::{Breach, HasLimits};
 use crate::replay::ReplayError;
 use crate::runtime::{Prepared, Runtime};
@@ -177,19 +177,7 @@ async fn execute(
         parked: rt.parked().clone(),
         hot_wait: cfg.hot_wait,
     });
-    let state = match HostState::new(HostInit {
-        run,
-        attempt,
-        module_hash_hex: p.module_hash_hex.clone(),
-        journal,
-        clock: rt.opts.clock.clone(),
-        limiter: engine.new_limiter(),
-        wall_deadline: Instant::now() + cfg.activation_timeout,
-        token_key: rt.opts.token_key,
-        continue_as_new_events: cfg.continue_as_new_events,
-        sink: Some(sink),
-        hot,
-    }) {
+    let state = match HostState::new(rt.host_init(p, run, attempt, journal, Some(sink), hot)) {
         Ok(s) => s,
         Err(e) => {
             return ActivationOutcome::AttemptFailed(AttemptFailure::ProtocolViolation(match e {

@@ -32,6 +32,7 @@ fn runtime(cfg: EngineConfig) -> Arc<Runtime> {
             RuntimeOptions {
                 clock: Arc::new(FakeClock::with_step(DEFAULT_ACCEPTED_AT, 0)),
                 token_key: [7; 32],
+                ..RuntimeOptions::default()
             },
         )
         .expect("runtime"),

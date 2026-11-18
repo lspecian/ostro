@@ -44,6 +44,7 @@ fn runtime(hot_wait: Duration, budget: Option<u64>) -> Arc<Runtime> {
             RuntimeOptions {
                 clock: Arc::new(FakeClock::with_step(DEFAULT_ACCEPTED_AT, 0)),
                 token_key: [9; 32],
+                ..RuntimeOptions::default()
             },
         )
         .expect("runtime"),

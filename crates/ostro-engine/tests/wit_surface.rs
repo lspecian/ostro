@@ -49,6 +49,7 @@ fn runtime_with(cfg: EngineConfig, token_key: [u8; 32]) -> Runtime {
             // independent of how many activations a drive takes.
             clock: Arc::new(FakeClock::with_step(DEFAULT_ACCEPTED_AT, 0)),
             token_key,
+            ..RuntimeOptions::default()
         },
     )
     .expect("runtime")

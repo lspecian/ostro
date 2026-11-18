@@ -117,6 +117,15 @@ pub fn validate_component<T: 'static>(
     linker: &Linker<T>,
     bytes: &[u8],
 ) -> Result<ValidatedComponent, EngineError> {
+    reject_core_module(bytes)?;
+    let component = Component::from_binary(engine, bytes)
+        .map_err(|e| EngineError::Validation(vec![format!("not a valid Wasm component: {e:#}")]))?;
+    validate_loaded(engine, linker, &component)
+}
+
+/// Step (1) of [`validate_component`]: reject a core module (by its header) before any
+/// compile or cache lookup.
+pub fn reject_core_module(bytes: &[u8]) -> Result<(), EngineError> {
     if bytes.len() >= 8 && &bytes[..4] == WASM_MAGIC && bytes[4..8] == CORE_VERSION {
         return Err(EngineError::Validation(vec![
             "not a component: Ostro accepts Wasm components (wasm32-wasip2 / componentize-*), \
@@ -124,9 +133,18 @@ pub fn validate_component<T: 'static>(
                 .to_string(),
         ]));
     }
-    let component = Component::from_binary(engine, bytes)
-        .map_err(|e| EngineError::Validation(vec![format!("not a valid Wasm component: {e:#}")]))?;
+    Ok(())
+}
 
+/// Steps (2)-(4) of [`validate_component`] on an already loaded component (e.g. one
+/// deserialized from the AOT cache): validation runs on every load, never skipped on
+/// cache hits.
+pub fn validate_loaded<T: 'static>(
+    engine: &Engine,
+    linker: &Linker<T>,
+    component: &Component,
+) -> Result<ValidatedComponent, EngineError> {
+    let component = component.clone();
     let ty = component.component_type();
     let imports: Vec<String> = ty.imports(engine).map(|(n, _)| n.to_string()).collect();
     let exports: Vec<String> = ty.exports(engine).map(|(n, _)| n.to_string()).collect();
