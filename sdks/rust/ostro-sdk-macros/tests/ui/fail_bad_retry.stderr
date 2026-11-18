@@ -1,0 +1,35 @@
+error: invalid duration "5x": expected an integer followed by ms, s, m or h (e.g. "200ms", "5s", "10m")
+ --> tests/ui/fail_bad_retry.rs:3:18
+  |
+3 | #[step(timeout = "5x")]
+  |                  ^^^^
+
+error: invalid duration "fast": expected an integer followed by ms, s, m or h (e.g. "200ms", "5s", "10m")
+ --> tests/ui/fail_bad_retry.rs:8:42
+  |
+8 | #[step(retry(max_attempts = 3, initial = "fast"))]
+  |                                          ^^^^^^
+
+error: unknown retry option `attempts` (expected max_attempts, initial, max, backoff, non_retryable)
+  --> tests/ui/fail_bad_retry.rs:13:14
+   |
+13 | #[step(retry(attempts = 3))]
+   |              ^^^^^^^^
+
+error: `backoff` expects a number literal (e.g. 2.0)
+  --> tests/ui/fail_bad_retry.rs:18:42
+   |
+18 | #[step(retry(max_attempts = 3, backoff = "2"))]
+   |                                          ^^^
+
+error: `fuel` must be a non-negative integer (u64)
+  --> tests/ui/fail_bad_retry.rs:23:15
+   |
+23 | #[step(fuel = -1)]
+   |               ^
+
+error: invalid duration "10 minutes": expected an integer followed by ms, s, m or h (e.g. "200ms", "5s", "10m")
+  --> tests/ui/fail_bad_retry.rs:28:51
+   |
+28 | #[workflow(name = "x", version = 1, run_timeout = "10 minutes")]
+   |                                                   ^^^^^^^^^^^^
