@@ -43,7 +43,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 - [x] **ENG-01**: Wasmtime 50.x component host with NaN canonicalisation, deterministic relaxed SIMD, threads/GC disabled
 - [x] **ENG-02**: Host provides deterministic implementations of WASI imports runtimes pull in (journaled clocks, ChaCha20 random seeded per run, empty env, stdout/stderr → log, no FS/sockets/http); deploy-time validation rejects components importing anything else
-- [ ] **ENG-03**: Replay compares every guest command (kind + canonical command hash) with the journal; a mismatch fails the run into the DLQ with reason `nondeterminism`, the sequence number, expected vs actual
+- [x] **ENG-03**: Replay compares every guest command (kind + canonical command hash) with the journal; a mismatch fails the run into the DLQ with reason `nondeterminism`, the sequence number, expected vs actual
 - [x] **ENG-04**: Recorded results are returned to the guest as the exact canonical bytes that were journaled
 - [ ] **ENG-05**: Per-instance memory caps, fuel budgets per step/run, and epoch-based time slicing and deadlines; a breach fails only that attempt
 - [ ] **ENG-06**: A guest at maximum Wasm stack depth calling a host function cannot overflow the native stack or abort the node
@@ -268,7 +268,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | META-03 | Phase 4 | Pending |
 | ENG-01 | Phase 3 | Complete |
 | ENG-02 | Phase 3 | Complete |
-| ENG-03 | Phase 3 | Pending |
+| ENG-03 | Phase 3 | Complete |
 | ENG-04 | Phase 3 | Complete |
 | ENG-05 | Phase 3 | Pending |
 | ENG-06 | Phase 3 | Pending |
