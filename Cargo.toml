@@ -57,9 +57,13 @@ ostro-testkit = { path = "crates/ostro-testkit" }
 utoipa = { version = "6.0.0", features = ["macros"] }
 utoipa-axum = "0.3.0"
 serde_json = "1"
+config = { version = "0.15.27", default-features = false, features = ["toml"] }
 # exact: locked decision (Phase 4 research); chrono is banned
 jiff = { version = "=1.0.1", features = ["serde"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tower-http = { version = "0.7.1", features = ["limit", "trace"] }
+# OS RNG for run rng_seed / token key (same major as uuid's)
+getrandom = "0.4.3"
 # test HTTP client only; no TLS (no native-tls/openssl)
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "http2"] }
 # build
