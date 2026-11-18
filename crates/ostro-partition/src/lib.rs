@@ -9,7 +9,6 @@ pub use store::{PartitionStore, StoreConfig, StoreError, StoreMeta, TABLES, Tabl
 
 // Dependencies wired in plan 02-01 ahead of their consuming plans.
 // The anchors keep cargo's per-crate `unused_dependencies` lint quiet.
-use blake3 as _;
 use bytes as _;
 use metrics as _;
 use ostro_blob as _;

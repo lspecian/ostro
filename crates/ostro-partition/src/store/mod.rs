@@ -18,6 +18,7 @@
 
 pub mod batch;
 pub mod config;
+mod digest;
 pub mod keys;
 pub mod meta;
 pub mod values;
