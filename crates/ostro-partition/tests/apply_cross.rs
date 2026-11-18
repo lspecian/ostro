@@ -4,10 +4,10 @@
 
 use bytes::Bytes;
 use ostro_partition::apply::{
-    Action, ApplyOutcome, Cursor, InvalidCode, RejectReason, apply_command,
+    Action, ApplyOutcome, Cursor, InvalidCode, RejectReason, START_DELAY_OP, apply_command,
 };
 use ostro_partition::store::keys::{
-    children_key, dedupe_key, outbox_key, outbox_prefix, ready_key, run_key,
+    children_key, dedupe_key, outbox_key, outbox_prefix, ready_key, run_key, timer_key,
 };
 use ostro_partition::store::values::{self, InboxMsg, RunRecord, RunStatus};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
@@ -16,6 +16,7 @@ use ostro_types::command::{
     EnqueueReady, EventsAppended, InboundBatch, InboundMsg, OutboxMsg, OutboxTruncated, ParentRef,
     SendMessage, Signal, StartRun, TerminalStatus, derived, encode_command, outbox_msg,
 };
+use ostro_types::command::{CancelTimer, ScheduleTimer, TimerFired};
 use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
 use prost::Message;
 
@@ -678,4 +679,189 @@ fn outbox_truncate() {
     let (_, a) = h.apply_act(&events(&r, 1, vec![send(signal_kind(&t, "d"))]));
     assert!(has_outbox_action(&a));
     assert!(h.get(Table::Outbox, &outbox_key(5, 4)).is_some());
+}
+
+// ---------------------------------------------------------------- timers
+
+fn fired(run: &RunId, op: u64, due: u64, at: u64) -> Command {
+    Command::timer_fired(TimerFired {
+        run_id: run.as_bytes().to_vec(),
+        op,
+        due_at_ms: due,
+        fired_at_ms: at,
+    })
+}
+
+fn schedule(op: u64, due: u64) -> Derived {
+    intent(derived::Intent::ScheduleTimer(ScheduleTimer {
+        op,
+        due_at_ms: due,
+    }))
+}
+
+#[test]
+fn timer_fire_once() {
+    let (mut h, r) = running(0, 1);
+    assert_eq!(
+        h.apply(&events(&r, 1, vec![schedule(7, 1000)])),
+        ApplyOutcome::Accepted
+    );
+    assert!(h.get(Table::Timers, &timer_key(1000, &r, 7)).is_some());
+
+    let (o, a, reads) = h.apply_full(&fired(&r, 7, 1000, 1003));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(reads <= 2, "TimerFired reads: {reads}");
+    assert!(a.is_empty(), "Running run: no new ready row ({a:?})");
+    assert!(h.get(Table::Timers, &timer_key(1000, &r, 7)).is_none());
+    assert_eq!(
+        h.inbox(&r),
+        vec![InboxMsg::TimerFired {
+            op: 7,
+            fired_at_ms: 1003
+        }]
+    );
+    let run = h.run(&r).unwrap();
+    assert_eq!(run.status, RunStatus::Running);
+    assert_eq!(run.inbox_next, 1);
+
+    // A new leader re-fires the same timer: Duplicate, state unchanged.
+    let before = h.data();
+    let (o, a, reads) = h.apply_full(&fired(&r, 7, 1000, 1500));
+    assert_eq!(o, ApplyOutcome::Duplicate { existing: None });
+    assert!(a.is_empty());
+    assert_eq!(reads, 1);
+    assert_eq!(h.data(), before);
+}
+
+#[test]
+fn timer_cancelled() {
+    let (mut h, r) = running(0, 1);
+    assert_eq!(
+        h.apply(&events(&r, 1, vec![schedule(7, 1000)])),
+        ApplyOutcome::Accepted
+    );
+    let cancel = intent(derived::Intent::CancelTimer(CancelTimer {
+        op: 7,
+        due_at_ms: 1000,
+    }));
+    assert_eq!(
+        h.apply(&events(&r, 1, vec![cancel])),
+        ApplyOutcome::Accepted
+    );
+    let before = h.data();
+    assert_eq!(
+        h.apply(&fired(&r, 7, 1000, 1001)),
+        ApplyOutcome::Duplicate { existing: None }
+    );
+    assert_eq!(h.data(), before);
+    assert!(h.inbox(&r).is_empty());
+}
+
+#[test]
+fn timer_delayed_start() {
+    let mut h = H::new(0);
+    let r = rid(0, 1);
+    let mut s = start(&r);
+    s.ready_at_ms = 5000;
+    assert_eq!(h.apply(&Command::start_run(s)), ApplyOutcome::Accepted);
+    assert_eq!(h.run(&r).unwrap().status, RunStatus::Scheduled);
+
+    let (o, a, reads) = h.apply_full(&fired(&r, START_DELAY_OP, 5000, 5002));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(reads <= 2);
+    assert_eq!(
+        a,
+        vec![Action::EnqueueReady {
+            run: r,
+            queue: "q".into(),
+            priority: 5,
+            ready_at_ms: 5000,
+            concurrency_key: "ck".into()
+        }]
+    );
+    let run = h.run(&r).unwrap();
+    assert_eq!(run.status, RunStatus::Ready);
+    assert!(h.get(Table::Ready, &ready_key("q", 5, 5000, &r)).is_some());
+    assert!(
+        h.get(Table::Timers, &timer_key(5000, &r, START_DELAY_OP))
+            .is_none()
+    );
+    assert!(
+        h.inbox(&r).is_empty(),
+        "a delayed start is not an inbox event"
+    );
+
+    let before = h.data();
+    assert_eq!(
+        h.apply(&fired(&r, START_DELAY_OP, 5000, 5100)),
+        ApplyOutcome::Duplicate { existing: None }
+    );
+    assert_eq!(h.data(), before);
+}
+
+#[test]
+fn timer_delayed_start_after_early_wake() {
+    // A signal woke the delayed run early; the start timer then only removes
+    // its row (no second ready row).
+    let mut h = H::new(5);
+    let r = rid(5, 1);
+    let mut s = start(&r);
+    s.ready_at_ms = 5000;
+    assert_eq!(h.apply(&Command::start_run(s)), ApplyOutcome::Accepted);
+    assert_eq!(
+        h.apply(&inbound(0, vec![im(1, signal_kind(&r, "a"))])),
+        ApplyOutcome::Accepted
+    );
+    assert_eq!(h.run(&r).unwrap().status, RunStatus::Ready);
+    let (o, a) = h.apply_act(&fired(&r, START_DELAY_OP, 5000, 5000));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(a.is_empty());
+    assert_eq!(h.rows(Table::Ready, &[]).len(), 1);
+    assert!(h.rows(Table::Timers, &[]).is_empty());
+}
+
+#[test]
+fn timer_terminal_run() {
+    let (mut h, r) = running(0, 1);
+    let done = intent(derived::Intent::CompleteRun(CompleteRun {
+        status: TerminalStatus::Completed as i32,
+        result: None,
+        completed_at_ms: 9,
+    }));
+    assert_eq!(
+        h.apply(&events(&r, 1, vec![schedule(7, 1000), done])),
+        ApplyOutcome::Accepted
+    );
+    assert_eq!(h.run(&r).unwrap().status, RunStatus::Completed);
+    assert!(h.get(Table::Timers, &timer_key(1000, &r, 7)).is_some());
+
+    let (o, a) = h.apply_act(&fired(&r, 7, 1000, 1001));
+    assert_eq!(o, ApplyOutcome::Accepted);
+    assert!(a.is_empty());
+    assert!(h.get(Table::Timers, &timer_key(1000, &r, 7)).is_none());
+    assert!(h.inbox(&r).is_empty());
+    assert_eq!(h.run(&r).unwrap().status, RunStatus::Completed);
+}
+
+#[test]
+fn timer_reads_and_validation() {
+    let (mut h, r) = running(0, 1);
+    // Unknown timer: exactly one point read.
+    let (o, _, reads) = h.apply_full(&fired(&r, 3, 10, 11));
+    assert_eq!(o, ApplyOutcome::Duplicate { existing: None });
+    assert_eq!(reads, 1);
+    assert_eq!(
+        h.apply(&fired(&rid(4, 1), 3, 10, 11)),
+        rej(RejectReason::WrongPartition)
+    );
+    let bad = Command::timer_fired(TimerFired {
+        run_id: vec![1, 2, 3],
+        op: 3,
+        due_at_ms: 10,
+        fired_at_ms: 11,
+    });
+    assert_eq!(
+        h.apply(&bad),
+        rej(RejectReason::Invalid(InvalidCode::BadRunId))
+    );
 }
