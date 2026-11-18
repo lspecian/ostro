@@ -60,7 +60,10 @@ impl<T> Op<T> {
         if completion.op != self.id {
             return Err(StepError::non_retryable(
                 "protocol",
-                format!("completion for op {} decoded as op {}", completion.op, self.id),
+                format!(
+                    "completion for op {} decoded as op {}",
+                    completion.op, self.id
+                ),
             ));
         }
         match completion.outcome {

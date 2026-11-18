@@ -33,3 +33,18 @@ pub use ops::{Completion, Op, OpId};
 pub use serde as __serde;
 #[doc(hidden)]
 pub use serde_json as __serde_json;
+
+pub use registry::Workflow;
+pub use step::{RetryPolicy, StepOptions, StepOptionsBuilder, run_step};
+
+/// Everything a workflow module usually needs: `use ostro_sdk::prelude::*;`.
+pub mod prelude {
+    pub use crate::ctx::{Ctx, Level, RunInfo};
+    pub use crate::error::{StepError, WorkflowError};
+    pub use crate::ops::{Completion, Op};
+    pub use crate::registry::Workflow;
+    pub use crate::step::{StepOptions, run_step};
+    pub use crate::{join, select};
+    pub use serde::{Deserialize, Serialize};
+    pub use serde_json::json;
+}

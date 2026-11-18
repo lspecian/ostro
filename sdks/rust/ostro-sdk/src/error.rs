@@ -122,7 +122,11 @@ impl From<serde_json::Error> for StepError {
 
 impl fmt::Display for StepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let r = if self.retryable { "retryable" } else { "non-retryable" };
+        let r = if self.retryable {
+            "retryable"
+        } else {
+            "non-retryable"
+        };
         write!(f, "{} ({r}): {}", self.kind, self.message)
     }
 }
@@ -190,7 +194,11 @@ impl From<WorkflowError> for Failure {
 
 impl fmt::Display for WorkflowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let r = if self.retryable { "retryable" } else { "non-retryable" };
+        let r = if self.retryable {
+            "retryable"
+        } else {
+            "non-retryable"
+        };
         write!(f, "{} ({r}): {}", self.kind, self.message)
     }
 }
@@ -217,8 +225,14 @@ mod tests {
 
     #[test]
     fn reserved_kinds_map_to_unit_variants() {
-        assert!(matches!(StepError::timeout().to_failure(), Failure::Timeout));
-        assert!(matches!(StepError::cancelled().to_failure(), Failure::Cancelled));
+        assert!(matches!(
+            StepError::timeout().to_failure(),
+            Failure::Timeout
+        ));
+        assert!(matches!(
+            StepError::cancelled().to_failure(),
+            Failure::Cancelled
+        ));
         // A *retryable* "timeout" kind is an ordinary error, not the reserved variant.
         assert!(matches!(
             StepError::retryable(TIMEOUT, "x").to_failure(),

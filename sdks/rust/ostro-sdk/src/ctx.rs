@@ -11,10 +11,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::bindings::ostro::runtime::context;
 use crate::bindings::ostro::runtime::effects;
 use crate::bindings::ostro::runtime::log as wit_log;
 use crate::bindings::ostro::runtime::types::Datetime;
-use crate::bindings::ostro::runtime::context;
 use crate::error::WorkflowError;
 use crate::ops::{self, Op};
 
@@ -96,7 +96,6 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    #[allow(dead_code)] // consumed by the step runner / registry (Task 2)
     pub(crate) fn new() -> Self {
         Self { _p: () }
     }
