@@ -8,9 +8,7 @@
 use std::sync::Arc;
 
 use ostro_proto::api::v1 as pb;
-use ostro_proto::api::v1::{
-    modules_server::Modules, runs_server::Runs, workflows_server::Workflows,
-};
+use ostro_proto::api::v1::{modules_server, runs_server, workflows_server};
 use tonic::{Request, Response, Status};
 
 use crate::domain::{self, ControlPlane};
@@ -37,6 +35,26 @@ pub fn status_details(status: &Status) -> Option<serde_json::Value> {
     } else {
         serde_json::from_slice(d).ok()
     }
+}
+
+/// tonic rejects messages over a server's decode limit with `OUT_OF_RANGE`; the shared
+/// table says an over-limit body is `RESOURCE_EXHAUSTED` (REST 413). No [`ApiError`]
+/// maps to `OUT_OF_RANGE`, so rewriting it on trailers-only gRPC responses is exact.
+pub(crate) async fn map_size_limit_status(
+    mut res: axum::response::Response,
+) -> axum::response::Response {
+    let out_of_range = (tonic::Code::OutOfRange as i32).to_string();
+    let headers = res.headers_mut();
+    if headers
+        .get("grpc-status")
+        .is_some_and(|v| v.as_bytes() == out_of_range.as_bytes())
+    {
+        let code = (crate::error::ErrorCode::PayloadTooLarge.grpc_code() as i32).to_string();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&code) {
+            headers.insert("grpc-status", v);
+        }
+    }
+    res
 }
 
 // ---------------------------------------------------------------------------------
@@ -255,8 +273,25 @@ impl From<pb::RunHistoryRequest> for domain::HistoryRequest {
 // ---------------------------------------------------------------------------------
 
 /// `ostro.api.v1.Modules` over a [`ControlPlane`].
+///
+/// Enforces `max_module_bytes` on the module bytes itself (ResourceExhausted, like
+/// REST's 413), so the limit is exact even though tonic's decode limit must leave
+/// headroom for the rest of the message.
 #[derive(Clone)]
-pub struct GrpcModules(pub Arc<dyn ControlPlane>);
+pub struct GrpcModules {
+    cp: Arc<dyn ControlPlane>,
+    max_module_bytes: usize,
+}
+
+impl GrpcModules {
+    /// Modules service over `cp` accepting modules up to `max_module_bytes`.
+    pub fn new(cp: Arc<dyn ControlPlane>, max_module_bytes: usize) -> Self {
+        GrpcModules {
+            cp,
+            max_module_bytes,
+        }
+    }
+}
 
 /// `ostro.api.v1.Workflows` over a [`ControlPlane`].
 #[derive(Clone)]
@@ -267,14 +302,21 @@ pub struct GrpcWorkflows(pub Arc<dyn ControlPlane>);
 pub struct GrpcRuns(pub Arc<dyn ControlPlane>);
 
 #[tonic::async_trait]
-impl Modules for GrpcModules {
+impl modules_server::Modules for GrpcModules {
     async fn upload(
         &self,
         request: Request<pb::UploadModuleRequest>,
     ) -> Result<Response<pb::UploadModuleResponse>, Status> {
         let r = request.into_inner();
+        if r.wasm.len() > self.max_module_bytes {
+            return Err(to_status(ApiError::payload_too_large(format!(
+                "module is {} bytes, api.max_module_bytes is {}",
+                r.wasm.len(),
+                self.max_module_bytes
+            ))));
+        }
         let res = self
-            .0
+            .cp
             .upload_module(domain::UploadModule {
                 sha256: r.sha256,
                 wasm: r.wasm.into(),
@@ -293,7 +335,7 @@ impl Modules for GrpcModules {
         request: Request<pb::GetModuleRequest>,
     ) -> Result<Response<pb::ModuleInfo>, Status> {
         let m = self
-            .0
+            .cp
             .get_module(request.into_inner().sha256)
             .await
             .map_err(to_status)?;
@@ -302,7 +344,7 @@ impl Modules for GrpcModules {
 }
 
 #[tonic::async_trait]
-impl Workflows for GrpcWorkflows {
+impl workflows_server::Workflows for GrpcWorkflows {
     async fn list(
         &self,
         _request: Request<pb::ListWorkflowsRequest>,
@@ -332,7 +374,7 @@ impl Workflows for GrpcWorkflows {
 }
 
 #[tonic::async_trait]
-impl Runs for GrpcRuns {
+impl runs_server::Runs for GrpcRuns {
     async fn start(
         &self,
         request: Request<pb::StartRunRequest>,

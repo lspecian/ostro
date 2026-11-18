@@ -77,20 +77,29 @@ pub fn ui_shell_html() -> String {
 /// `/readyz`, the UI shell at `/`, and the tonic gRPC services (`ostro.health.v1.Health`,
 /// `ostro.api.v1.{Modules,Workflows,Runs}`) under their `/<package>.<Service>/` paths.
 ///
-/// The Modules server's decode limit is raised from tonic's 4 MiB default to
-/// `cfg.max_module_bytes` (plus framing headroom) so uploads accepted over REST are
-/// accepted over gRPC too; every other service keeps the default.
+/// gRPC size limits mirror REST: the Modules server's decode limit is raised from
+/// tonic's 4 MiB default to `cfg.max_module_bytes` (plus framing headroom; the module
+/// bytes themselves are checked exactly by [`grpc::GrpcModules`]); Workflows and Runs
+/// use `cfg.max_request_bytes`. Over-limit messages answer `RESOURCE_EXHAUSTED`.
 pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
     let (rest, _doc) = rest::api_routes(cfg.max_module_bytes).split_for_parts();
     let grpc = tonic::service::Routes::new(HealthServer::new(HealthSvc))
         .add_service(
-            ModulesServer::new(grpc::GrpcModules(cp.clone())).max_decoding_message_size(
-                cfg.max_module_bytes.saturating_add(GRPC_UPLOAD_HEADROOM),
-            ),
+            ModulesServer::new(grpc::GrpcModules::new(cp.clone(), cfg.max_module_bytes))
+                .max_decoding_message_size(
+                    cfg.max_module_bytes.saturating_add(GRPC_UPLOAD_HEADROOM),
+                ),
         )
-        .add_service(WorkflowsServer::new(grpc::GrpcWorkflows(cp.clone())))
-        .add_service(RunsServer::new(grpc::GrpcRuns(cp.clone())))
-        .into_axum_router();
+        .add_service(
+            WorkflowsServer::new(grpc::GrpcWorkflows(cp.clone()))
+                .max_decoding_message_size(cfg.max_request_bytes),
+        )
+        .add_service(
+            RunsServer::new(grpc::GrpcRuns(cp.clone()))
+                .max_decoding_message_size(cfg.max_request_bytes),
+        )
+        .into_axum_router()
+        .layer(axum::middleware::map_response(grpc::map_size_limit_status));
     rest.with_state(cp)
         // Route-level limits (the module upload) are inner layers and win over this one.
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes))
