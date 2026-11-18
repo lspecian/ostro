@@ -12,6 +12,18 @@ tonic.workspace = true
 tokio.workspace = true
 rustls.workspace = true
 ostro-proto = { path = "../ostro-proto" }
+# Phase 4 anchors (consumed by 04-08 REST/OpenAPI surface)
+utoipa.workspace = true
+utoipa-axum.workspace = true
+tower-http.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
+serde.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
 
 [lints]
 workspace = true
