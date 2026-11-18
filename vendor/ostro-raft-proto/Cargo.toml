@@ -26,5 +26,6 @@ lazy_static = "1.4"
 prost-build = "0.14.6"
 protox = "0.10.0"
 
-# Vendored code keeps its own (default) lint levels; do not inherit [workspace.lints].
+# Vendored code keeps upstream style and does not inherit [workspace.lints].
+# Run clippy -D warnings with --exclude for vendored crates (see VENDORED.md).
 [lints.rust]

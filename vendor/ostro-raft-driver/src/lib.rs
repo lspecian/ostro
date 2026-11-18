@@ -3,6 +3,9 @@
 //! over raft-rs plus the durable [`RaftLogStore`]. Transport is supplied by the
 //! caller through [`Outbox`].
 
+// Ostro: vendored code keeps upstream style and is not held to clippy lints.
+#![allow(clippy::all)]
+
 pub mod driver;
 pub mod log_store;
 
