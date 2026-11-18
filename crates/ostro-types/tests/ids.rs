@@ -69,8 +69,14 @@ fn run_id_new_v7_is_v7_and_keeps_partition() {
 fn run_id_from_bytes_checks_length() {
     let id = RunId::new_v7(PartitionId(9));
     assert_eq!(RunId::from_bytes(id.as_bytes()).expect("ok"), id);
-    assert!(matches!(RunId::from_bytes(&[0u8; 17]), Err(IdError::BadLength(17))));
-    assert!(matches!(RunId::from_bytes(&[0u8; 19]), Err(IdError::BadLength(19))));
+    assert!(matches!(
+        RunId::from_bytes(&[0u8; 17]),
+        Err(IdError::BadLength(17))
+    ));
+    assert!(matches!(
+        RunId::from_bytes(&[0u8; 19]),
+        Err(IdError::BadLength(19))
+    ));
 }
 
 #[test]
@@ -98,8 +104,14 @@ fn run_id_from_str_accepts_upper_and_aliases() {
     // '1' at position 0 = 00001 in the top five bits => byte0 = 0b0000_1000.
     one_bytes[0] = 0b0000_1000;
     let one = RunId::from_bytes(&one_bytes).expect("ok");
-    assert_eq!(RunId::from_str(&format!("i{}", "0".repeat(28))).expect("i"), one);
-    assert_eq!(RunId::from_str(&format!("L{}", "0".repeat(28))).expect("L"), one);
+    assert_eq!(
+        RunId::from_str(&format!("i{}", "0".repeat(28))).expect("i"),
+        one
+    );
+    assert_eq!(
+        RunId::from_str(&format!("L{}", "0".repeat(28))).expect("L"),
+        one
+    );
 }
 
 #[test]
@@ -146,9 +158,18 @@ proptest! {
 
 #[test]
 fn attempt_token_ordering_is_epoch_then_n() {
-    let a = AttemptToken { epoch: Epoch(1), n: 9 };
-    let b = AttemptToken { epoch: Epoch(2), n: 1 };
-    let c = AttemptToken { epoch: Epoch(2), n: 2 };
+    let a = AttemptToken {
+        epoch: Epoch(1),
+        n: 9,
+    };
+    let b = AttemptToken {
+        epoch: Epoch(2),
+        n: 1,
+    };
+    let c = AttemptToken {
+        epoch: Epoch(2),
+        n: 2,
+    };
     assert!(a < b);
     assert!(b < c);
     assert!(a < c);
@@ -239,7 +260,11 @@ fn routing_golden_vectors() {
         n += 1;
     }
     assert!(n >= 24, "golden file has only {n} vectors");
-    assert_eq!(GOLDEN, render_golden(), "golden file out of sync with golden_inputs()");
+    assert_eq!(
+        GOLDEN,
+        render_golden(),
+        "golden file out of sync with golden_inputs()"
+    );
 }
 
 #[test]

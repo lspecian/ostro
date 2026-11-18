@@ -1,0 +1,49 @@
+# ostro routing golden vectors — workflow<TAB>idem_key_hex<TAB>P<TAB>partition — DO NOT REGENERATE (frozen at Phase 5)
+		1	0
+		16	13
+		64	61
+		1000	669
+	6f726465722d3432	1	0
+	6f726465722d3432	16	2
+	6f726465722d3432	64	34
+	6f726465722d3432	1000	26
+	00ff1080	1	0
+	00ff1080	16	2
+	00ff1080	64	18
+	00ff1080	1000	298
+orders		1	0
+orders		16	7
+orders		64	55
+orders		1000	447
+orders	6f726465722d3432	1	0
+orders	6f726465722d3432	16	4
+orders	6f726465722d3432	64	4
+orders	6f726465722d3432	1000	732
+orders	00ff1080	1	0
+orders	00ff1080	16	12
+orders	00ff1080	64	44
+orders	00ff1080	1000	180
+payments.v2		1	0
+payments.v2		16	10
+payments.v2		64	58
+payments.v2		1000	330
+payments.v2	6f726465722d3432	1	0
+payments.v2	6f726465722d3432	16	0
+payments.v2	6f726465722d3432	64	16
+payments.v2	6f726465722d3432	1000	312
+payments.v2	00ff1080	1	0
+payments.v2	00ff1080	16	8
+payments.v2	00ff1080	64	56
+payments.v2	00ff1080	1000	928
+überweisung-流程-🚀		1	0
+überweisung-流程-🚀		16	7
+überweisung-流程-🚀		64	55
+überweisung-流程-🚀		1000	319
+überweisung-流程-🚀	6f726465722d3432	1	0
+überweisung-流程-🚀	6f726465722d3432	16	6
+überweisung-流程-🚀	6f726465722d3432	64	54
+überweisung-流程-🚀	6f726465722d3432	1000	870
+überweisung-流程-🚀	00ff1080	1	0
+überweisung-流程-🚀	00ff1080	16	9
+überweisung-流程-🚀	00ff1080	64	9
+überweisung-流程-🚀	00ff1080	1000	553
