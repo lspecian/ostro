@@ -16,6 +16,7 @@
 mod common;
 
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use ostro_engine::config::EngineConfig;
 use ostro_engine::error::AttemptFailure;
@@ -25,6 +26,7 @@ use ostro_engine::testkit::{
     DEFAULT_ACCEPTED_AT, Drive, FakeClock, RunSpec, Script, drive_to_completion, replay_journal,
 };
 use ostro_types::journal::{Event, EventBody, RngSeed, encode_event};
+use sha2::{Digest, Sha256};
 
 struct Shared {
     rt: Runtime,
@@ -55,6 +57,13 @@ fn shared() -> &'static Shared {
             divergent,
         }
     })
+}
+
+fn iters() -> usize {
+    std::env::var("OSTRO_DET_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
 }
 
 fn run_ref() -> RunRef {
@@ -115,6 +124,10 @@ fn encoded(journal: &[Event]) -> Vec<(u64, u32, Vec<u8>)> {
             (e.seq, kind, bytes)
         })
         .collect()
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Record det-basic with `mode`, replay its journal with det-divergent; returns
@@ -221,4 +234,76 @@ async fn divergence_seed_matters() {
     );
     assert_ne!(encoded(&a.journal), encoded(&b.journal));
     assert_ne!(a.outcome, b.outcome);
+}
+
+#[tokio::test]
+async fn thousand_records() {
+    let n = iters();
+    let first = record("basic").await;
+    let want = encoded(&first.journal);
+    let start = Instant::now();
+    for i in 0..n {
+        let d = record("basic").await;
+        assert_eq!(d.outcome, first.outcome, "run {i}: outcome differs");
+        assert!(encoded(&d.journal) == want, "run {i}: journal bytes differ");
+    }
+    let el = start.elapsed();
+    println!(
+        "thousand_records: {n} records in {el:?} ({:?}/run)",
+        el / n.max(1) as u32
+    );
+}
+
+#[tokio::test]
+async fn thousand_replays() {
+    let n = iters();
+    let d = record("basic").await;
+    let ActivationOutcome::Completed { output } = &d.outcome else {
+        unreachable!()
+    };
+    let want = ActivationOutcome::Completed {
+        output: output.clone(),
+    };
+    let s = shared();
+    let start = Instant::now();
+    for i in 0..n {
+        let (outcome, appended) =
+            replay_journal(&s.rt, &s.basic, run_ref(), d.journal.clone()).await;
+        assert_eq!(outcome, want, "replay {i}");
+        assert_eq!(appended, 0, "replay {i} appended events");
+    }
+    let el = start.elapsed();
+    println!(
+        "thousand_replays: {n} replays in {el:?} ({:?}/replay)",
+        el / n.max(1) as u32
+    );
+}
+
+/// First replay-corpus entry. QA-02 (Phase 5) replays committed journals across
+/// versions and architectures. A change here means hashing, the journal codec, the
+/// RNG streams, the WASI shim or the guest toolchain changed: investigate, never
+/// blindly re-bless. If this snapshot differs between x86_64 and aarch64 in CI, that
+/// is a real determinism bug.
+#[tokio::test]
+async fn golden_det_basic_journal() {
+    let d = record("basic").await;
+    let mut text = String::new();
+    for e in &d.journal {
+        let (_, bytes) = encode_event(e);
+        let hash = e
+            .body
+            .command_meta()
+            .map_or_else(|| "-".to_string(), |m| hex(&m.hash.0));
+        let digest = Sha256::digest(&bytes);
+        text.push_str(&format!(
+            "{} {:?} {} {} {} {}\n",
+            e.seq,
+            e.body.kind(),
+            hash,
+            e.ts_nanos,
+            bytes.len(),
+            hex(&digest[..8])
+        ));
+    }
+    insta::assert_snapshot!("golden_det_basic_journal", text);
 }
