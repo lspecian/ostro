@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Foundation, Vendoring & Spikes** - Workspace, vendored and modernised Chronik code, CI matrix, and S2/S3 spike decisions (completed 2026-11-18)
 - [ ] **Phase 2: Durable Partition Log & State Machine** - CRC-verified WAL journal behind an RF=1 `ReplicatedLog`, deterministic fjall apply, outbox/shuffler, timers, fencing epochs
-- [ ] **Phase 3: Deterministic Wasm Engine & WIT 0.1** - Wasmtime component host with virtualised WASI, replay divergence detection, sandbox limits, AOT cache/pooling, full WIT 0.1 surface
+- [x] **Phase 3: Deterministic Wasm Engine & WIT 0.1** - Wasmtime component host with virtualised WASI, replay divergence detection, sandbox limits, AOT cache/pooling, full WIT 0.1 surface (completed 2026-11-18)
 - [ ] **Phase 4: Single-Node Server & Rust MVP** - Metadata Raft, dispatcher, unified HTTP/gRPC API, `ostro dev`/`server`, and Rust SDK running workflows with steps end to end
 - [ ] **Phase 5: Workflow Semantics & Core Hardening** - Timers, signals, concurrency, cancel, patching, timeouts; crash-injection harness, replay corpus, retention, WIT 0.1 freeze
 - [ ] **Phase 6: Effects Bridge, Connectors & Secrets** - HTTP/SQL/object-store effects with idempotency semantics, origin-bound secrets, SSRF-hardened egress
@@ -126,7 +126,7 @@ Plans:
 - [x] 03-09-PLAN.md — Determinism suite: 1,000 records/replays, divergence at exact seq, golden journal (W5)
 - [x] 03-10-PLAN.md — Sandbox (fuel/epoch/memory/recursion/isolation) + max-depth host-call stack test (W5)
 - [x] 03-12-PLAN.md — WIT-01..06 behaviour tests: every import, cancel/cleanup, continue-as-new, await tokens, set-status, failures/timeouts (W5)
-- [ ] 03-11-PLAN.md — Hot-wait vs evict, LRU node-budget eviction, Runtime AOT/InstancePre cache, warm p50; full ci-local gate (W6)
+- [x] 03-11-PLAN.md — Hot-wait vs evict, LRU node-budget eviction, Runtime AOT/InstancePre cache, warm p50; full ci-local gate (W6)
 **Research flag**: Wasmtime 50.0.2 pooling allocator and fiber-stack sizing
 
 ### Phase 4: Single-Node Server & Rust MVP
@@ -275,7 +275,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 |-------|----------------|--------|-----------|
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 12/16 | In Progress | - |
-| 3. Deterministic Wasm Engine & WIT 0.1 | 11/12 | In Progress | - |
+| 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
