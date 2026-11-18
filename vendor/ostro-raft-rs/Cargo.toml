@@ -1,0 +1,40 @@
+# Ostro-authored manifest replacing chronik-stream@08715f4 crates/raft/Cargo.toml
+# (see VENDORED.md). Source is tikv/raft-rs v0.7.0 as modified by Chronik.
+[package]
+name = "ostro-raft-rs"
+version = "0.7.0"
+authors = ["The TiKV Project Developers"]
+edition = "2021"
+license = "Apache-2.0"
+description = "Vendored raft (tikv/raft-rs v0.7.0 via Chronik Stream), modernised for Ostro"
+publish = false
+
+[lib]
+name = "raft"
+
+[features]
+# `default-logger` is intentionally NOT a default feature (cargo-deny checks
+# workspace members with their own defaults; see research Pitfall 3).
+default = ["prost-codec"]
+prost-codec = ["raft-proto/prost-codec"]
+default-logger = ["dep:slog-stdlog"]
+
+[dependencies]
+bytes = "1"
+rustc-hash = "2"
+getset = "0.1.1"
+prost = "0.14.6"
+thiserror = "2"
+raft-proto = { package = "ostro-raft-proto", path = "../ostro-raft-proto", default-features = false }
+rand = "0.9"
+slog = "2.2"
+slog-stdlog = { version = "4", optional = true }
+
+[dev-dependencies]
+regex = "1"
+slog-stdlog = "4"
+anyhow = "1.0"
+itertools = "0.10.0"
+
+# Vendored code keeps its own (default) lint levels; do not inherit [workspace.lints].
+[lints.rust]

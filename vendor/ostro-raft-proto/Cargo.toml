@@ -1,0 +1,30 @@
+# Ostro-authored manifest replacing chronik-stream@08715f4 crates/raft-proto/Cargo.toml
+# (see VENDORED.md). Source is tikv/raft-rs v0.7.0 raft-proto as modified by Chronik.
+[package]
+name = "ostro-raft-proto"
+version = "0.7.0"
+authors = ["The TiKV Project Developers"]
+edition = "2021"
+license = "Apache-2.0"
+description = "Vendored raft-proto (tikv/raft-rs v0.7.0 via Chronik Stream) on prost 0.14 + protox"
+publish = false
+
+[lib]
+name = "raft_proto"
+
+[features]
+default = []
+# Kept for compatibility with the raft crate's feature requirements.
+prost-codec = []
+
+[dependencies]
+bytes = "1"
+prost = "0.14.6"
+lazy_static = "1.4"
+
+[build-dependencies]
+prost-build = "0.14.6"
+protox = "0.10.0"
+
+# Vendored code keeps its own (default) lint levels; do not inherit [workspace.lints].
+[lints.rust]

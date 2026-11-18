@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
-# Vendored crates ("vendor/*") join the workspace in plans 01-04 / 01-06.
-members = ["crates/*"]
+members = ["crates/*", "vendor/*"]
 exclude = ["spikes", "ci/deny-fixtures"]
 
 [workspace.package]
@@ -12,6 +11,9 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+# vendored (see VENDORED.md)
+raft = { package = "ostro-raft-rs", path = "vendor/ostro-raft-rs", default-features = false, features = ["prost-codec"] }
+raft-proto = { package = "ostro-raft-proto", path = "vendor/ostro-raft-proto" }
 # stack (versions verified 2026-11-18)
 # NOTE: no wasmtime `cache` feature — it pulls zstd-sys (C); Ostro owns its AOT cache (ENG-07).
 wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "pooling-allocator", "parallel-compilation", "std", "addr2line", "demangle", "coredump"] }
