@@ -8,6 +8,29 @@ publish.workspace = true
 
 [dependencies]
 wasmtime.workspace = true
+tokio.workspace = true
+ostro-types.workspace = true
+serde.workspace = true
+postcard.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+chacha20.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[features]
+# Exposes the in-memory fake ActivationSink and test helpers (plan 03-08).
+testkit = []
+
+[dev-dependencies]
+ostro-engine = { path = ".", features = ["testkit"] }
+proptest.workspace = true
+insta.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
