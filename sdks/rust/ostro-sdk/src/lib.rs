@@ -22,6 +22,7 @@ pub mod bindings;
 pub mod ctx;
 pub mod error;
 pub mod ops;
+pub mod registry;
 pub mod step;
 
 pub use ctx::{Ctx, Header, HttpRequest, HttpResponse, Level, RunInfo};
