@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use ostro_blob::{hex, BlobError, BlobRef, BlobStore};
+use ostro_blob::{BlobError, BlobRef, BlobStore, hex};
 use sha2::{Digest, Sha256};
 
 fn payload(len: usize) -> Vec<u8> {
