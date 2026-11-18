@@ -1773,6 +1773,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ostro-testkit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "ostro-types"
 version = "0.1.0"
 dependencies = [

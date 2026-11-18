@@ -1,0 +1,15 @@
+[package]
+name = "ostro-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Test-only helpers. Must NOT depend on ostro-log or ostro-partition (dev-dependency
+# cycles); partition-specific doubles live in crates/ostro-partition/tests/common/.
+[dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
