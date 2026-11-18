@@ -30,6 +30,14 @@
 //! bumping [`EVENT_CODEC_VER`] / [`RESULT_CODEC_VER`]** (and a decoder for the old version).
 //! The golden vectors in `tests/golden/journal_v1.txt` fail CI on any drift.
 //!
+//! **Appending a new event kind is additive and does NOT bump [`EVENT_CODEC_VER`]**
+//! (Phase 4 decision): the kind code lives outside the bytes and every existing kind's
+//! encoding is unchanged, so old journals decode identically. A new kind gets a new code,
+//! a new payload struct, a new `EventBody` variant appended at the END of the enum, and a
+//! new golden line appended to `journal_v1.txt`; existing golden lines are never
+//! re-blessed. Bump the version only when an existing kind's encoding changes. Example:
+//! [`EventKind::StepAttemptFailed`] (29, plan 04-04, step retry WF-02).
+//!
 //! # Command hash (v1, [`HASH_VER`])
 //!
 //! `command_hash = sha256(b"ostro/cmd" ‖ [hash_ver] ‖ [CommandKind as u8] ‖ canonical_args)[..16]`.
@@ -299,6 +307,8 @@ pub enum EventKind {
     RunCompleted = 26,
     RunFailed = 27,
     RunContinuedAsNew = 28,
+    /// A step attempt failed and will be retried (WF-02, additive in Phase 4).
+    StepAttemptFailed = 29,
     // inputs
     TimerFired = 64,
     EffectCompleted = 65,
@@ -415,6 +425,32 @@ pub struct RunContinuedAsNew {
     pub continuation: Continuation,
 }
 
+/// Where the wait before the next attempt of a failed step happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AttemptBackoff {
+    /// Short delay: the host waits inside the activation and retries in place.
+    InActivation,
+    /// Long delay: the run is evicted and re-queued at `retry_at_nanos`.
+    Requeue,
+}
+
+/// A step attempt failed and the retry policy decided to retry it (WF-02).
+///
+/// Carries the same command hash as the step's eventual [`StepCompleted`]; on replay the
+/// cursor consumes a chain of these before the completion. `attempt` is 1-based (the
+/// attempt that failed), so the live attempt after a chain of `n` is `n + 1`. The final
+/// attempt (success, or failure that is not retried) is recorded as `StepCompleted`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StepAttemptFailed {
+    pub meta: CommandMeta,
+    pub name: String,
+    pub attempt: u32,
+    pub failure: Failure,
+    pub retry_at_nanos: u64,
+    pub backoff: AttemptBackoff,
+    pub fuel_used: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TimerFired {
     pub op: OpId,
@@ -474,6 +510,8 @@ pub enum EventBody {
     ChildCompleted(ChildCompleted),
     TokenCompleted(TokenCompleted),
     CancelRequested(CancelRequested),
+    // Appended after the original Phase 3 variants (additive, see module docs).
+    StepAttemptFailed(StepAttemptFailed),
 }
 
 impl EventBody {
@@ -500,6 +538,7 @@ impl EventBody {
             Self::ChildCompleted(_) => EventKind::ChildCompleted,
             Self::TokenCompleted(_) => EventKind::TokenCompleted,
             Self::CancelRequested(_) => EventKind::CancelRequested,
+            Self::StepAttemptFailed(_) => EventKind::StepAttemptFailed,
         }
     }
 
@@ -524,6 +563,7 @@ impl EventBody {
             Self::RunCompleted(e) => Some(&e.meta),
             Self::RunFailed(e) => Some(&e.meta),
             Self::RunContinuedAsNew(e) => Some(&e.meta),
+            Self::StepAttemptFailed(e) => Some(&e.meta),
             Self::RunStarted(_)
             | Self::TimerFired(_)
             | Self::EffectCompleted(_)
@@ -578,6 +618,9 @@ impl EventBody {
             Self::ChildCompleted(e) => format!("child completed op {}", e.op),
             Self::TokenCompleted(e) => format!("token completed op {}", e.op),
             Self::CancelRequested(_) => "cancel requested".to_string(),
+            Self::StepAttemptFailed(e) => {
+                format!("step {:?} attempt {} failed", e.name, e.attempt)
+            }
         }
     }
 }
@@ -717,6 +760,7 @@ impl EventKind {
             26 => Self::RunCompleted,
             27 => Self::RunFailed,
             28 => Self::RunContinuedAsNew,
+            29 => Self::StepAttemptFailed,
             64 => Self::TimerFired,
             65 => Self::EffectCompleted,
             66 => Self::SignalReceived,
@@ -776,6 +820,7 @@ pub fn encode_event(ev: &Event) -> (u32, Vec<u8>) {
         EventBody::ChildCompleted(p) => enc(ts, p),
         EventBody::TokenCompleted(p) => enc(ts, p),
         EventBody::CancelRequested(p) => enc(ts, p),
+        EventBody::StepAttemptFailed(p) => enc(ts, p),
     };
     (ev.body.kind().code(), bytes)
 }
@@ -817,6 +862,7 @@ pub fn decode_event(seq: u64, kind: u32, bytes: &[u8]) -> Result<Event, CodecErr
         EventKind::ChildCompleted => dec(rest, EventBody::ChildCompleted),
         EventKind::TokenCompleted => dec(rest, EventBody::TokenCompleted),
         EventKind::CancelRequested => dec(rest, EventBody::CancelRequested),
+        EventKind::StepAttemptFailed => dec(rest, EventBody::StepAttemptFailed),
     }?;
     Ok(Event {
         seq,
@@ -1241,25 +1287,37 @@ mod tests {
                 }),
                 EventKind::CancelRequested,
             ),
+            (
+                EventBody::StepAttemptFailed(StepAttemptFailed {
+                    meta: meta(),
+                    name: "charge".into(),
+                    attempt: 1,
+                    failure: Failure::Timeout,
+                    retry_at_nanos: 9,
+                    backoff: AttemptBackoff::InActivation,
+                    fuel_used: 0,
+                }),
+                EventKind::StepAttemptFailed,
+            ),
         ]
     }
 
     #[test]
     fn kind_round_trips_for_every_variant() {
         let bodies = all_bodies();
-        assert_eq!(bodies.len(), 20);
+        assert_eq!(bodies.len(), 21);
         for (body, kind) in &bodies {
             assert_eq!(body.kind(), *kind);
         }
     }
 
     #[test]
-    fn guest_commands_are_exactly_codes_16_to_28() {
+    fn guest_commands_are_exactly_codes_16_to_29() {
         for (body, kind) in all_bodies() {
             let code = kind.code();
             assert_eq!(
                 body.is_guest_command(),
-                (16..=28).contains(&code),
+                (16..=29).contains(&code),
                 "code {code}"
             );
             assert_eq!(body.completes_op().is_some(), (64..=69).contains(&code));
@@ -1268,7 +1326,7 @@ mod tests {
 
     #[test]
     fn event_kind_codes_are_pinned() {
-        let expected: [(EventKind, u32); 20] = [
+        let expected: [(EventKind, u32); 21] = [
             (EventKind::RunStarted, 1),
             (EventKind::StepCompleted, 16),
             (EventKind::TimerStarted, 17),
@@ -1283,6 +1341,7 @@ mod tests {
             (EventKind::RunCompleted, 26),
             (EventKind::RunFailed, 27),
             (EventKind::RunContinuedAsNew, 28),
+            (EventKind::StepAttemptFailed, 29),
             (EventKind::TimerFired, 64),
             (EventKind::EffectCompleted, 65),
             (EventKind::SignalReceived, 66),

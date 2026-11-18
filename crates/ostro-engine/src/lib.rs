@@ -12,6 +12,7 @@ pub mod error;
 pub mod host;
 pub mod limits;
 pub mod replay;
+pub mod retry;
 pub mod runtime;
 pub mod sink;
 #[cfg(feature = "testkit")]

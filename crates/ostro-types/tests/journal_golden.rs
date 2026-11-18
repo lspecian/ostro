@@ -336,6 +336,23 @@ fn golden_events() -> Vec<(&'static str, Event)> {
                 }),
             ),
         ),
+        // Additive kinds (no EVENT_CODEC_VER bump) are appended here, AFTER every
+        // Phase 3 vector, so blessing only ever adds golden lines.
+        (
+            "step_attempt_failed",
+            ev(
+                22,
+                EventBody::StepAttemptFailed(StepAttemptFailed {
+                    meta: meta(1),
+                    name: "charge".into(),
+                    attempt: 2,
+                    failure: Failure::Retryable(err("io")),
+                    retry_at_nanos: 1_700_000_000_400_000_000,
+                    backoff: AttemptBackoff::Requeue,
+                    fuel_used: 777,
+                }),
+            ),
+        ),
     ]
 }
 
@@ -579,7 +596,7 @@ fn golden_event_codec() {
     let events = golden_events();
     let kinds: std::collections::BTreeSet<u32> =
         events.iter().map(|(_, e)| e.body.kind().code()).collect();
-    assert_eq!(kinds.len(), 20, "every EventKind needs a golden event");
+    assert_eq!(kinds.len(), 21, "every EventKind needs a golden event");
     for (line, (name, ev)) in golden_section("event").iter().zip(&events) {
         let mut parts = line.split(' ');
         assert_eq!(parts.next(), Some("event"));
@@ -1035,6 +1052,32 @@ fn arb_body() -> impl Strategy<Value = EventBody> {
         ),
         (any::<u64>(), arb_payload())
             .prop_map(|(op, payload)| EventBody::SignalReceived(SignalReceived { op, payload })),
+        (
+            arb_meta(),
+            arb_string(),
+            any::<u32>(),
+            arb_failure(),
+            any::<u64>(),
+            any::<bool>(),
+            any::<u64>()
+        )
+            .prop_map(
+                |(meta, name, attempt, failure, retry_at_nanos, requeue, fuel_used)| {
+                    EventBody::StepAttemptFailed(StepAttemptFailed {
+                        meta,
+                        name,
+                        attempt,
+                        failure,
+                        retry_at_nanos,
+                        backoff: if requeue {
+                            AttemptBackoff::Requeue
+                        } else {
+                            AttemptBackoff::InActivation
+                        },
+                        fuel_used,
+                    })
+                }
+            ),
     ]
 }
 
