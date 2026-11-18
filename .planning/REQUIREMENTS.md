@@ -29,7 +29,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **STOR-09**: Fixed partition count configured at creation (default 16 single-node, 64 cluster); run ids embed their partition so any node routes without lookup
 - [x] **STOR-10**: Each new leadership term begins with a `LeaderAnnounced{epoch}` log entry; executors receive `(epoch, attempt)` fencing tokens validated at apply time
 - [x] **STOR-11**: Validation of appended commands happens at apply time; `AppendAck` is sent only after apply
-- [ ] **STOR-12**: Cross-partition messages (child start/complete, signals to other runs, cancel cascades, cron starts) go through a per-partition outbox and shuffler with `(src_partition, seq)` deduplication
+- [x] **STOR-12**: Cross-partition messages (child start/complete, signals to other runs, cancel cascades, cron starts) go through a per-partition outbox and shuffler with `(src_partition, seq)` deduplication
 - [x] **STOR-13**: Timers are loaded lazily in a time window; `TimerFired` is idempotent
 - [x] **STOR-14**: Large payloads (> 256 KiB inline limit) are stored in the blob store and referenced from the journal
 
@@ -260,7 +260,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | STOR-09 | Phase 2 | Complete |
 | STOR-10 | Phase 2 | Complete |
 | STOR-11 | Phase 2 | Complete |
-| STOR-12 | Phase 2 | Pending |
+| STOR-12 | Phase 2 | Complete |
 | STOR-13 | Phase 2 | Complete |
 | STOR-14 | Phase 2 | Complete |
 | META-01 | Phase 4 | Pending |
