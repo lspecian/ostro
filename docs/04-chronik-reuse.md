@@ -1,5 +1,13 @@
 # 04 — Reusing Chronik Stream
 
+> **Superseded in part (2026-11-18), after research of the Chronik source** (see `.planning/research/SUMMARY.md` and `ARCHITECTURE.md`):
+> - **Vendor, don't depend.** The needed Chronik code is copied into Ostro with attribution and modernised there. Chronik is not modified, and there is no `chronik-core` extraction.
+> - **Replication Option A is rejected.** Ostro ports Chronik's pure algorithms (epoch cache, ISR math, watermarks, failover planner) behind its own `ReplicatedLog` trait, which runs at RF=1 from Phase 1. Fetch is a small tonic service (Option B).
+> - **Object store:** use the `object_store` crate, not Chronik's backends.
+> - **WAL:** use V2 records only, carrying Ostro's own envelope `{epoch, codec_ver, crc32c, cmds}`. CRCs are verified on every read, because `verify_checksum()` skips V2. io_uring is disabled.
+>
+> The §4 lessons still apply in full.
+
 Chronik Stream (github.com/lspecian/chronik-stream, Apache-2.0, same author) is a single-binary, Kafka-compatible event platform in Rust. It has already solved Ostro's hardest infrastructure problems: a durable WAL, Raft for metadata, follower-pull log replication with leader epochs, and object-store tiering. This document maps what to reuse, what needs extraction, and what Chronik's own history teaches.
 
 *Based on a read of the Chronik `main` branch (workspace version 2.18.0) on 2026-11-18. Line counts and coupling are approximate.*
