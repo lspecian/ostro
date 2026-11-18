@@ -1,0 +1,15 @@
+{"guest":"py","kind":"pool-limit","knob":"total-core-instances","min_per_component_instance":38}
+{"guest":"py","kind":"pool-limit","knob":"total-memories","min_per_component_instance":1}
+{"guest":"py","kind":"pool-limit","knob":"total-tables","min_per_component_instance":2}
+{"guest":"py","kind":"pool-limit","knob":"max-memory-size","bytes":13172736,"fits":true}
+{"guest":"py","kind":"pool-limit","knob":"max-memory-size","bytes":13107200,"fits":false}
+{"guest":"ts","kind":"pool-limit","knob":"total-core-instances","min_per_component_instance":3}
+{"guest":"ts","kind":"pool-limit","knob":"total-memories","min_per_component_instance":1}
+{"guest":"ts","kind":"pool-limit","knob":"total-tables","min_per_component_instance":2}
+{"guest":"ts","kind":"pool-limit","knob":"max-memory-size","bytes":9502720,"fits":true}
+{"guest":"ts","kind":"pool-limit","knob":"max-memory-size","bytes":9437184,"fits":false}
+{"guest":"rust","kind":"pool-limit","knob":"total-core-instances","min_per_component_instance":3}
+{"guest":"rust","kind":"pool-limit","knob":"total-memories","min_per_component_instance":1}
+{"guest":"rust","kind":"pool-limit","knob":"total-tables","min_per_component_instance":2}
+{"guest":"rust","kind":"pool-limit","knob":"max-memory-size","bytes":1114112,"fits":true}
+{"guest":"rust","kind":"pool-limit","knob":"max-memory-size","bytes":1048576,"fits":false}
