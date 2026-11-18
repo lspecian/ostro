@@ -4,7 +4,11 @@ mod common;
 
 use std::path::Path;
 
-use ostro_engine::cache::{DiskCache, cache_key, compat_digest, load_or_create_key, module_sha};
+use std::sync::Arc;
+
+use ostro_engine::cache::{
+    AotCache, DiskCache, cache_key, compat_digest, load_or_create_key, module_sha,
+};
 use ostro_engine::host::bindings::Workflow;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store, WasmBacktraceDetails};
@@ -172,4 +176,157 @@ fn cache_truncated() {
     assert!(disk.get(&engine, &ck).is_none());
     assert!(!path.exists());
     assert_eq!(disk.stats().tamper_total, 1);
+}
+
+// ---------------------------------------------------------------- Task 2
+
+fn leb128(mut n: usize, out: &mut Vec<u8>) {
+    loop {
+        let byte = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// The smoke component with a trailing custom section `ostro-test-N`: a distinct sha,
+/// still a valid component.
+fn smoke_variant(n: usize) -> Vec<u8> {
+    let mut wasm = common::guest_wasm("smoke");
+    let name = format!("ostro-test-{n}");
+    let mut payload = Vec::new();
+    leb128(name.len(), &mut payload);
+    payload.extend_from_slice(name.as_bytes());
+    wasm.push(0);
+    leb128(payload.len(), &mut wasm);
+    wasm.extend_from_slice(&payload);
+    wasm
+}
+
+fn new_cache(dir: &Path, engine: Engine, permits: usize) -> AotCache {
+    let key = load_or_create_key(dir).unwrap();
+    AotCache::new(dir, key, engine, permits).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compile_pool_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = pinned_engine();
+    let cache = Arc::new(new_cache(dir.path(), engine.clone(), 2));
+    let mut tasks = Vec::new();
+    for n in 0..6 {
+        let cache = cache.clone();
+        tasks.push(tokio::spawn(async move {
+            let wasm = smoke_variant(n);
+            cache.component(module_sha(&wasm), &wasm).await
+        }));
+    }
+    for t in tasks {
+        let c = t.await.unwrap().expect("compile");
+        assert_smoke_runs(&engine, &c);
+    }
+    let max = cache.max_concurrent_compiles();
+    assert!((1..=2).contains(&max), "max concurrent compiles {max}");
+    assert_eq!(cache.stats().compiles, 6);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compile_single_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = pinned_engine();
+    let cache = Arc::new(new_cache(dir.path(), engine.clone(), 4));
+    let wasm: Arc<[u8]> = common::guest_wasm("smoke").into();
+    let sha = module_sha(&wasm);
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let cache = cache.clone();
+        let wasm = wasm.clone();
+        tasks.push(tokio::spawn(
+            async move { cache.component(sha, &wasm).await },
+        ));
+    }
+    for t in tasks {
+        let c = t.await.unwrap().expect("compile");
+        assert_smoke_runs(&engine, &c);
+    }
+    assert_eq!(cache.stats().compiles, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cache_hit_after_compile() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = pinned_engine();
+    let wasm = common::guest_wasm("smoke");
+    let sha = module_sha(&wasm);
+    {
+        let cache = new_cache(dir.path(), engine.clone(), 1);
+        cache.component(sha, &wasm).await.unwrap();
+        assert_eq!(cache.stats().compiles, 1);
+    }
+    // Simulated restart: a new cache over the same directory.
+    let cache = new_cache(dir.path(), engine.clone(), 1);
+    let c = cache.component(sha, &wasm).await.unwrap();
+    assert_smoke_runs(&engine, &c);
+    let s = cache.stats();
+    assert_eq!((s.compiles, s.hits), (0, 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tamper_then_recompile() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = pinned_engine();
+    let wasm = common::guest_wasm("smoke");
+    let sha = module_sha(&wasm);
+    new_cache(dir.path(), engine.clone(), 1)
+        .component(sha, &wasm)
+        .await
+        .unwrap();
+    let cache = new_cache(dir.path(), engine.clone(), 1);
+    let path = cache.disk().artefact_path(&cache_key(&engine, &sha));
+    let len = std::fs::metadata(&path).unwrap().len() as usize;
+    flip_byte(&path, len / 3);
+
+    let c = cache.component(sha, &wasm).await.unwrap();
+    assert_smoke_runs(&engine, &c);
+    let s = cache.stats();
+    assert_eq!((s.tamper_total, s.compiles), (1, 1));
+    // The rewritten artefact is valid.
+    let fresh = new_cache(dir.path(), engine.clone(), 1);
+    fresh.component(sha, &wasm).await.unwrap();
+    let s = fresh.stats();
+    assert_eq!((s.hits, s.compiles, s.tamper_total), (1, 0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compat_miss_recompiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine_a = pinned_engine();
+    let engine_b = other_engine();
+    let wasm = common::guest_wasm("smoke");
+    let sha = module_sha(&wasm);
+
+    new_cache(dir.path(), engine_a.clone(), 1)
+        .component(sha, &wasm)
+        .await
+        .unwrap();
+    let cache_b = new_cache(dir.path(), engine_b.clone(), 1);
+    let c = cache_b.component(sha, &wasm).await.unwrap();
+    assert_smoke_runs(&engine_b, &c);
+    let s = cache_b.stats();
+    assert_eq!((s.hits, s.misses, s.compiles), (0, 1, 1));
+
+    // Simulated key collision: A's (validly HMAC'd) artefact at B's key path.
+    let key_a = cache_key(&engine_a, &sha);
+    let key_b = cache_key(&engine_b, &sha);
+    assert_ne!(key_a, key_b);
+    let disk = cache_b.disk();
+    std::fs::copy(disk.artefact_path(&key_a), disk.artefact_path(&key_b)).unwrap();
+    let cache_b = new_cache(dir.path(), engine_b.clone(), 1);
+    let c = cache_b.component(sha, &wasm).await.unwrap();
+    assert_smoke_runs(&engine_b, &c);
+    let s = cache_b.stats();
+    assert_eq!((s.incompatible_total, s.compiles, s.tamper_total), (1, 1, 0));
 }
