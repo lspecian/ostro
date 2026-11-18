@@ -1,0 +1,26 @@
+# Ostro-authored manifest replacing chronik-stream@08715f4 crates/chronik-raft/Cargo.toml
+# (see VENDORED.md). Only driver.rs and log_store.rs are vendored; no Chronik crates.
+[package]
+name = "ostro-raft-driver"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Vendored Chronik Stream raft driver (RaftDriver + durable RaftLogStore)"
+publish = false
+
+[dependencies]
+raft = { package = "ostro-raft-rs", path = "../ostro-raft-rs", default-features = false, features = ["prost-codec"] }
+prost = "0.14.6"
+crc32fast = "1.5"
+tokio = { version = "1.54", features = ["sync"] }
+tracing = "0.1"
+slog = "2.7"
+slog-stdlog = "4.1"
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["full", "test-util"] }
+tempfile = "3"
+serde_json = "1"
+
+# Vendored code keeps its own (default) lint levels; do not inherit [workspace.lints].
+[lints.rust]

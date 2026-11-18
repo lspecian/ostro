@@ -1253,6 +1253,11 @@ version = "0.1.0"
 [[package]]
 name = "ostro-meta"
 version = "0.1.0"
+dependencies = [
+ "ostro-raft-driver",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "ostro-partition"
@@ -1271,6 +1276,21 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "ostro-raft-driver"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "ostro-raft-rs",
+ "prost",
+ "serde_json",
+ "slog",
+ "slog-stdlog",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
