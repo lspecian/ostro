@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 status: planning
 stopped_at: Completed 01-08-PLAN.md
-last_updated: "2026-11-18T18:01:27.793Z"
+last_updated: "2026-11-18T20:20:00.000Z"
 last_activity: 2026-11-18 — Completed 01-08-PLAN.md (quiet-machine confirmation; fjall crash test 5/5 + RMW 106.9k cmds/s; three Phase 1 decisions logged in PROJECT.md; FOUND-06 complete)
 progress:
   total_phases: 14
@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 Phase: 2 and 3 of 14 (planning in parallel; Phase 1 complete)
 Plan: 0 of TBD in current phases
 Phase 2 plan: 7 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2 done: 02-03 ostro-types core + 02-04 blob store; wave 3 done: 02-05 fjall state store + 02-06 command set + 02-07 log recovery; wave 4: 02-08/02-09 next)
-Phase 3 plan: 6 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next; 03-02 journal codec + command hash v1 done; 03-06 AOT cache + compile pool done; 03-03 engine config + pooling + limiter + epoch ticker done; 03-05 replay core done; 03-04 WASI shim + validation done)
+Phase 3 plan: 7 of 12 complete (wave 1: 03-01 done; wave 2 done: 03-02 codec/hash, 03-03 engine config, 03-04 WASI shim, 03-05 replay core, 03-06 AOT cache; wave 3 done: 03-07 host adapter + production linker + det-basic/wit-surface guests; wave 4: 03-08 next)
 Status: Planning Phases 2 (Durable Partition Log & State Machine) and 3 (Deterministic Wasm Engine & WIT 0.1)
 Phase 2 last activity: 2026-11-18 — Completed 02-07-PLAN.md (ostro-log recovery: verified full scan of every segment, torn-tail vs corruption rule with applied_offset floor, physical cut + fsync, LEO/epoch history rebuild)
-Phase 3 last activity: 2026-11-18 — Completed 03-04-PLAN.md (Ostro-owned deterministic WASI 0.2.12 shim on GuestEnv, deploy-time import/export validation, wasi-probe import snapshot)
+Phase 3 last activity: 2026-11-18 — Completed 03-07-PLAN.md (every ostro:runtime import over the replay core, build_linker = bindings + WASI shim + store-aware step fuel, det-basic/wit-surface guests, live->evict->resume->replay byte-identical)
 Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 
 Progress: [█░░░░░░░░░] 7% (1/14 phases)
@@ -75,6 +75,7 @@ Progress: [█░░░░░░░░░] 7% (1/14 phases)
 | Phase 02 P06 | 12min | 2 tasks | 4 files |
 | Phase 02 P05 | 20min | 2 tasks | 10 files |
 | Phase 02 P07 | 20min | 2 tasks | 8 files |
+| Phase 03 P07 | 40min | 3 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,7 @@ Recent decisions affecting current work:
 - [Phase 02 / 02-06]: Partition command set = hand-written prost `ostro_types::command::{Command, Cmd}` (tags 1..=7 frozen, 8..=63 reserved; golden tests/golden/commands.txt). EventsAppended carries opaque JournalEvent{seq,kind,payload} + submitter-computed Phase-2 Derived intents (ScheduleTimer/CancelTimer/SendMessage/EnqueueReady/CompleteRun) applied atomically with fencing; Phase 4 may move derivation into apply additively. OutboxMsg::target_partition reads the embedded run id (missing -> IdError::BadLength(0)); StartRun.rng_seed stored for Phase 3
 - [Phase 02 / 02-05]: State store = one fjall Database per partition at <data>/state/pNNNN, 13 keyspaces (Table/TABLES digest order); StoreConfig default 1 worker / 64 MiB journal / 8 MiB memtable / 16 MiB cache; ApplyBatch BTreeMap overlay counts keyspace reads (overlay free, range_prefix = 1) and commits data + applied_offset/state_hash/cursor/inbound_seen in one WriteBatch; digest = blake3 over one snapshot excluding only meta checkpointed_offset; ostro-partition failpoints feature still needs "fail/failpoints" (02-11)
 - [Phase 02 / 02-07]: ostro-log recover_partition(wal_dir, pid, floor=applied_offset) is sync (spawn_blocking), scans every segment via declared_record_size + WalRecord::from_bytes (never the vendored readers), verify_record = frame CRC → V2 → partition → Gap → envelope → trailer. Torn iff last non-empty segment AND expected base >= floor AND (incomplete at EOF | aligned all-zero 512 B sector | all-zero headerless remainder); cut = set_len + fsync file + fsync dir before any WAL queue opens. Empty segments listed, never deleted. EnvelopeError is now Clone
+- [Phase 03 / 03-07]: Host adapter = HostState over ReplayState; build_linker(engine) is the one production linker (ostro bindings + WASI shim). Per-step fuel: begin-step / [method]step.complete shadowed with sync func_wrap getting StoreContextMut (bindgen `store` flag needs component-model-async, not enabled); dropped budgeted step charges its full budget. record_terminal: replayed terminal of a different kind = NonDeterminism. Unsatisfied wait traps Evict{WaitUnsatisfied} (03-08 flushes after unwind)
 
 ### Pending Todos
 
