@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-11-18T17:28:09.076Z"
-last_activity: "2026-11-18 — Completed 01-02-PLAN.md (S3 redb durability spike: redb FAILS 90k rule; fjall recommended)"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-11-18T17:32:14.877Z"
+last_activity: "2026-11-18 — Completed 01-04-PLAN.md (raft stack vendored + ostro-meta single-voter smoke test)"
 progress:
   total_phases: 14
   completed_phases: 0
   total_plans: 8
-  completed_plans: 3
-  percent: 38
+  completed_plans: 4
+  percent: 50
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 ## Current Position
 
 Phase: 1 of 14 (Foundation, Vendoring & Spikes)
-Plan: 3 of 8 in current phase (01-01, 01-02, 01-03 complete)
+Plan: 4 of 8 in current phase (01-01, 01-02, 01-03, 01-04 complete)
 Status: In progress
-Last activity: 2026-11-18 — Completed 01-02-PLAN.md (S3 redb durability spike: redb FAILS 90k rule at 62k cmds/s; fjall 242k)
+Last activity: 2026-11-18 — Completed 01-04-PLAN.md (raft stack vendored: ostro-raft-proto/-rs/-driver, ostro-meta single-voter smoke test, VENDORED.md)
 
-Progress: [████░░░░░░] 38%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -53,6 +53,7 @@ Progress: [████░░░░░░] 38%
 | Phase 01 P01 | 4min | 3 tasks | 37 files |
 | Phase 01 P03 | 12min | 2 tasks | 12 files |
 | Phase 01 P02 | 22min | 2 tasks | 10 files |
+| Phase 01 P04 | 8min | 3 tasks | 41 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,8 @@ Recent decisions affecting current work:
 - [Phase 01]: S2 smoke: TS completed resource steps are never dropped without explicit Symbol.dispose; Rust std HashMap traps without a WASI random shim
 - [Phase 01]: S3: redb 4.6 FAILS the 90k cmds/s rule (T2 median 62,404 cmds/s; T3 no-fsync only 90.6k, so CPU-bound). fjall 3.1.13 T2 analogue reaches 242k cmds/s. Recommend fjall for STOR-05 pending fjall crash test + read-path bench and user confirmation
 - [Phase 01]: S3: redb T2 crash sanity 5/5. After kill -9 the db reopens at exactly the last durable checkpoint; None commits are discarded, so recovery replays the WAL from checkpointed_offset
+- [Phase 01]: Vendored crates: empty [lints.rust] table, rustfmt disable_all_formatting, crate-level #![allow(clippy::all)] (upstream deny(clippy::all) broke workspace clippy)
+- [Phase 01]: raft failpoints cfg blocks deleted (no fail dep); ostro-meta reaches raft via ostro_raft_driver::raft re-export
 
 ### Pending Todos
 
@@ -94,6 +97,6 @@ Open research gaps, from research/SUMMARY.md:
 
 ## Session Continuity
 
-Last session: 2026-11-18T17:28:06.010Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-11-18T17:32:14.875Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
