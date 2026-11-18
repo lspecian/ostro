@@ -35,6 +35,17 @@ pub use serde as __serde;
 pub use serde_json as __serde_json;
 
 pub use registry::Workflow;
+
+/// `#[workflow(name = "...", version = N, ...)]` on a
+/// `fn(ctx: &Ctx, input: In) -> Result<Out, E>` generates a unit struct named after the
+/// function in UpperCamelCase plus `Workflow` (`fn order` -> `OrderWorkflow`) that
+/// implements [`Workflow`]; register it with [`export!`]. See `ostro-sdk-macros`.
+pub use ostro_sdk_macros::workflow;
+
+/// `#[step(...)]` turns a `fn(args) -> Result<T, StepError>` into a durable step: calling
+/// it runs (or replays) the body through [`run_step`] with the declared options. See
+/// `ostro-sdk-macros`.
+pub use ostro_sdk_macros::step;
 pub use step::{RetryPolicy, StepOptions, StepOptionsBuilder, run_step};
 
 /// Everything a workflow module usually needs: `use ostro_sdk::prelude::*;`.
@@ -45,6 +56,7 @@ pub mod prelude {
     pub use crate::registry::Workflow;
     pub use crate::step::{StepOptions, run_step};
     pub use crate::{join, select};
+    pub use ostro_sdk_macros::{step, workflow};
     pub use serde::{Deserialize, Serialize};
     pub use serde_json::json;
 }

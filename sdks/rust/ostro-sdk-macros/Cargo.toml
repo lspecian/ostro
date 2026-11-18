@@ -1,0 +1,22 @@
+[package]
+name = "ostro-sdk-macros"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "#[workflow] and #[step] attribute macros for the Ostro Rust SDK"
+
+[lib]
+proc-macro = true
+
+# Explicit versions (no workspace inheritance) — see ../Cargo.toml.
+[dependencies]
+syn = { version = "=2.0.119", features = ["full"] }
+quote = "=1.0.47"
+proc-macro2 = "=1.0.107"
+
+[dev-dependencies]
+trybuild = "=1.0.125"
+ostro-sdk = { path = "../ostro-sdk" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"

@@ -7,10 +7,14 @@
 # other workspaces depend on ostro-sdk by path, and explicit versions keep that simple.
 [workspace]
 resolver = "3"
-members = ["ostro-sdk"]
+members = ["ostro-sdk", "ostro-sdk-macros"]
 
 # Pinned versions (written explicitly in each member manifest; a [workspace.dependencies]
 # table would only trigger cargo's unused-workspace-dependency warning):
 #   wit-bindgen = "=0.63.0"   (must match guests/ and the S2 toolchain)
 #   serde       = "=1.0.229"  (derive)
 #   serde_json  = "=1.0.154"
+#   syn         = "=2.0.119"  (full)  — ostro-sdk-macros
+#   quote       = "=1.0.47"
+#   proc-macro2 = "=1.0.107"
+#   trybuild    = "=1.0.125"  (dev, ostro-sdk-macros)
