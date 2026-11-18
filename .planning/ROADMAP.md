@@ -89,7 +89,7 @@ Plans:
 - [x] 02-03-PLAN.md — ostro-types core: ids/RunId, xxh3 routing golden vectors, PayloadRef, 32-byte envelope + CRC32C (W2)
 - [x] 02-04-PLAN.md — ostro-blob content-addressed durable blob store (W2)
 - [ ] 02-05-PLAN.md — fjall state store layer: per-partition DB, keyspaces, key/value codecs, ApplyBatch overlay, checkpoint, logical digest (W3)
-- [ ] 02-06-PLAN.md — Partition command set (prost) with golden encodings, opaque journal events + Derived intents (W3)
+- [x] 02-06-PLAN.md — Partition command set (prost) with golden encodings, opaque journal events + Derived intents (W3)
 - [ ] 02-07-PLAN.md — Log recovery: verified full scan, torn-tail vs corruption rule (applied_offset floor), physical cut (W3)
 - [ ] 02-08-PLAN.md — ReplicatedLog trait + RF=1 Rf1Log/LogNode, HW from commit callback, epoch cache, fatal I/O, trim/barrier (W4)
 - [ ] 02-09-PLAN.md — Pure apply core: epoch/attempt fencing, StartRun dedupe, EventsAppended + Derived, payload limit, rolling hash, read budget (W4)
@@ -274,7 +274,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
-| 2. Durable Partition Log & State Machine | 4/16 | In Progress | - |
+| 2. Durable Partition Log & State Machine | 5/16 | In Progress | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 6/12 | In Progress | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |

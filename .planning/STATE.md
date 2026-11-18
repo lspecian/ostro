@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 
 Phase: 2 and 3 of 14 (planning in parallel; Phase 1 complete)
 Plan: 0 of TBD in current phases
-Phase 2 plan: 4 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2 done: 02-03 ostro-types core + 02-04 blob store; wave 3: 02-05/02-06/02-07 next)
+Phase 2 plan: 5 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2 done: 02-03 ostro-types core + 02-04 blob store; wave 3: 02-05/02-06/02-07 next; 02-06 command set done)
 Phase 3 plan: 6 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next; 03-02 journal codec + command hash v1 done; 03-06 AOT cache + compile pool done; 03-03 engine config + pooling + limiter + epoch ticker done; 03-05 replay core done; 03-04 WASI shim + validation done)
 Status: Planning Phases 2 (Durable Partition Log & State Machine) and 3 (Deterministic Wasm Engine & WIT 0.1)
-Phase 2 last activity: 2026-11-18 — Completed 02-03-PLAN.md (ostro-types core: ids/RunId base32, frozen xxh3 routing golden vectors, PayloadRef, 32-byte envelope + CRC32C)
+Phase 2 last activity: 2026-11-18 — Completed 02-06-PLAN.md (prost partition command set: 7 Cmd variants with golden encodings, opaque JournalEvent + Derived intents, OutboxMsg target_partition routing)
 Phase 3 last activity: 2026-11-18 — Completed 03-04-PLAN.md (Ostro-owned deterministic WASI 0.2.12 shim on GuestEnv, deploy-time import/export validation, wasi-probe import snapshot)
 Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 
@@ -72,6 +72,7 @@ Progress: [█░░░░░░░░░] 7% (1/14 phases)
 | Phase 03 P04 | 35min | 2 tasks | 23 files |
 | Phase 02 P04 | 8min | 2 tasks | 6 files |
 | Phase 02 P03 | 15min | 2 tasks | 8 files |
+| Phase 02 P06 | 12min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,7 @@ Recent decisions affecting current work:
 - [Phase 03 / 03-04]: Deterministic WASI shim = sync+trappable bindgen over vendored WASI 0.2.12 WIT (crates/ostro-engine/wit-wasi, 18 interfaces), Host impls on a local `WasiImpl<'_, T: GuestEnv>` view; timers never sleep, exit -> GuestExit trap. validate_component collects all violations, instantiate_pre only after allow-list passes; wasi-probe import snapshot guards toolchain bumps
 - [Phase 02 / 02-04]: ostro-blob BlobStore: put = tmp/ write + sync_all + rename to blobs/<hh>/<hex> + shard dir fsync (idempotent, visible == complete); failed put leaves tmp for open() to remove; get verifies len then sha256; STOR-14 completes with 02-11 PayloadRef
 - [Phase 02 / 02-03]: ostro-types Phase 2 modules = ids, routing, payload, envelope (+ command in 02-06); journal.rs is Phase 3's. Envelope: verify order len→magic→codec→flags→reserved→crc→Empty→exact cmd_count (CountMismatch on clean short body, BodyMalformed on overrun)→TrailingBytes; RunId strings canonical only (non-zero pad bits rejected); routing pinned by tests/golden/routing.txt (OSTRO_BLESS=1) + in-test xxh3 computation
+- [Phase 02 / 02-06]: Partition command set = hand-written prost `ostro_types::command::{Command, Cmd}` (tags 1..=7 frozen, 8..=63 reserved; golden tests/golden/commands.txt). EventsAppended carries opaque JournalEvent{seq,kind,payload} + submitter-computed Phase-2 Derived intents (ScheduleTimer/CancelTimer/SendMessage/EnqueueReady/CompleteRun) applied atomically with fencing; Phase 4 may move derivation into apply additively. OutboxMsg::target_partition reads the embedded run id (missing -> IdError::BadLength(0)); StartRun.rng_seed stored for Phase 3
 
 ### Pending Todos
 
