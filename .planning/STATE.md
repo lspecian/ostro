@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-11-18T17:42:00.000Z"
-last_activity: "2026-11-18 — Completed 01-06-PLAN.md (ostro-wal vendored, ostro-log wired, check-vendored.sh)"
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-11-18T18:05:00.000Z"
+last_activity: "2026-11-18 — Completed 01-07-PLAN.md (ci-local.sh green incl. musl zigbuild; GitHub Actions matrix)"
 progress:
   total_phases: 14
   completed_phases: 0
   total_plans: 8
-  completed_plans: 6
-  percent: 75
+  completed_plans: 7
+  percent: 88
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 ## Current Position
 
 Phase: 1 of 14 (Foundation, Vendoring & Spikes)
-Plan: 6 of 8 in current phase (01-01 to 01-06 complete)
+Plan: 7 of 8 in current phase (01-01 to 01-07 complete)
 Status: In progress
-Last activity: 2026-11-18 — Completed 01-06-PLAN.md (ostro-wal vendored with metrics facade and no io_uring/bincode/env reads; ostro-log smoke test; VENDORED.md complete; scripts/check-vendored.sh)
+Last activity: 2026-11-18 — Completed 01-07-PLAN.md (scripts/ci-local.sh green incl. static x86_64 musl zigbuild with mimalloc; .github/workflows/ci.yml lint + 4-leg matrix, SHA-pinned; remote legs human_needed)
 
-Progress: [████████░░] 75%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [████████░░] 75%
 | Phase 01 P04 | 8min | 3 tasks | 41 files |
 | Phase 01 P05 | 25min | 2 tasks | 9 files |
 | Phase 01 P06 | 8min | 2 tasks | 21 files |
+| Phase 01 P07 | 15min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,9 @@ Recent decisions affecting current work:
 - [Phase 01]: ostro-wal: CHRONIK_* env knobs replaced by config (new GroupCommitConfig::tail_cache_bytes; Default = low_resource; 250MB rotation const); io_uring/AsyncIoConfig/bincode removed; metrics facade ostro_wal_batches_total + ostro_wal_batch_records
 - [Phase 01]: ostro-wal is_raft_topic backpressure exemption uses reserved prefix `__ostro_` (was __chronik_metadata); V2 WalRecord::verify_checksum is a no-op, so the Phase 2 envelope must carry its own CRC32C
 - [Phase 01]: scripts/check-vendored.sh is the provenance gate (needs jq); 01-07 CI should run it
+- [Phase 01]: CI: zig 0.17.1 + cargo-zigbuild 0.24.1 build a static x86_64 musl ostro (mimalloc, aws-lc-rs) with no fallback needed; test runner is `cargo-zigbuild test` (not `cargo zigbuild test`)
+- [Phase 01]: Unused workspace pins removed (raft, raft-proto, metrics, tracing, thiserror, prost-build); vendored crates pin their own deps; build is now warning-free and ci-local.sh enforces it
+- [Phase 01]: FOUND-05 PARTIAL until the user pushes and the Actions run (lint, x86_64/aarch64 musl, macos-aarch64, x86_64-gnu) is green
 
 ### Pending Todos
 
@@ -102,10 +106,11 @@ Open research gaps, from research/SUMMARY.md:
 - Pin policy: Wasmtime 48 LTS vs tracking monthly releases to 60 LTS. (Phase 1 decision)
 - Fixed partition count (P=16 single node / 64 cluster) must be confirmed before Phase 5 freezes the format.
 - The MVP is larger than docs/02. Streaming and debounce/singleton are already v2. The saga helper (WF-10) is a candidate cut if scope pressure appears.
+- FOUND-05 remote CI legs (aarch64 musl, macOS, the Actions run itself) are human_needed: no git remote exists yet
 - Storage engine choice for STOR-05: redb failed S3 rule, fjall recommended; needs user confirmation in FOUND-06 decision logging (01-08)
 
 ## Session Continuity
 
-Last session: 2026-11-18T17:42:00.000Z
-Stopped at: Completed 01-06-PLAN.md
+Last session: 2026-11-18T18:05:00.000Z
+Stopped at: Completed 01-07-PLAN.md
 Resume file: None

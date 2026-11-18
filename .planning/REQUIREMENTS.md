@@ -247,7 +247,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | FOUND-02 | Phase 1 | Complete |
 | FOUND-03 | Phase 1 | Complete |
 | FOUND-04 | Phase 1 | Complete |
-| FOUND-05 | Phase 1 | Pending |
+| FOUND-05 | Phase 1 | Partial (local x86_64 musl green; remote aarch64/macOS legs human_needed) |
 | FOUND-06 | Phase 1 | Pending |
 | STOR-01 | Phase 2 | Pending |
 | STOR-02 | Phase 2 | Pending |
