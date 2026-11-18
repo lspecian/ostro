@@ -41,14 +41,14 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Engine, Determinism & Sandbox
 
-- [ ] **ENG-01**: Wasmtime 50.x component host with NaN canonicalisation, deterministic relaxed SIMD, threads/GC disabled
+- [x] **ENG-01**: Wasmtime 50.x component host with NaN canonicalisation, deterministic relaxed SIMD, threads/GC disabled
 - [ ] **ENG-02**: Host provides deterministic implementations of WASI imports runtimes pull in (journaled clocks, ChaCha20 random seeded per run, empty env, stdout/stderr → log, no FS/sockets/http); deploy-time validation rejects components importing anything else
 - [ ] **ENG-03**: Replay compares every guest command (kind + canonical command hash) with the journal; a mismatch fails the run into the DLQ with reason `nondeterminism`, the sequence number, expected vs actual
 - [ ] **ENG-04**: Recorded results are returned to the guest as the exact canonical bytes that were journaled
 - [ ] **ENG-05**: Per-instance memory caps, fuel budgets per step/run, and epoch-based time slicing and deadlines; a breach fails only that attempt
 - [ ] **ENG-06**: A guest at maximum Wasm stack depth calling a host function cannot overflow the native stack or abort the node
 - [x] **ENG-07**: Modules are AOT-compiled at deploy in a bounded compile pool; artefacts cached on disk keyed by sha256 + Wasmtime compatibility hash + Ostro version, HMAC-verified before load
-- [ ] **ENG-08**: `InstancePre` + pooling allocator instantiate warm modules within NFR targets; pool sizing is configurable and fails clearly under address-space limits
+- [x] **ENG-08**: `InstancePre` + pooling allocator instantiate warm modules within NFR targets; pool sizing is configurable and fails clearly under address-space limits
 - [ ] **ENG-09**: Activation model: hot-wait for short effects, otherwise evict (drop Store) and replay on re-dispatch; resident Wasm memory is bounded by a node budget with LRU eviction
 - [ ] **ENG-10**: The host links WIT `0.1.x` (and later `0.2.x`) side by side, selected by the component's imports
 
@@ -266,14 +266,14 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | META-01 | Phase 4 | Pending |
 | META-02 | Phase 4 | Pending |
 | META-03 | Phase 4 | Pending |
-| ENG-01 | Phase 3 | Pending |
+| ENG-01 | Phase 3 | Complete |
 | ENG-02 | Phase 3 | Pending |
 | ENG-03 | Phase 3 | Pending |
 | ENG-04 | Phase 3 | Pending |
 | ENG-05 | Phase 3 | Pending |
 | ENG-06 | Phase 3 | Pending |
 | ENG-07 | Phase 3 | Complete |
-| ENG-08 | Phase 3 | Pending |
+| ENG-08 | Phase 3 | Complete |
 | ENG-09 | Phase 3 | Pending |
 | ENG-10 | Phase 13 | Pending |
 | WIT-01 | Phase 3 | Complete |
