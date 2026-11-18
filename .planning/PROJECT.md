@@ -57,7 +57,7 @@ Full design (source of truth): `docs/README.md`, `docs/01-research.md`, `docs/02
 
 - **Tech stack**: Rust (stable), Tokio, Wasmtime (Component Model), redb, chronik-wal, chronik-raft, tonic/axum: as decided in docs/03
 - **Packaging**: Single static binary (no C++ deps such as RocksDB) for linux x86_64/aarch64 + macOS. The single-binary moat (D1) depends on it
-- **Dependencies**: Chronik crates consumed as git dependencies pinned to a commit until a `chronik-core` workspace is extracted. They are the author's own repo
+- **Dependencies**: Needed Chronik code (chronik-raft driver/log store, chronik-wal pieces, replication algorithms) is **vendored into the Ostro workspace** (Apache-2.0, with attribution and source commit recorded) and modernised there. The Chronik repo is not modified
 - **Correctness**: zero lost accepted runs under crash injection; single node uses the replication code path with RF=1 (D5)
 - **Determinism**: all ambient non-determinism virtualised by the host; replay divergence is detected, never silently tolerated
 - **Security**: secrets never enter guest memory; guests have no ambient authority
@@ -74,7 +74,8 @@ Full design (source of truth): `docs/README.md`, `docs/01-research.md`, `docs/02
 | Raft for metadata, follower-pull ISR for partition logs (Chronik model) | Proven in Chronik; avoids multi-raft batching pitfalls | — Pending |
 | Deterministic replay, not memory snapshots | Portable, small, works for every language | — Pending |
 | Single-node product first (Phases 1–3), cluster last (Phase 4) | Usable product early; RF=1 path keeps cluster additive | — Pending |
-| Reuse Chronik's Kafka-Fetch replication internally first (Option A), extract later | Keeps the battle-tested path | — Pending |
+| ~~Reuse Chronik's Kafka-Fetch replication (Option A)~~ → port Chronik's pure replication algorithms behind an Ostro `ReplicatedLog` trait (exists from Phase 1 at RF=1) | Research: Option A drags in ~10k lines of Kafka handlers and can't run at RF=1 | — Pending |
+| Vendor Chronik code into Ostro (no upstream changes, no git deps) | Chronik pins older tonic/prost/axum/OTel; raft patch ignored as a git dep; avoids touching Chronik | — Pending |
 
 ---
 *Last updated: 2026-11-18 after initialization*
