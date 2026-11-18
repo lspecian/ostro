@@ -22,9 +22,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "failpoints")]
-use fail as _;
-
 /// Reference to a stored blob: its sha256 and length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlobRef {
@@ -153,8 +150,17 @@ impl BlobStore {
 
         let mut f = File::create(&tmp_path)?;
         f.write_all(bytes)?;
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("blob::fsync", |_| Err(BlobError::Io(
+            io::Error::from_raw_os_error(5)
+        )));
         f.sync_all()?;
         drop(f);
+
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("blob::before_rename", |_| Err(BlobError::Io(
+            io::Error::other("failpoint")
+        )));
 
         let shard = self.root.join(BLOBS_DIR).join(&h[..2]);
         ensure_dir(&shard)?;
