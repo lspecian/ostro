@@ -54,12 +54,12 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### WIT Contract (ostro:runtime@0.1.0)
 
-- [ ] **WIT-01**: Synchronous WIT world with context (info, now, random, uuid, is-replaying, patched), journal (begin-step / complete), effects (op handles + deterministic `wait`), log, and `workflows` export (describe, run)
+- [x] **WIT-01**: Synchronous WIT world with context (info, now, random, uuid, is-replaying, patched), journal (begin-step / complete), effects (op handles + deterministic `wait`), log, and `workflows` export (describe, run)
 - [ ] **WIT-02**: Guest-visible cancellation: a workflow can observe a cancel request and run cleanup; hard terminate is a separate operation
 - [ ] **WIT-03**: First-class `continue-as-new` operation
 - [ ] **WIT-04**: Callback/await tokens: a workflow obtains an opaque token (embedding partition and run) that an external caller completes without knowing the run id
 - [ ] **WIT-05**: `set-status` publishes a JSON status readable via the API (instead of query handlers)
-- [ ] **WIT-06**: Non-retryable error kind and per-run timeouts are expressible in the contract
+- [x] **WIT-06**: Non-retryable error kind and per-run timeouts are expressible in the contract
 - [ ] **WIT-07**: WIT 0.1 is frozen at the end of the single-node core phase; later changes are additive only
 
 ### Workflow Semantics
@@ -276,12 +276,12 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | ENG-08 | Phase 3 | Pending |
 | ENG-09 | Phase 3 | Pending |
 | ENG-10 | Phase 13 | Pending |
-| WIT-01 | Phase 3 | Pending |
+| WIT-01 | Phase 3 | Complete |
 | WIT-02 | Phase 3 | Pending |
 | WIT-03 | Phase 3 | Pending |
 | WIT-04 | Phase 3 | Pending |
 | WIT-05 | Phase 3 | Pending |
-| WIT-06 | Phase 3 | Pending |
+| WIT-06 | Phase 3 | Complete |
 | WIT-07 | Phase 5 | Pending |
 | WF-01 | Phase 4 | Pending |
 | WF-02 | Phase 4 | Pending |
