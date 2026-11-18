@@ -7,7 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-failpoints = ["dep:fail"]
+# Fault-injection suites (tests/fatal_io_state.rs): state-store failpoints
+# (state::commit, state::persist) plus the WAL/blob failpoints underneath.
+failpoints = ["dep:fail", "fail/failpoints", "ostro-log/failpoints", "ostro-blob/failpoints"]
 
 [dependencies]
 ostro-types.workspace = true
@@ -30,6 +32,10 @@ tempfile.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 ostro-testkit.workspace = true
+
+[[test]]
+name = "fatal_io_state"
+required-features = ["failpoints"]
 
 [lints]
 workspace = true

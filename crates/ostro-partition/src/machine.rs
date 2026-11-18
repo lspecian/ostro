@@ -383,14 +383,7 @@ impl<L: ReplicatedLog> Machine<L> {
                 continue;
             }
 
-            self.health_tx.send_if_modified(|h| {
-                if *h == PartitionHealth::Starting {
-                    *h = PartitionHealth::Healthy;
-                    true
-                } else {
-                    false
-                }
-            });
+            self.mark_healthy();
             self.maybe_checkpoint()?;
 
             match self.wait() {
@@ -520,7 +513,11 @@ impl<L: ReplicatedLog> Machine<L> {
         b.commit(&mu)
             .map_err(|e| format!("state commit failed: {e}"))?;
 
-        // Only after the commit: publish, ack, act.
+        // Only after the commit: publish, ack, act. Healthy is published before `applied`
+        // so an observer that saw the catch-up offset also sees Healthy.
+        if self.cur.next >= hw {
+            self.mark_healthy();
+        }
         self.applied_tx.send_replace(self.cur.next);
         self.acks.resolve(&outcomes, self.cur.next);
         if !actions.is_empty() && self.emit.load(Ordering::Acquire) {
@@ -531,6 +528,18 @@ impl<L: ReplicatedLog> Machine<L> {
         self.m_cmds.increment(outcomes.len() as u64);
         self.m_batch_secs.record(t0.elapsed().as_secs_f64());
         Ok(())
+    }
+
+    /// `Starting` -> `Healthy` (once caught up to the HW).
+    fn mark_healthy(&self) {
+        self.health_tx.send_if_modified(|h| {
+            if *h == PartitionHealth::Starting {
+                *h = PartitionHealth::Healthy;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     fn maybe_checkpoint(&mut self) -> Result<(), String> {

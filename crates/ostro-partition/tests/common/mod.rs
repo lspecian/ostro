@@ -13,7 +13,7 @@ use ostro_blob::BlobStore;
 use ostro_log::{LogNode, LogNodeConfig, ReplicatedLog, Rf1Log, Role};
 use ostro_partition::{
     ApplyOutcome, Cursor, MachineConfig, MachineHandle, PartitionError, PartitionHandle,
-    PartitionStore, PendingAcks, StoreConfig, apply_chunk,
+    PartitionHealth, PartitionStore, PendingAcks, StoreConfig, apply_chunk,
 };
 use ostro_types::command::{ConflictPolicy, StartRun};
 use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId, PayloadRef, RunId};
@@ -106,6 +106,12 @@ where
         .await
         .expect("catch-up timed out")
         .expect("machine gone");
+    let mut health = handle.machine().health();
+    timeout(T, health.wait_for(|h| *h != PartitionHealth::Starting))
+        .await
+        .expect("machine never left Starting")
+        .expect("machine gone");
+    assert_eq!(*health.borrow(), PartitionHealth::Healthy);
 
     let latest = rf1.epochs().latest().map_or(0, |e| e.0);
     let epoch = if announce {
