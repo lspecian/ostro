@@ -28,10 +28,10 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **STOR-08**: WAL segments are deleted only below the last durable state checkpoint, and no GC/retention task runs before startup recovery has completed (readiness barrier)
 - [ ] **STOR-09**: Fixed partition count configured at creation (default 16 single-node, 64 cluster); run ids embed their partition so any node routes without lookup
 - [ ] **STOR-10**: Each new leadership term begins with a `LeaderAnnounced{epoch}` log entry; executors receive `(epoch, attempt)` fencing tokens validated at apply time
-- [ ] **STOR-11**: Validation of appended commands happens at apply time; `AppendAck` is sent only after apply
+- [x] **STOR-11**: Validation of appended commands happens at apply time; `AppendAck` is sent only after apply
 - [ ] **STOR-12**: Cross-partition messages (child start/complete, signals to other runs, cancel cascades, cron starts) go through a per-partition outbox and shuffler with `(src_partition, seq)` deduplication
 - [ ] **STOR-13**: Timers are loaded lazily in a time window; `TimerFired` is idempotent
-- [ ] **STOR-14**: Large payloads (> 256 KiB inline limit) are stored in the blob store and referenced from the journal
+- [x] **STOR-14**: Large payloads (> 256 KiB inline limit) are stored in the blob store and referenced from the journal
 
 ### Metadata
 
@@ -259,10 +259,10 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | STOR-08 | Phase 2 | Pending |
 | STOR-09 | Phase 2 | Pending |
 | STOR-10 | Phase 2 | Pending |
-| STOR-11 | Phase 2 | Pending |
+| STOR-11 | Phase 2 | Complete |
 | STOR-12 | Phase 2 | Pending |
 | STOR-13 | Phase 2 | Pending |
-| STOR-14 | Phase 2 | Pending |
+| STOR-14 | Phase 2 | Complete |
 | META-01 | Phase 4 | Pending |
 | META-02 | Phase 4 | Pending |
 | META-03 | Phase 4 | Pending |
