@@ -11,6 +11,7 @@ use ostro_types::journal::{
     RunStarted, SignalWaitStarted, SqlRequest, StatusPublished, StepCompleted, TimerFired,
     TimerStarted, WaitMode, WaitResolved,
 };
+use ostro_types::journal::{AttemptBackoff, Failure, StepAttemptFailed};
 use proptest::prelude::*;
 
 use super::*;
@@ -741,7 +742,7 @@ fn step_guard() {
     let mut st = fresh();
     let actual = || "step".to_string();
     let seq = match st.begin_step(h(1), &actual).unwrap() {
-        StepBegin::Live { seq } => seq,
+        StepBegin::Live { seq, .. } => seq,
         StepBegin::Replayed(_) => panic!("expected live"),
     };
     assert_eq!(seq, 1);
@@ -767,7 +768,7 @@ fn step_guard() {
 
     // Abandoned step releases its seq.
     let seq = match st.begin_step(h(6), &actual).unwrap() {
-        StepBegin::Live { seq } => seq,
+        StepBegin::Live { seq, .. } => seq,
         StepBegin::Replayed(_) => panic!("expected live"),
     };
     assert_eq!(seq, 2);
@@ -789,6 +790,182 @@ fn step_guard() {
     let journal = st.journal().to_vec();
     let mut st = replay(journal);
     assert_eq!(nd(st.begin_step(h(9), &actual).map(|_| ())).seq, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Step retry attempt chains (WF-02, plan 04-04)
+// ---------------------------------------------------------------------------
+
+fn saf_body(hash: CommandHash, attempt: u32, retry_at_nanos: u64) -> EventBody {
+    EventBody::StepAttemptFailed(StepAttemptFailed {
+        meta: meta(hash),
+        name: "s".into(),
+        attempt,
+        failure: Failure::Timeout,
+        retry_at_nanos,
+        backoff: AttemptBackoff::InActivation,
+        fuel_used: 0,
+    })
+}
+
+fn recorded(seq: u64, body: EventBody) -> Event {
+    Event {
+        seq,
+        ts_nanos: ACCEPTED + seq * 10,
+        body,
+    }
+}
+
+#[test]
+fn replay_consumes_attempt_chain_then_completion() {
+    let journal = vec![
+        run_started(),
+        recorded(1, saf_body(h(1), 1, 111)),
+        recorded(2, saf_body(h(1), 2, 222)),
+        recorded(3, step_body(h(1))),
+    ];
+    let mut st = replay(journal);
+    let actual = || "step".to_string();
+    match st.begin_step(h(1), &actual).unwrap() {
+        StepBegin::Replayed(ev) => {
+            assert_eq!(ev.seq, 3);
+            assert_eq!(ev.body.kind(), EventKind::StepCompleted);
+        }
+        StepBegin::Live { .. } => panic!("expected replay"),
+    }
+    assert!(!st.is_replaying());
+    assert_eq!(st.logical_now_nanos(), ACCEPTED + 30);
+    // No guard opened: the next command goes live at seq 4.
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(2)).unwrap(), (4, false));
+}
+
+#[test]
+fn replay_chain_without_completion_goes_live_at_next_attempt() {
+    let journal = vec![run_started(), recorded(1, saf_body(h(1), 1, 777))];
+    let mut st = replay(journal);
+    let actual = || "step".to_string();
+    match st.begin_step(h(1), &actual).unwrap() {
+        StepBegin::Live {
+            seq,
+            attempt,
+            last_retry_at_nanos,
+        } => {
+            assert_eq!(seq, 2);
+            assert_eq!(attempt, 2);
+            assert_eq!(last_retry_at_nanos, Some(777));
+        }
+        StepBegin::Replayed(_) => panic!("expected live"),
+    }
+    // The step is open at seq 2.
+    assert!(is_open_step(cmd(&mut st, CommandKind::Http, h(2))));
+    st.complete_step(2, step_body(h(1))).unwrap();
+    assert_eq!(st.take_pending().len(), 1);
+}
+
+#[test]
+fn fresh_live_step_is_attempt_one() {
+    let mut st = fresh();
+    match st.begin_step(h(1), &|| "step".to_string()).unwrap() {
+        StepBegin::Live {
+            seq,
+            attempt,
+            last_retry_at_nanos,
+        } => {
+            assert_eq!((seq, attempt, last_retry_at_nanos), (1, 1, None));
+        }
+        StepBegin::Replayed(_) => panic!("expected live"),
+    }
+}
+
+#[test]
+fn attempt_chain_divergence() {
+    let actual = || "step".to_string();
+    // SAF recorded for a different step hash.
+    let mut st = replay(vec![run_started(), recorded(1, saf_body(h(9), 1, 0))]);
+    assert_eq!(nd(st.begin_step(h(1), &actual).map(|_| ())).seq, 1);
+    // Chain followed by a different command.
+    let mut st = replay(vec![
+        run_started(),
+        recorded(1, saf_body(h(1), 1, 0)),
+        recorded(2, body_for(CommandKind::Http, h(2))),
+    ]);
+    assert_eq!(nd(st.begin_step(h(1), &actual).map(|_| ())).seq, 2);
+    // A non-step command where the journal has a SAF.
+    let mut st = replay(vec![run_started(), recorded(1, saf_body(h(1), 1, 0))]);
+    assert_eq!(nd(cmd(&mut st, CommandKind::Http, h(1))).seq, 1);
+    // Out-of-order attempt numbers are a bad journal.
+    let mut st = replay(vec![run_started(), recorded(1, saf_body(h(1), 2, 0))]);
+    assert!(matches!(
+        st.begin_step(h(1), &actual),
+        Err(ReplayError::BadJournal(_))
+    ));
+}
+
+#[test]
+fn record_attempt_failed_live() {
+    let mut st = fresh();
+    let actual = || "step".to_string();
+    let seq = match st.begin_step(h(1), &actual).unwrap() {
+        StepBegin::Live { seq, .. } => seq,
+        StepBegin::Replayed(_) => panic!("expected live"),
+    };
+    let first = st.rng(RandomStream::CtxRandom).next_u64();
+    let seed = st.run().rng_seed;
+    let mut expect1 = RngStreams::new(&rng::step_seed(&seed, 1));
+    assert_eq!(first, expect1.stream(RandomStream::CtxRandom).next_u64());
+
+    // Guards: wrong seq, wrong body.
+    assert!(matches!(
+        st.record_attempt_failed(seq + 1, saf_body(h(1), 1, 5)),
+        Err(ReplayError::Protocol(_))
+    ));
+    assert!(matches!(
+        st.record_attempt_failed(seq, step_body(h(1))),
+        Err(ReplayError::Protocol(_))
+    ));
+
+    let next = st.record_attempt_failed(seq, saf_body(h(1), 1, 5)).unwrap();
+    assert_eq!(next, 2);
+    // Step stays open at the new seq; the SAF is pending at the old one.
+    assert!(is_open_step(cmd(&mut st, CommandKind::Http, h(2))));
+    let pending = st.take_pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].seq, 1);
+    assert_eq!(pending[0].body.kind(), EventKind::StepAttemptFailed);
+    // Fresh step-local stream seeded from the NEW seq.
+    let mut expect2 = RngStreams::new(&rng::step_seed(&seed, 2));
+    assert_eq!(
+        st.rng(RandomStream::CtxRandom).next_u64(),
+        expect2.stream(RandomStream::CtxRandom).next_u64()
+    );
+    // complete_step at the old seq is rejected; at the new seq it closes the step.
+    assert!(st.complete_step(1, step_body(h(1))).is_err());
+    st.complete_step(2, step_body(h(1))).unwrap();
+    // Run-level streams restored (untouched by either attempt).
+    let mut run_level = RngStreams::new(&seed);
+    assert_eq!(
+        st.rng(RandomStream::CtxRandom).next_u64(),
+        run_level.stream(RandomStream::CtxRandom).next_u64()
+    );
+    let journal = st.journal().to_vec();
+    assert_eq!(command_seqs(&journal), [1, 2]);
+
+    // Replay of the recorded journal returns the completion, consuming both.
+    let mut st = replay(journal);
+    match st.begin_step(h(1), &actual).unwrap() {
+        StepBegin::Replayed(ev) => assert_eq!(ev.seq, 2),
+        StepBegin::Live { .. } => panic!("expected replay"),
+    }
+    assert!(st.finish().is_ok());
+}
+
+#[test]
+fn record_attempt_failed_requires_open_step() {
+    let mut st = fresh();
+    assert!(matches!(
+        st.record_attempt_failed(1, saf_body(h(1), 1, 0)),
+        Err(ReplayError::Protocol(_))
+    ));
 }
 
 #[test]
@@ -987,7 +1164,7 @@ fn step_closure_randomness_does_not_leak() {
     // Record: a live step draws ctx and uuid randomness; then a draw outside any step.
     let mut st = fresh();
     let seq = match st.begin_step(h(1), &actual).unwrap() {
-        StepBegin::Live { seq } => seq,
+        StepBegin::Live { seq, .. } => seq,
         StepBegin::Replayed(_) => panic!("live"),
     };
     let inside = st.rng(RandomStream::CtxRandom).next_u64();
@@ -1022,7 +1199,7 @@ fn step_closure_randomness_does_not_leak() {
     // An abandoned live step restores the run-level streams too.
     let mut st = fresh();
     let seq = match st.begin_step(h(1), &actual).unwrap() {
-        StepBegin::Live { seq } => seq,
+        StepBegin::Live { seq, .. } => seq,
         StepBegin::Replayed(_) => panic!("live"),
     };
     st.rng(RandomStream::CtxRandom).next_u64();
