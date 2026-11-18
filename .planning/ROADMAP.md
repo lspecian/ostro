@@ -32,8 +32,8 @@ Mapping to `docs/05-roadmap.md`:
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Foundation, Vendoring & Spikes** - Workspace, vendored and modernised Chronik code, CI matrix, and S2/S3 spike decisions
-- [ ] **Phase 2: Durable Partition Log & State Machine** - CRC-verified WAL journal behind an RF=1 `ReplicatedLog`, deterministic redb apply, outbox/shuffler, timers, fencing epochs
+- [x] **Phase 1: Foundation, Vendoring & Spikes** - Workspace, vendored and modernised Chronik code, CI matrix, and S2/S3 spike decisions (completed 2026-11-18)
+- [ ] **Phase 2: Durable Partition Log & State Machine** - CRC-verified WAL journal behind an RF=1 `ReplicatedLog`, deterministic fjall apply, outbox/shuffler, timers, fencing epochs
 - [ ] **Phase 3: Deterministic Wasm Engine & WIT 0.1** - Wasmtime component host with virtualised WASI, replay divergence detection, sandbox limits, AOT cache/pooling, full WIT 0.1 surface
 - [ ] **Phase 4: Single-Node Server & Rust MVP** - Metadata Raft, dispatcher, unified HTTP/gRPC API, `ostro dev`/`server`, and Rust SDK running workflows with steps end to end
 - [ ] **Phase 5: Workflow Semantics & Core Hardening** - Timers, signals, concurrency, cancel, patching, timeouts; crash-injection harness, replay corpus, retention, WIT 0.1 freeze
@@ -241,7 +241,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation, Vendoring & Spikes | 8/8 | Plans complete; verification pending (FOUND-05 remote CI human_needed) | - |
+| 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 0/TBD | Not started | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 0/TBD | Not started | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |
