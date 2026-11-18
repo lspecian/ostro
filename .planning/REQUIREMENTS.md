@@ -36,8 +36,8 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 ### Metadata
 
 - [ ] **META-01**: Metadata state machine runs on the vendored Raft driver with Ostro's own transport; single voter on a single node
-- [ ] **META-02**: Metadata holds membership, partition map (leader, epoch, ISR), modules, workflows and active versions, queues, schedules, tokens, tenants, sealed secrets, grants, connections, egress policies
-- [ ] **META-03**: Every replicated metadata record type carries a version field so stale records never overwrite newer state
+- [x] **META-02**: Metadata holds membership, partition map (leader, epoch, ISR), modules, workflows and active versions, queues, schedules, tokens, tenants, sealed secrets, grants, connections, egress policies
+- [x] **META-03**: Every replicated metadata record type carries a version field so stale records never overwrite newer state
 
 ### Engine, Determinism & Sandbox
 
@@ -264,8 +264,8 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | STOR-13 | Phase 2 | Complete |
 | STOR-14 | Phase 2 | Complete |
 | META-01 | Phase 4 | Pending |
-| META-02 | Phase 4 | Pending |
-| META-03 | Phase 4 | Pending |
+| META-02 | Phase 4 | Complete |
+| META-03 | Phase 4 | Complete |
 | ENG-01 | Phase 3 | Complete |
 | ENG-02 | Phase 3 | Complete |
 | ENG-03 | Phase 3 | Complete |

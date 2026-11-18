@@ -142,7 +142,7 @@ Plans:
 **Plans**: 20 plans (8 waves; plans editing ostro-partition apply/store/handle or ostro-types command.rs are gated behind 04-09, which requires Phase 2 complete)
 
 Plans:
-- [ ] 04-01-PLAN.md — ostro-meta: records, versioned CAS apply, MetaSm snapshot, MetaHandle with immediate campaign (META-01/02/03)
+- [x] 04-01-PLAN.md — ostro-meta: records, versioned CAS apply, MetaSm snapshot, MetaHandle with immediate campaign (META-01/02/03)
 - [x] 04-02-PLAN.md — Workspace pins + ostro-server skeleton with layered ServerConfig + one-port smoke test (CLI-02)
 - [x] 04-03-PLAN.md — ostro.api.v1 protos (Modules, Workflows, Runs) via protox (API-01)
 - [x] 04-04-PLAN.md — StepAttemptFailed (kind 29, additive) + pure retry decision + replay attempt chains (WF-02)
@@ -298,7 +298,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 14/16 | In Progress | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
-| 4. Single-Node Server & Rust MVP | 4/20 | In Progress | - |
+| 4. Single-Node Server & Rust MVP | 5/20 | In Progress | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
