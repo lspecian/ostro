@@ -82,7 +82,11 @@ async fn checkpoint_every_n_batches() {
                 .unwrap();
             last = a;
         } else {
-            assert_eq!(*durable.borrow(), last, "checkpoint before the 4th batch ({i})");
+            assert_eq!(
+                *durable.borrow(),
+                last,
+                "checkpoint before the 4th batch ({i})"
+            );
         }
     }
     tp.close().await.unwrap();
@@ -169,7 +173,11 @@ async fn restart_replays_exactly_the_missing_suffix() {
 
     let tp = open_with(tmp.path(), cfg(), false, |l| l).await;
     assert_eq!(tp.handle.epoch(), Epoch(epoch.0));
-    assert_eq!(tp.applied(), applied + 4, "replayed exactly the missing suffix");
+    assert_eq!(
+        tp.applied(),
+        applied + 4,
+        "replayed exactly the missing suffix"
+    );
     let meta = tp.handle.store().read_meta().unwrap();
     assert_eq!(meta.applied, applied + 4);
     assert_eq!(

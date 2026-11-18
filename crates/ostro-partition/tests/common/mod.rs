@@ -66,16 +66,24 @@ pub async fn open_single(dir: &Path, cfg: MachineConfig) -> TestPartition {
 
 /// Like [`open_single`], wrapping the RF=1 log with `wrap`. Without `announce`, the epoch is
 /// set to the log's latest epoch and nothing is appended.
-pub async fn open_with<L, F>(dir: &Path, cfg: MachineConfig, announce: bool, wrap: F) -> TestPartition<L>
+pub async fn open_with<L, F>(
+    dir: &Path,
+    cfg: MachineConfig,
+    announce: bool,
+    wrap: F,
+) -> TestPartition<L>
 where
     L: ReplicatedLog,
     F: FnOnce(Arc<Rf1Log>) -> Arc<L>,
 {
     let (store, meta) =
         PartitionStore::open(dir, P0, pc(), &StoreConfig::default()).expect("open store");
-    let (node, mut logs) = LogNode::open(LogNodeConfig::new(dir.join("wal"), pc(), 1), &[meta.applied])
-        .await
-        .expect("open log node");
+    let (node, mut logs) = LogNode::open(
+        LogNodeConfig::new(dir.join("wal"), pc(), 1),
+        &[meta.applied],
+    )
+    .await
+    .expect("open log node");
     let rf1 = logs.remove(0).expect("recover partition log");
     let log = wrap(Arc::clone(&rf1));
     let store = Arc::new(store);
@@ -100,14 +108,21 @@ where
         .expect("machine gone");
 
     let latest = rf1.epochs().latest().map_or(0, |e| e.0);
-    let epoch = if announce { Epoch(latest + 1) } else { Epoch(latest) };
+    let epoch = if announce {
+        Epoch(latest + 1)
+    } else {
+        Epoch(latest)
+    };
     handle.set_epoch(epoch);
     rf1.set_role(Role::Leader { epoch });
     if announce {
-        let o = timeout(T, handle.submit_one(Command::leader_announced(epoch.0, 1, 0)))
-            .await
-            .expect("announce timed out")
-            .expect("announce");
+        let o = timeout(
+            T,
+            handle.submit_one(Command::leader_announced(epoch.0, 1, 0)),
+        )
+        .await
+        .expect("announce timed out")
+        .expect("announce");
         assert_eq!(o, ApplyOutcome::Accepted);
     }
     TestPartition { node, rf1, handle }

@@ -17,7 +17,11 @@ async fn state_is_visible_at_ack_time() {
     let run = new_run();
     let o = tp.handle.submit(vec![start_cmd(&run)]).await.unwrap();
     assert_eq!(o, vec![ApplyOutcome::Accepted]);
-    let rec = tp.handle.read_run(&run).unwrap().expect("run visible at ack time");
+    let rec = tp
+        .handle
+        .read_run(&run)
+        .unwrap()
+        .expect("run visible at ack time");
     assert_eq!(rec.workflow, "wf");
     tp.close().await.unwrap();
 }
