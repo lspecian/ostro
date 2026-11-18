@@ -1,5 +1,5 @@
 # Ostro-authored manifest replacing chronik-stream@08715f4 crates/chronik-wal/Cargo.toml
-# (see VENDORED.md). No Chronik crates, no tokio-uring, no bincode, no chrono.
+# (see VENDORED.md). No Chronik crates, no io-uring runtime, no bincode, no chrono.
 [package]
 name = "ostro-wal"
 version = "0.1.0"

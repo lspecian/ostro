@@ -74,7 +74,38 @@ Transitive upstream for vendor/ostro-raft-rs and vendor/ostro-raft-proto: tikv/r
 | crates/chronik-raft/src/config.rs, error.rs, rpc.rs, storage.rs, transport.rs, prost_bridge.rs, transport/grpc.rs, transport/memory.rs | Legacy/stub modules superseded by driver.rs/log_store.rs. `error.rs` drags in tonic and bincode |
 | crates/chronik-raft/build.rs, proto/raft_rpc.proto, proto/catalog_rpc.proto | tonic-build 0.11 and protoc codegen for the excluded transport |
 | crates/chronik-raft-bridge (src/lib.rs 47 lines, Cargo.toml) | Existed only to bridge two prost versions. With a single prost 0.14 it isn't needed. The vendored driver.rs and log_store.rs call `prost::Message` directly and never referenced it |
+| crates/chronik-wal/src/io_uring_thread.rs (373 lines) | tokio-uring io_uring thread; the io_uring path was removed (it also measured slower upstream) |
+| crates/chronik-wal/src/fsync.rs (499 lines) | Uses chronik_common::metrics; `FsyncBatcher` was constructed but never used |
+| crates/chronik-wal/src/checkpoint.rs (215 lines) | `CheckpointManager` was constructed but never used by the vendored path (`CheckpointConfig` stays in config.rs) |
+| crates/chronik-wal/src/compaction.rs (657 lines) | Kafka-style key compaction, not needed by Ostro |
+| crates/chronik-wal/src/periodic_flusher.rs (121 lines) | Not used by GroupCommitWal |
+| crates/chronik-wal/src/segment.rs (254 lines) | Legacy `WalSegment`, the only chrono user; GroupCommitWal owns segments |
+| crates/chronik-wal/src/{audit,streaming,io,rotation,checkpoint}/*.rs (0–3 lines each) | Empty stub modules |
+| crates/chronik-wal/src/tests/unit_tests.rs (895 lines) | Tests the excluded segment.rs |
+| crates/chronik-wal/src/tests/rotation_load_test.rs (794 lines) | Wall-clock performance floor, flaky in CI. May return later as `#[ignore]` |
+| crates/chronik-wal/src/tests/{wal_durability_stress,wal_validation_test,async_io_bench}.rs (490+483+242 lines) | Not compiled upstream either (absent from tests/mod.rs) |
+| crates/chronik-wal/src/tests/mod.rs, src/tests/README.md | Only index the excluded tests |
+| crates/chronik-wal/RELEASE.md (290 lines) | Upstream release notes |
 
 ## vendor/ostro-wal
 
-Added by plan 01-06.
+| Ostro path | Upstream path | Upstream lines | Status | Local modifications |
+|---|---|---:|---|---|
+| vendor/ostro-wal/Cargo.toml | crates/chronik-wal/Cargo.toml | 65 | rewritten | Package `ostro-wal`, explicit metadata, `publish = false`, edition 2021, empty `[lints.rust]`. Deps: tokio (`fs, io-util, sync, rt, time, macros`), bytes, byteorder, tracing, thiserror 2 (was 1), dashmap 6 (was 5.5), crc32fast, serde, serde_json, libc, metrics 0.24.6. Dev-deps: tokio (full, test-util), tempfile. Dropped chronik-common, chronik-monitoring, tokio-uring, bincode, chrono, uuid, anyhow, futures, async-trait, parking_lot, tokio-util, crossbeam, memmap2, ring, zstd, proptest, criterion, regex, rand (unused by the vendored tests) and all features (`async-io`, `wal`, `wal-encryption`, `wal-compression`) |
+| vendor/ostro-wal/rustfmt.toml | — | — | ostro-authored | `disable_all_formatting = true` |
+| vendor/ostro-wal/src/lib.rs | crates/chronik-wal/src/lib.rs | 76 | rewritten | Declares only the vendored modules (error, manager, record, config, buffer_pool, group_commit, io_priority, truncate, segment_index). Re-exports `WalError, Result, WalManager, WalRecord, WalConfig, CompressionType, CheckpointConfig, RecoveryConfig, RotationConfig, FsyncConfig, GroupCommitWal, GroupCommitConfig, PartitionMetrics, TruncateOutcome` and `Error`. `recover_all` and `RecoveryResult` kept. Crate-level `#![allow(clippy::all)]`; `cfg_attr(not(feature = "wal"))` removed |
+| vendor/ostro-wal/src/group_commit.rs | crates/chronik-wal/src/group_commit.rs | 2837 | modified | `MetricsRecorder::record_wal_batch` → `metrics::counter!("ostro_wal_batches_total").increment(1)` + `metrics::histogram!("ostro_wal_batch_records")`. All 26 `cfg(all(target_os = "linux", feature = "async-io"))` items removed (io_uring writer variant, `IoUringThreadHandle` import, `io_uring_handle` fields/params/args). `GroupCommitConfig::use_io_uring` and its env reader removed. `CHRONIK_WAL_PROFILE` (Default → `low_resource()`), `CHRONIK_WAL_ROTATION_SIZE` (→ `DEFAULT_ROTATION_SIZE_BYTES` = 250MB) and `CHRONIK_WAL_TAIL_CACHE_BYTES` (→ new field `GroupCommitConfig::tail_cache_bytes`, default `DEFAULT_TAIL_CACHE_BYTES` = 2MiB) env reads removed. `is_raft_topic` backpressure exemption: `"__chronik_metadata"` → `"__ostro_"` prefix (kept, not removed; `__raft` prefix unchanged). Unused `partition_key` param of `WalWriter::create` removed. `io_priority::set_wal_priority()` call kept |
+| vendor/ostro-wal/src/manager.rs | crates/chronik-wal/src/manager.rs | 1190 | modified | Never-used `CheckpointManager`/`FsyncBatcher` fields and construction removed. Dead `extract_offset_range` + `MinimalCanonicalRecord` (bincode decode of a Kafka CanonicalRecord, zero callers) deleted. `CHRONIK_WAL_PROFILE` log/comment text now describes config fields. Unused `PathBuf` import removed. Test configs no longer set `async_io` |
+| vendor/ostro-wal/src/record.rs | crates/chronik-wal/src/record.rs | 723 | modified | Comment-only: the `verify_checksum` rationale no longer names the removed serializer, plus a note that V2 verification is a no-op until Phase 2's envelope CRC |
+| vendor/ostro-wal/src/config.rs | crates/chronik-wal/src/config.rs | 236 | modified | `AsyncIoConfig` (io_uring knobs) and the `WalConfig::async_io` field removed. `CompressionType::Zstd` (behind the never-enabled `wal-compression` feature) removed |
+| vendor/ostro-wal/src/error.rs | crates/chronik-wal/src/error.rs | 66 | modified | `SerializationError(#[from] bincode::Error)` removed |
+| vendor/ostro-wal/src/io_priority.rs | crates/chronik-wal/src/io_priority.rs | 112 | modified | Doc example `chronik_wal::` → `ostro_wal::` |
+| vendor/ostro-wal/src/buffer_pool.rs | crates/chronik-wal/src/buffer_pool.rs | 422 | unchanged | — |
+| vendor/ostro-wal/src/segment_index.rs | crates/chronik-wal/src/segment_index.rs | 935 | unchanged | — |
+| vendor/ostro-wal/src/truncate.rs | crates/chronik-wal/src/truncate.rs | 507 | unchanged | — |
+| vendor/ostro-wal/tests/suffix_truncation.rs | crates/chronik-wal/tests/suffix_truncation.rs | 434 | modified | `chronik_wal` → `ostro_wal`; `#![allow(clippy::all)]` |
+| vendor/ostro-wal/tests/idle_seal_rotation.rs | crates/chronik-wal/tests/idle_seal_rotation.rs | 188 | modified | `chronik_wal` → `ostro_wal`; `#![allow(clippy::all)]` |
+
+**Metrics:** the WAL emits `ostro_wal_batches_total` (counter, one per committed batch) and `ostro_wal_batch_records` (histogram, records per batch) through the `metrics` facade. Library code reads no environment variables; every knob is a `GroupCommitConfig` / `WalConfig` field.
+
+**Answered research gap:** no WAL recovery path decodes `canonical_data` as Kafka. The only decoder, `manager.rs::extract_offset_range` (bincode → `MinimalCanonicalRecord`), had zero callers at 08715f4 and was deleted. `canonical_data` is opaque bytes to the vendored WAL.
