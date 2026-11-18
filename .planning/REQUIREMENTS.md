@@ -47,7 +47,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **ENG-04**: Recorded results are returned to the guest as the exact canonical bytes that were journaled
 - [ ] **ENG-05**: Per-instance memory caps, fuel budgets per step/run, and epoch-based time slicing and deadlines; a breach fails only that attempt
 - [ ] **ENG-06**: A guest at maximum Wasm stack depth calling a host function cannot overflow the native stack or abort the node
-- [ ] **ENG-07**: Modules are AOT-compiled at deploy in a bounded compile pool; artefacts cached on disk keyed by sha256 + Wasmtime compatibility hash + Ostro version, HMAC-verified before load
+- [x] **ENG-07**: Modules are AOT-compiled at deploy in a bounded compile pool; artefacts cached on disk keyed by sha256 + Wasmtime compatibility hash + Ostro version, HMAC-verified before load
 - [ ] **ENG-08**: `InstancePre` + pooling allocator instantiate warm modules within NFR targets; pool sizing is configurable and fails clearly under address-space limits
 - [ ] **ENG-09**: Activation model: hot-wait for short effects, otherwise evict (drop Store) and replay on re-dispatch; resident Wasm memory is bounded by a node budget with LRU eviction
 - [ ] **ENG-10**: The host links WIT `0.1.x` (and later `0.2.x`) side by side, selected by the component's imports
@@ -272,7 +272,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | ENG-04 | Phase 3 | Pending |
 | ENG-05 | Phase 3 | Pending |
 | ENG-06 | Phase 3 | Pending |
-| ENG-07 | Phase 3 | Pending |
+| ENG-07 | Phase 3 | Complete |
 | ENG-08 | Phase 3 | Pending |
 | ENG-09 | Phase 3 | Pending |
 | ENG-10 | Phase 13 | Pending |
