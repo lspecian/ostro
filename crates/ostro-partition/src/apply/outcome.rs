@@ -23,7 +23,9 @@
 //! | `Rejected(Invalid(_))` (any code)    | 26   |
 //!
 //! The [`InvalidCode`] detail is not part of the hash code (the command
-//! bytes are folded anyway, and they determine the detail).
+//! bytes are folded anyway, and they determine the detail). `InvalidCode`
+//! variants are append-only as well (02-09 added `BadIntent`,
+//! `FieldTooLong`; 02-10 added `BadSource`, `TruncateBeyondEnd`).
 
 use ostro_types::{AttemptToken, Epoch, PartitionId, RunId};
 
@@ -76,6 +78,10 @@ pub enum InvalidCode {
     /// A string that becomes part of a key (workflow, queue) is longer than
     /// 65535 bytes.
     FieldTooLong,
+    /// `InboundBatch.src` is outside the partition count.
+    BadSource,
+    /// `OutboxTruncated.upto_seq` names a seq that was never emitted.
+    TruncateBeyondEnd,
 }
 
 impl RejectReason {

@@ -59,13 +59,38 @@ pub(crate) fn emit(
     Ok(())
 }
 
-/// `OutboxTruncated` apply. Stub until plan 02-10.
+/// `OutboxTruncated{target, upto_seq}` (on the source partition): the
+/// shuffler acknowledges delivery of every row `<= upto_seq` for `target`.
+///
+/// - `upto <= truncated[target]` → `Duplicate` (idempotent re-ack).
+/// - `upto >= next_seq[target]` (never emitted, including targets outside
+///   the partition count) → `Rejected(Invalid(TruncateBeyondEnd))`.
+/// - Otherwise the rows `truncated+1 ..= upto` are removed with blind
+///   deletes (zero keyspace reads) and `truncated[target] = upto`.
 pub(crate) fn apply_outbox_truncated(
-    _b: &mut ApplyBatch<'_>,
-    _cur: &mut Cursor,
-    _t: &OutboxTruncated,
+    b: &mut ApplyBatch<'_>,
+    cur: &mut Cursor,
+    t: &OutboxTruncated,
 ) -> Result<ApplyOutcome, StoreError> {
-    Ok(ApplyOutcome::Rejected(RejectReason::Invalid(
-        InvalidCode::NotImplemented,
-    )))
+    let beyond = || {
+        Ok(ApplyOutcome::Rejected(RejectReason::Invalid(
+            InvalidCode::TruncateBeyondEnd,
+        )))
+    };
+    let Ok(target) = u16::try_from(t.target) else {
+        return beyond();
+    };
+    let truncated = cur.meta.outbox_truncated.get(&target).copied().unwrap_or(0);
+    if t.upto_seq <= truncated {
+        return Ok(ApplyOutcome::Duplicate { existing: None });
+    }
+    let next = cur.meta.outbox_next_seq.get(&target).copied().unwrap_or(1);
+    if t.upto_seq >= next {
+        return beyond();
+    }
+    for seq in truncated + 1..=t.upto_seq {
+        b.remove(Table::Outbox, outbox_key(target, seq));
+    }
+    cur.meta.outbox_truncated.insert(target, t.upto_seq);
+    Ok(ApplyOutcome::Accepted)
 }

@@ -21,6 +21,8 @@ use prost::Message;
 
 // ---------------------------------------------------------------- helpers
 
+type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+
 struct H {
     p: u16,
     dir: tempfile::TempDir,
@@ -71,7 +73,7 @@ impl H {
         self.store.reader().get(t, k).expect("read")
     }
 
-    fn rows(&self, t: Table, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    fn rows(&self, t: Table, prefix: &[u8]) -> Rows {
         self.store
             .reader()
             .prefix(t, prefix, usize::MAX)
@@ -103,7 +105,7 @@ impl H {
 
     /// Every table except `meta` and `inbound_seen` (which move with every
     /// command), as raw rows.
-    fn data(&self) -> Vec<(Table, Vec<(Vec<u8>, Vec<u8>)>)> {
+    fn data(&self) -> Vec<(Table, Rows)> {
         ostro_partition::TABLES
             .into_iter()
             .filter(|t| !matches!(t, Table::Meta | Table::InboundSeen))
@@ -245,7 +247,10 @@ fn rej(r: RejectReason) -> ApplyOutcome {
 fn running(p: u16, n: u8) -> (H, RunId) {
     let mut h = H::new(p);
     let r = rid(p, n);
-    assert_eq!(h.apply(&Command::start_run(start(&r))), ApplyOutcome::Accepted);
+    assert_eq!(
+        h.apply(&Command::start_run(start(&r))),
+        ApplyOutcome::Accepted
+    );
     assert_eq!(h.apply(&grant(&r, 1)), ApplyOutcome::Accepted);
     (h, r)
 }
@@ -261,7 +266,10 @@ fn inbound_outbox_exactly_once() {
     let (mut src, r) = running(0, 1);
     let mut dst = H::new(5);
     let t = rid(5, 1);
-    assert_eq!(dst.apply(&Command::start_run(start(&t))), ApplyOutcome::Accepted);
+    assert_eq!(
+        dst.apply(&Command::start_run(start(&t))),
+        ApplyOutcome::Accepted
+    );
     for name in ["a", "b", "c"] {
         assert_eq!(
             src.apply(&events(&r, 1, vec![send(signal_kind(&t, name))])),
@@ -277,7 +285,10 @@ fn inbound_outbox_exactly_once() {
         .into_iter()
         .map(|m| match m {
             InboxMsg::Signal { name, payload } => {
-                assert_eq!(PayloadRef::decode(&*payload).unwrap(), inline(b"p").unwrap());
+                assert_eq!(
+                    PayloadRef::decode(&*payload).unwrap(),
+                    inline(b"p").unwrap()
+                );
                 name
             }
             other => panic!("unexpected inbox entry {other:?}"),
@@ -288,7 +299,10 @@ fn inbound_outbox_exactly_once() {
 
     // Re-delivery of the same batch: duplicate, nothing written.
     let before = dst.data();
-    assert_eq!(dst.apply(&batch), ApplyOutcome::Duplicate { existing: None });
+    assert_eq!(
+        dst.apply(&batch),
+        ApplyOutcome::Duplicate { existing: None }
+    );
     assert_eq!(dst.data(), before);
 
     // Overlapping re-send [2, 3, 4] after [1, 2, 3]: only 4 applies.
@@ -307,7 +321,10 @@ fn inbound_outbox_exactly_once() {
 fn inbound_gap() {
     let mut dst = H::new(5);
     let t = rid(5, 1);
-    assert_eq!(dst.apply(&Command::start_run(start(&t))), ApplyOutcome::Accepted);
+    assert_eq!(
+        dst.apply(&Command::start_run(start(&t))),
+        ApplyOutcome::Accepted
+    );
     assert_eq!(
         dst.apply(&inbound(0, vec![im(1, signal_kind(&t, "a"))])),
         ApplyOutcome::Accepted
@@ -334,7 +351,10 @@ fn inbound_gap() {
     assert_eq!(dst.data(), before);
     assert_eq!(dst.inbox(&t).len(), 1);
     assert_eq!(dst.cur.inbound_seen.get(&0), Some(&1));
-    assert_eq!(dst.store.read_meta().unwrap().inbound_seen.get(&0), Some(&1));
+    assert_eq!(
+        dst.store.read_meta().unwrap().inbound_seen.get(&0),
+        Some(&1)
+    );
 }
 
 #[test]
@@ -398,10 +418,7 @@ fn inbound_signal_wakes_scheduled_run() {
     assert_eq!(o, ApplyOutcome::Accepted);
     let run = dst.run(&t).unwrap();
     assert_eq!(run.status, RunStatus::Ready);
-    assert!(
-        dst.get(Table::Ready, &ready_key("q", 5, 100, &t))
-            .is_some()
-    );
+    assert!(dst.get(Table::Ready, &ready_key("q", 5, 100, &t)).is_some());
     assert!(matches!(a.as_slice(), [Action::EnqueueReady { run, .. }] if *run == t));
 
     // Already Ready: a second signal adds an inbox entry but no ready row.
@@ -418,7 +435,9 @@ fn inbound_child_roundtrip() {
     let mut p5 = H::new(5);
     let child = rid(5, 7);
     // The parent starts the child and yields (EnqueueReady).
-    let yield_ready = intent(derived::Intent::EnqueueReady(EnqueueReady { ready_at_ms: 200 }));
+    let yield_ready = intent(derived::Intent::EnqueueReady(EnqueueReady {
+        ready_at_ms: 200,
+    }));
     assert_eq!(
         p0.apply(&events(
             &parent,
@@ -442,14 +461,17 @@ fn inbound_child_roundtrip() {
 
     // A re-sent StartChild with a fresh seq hits the runs row: consumed.
     assert_eq!(
-        p5.apply(&inbound(0, vec![im(2, {
-            let mut s = start(&child);
-            s.parent = Some(ParentRef {
-                run_id: parent.as_bytes().to_vec(),
-                op: 3,
-            });
-            outbox_msg::Kind::StartChild(ostro_types::command::StartChild { start: Some(s) })
-        })])),
+        p5.apply(&inbound(
+            0,
+            vec![im(2, {
+                let mut s = start(&child);
+                s.parent = Some(ParentRef {
+                    run_id: parent.as_bytes().to_vec(),
+                    op: 3,
+                });
+                outbox_msg::Kind::StartChild(ostro_types::command::StartChild { start: Some(s) })
+            })]
+        )),
         ApplyOutcome::Accepted
     );
     assert_eq!(p5.cur.inbound_seen.get(&0), Some(&2));
@@ -461,7 +483,10 @@ fn inbound_child_roundtrip() {
         result: inline(b"out"),
         completed_at_ms: 9,
     }));
-    assert_eq!(p5.apply(&events(&child, 1, vec![done])), ApplyOutcome::Accepted);
+    assert_eq!(
+        p5.apply(&events(&child, 1, vec![done])),
+        ApplyOutcome::Accepted
+    );
     assert_eq!(deliver(&mut p5, &mut p0), ApplyOutcome::Accepted);
 
     let pr = p0.run(&parent).unwrap();
@@ -555,12 +580,18 @@ fn inbound_cron_once() {
     assert_eq!(
         p5.apply(&inbound(
             0,
-            vec![im(1, cron("nightly", 1000, &a)), im(2, cron("nightly", 1000, &b))]
+            vec![
+                im(1, cron("nightly", 1000, &a)),
+                im(2, cron("nightly", 1000, &b))
+            ]
         )),
         ApplyOutcome::Accepted
     );
     assert!(p5.run(&a).is_some());
-    assert!(p5.run(&b).is_none(), "same (schedule, fire_time) starts once");
+    assert!(
+        p5.run(&b).is_none(),
+        "same (schedule, fire_time) starts once"
+    );
     assert_eq!(
         p5.get(
             Table::Dedupe,
@@ -587,7 +618,9 @@ fn inbound_seen_persists() {
         )),
         ApplyOutcome::Accepted
     );
-    let H { dir, store, cur, .. } = dst;
+    let H {
+        dir, store, cur, ..
+    } = dst;
     drop(store);
     let (_store, meta) = PartitionStore::open(
         dir.path(),
@@ -628,7 +661,11 @@ fn outbox_truncate() {
     let beyond = rej(RejectReason::Invalid(InvalidCode::TruncateBeyondEnd));
     assert_eq!(h.apply(&truncate(5, 4)), beyond);
     assert_eq!(h.apply(&truncate(7, 1)), beyond, "never emitted to 7");
-    assert_eq!(h.apply(&truncate(70_000, 1)), beyond);
+    let wide = Command::outbox_truncated(OutboxTruncated {
+        target: 70_000,
+        upto_seq: 1,
+    });
+    assert_eq!(h.apply(&wide), beyond);
     let (o, _, reads) = h.apply_full(&truncate(5, 3));
     assert_eq!(o, ApplyOutcome::Accepted);
     assert_eq!(reads, 0);

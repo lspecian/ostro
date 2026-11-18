@@ -41,7 +41,6 @@ impl Cursor {
 
     /// Records the highest seq applied from `src` (written with the next
     /// [`meta_update`](Self::meta_update)).
-    #[allow(dead_code, reason = "consumed by InboundBatch apply (plan 02-10)")]
     pub(crate) fn set_inbound_seen(&mut self, src: u16, seq: u64) {
         self.inbound_seen.insert(src, seq);
         self.inbound_changed.insert(src);
