@@ -51,7 +51,7 @@ Full design (source of truth): `docs/README.md`, `docs/01-research.md`, `docs/02
 - **Chronik lessons (docs/04 §4):** replication silently disabled for user data for ~9 months; "ISR is fiction"; the Raft data path failed on batching. Rules: one replication path including RF=1, ISR from measured LEOs only, conformance suite first, benchmarks verify acknowledged bytes on disk.
 - **Competition:** Restate is closest (Rust single binary, embedded storage) but runs code in the user's services. Ostro's moat is that the server hosts the code (upload Wasm) while still being a self-hosted single binary.
 - **Ecosystem uncertainty:** Wasmtime Component Model async / WASI 0.3 maturity; componentize-py/js sizes and features; Python per-instance memory (10–50 MB).
-- **Repository:** greenfield; directory still named `pgflow` (historical) and may be renamed to `ostro`.
+- **Repository:** greenfield, at `~/Development/ostro` (renamed from `pgflow` on 2026-11-18).
 
 ## Constraints
 
