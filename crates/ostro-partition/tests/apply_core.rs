@@ -557,7 +557,8 @@ fn malformed() {
 
 // ---------------------------------------------------------------- rolling hash
 
-const FOLD_GOLDEN: &str = "PLACEHOLDER";
+/// fold_hash([0; 32], Offset(0), 0, b"x"). Frozen: changing it changes every stored state_hash.
+const FOLD_GOLDEN: &str = "2044af1ee71a81a4a6c36183d045adb1459b0d08fe1b1f911510794ae431f75e";
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -642,7 +643,7 @@ fn workload() -> Vec<(u32, Bytes)> {
         i += 1;
         let r = rid(0, i);
         let mut s = start(&r);
-        if i % 3 == 0 {
+        if i.is_multiple_of(3) {
             s.ready_at_ms = 1_000 + u64::from(i);
         }
         v.push((1, enc(&Command::start_run(s))));
