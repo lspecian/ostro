@@ -1,0 +1,1 @@
+# ostro partition command golden vectors — name<TAB>hex — DO NOT REGENERATE (frozen at Phase 5)
