@@ -12,7 +12,6 @@ tonic.workspace = true
 tokio.workspace = true
 rustls.workspace = true
 ostro-proto = { path = "../ostro-proto" }
-# Phase 4 anchors (consumed by 04-08 REST/OpenAPI surface)
 utoipa.workspace = true
 utoipa-axum.workspace = true
 tower-http.workspace = true
@@ -21,9 +20,17 @@ jiff.workspace = true
 serde.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+# FakeControlPlane only (feature "fake")
+sha2 = { workspace = true, optional = true }
+
+[features]
+# In-memory FakeControlPlane for adapter tests (04-08 REST, 04-11 gRPC parity).
+fake = ["dep:sha2"]
 
 [dev-dependencies]
+ostro-api = { path = ".", features = ["fake"] }
 reqwest.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

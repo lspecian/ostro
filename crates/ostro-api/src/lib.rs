@@ -1,14 +1,18 @@
-//! ostro-api: HTTP + gRPC API surface (skeleton).
+//! ostro-api: HTTP + gRPC API surface.
+//!
+//! [`domain::ControlPlane`] is the transport-neutral contract every adapter calls.
 
-// Phase 4 dependency anchors: wired ahead of use (04-02); 04-08 removes these as it
-// consumes them (REST handlers, OpenAPI, body limits/tracing layers).
-use async_trait as _;
-use bytes as _;
+pub mod domain;
+pub mod error;
+#[cfg(any(test, feature = "fake"))]
+pub mod fake;
+
+pub use domain::ControlPlane;
+pub use error::{ApiError, ErrorCode};
+
+// Phase 4 dependency anchors still awaiting the REST/OpenAPI surface (04-08 Task 2).
 use jiff as _;
-use serde as _;
-use serde_json as _;
 use tower_http as _;
-use utoipa as _;
 use utoipa_axum as _;
 
 use ostro_proto::health::v1::{
