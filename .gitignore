@@ -1,0 +1,6 @@
+target/
+*.cwasm
+.ostro/
+node_modules/
+__pycache__/
+.venv/
