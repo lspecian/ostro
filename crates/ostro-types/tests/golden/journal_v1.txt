@@ -1,0 +1,1 @@
+# ostro journal golden vectors v1 — DO NOT REGENERATE without bumping HASH_VER/EVENT_CODEC_VER/RESULT_CODEC_VER (frozen at Phase 5)
