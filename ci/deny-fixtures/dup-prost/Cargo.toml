@@ -1,0 +1,13 @@
+# Negative fixture for FOUND-04: two prost versions must be rejected by deny.toml.
+[workspace]
+
+[package]
+name = "deny-fixture-dup-prost"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+prost = "0.14.6"
+prost012 = { package = "prost", version = "0.12" }

@@ -1,0 +1,11 @@
+# Negative fixture for FOUND-04: a GPL-3.0-only crate must be rejected by deny.toml.
+[workspace]
+
+[package]
+name = "deny-fixture-bad-licence"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
