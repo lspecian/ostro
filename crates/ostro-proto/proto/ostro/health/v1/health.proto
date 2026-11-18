@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package ostro.health.v1;
+
+service Health {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {}
+
+message CheckResponse {
+  string status = 1;
+}

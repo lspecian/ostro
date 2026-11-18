@@ -1,0 +1,21 @@
+[package]
+name = "ostro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ostro"
+path = "src/main.rs"
+
+[dependencies]
+mimalloc.workspace = true
+clap.workspace = true
+ostro-engine = { path = "../ostro-engine" }
+ostro-partition = { path = "../ostro-partition" }
+ostro-api = { path = "../ostro-api" }
+
+[lints]
+workspace = true
