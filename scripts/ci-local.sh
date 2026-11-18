@@ -27,7 +27,15 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 # Crates with a `failpoints` feature whose fault-injection suites run in the
 # "failpoint suites" step (single-threaded: the fail registry is global).
 # Later Phase 2 plans append ostro-log, ostro-partition, ostro-blob.
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition)
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest)
+# ostro-crashtest's crash loops are #[ignore] (slow, spawn processes), so this gate only
+# lints them and runs the crate's unit tests. Run them explicitly (02-VALIDATION.md):
+#   OSTRO_CRASH_ITERS=50 cargo test --release -p ostro-crashtest --test crash_loop \
+#     -- --ignored --nocapture
+#   OSTRO_CRASH_ITERS=50 cargo test --release -p ostro-crashtest --features failpoints \
+#     --test crash_loop -- --ignored --nocapture crash_loop_io_errors
+#   PROPTEST_CASES=1000 cargo test --release -p ostro-partition --test rebuild_digest
+# Phase gate: OSTRO_CRASH_ITERS=500 (crash_loop_kill9) + PROPTEST_CASES=1000 rebuild_digest.
 WORKFLOW=".github/workflows/ci.yml"
 
 declare -a NAMES=() RESULTS=() TIMES=()
