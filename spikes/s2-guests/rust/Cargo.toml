@@ -1,0 +1,19 @@
+[package]
+name = "s2-guest-rust"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of the root Ostro workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.63"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -1,0 +1,43 @@
+// Spike S2 shared WIT (throwaway; not the frozen Ostro WIT 0.1).
+// Carries both step-handle shapes so the resource-vs-u64 decision can be
+// measured from one set of guests.
+package ostro:spike@0.1.0;
+
+interface journal {
+    resource step {
+        seq: func() -> u64;
+        complete: func(output: string) -> bool;
+    }
+    variant step-start {
+        replayed(string),
+        execute(step),
+    }
+    begin-step: func(name: string) -> step-start;
+    // Fallback shape for the step-handle decision.
+    begin-step-u64: func(name: string) -> u64;
+    complete-u64: func(handle: u64, output: string) -> bool;
+}
+
+interface context {
+    now-ms: func() -> u64;
+    random-u64: func() -> u64;
+}
+
+world spike {
+    import journal;
+    import context;
+
+    // begin-step (resource) -> complete, then begin-step-u64 -> complete-u64.
+    export run: func(input: string) -> string;
+    // Ambient-nondeterminism probes (what the toolchain bakes in at pre-init).
+    export probe-random: func() -> string;
+    export probe-time: func() -> string;
+    export probe-hash: func() -> string;
+    export probe-uuid: func() -> string;
+    // Guest reseeds its PRNG from context.random-u64 (when seed-from-host),
+    // then draws 3 values.
+    export run-reseeded: func(seed-from-host: bool) -> string;
+    // begin-step -> execute(step) -> read seq -> drop without complete.
+    // Used to observe HostStep::drop on the host.
+    export run-dropped-step: func() -> string;
+}
