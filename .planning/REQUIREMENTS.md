@@ -65,7 +65,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 ### Workflow Semantics
 
 - [ ] **WF-01**: Developer can define a workflow with stable name + version and typed JSON input/output [FR-1.1]
-- [ ] **WF-02**: Developer can define steps with retry policy (max attempts, initial/max interval, backoff coefficient, non-retryable kinds), timeout and fuel budget; replay returns recorded results without re-executing [FR-1.2]
+- [x] **WF-02**: Developer can define steps with retry policy (max attempts, initial/max interval, backoff coefficient, non-retryable kinds), timeout and fuel budget; replay returns recorded results without re-executing [FR-1.2]
 - [ ] **WF-03**: Developer can await effects concurrently (gather/all/join) and race them, with completion order journaled and replayed identically [FR-1.3]
 - [ ] **WF-04**: Developer can sleep for a duration or until a time; a sleeping run holds no memory [FR-1.4]
 - [ ] **WF-05**: Developer can wait for a named signal with timeout; callers can send signals via API [FR-1.5]
@@ -284,7 +284,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WIT-06 | Phase 3 | Complete |
 | WIT-07 | Phase 5 | Pending |
 | WF-01 | Phase 4 | Pending |
-| WF-02 | Phase 4 | Pending |
+| WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Pending |
 | WF-04 | Phase 5 | Pending |
 | WF-05 | Phase 5 | Pending |
