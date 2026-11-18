@@ -2,6 +2,7 @@
 //! stack (state store + RF=1 log + apply machine + handle) until `Node` exists.
 #![allow(dead_code, clippy::disallowed_methods, clippy::disallowed_types)]
 
+pub mod flaky_router;
 pub mod manual_hw;
 
 use std::path::Path;
