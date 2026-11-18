@@ -68,7 +68,7 @@ Plans:
 - [x] 01-05-PLAN.md — Spike S2 measurements and report (sizes, instantiate, memory, cold start, randomness, step handle) (W2)
 - [x] 01-06-PLAN.md — Vendor + modernise WAL (ostro-wal), wire ostro-log, complete VENDORED.md, check-vendored.sh (W3)
 - [x] 01-07-PLAN.md — Local CI gate (incl. musl zigbuild) + GitHub Actions matrix; remote legs human_needed (W4)
-- [ ] 01-08-PLAN.md — Quiet-machine confirmation runs + log the three decisions in PROJECT.md (W5)
+- [x] 01-08-PLAN.md — Quiet-machine confirmation runs + log the three decisions in PROJECT.md (W5)
 **Research flag**: Guest toolchain behaviour under `--stub-wasi` (measure, don't assume)
 
 ### Phase 2: Durable Partition Log & State Machine
@@ -241,7 +241,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation, Vendoring & Spikes | 7/8 | In Progress | - |
+| 1. Foundation, Vendoring & Spikes | 8/8 | Plans complete; verification pending (FOUND-05 remote CI human_needed) | - |
 | 2. Durable Partition Log & State Machine | 0/TBD | Not started | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 0/TBD | Not started | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |
