@@ -18,7 +18,6 @@ pub use verify::{Corruption, VerifiedBatch, verify_record};
 // The anchors keep cargo's per-crate `unused_dependencies` lint quiet.
 use metrics as _;
 use tokio as _;
-use tracing as _;
 
 #[cfg(test)]
 mod dev_dep_anchors {
