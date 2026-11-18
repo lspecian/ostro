@@ -65,7 +65,7 @@ Plans:
 - [x] 01-02-PLAN.md — Spike S3: redb durability-tier benchmark, crash sanity, report vs 90k cmds/s rule (W1)
 - [x] 01-03-PLAN.md — Spike S2 apparatus: shared WIT, py/ts/rust guests, Wasmtime 50.0.2 harness (W1)
 - [x] 01-04-PLAN.md — Vendor + modernise raft stack (ostro-raft-proto/-rs/-driver), wire ostro-meta, start VENDORED.md (W2)
-- [ ] 01-05-PLAN.md — Spike S2 measurements and report (sizes, instantiate, memory, cold start, randomness, step handle) (W2)
+- [x] 01-05-PLAN.md — Spike S2 measurements and report (sizes, instantiate, memory, cold start, randomness, step handle) (W2)
 - [ ] 01-06-PLAN.md — Vendor + modernise WAL (ostro-wal), wire ostro-log, complete VENDORED.md, check-vendored.sh (W3)
 - [ ] 01-07-PLAN.md — Local CI gate (incl. musl zigbuild) + GitHub Actions matrix; remote legs human_needed (W4)
 - [ ] 01-08-PLAN.md — Quiet-machine confirmation runs + log the three decisions in PROJECT.md (W5)
@@ -241,7 +241,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation, Vendoring & Spikes | 4/8 | In Progress | - |
+| 1. Foundation, Vendoring & Spikes | 5/8 | In Progress | - |
 | 2. Durable Partition Log & State Machine | 0/TBD | Not started | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 0/TBD | Not started | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |

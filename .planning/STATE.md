@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-11-18T17:32:14.877Z"
-last_activity: "2026-11-18 — Completed 01-04-PLAN.md (raft stack vendored + ostro-meta single-voter smoke test)"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-11-18T17:45:00.000Z"
+last_activity: "2026-11-18 — Completed 01-05-PLAN.md (S2 measurements and report)"
 progress:
   total_phases: 14
   completed_phases: 0
   total_plans: 8
-  completed_plans: 4
-  percent: 50
+  completed_plans: 5
+  percent: 63
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 ## Current Position
 
 Phase: 1 of 14 (Foundation, Vendoring & Spikes)
-Plan: 4 of 8 in current phase (01-01, 01-02, 01-03, 01-04 complete)
+Plan: 5 of 8 in current phase (01-01 to 01-05 complete)
 Status: In progress
-Last activity: 2026-11-18 — Completed 01-04-PLAN.md (raft stack vendored: ostro-raft-proto/-rs/-driver, ostro-meta single-voter smoke test, VENDORED.md)
+Last activity: 2026-11-18 — Completed 01-05-PLAN.md (S2 report: NFR-2.3 met for py/ts/rust, Python 6.5 MB/instance, no reseed after pre-init, Recommendation: resource)
 
-Progress: [█████░░░░░] 50%
+Progress: [██████░░░░] 63%
 
 ## Performance Metrics
 
@@ -54,6 +54,7 @@ Progress: [█████░░░░░] 50%
 | Phase 01 P03 | 12min | 2 tasks | 12 files |
 | Phase 01 P02 | 22min | 2 tasks | 10 files |
 | Phase 01 P04 | 8min | 3 tasks | 41 files |
+| Phase 01 P05 | 25min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,10 @@ Recent decisions affecting current work:
 - [Phase 01]: S3: redb T2 crash sanity 5/5. After kill -9 the db reopens at exactly the last durable checkpoint; None commits are discarded, so recovery replays the WAL from checkpointed_offset
 - [Phase 01]: Vendored crates: empty [lints.rust] table, rustfmt disable_all_formatting, crate-level #![allow(clippy::all)] (upstream deny(clippy::all) broke workspace clippy)
 - [Phase 01]: raft failpoints cfg blocks deleted (no fail dep); ostro-meta reaches raft via ostro_raft_driver::raft re-export
+- [Phase 01]: S2: step handle Recommendation resource (round-trips py/ts/rust; HostStep::drop observable only with SDK RAII/with/using; engine must not rely on drop)
+- [Phase 01]: S2: NFR-2.3 met (instantiate p50 py ~450 us, ts/rust 10-20 us); Python 6.5 MB RSS/instance -> recommend Python embedded by default under NFR-1.3 budgets, not workers
+- [Phase 01]: S2: componentize-py/js do NOT reseed after pre-init; host-driven reseed works in all three; Rust wasip2 imports 16 wasi:*@0.2.12 interfaces (not 17)
+- [Phase 01]: S2: Python component = 38 core instances; wasmtime default pool fits only 26 live Python instances (ENG-08); only Rust builds reproducible
 
 ### Pending Todos
 
@@ -85,8 +90,8 @@ None yet.
 ### Blockers/Concerns
 
 Open research gaps, from research/SUMMARY.md:
-- Do componentize-py/js reseed randomness after pre-init? (S2, Phase 1)
-- Python per-instance memory vs NFR-2. This decides whether Python defaults to workers. (S2, Phase 1)
+- ~~Do componentize-py/js reseed randomness after pre-init?~~ Answered by S2 (01-05): no; SDKs must reseed/patch from ctx.
+- ~~Python per-instance memory vs NFR-2.~~ Answered by S2 (01-05): about 6.5 MB/instance; recommend embedded by default (decision logged in 01-08).
 - macOS notarization entitlement for Cranelift. (Phase 1 smoke test)
 - Does any WAL V2 recovery path decode `canonical_data` as Kafka? (Phase 2)
 - Wasmtime 50.0.2 default stack and pool sizes. (Phase 3)
@@ -97,6 +102,6 @@ Open research gaps, from research/SUMMARY.md:
 
 ## Session Continuity
 
-Last session: 2026-11-18T17:32:14.875Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-11-18T17:45:00.000Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None
