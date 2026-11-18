@@ -98,7 +98,7 @@ Plans:
 - [x] 02-12-PLAN.md — Node: ordered startup, node.toml P check, LeaderAnnounced per term, ReadyBarrier, router, leader skeleton, rebuild (W6)
 - [x] 02-13-PLAN.md — Outbox shuffler + exactly-once property over P=16 with restarts and flaky acks (W7)
 - [x] 02-14-PLAN.md — Lazy windowed timer service + barrier-gated, inert-by-default retention (W7)
-- [ ] 02-15-PLAN.md — Rebuild-digest proptest + ostro-crashtest kill -9 / torn / corruption / failpoint loops (W8)
+- [x] 02-15-PLAN.md — Rebuild-digest proptest + ostro-crashtest kill -9 / torn / corruption / failpoint loops (W8)
 - [ ] 02-16-PLAN.md — fjall reopen/throughput/stall measurement + tuning, docs/storage-format.md, docs/03, CI, phase gate (W9)
 **Research flag**: redb durability tiers; WAL V2 recovery paths (confirm none decode `canonical_data` as Kafka)
 
@@ -296,7 +296,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
-| 2. Durable Partition Log & State Machine | 14/16 | In Progress | - |
+| 2. Durable Partition Log & State Machine | 15/16 | In Progress | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 10/20 | In Progress | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
