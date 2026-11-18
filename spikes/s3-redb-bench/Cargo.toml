@@ -1,0 +1,25 @@
+[package]
+name = "s3-redb-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Spike S3: redb 4.6 apply_batch throughput/latency per durability tier, plus kill -9 crash sanity"
+
+# Standalone workspace root: this spike is never a member of the Ostro root workspace.
+[workspace]
+
+[dependencies]
+redb = "=4.6.0"
+rand = "0.9"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+fjall = { version = "=3.1.13", optional = true }
+
+[features]
+default = []
+# Only compiled if redb fails the locked decision rule (S3 Task 2 fallback).
+fjall = ["dep:fjall"]
+
+[profile.release]
+debug = false
