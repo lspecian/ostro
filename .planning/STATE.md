@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 Phase: 2 and 3 of 14 (planning in parallel; Phase 1 complete)
 Plan: 0 of TBD in current phases
 Phase 2 plan: 2 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2: 02-03/02-04 next)
-Phase 3 plan: 5 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next; 03-02 journal codec + command hash v1 done; 03-06 AOT cache + compile pool done; 03-03 engine config + pooling + limiter + epoch ticker done; 03-05 replay core done)
+Phase 3 plan: 6 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next; 03-02 journal codec + command hash v1 done; 03-06 AOT cache + compile pool done; 03-03 engine config + pooling + limiter + epoch ticker done; 03-05 replay core done; 03-04 WASI shim + validation done)
 Status: Planning Phases 2 (Durable Partition Log & State Machine) and 3 (Deterministic Wasm Engine & WIT 0.1)
 Phase 2 last activity: 2026-11-18 — Completed 02-01-PLAN.md (fjall 3.1.13 replaces redb; Phase 2 deps pinned; deny green with fjall tree; ostro-testkit; nextest crash profile)
-Phase 3 last activity: 2026-11-18 — Completed 03-05-PLAN.md (pure replay core: cursor/divergence at exact seq, time rule, wait ordering, step guard, ChaCha streams, ot1_ await tokens)
+Phase 3 last activity: 2026-11-18 — Completed 03-04-PLAN.md (Ostro-owned deterministic WASI 0.2.12 shim on GuestEnv, deploy-time import/export validation, wasi-probe import snapshot)
 Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 
 Progress: [█░░░░░░░░░] 7% (1/14 phases)
@@ -69,6 +69,7 @@ Progress: [█░░░░░░░░░] 7% (1/14 phases)
 | Phase 03 P06 | 20min | 2 tasks | 3 files |
 | Phase 03 P03 | 35min | 2 tasks | 8 files |
 | Phase 03 P05 | 30min | 1 tasks | 6 files |
+| Phase 03 P04 | 35min | 2 tasks | 23 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,7 @@ Recent decisions affecting current work:
 - [Phase 03 / 03-06]: AOT cache key = hex(sha256(module))-<16 hex of sha256(Wasmtime compat hash + wasmtime/ostro versions + target triple)>; artefacts = cwasm‖HMAC-SHA256(node-local 0600 aot.key), verified on in-memory bytes before Component::deserialize; single flight covers disk lookup + compile. Wasmtime accepts cross-opt-level artefacts (only tunables/features are rejected). 03-03: pin wasm_backtrace_details(Disable) in engine_config
 - [Phase 03 / 03-05]: Replay core API: `ReplayState::patched` returns `Result<bool, ReplayError>` (open-step guard); live event ts = max(clock, last command ts); wait rejects un-issued/non-op ids and wait(any,[]); deliver_inputs rejected while a step is open; finish() abandons an open step
 - [Phase 03 / 03-05]: RNG = RFC 8439 ChaCha20 (key=seed, nonce=stream u32 LE‖0^8); await token = ot1_ + canonical lowercase base32(partition BE‖len u8‖run_id‖op BE‖HMAC-SHA256[..10]); golden vectors computed independently in Python
+- [Phase 03 / 03-04]: Deterministic WASI shim = sync+trappable bindgen over vendored WASI 0.2.12 WIT (crates/ostro-engine/wit-wasi, 18 interfaces), Host impls on a local `WasiImpl<'_, T: GuestEnv>` view; timers never sleep, exit -> GuestExit trap. validate_component collects all violations, instantiate_pre only after allow-list passes; wasi-probe import snapshot guards toolchain bumps
 
 ### Pending Todos
 

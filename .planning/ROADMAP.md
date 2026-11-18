@@ -118,7 +118,7 @@ Plans:
 - [x] 03-01-PLAN.md — Contracts + scaffold: full WIT 0.1, guests workspace + build helper, engine module skeleton/deps, error/sink/env contracts, ostro-types journal types (W1)
 - [x] 03-02-PLAN.md — TDD: journal event/result codec + per-kind command hash v1 with golden vectors (W2)
 - [x] 03-03-PLAN.md — Engine config (NaN canon, det. relaxed SIMD, 4 MiB fiber stack), pooling per language class + wrapped failure/fallback, limiter + node budget, epoch ticker (W2)
-- [ ] 03-04-PLAN.md — Ostro-owned deterministic WASI 0.2.12 shim + deploy-time import/export validation + import-probe snapshot (W2)
+- [x] 03-04-PLAN.md — Ostro-owned deterministic WASI 0.2.12 shim + deploy-time import/export validation + import-probe snapshot (W2)
 - [x] 03-05-PLAN.md — TDD: pure replay core (cursor/divergence, time rule, wait ordering, patch/status/cancel, ChaCha streams, await tokens) (W2)
 - [x] 03-06-PLAN.md — AOT cache: bounded single-flight compile pool, sha256+compat-hash+version key, HMAC-verified load (W2)
 - [ ] 03-07-PLAN.md — Host adapter for every ostro:runtime import over the replay core + production linker + det-basic/wit-surface guests (W3)
@@ -275,7 +275,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 |-------|----------------|--------|-----------|
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 2/16 | In Progress | - |
-| 3. Deterministic Wasm Engine & WIT 0.1 | 5/12 | In Progress | - |
+| 3. Deterministic Wasm Engine & WIT 0.1 | 6/12 | In Progress | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
