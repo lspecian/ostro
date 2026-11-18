@@ -1,0 +1,112 @@
+// Run start, inspection, history and listing
+// (REST: POST /v1/runs, GET /v1/runs/{id}, GET /v1/runs/{id}/history,
+// GET /v1/runs).
+syntax = "proto3";
+
+package ostro.api.v1;
+
+import "ostro/api/v1/common.proto";
+
+service Runs {
+  rpc Start(StartRunRequest) returns (StartRunResponse);
+  rpc Get(GetRunRequest) returns (RunInfo);
+  rpc History(RunHistoryRequest) returns (RunHistoryResponse);
+  rpc List(ListRunsRequest) returns (ListRunsResponse);
+}
+
+message StartRunRequest {
+  string workflow = 1;
+  // UTF-8 JSON input.
+  bytes input_json = 2;
+  // Defaults to the workflow's active version.
+  optional uint32 version = 3;
+  optional string queue = 4;
+  optional uint64 delay_ms = 5;
+  optional int32 priority = 6;
+  repeated string tags = 7;
+  // W3C traceparent.
+  optional string traceparent = 8;
+  optional string tenant = 9;
+  optional string idempotency_key = 10;
+  ConflictPolicy conflict_policy = 11;
+  optional string concurrency_key = 12;
+}
+
+message StartRunResponse {
+  string run_id = 1;
+  // False when an existing run was returned for the idempotency key.
+  bool created = 2;
+}
+
+message GetRunRequest {
+  string run_id = 1;
+}
+
+message RunInfo {
+  string run_id = 1;
+  string workflow = 2;
+  uint32 version = 3;
+  string module_sha256 = 4;
+  string queue = 5;
+  RunStatus status = 6;
+  optional uint32 attempt = 7;
+  repeated string tags = 8;
+  optional string tenant = 9;
+  optional string traceparent = 10;
+  int32 priority = 11;
+  uint64 created_at_ms = 12;
+  optional uint64 completed_at_ms = 13;
+  optional bytes published_status_json = 14;
+  optional bytes result_json = 15;
+  optional string failure = 16;
+  optional string concurrency_key = 17;
+}
+
+message RunHistoryRequest {
+  string run_id = 1;
+  uint64 from_seq = 2;
+  // 0 = server default.
+  uint32 limit = 3;
+}
+
+message HistoryEvent {
+  uint64 seq = 1;
+  string kind = 2;
+  uint64 ts_ms = 3;
+  string summary = 4;
+  // UTF-8 JSON details.
+  bytes details_json = 5;
+}
+
+message RunHistoryResponse {
+  repeated HistoryEvent events = 1;
+  // Set when more events are available.
+  optional uint64 next_from_seq = 2;
+}
+
+message ListRunsRequest {
+  optional string workflow = 1;
+  optional RunStatus status = 2;
+  optional string queue = 3;
+  optional string tag = 4;
+  optional uint64 created_after_ms = 5;
+  optional uint64 created_before_ms = 6;
+  // 0 = server default.
+  uint32 limit = 7;
+  optional string page_token = 8;
+}
+
+message RunSummary {
+  string run_id = 1;
+  string workflow = 2;
+  uint32 version = 3;
+  RunStatus status = 4;
+  string queue = 5;
+  uint64 created_at_ms = 6;
+  repeated string tags = 7;
+}
+
+message ListRunsResponse {
+  repeated RunSummary runs = 1;
+  optional string next_page_token = 2;
+}

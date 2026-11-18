@@ -1,0 +1,36 @@
+// Shared types for the ostro.api.v1 control-plane gRPC services.
+//
+// Conventions (mirrored by the REST surface one-to-one):
+// - JSON payloads travel as `bytes` holding UTF-8 JSON; such fields end in
+//   `_json` so both transports share the domain's JSON validation.
+// - Timestamps are `uint64 *_at_ms` (Unix epoch milliseconds); REST renders
+//   them as RFC 3339.
+// - `optional` marks presence-sensitive scalars.
+syntax = "proto3";
+
+package ostro.api.v1;
+
+// Lifecycle status of a run.
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  SCHEDULED = 1;
+  READY = 2;
+  RUNNING = 3;
+  COMPLETED = 4;
+  FAILED = 5;
+  CANCELLED = 6;
+}
+
+// Behaviour when a StartRun idempotency key already exists.
+enum ConflictPolicy {
+  // Return the existing run (created = false).
+  CONFLICT_POLICY_RETURN_EXISTING = 0;
+  // Reject the request with ALREADY_EXISTS.
+  CONFLICT_POLICY_REJECT = 1;
+}
+
+// A specific version of a named workflow.
+message WorkflowRef {
+  string name = 1;
+  uint32 version = 2;
+}

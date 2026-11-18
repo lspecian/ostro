@@ -1,0 +1,39 @@
+// Module upload and lookup (REST: POST /v1/modules, GET /v1/modules/{sha256}).
+syntax = "proto3";
+
+package ostro.api.v1;
+
+import "ostro/api/v1/common.proto";
+
+service Modules {
+  // Upload a Wasm component. Idempotent on sha256.
+  rpc Upload(UploadModuleRequest) returns (UploadModuleResponse);
+  // Fetch module metadata by sha256.
+  rpc Get(GetModuleRequest) returns (ModuleInfo);
+}
+
+message UploadModuleRequest {
+  // Lowercase hex sha256 of `wasm`; verified by the server.
+  string sha256 = 1;
+  bytes wasm = 2;
+  optional string language = 3;
+}
+
+message UploadModuleResponse {
+  ModuleInfo module = 1;
+  // False when the module already existed.
+  bool created = 2;
+}
+
+message ModuleInfo {
+  string sha256 = 1;
+  uint64 size_bytes = 2;
+  optional string language = 3;
+  repeated WorkflowRef workflows = 4;
+  uint64 uploaded_at_ms = 5;
+}
+
+message GetModuleRequest {
+  // Lowercase hex sha256.
+  string sha256 = 1;
+}
