@@ -81,7 +81,25 @@ Plans:
   3. Every leadership term begins with `LeaderAnnounced{epoch}`. A command carrying a stale `(epoch, attempt)` token is rejected at apply.
   4. Cross-partition messages (child start/complete, signals, cancels, cron starts) are delivered exactly once across P=16 partitions through the outbox and shuffler, even when replayed after a crash. Duplicate `TimerFired` entries have no effect.
   5. A payload over 256 KiB is stored in the blob store and referenced from the journal. WAL segments are never deleted above the last durable checkpoint or before the startup readiness barrier.
-**Plans**: TBD
+**Plans**: 16 plans (9 waves)
+
+Plans:
+- [ ] 02-01-PLAN.md — Wave 0: fjall replaces redb, all Phase 2 workspace deps, cargo-deny with fjall tree, nextest, ostro-testkit corruption helpers, determinism clippy config (W1)
+- [ ] 02-02-PLAN.md — Vendored WAL patches P1 poison / P2 dir fsync / P3 failpoints + VENDORED.md + CI failpoint step (W1)
+- [ ] 02-03-PLAN.md — ostro-types core: ids/RunId, xxh3 routing golden vectors, PayloadRef, 32-byte envelope + CRC32C (W2)
+- [ ] 02-04-PLAN.md — ostro-blob content-addressed durable blob store (W2)
+- [ ] 02-05-PLAN.md — fjall state store layer: per-partition DB, keyspaces, key/value codecs, ApplyBatch overlay, checkpoint, logical digest (W3)
+- [ ] 02-06-PLAN.md — Partition command set (prost) with golden encodings, opaque journal events + Derived intents (W3)
+- [ ] 02-07-PLAN.md — Log recovery: verified full scan, torn-tail vs corruption rule (applied_offset floor), physical cut (W3)
+- [ ] 02-08-PLAN.md — ReplicatedLog trait + RF=1 Rf1Log/LogNode, HW from commit callback, epoch cache, fatal I/O, trim/barrier (W4)
+- [ ] 02-09-PLAN.md — Pure apply core: epoch/attempt fencing, StartRun dedupe, EventsAppended + Derived, payload limit, rolling hash, read budget (W4)
+- [ ] 02-10-PLAN.md — Apply cross-partition: inbound (src, seq) dedupe, child/signal/cancel cascade/cron, outbox truncation, idempotent TimerFired (W5)
+- [ ] 02-11-PLAN.md — Apply machine thread (≤ HW, chunked WriteBatch, 100 ms/256-batch checkpoints), ack rendezvous, PartitionHandle, blob offload, fail-stop (W5)
+- [ ] 02-12-PLAN.md — Node: ordered startup, node.toml P check, LeaderAnnounced per term, ReadyBarrier, router, leader skeleton, rebuild (W6)
+- [ ] 02-13-PLAN.md — Outbox shuffler + exactly-once property over P=16 with restarts and flaky acks (W7)
+- [ ] 02-14-PLAN.md — Lazy windowed timer service + barrier-gated, inert-by-default retention (W7)
+- [ ] 02-15-PLAN.md — Rebuild-digest proptest + ostro-crashtest kill -9 / torn / corruption / failpoint loops (W8)
+- [ ] 02-16-PLAN.md — fjall reopen/throughput/stall measurement + tuning, docs/storage-format.md, docs/03, CI, phase gate (W9)
 **Research flag**: redb durability tiers; WAL V2 recovery paths (confirm none decode `canonical_data` as Kafka)
 
 ### Phase 3: Deterministic Wasm Engine & WIT 0.1
