@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 
 Phase: 2 and 3 of 14 (planning in parallel; Phase 1 complete)
 Plan: 0 of TBD in current phases
-Phase 2 plan: 7 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2 done: 02-03 ostro-types core + 02-04 blob store; wave 3 done: 02-05 fjall state store + 02-06 command set + 02-07 log recovery; wave 4: 02-08/02-09 next)
+Phase 2 plan: 8 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2 done: 02-03 ostro-types core + 02-04 blob store; wave 3 done: 02-05 fjall state store + 02-06 command set + 02-07 log recovery; wave 4: 02-09 apply core done, 02-08 next)
 Phase 3 plan: 7 of 12 complete (wave 1: 03-01 done; wave 2 done: 03-02 codec/hash, 03-03 engine config, 03-04 WASI shim, 03-05 replay core, 03-06 AOT cache; wave 3 done: 03-07 host adapter + production linker + det-basic/wit-surface guests; wave 4: 03-08 next)
 Status: Planning Phases 2 (Durable Partition Log & State Machine) and 3 (Deterministic Wasm Engine & WIT 0.1)
-Phase 2 last activity: 2026-11-18 — Completed 02-07-PLAN.md (ostro-log recovery: verified full scan of every segment, torn-tail vs corruption rule with applied_offset floor, physical cut + fsync, LEO/epoch history rebuild)
+Phase 2 last activity: 2026-11-18 — Completed 02-09-PLAN.md (pure deterministic apply core: epoch/attempt fencing, one-read StartRun dedupe, fenced EventsAppended + Derived intents, 256 KiB inline rule, outbox emit, frozen outcome codes + blake3 rolling hash, chunk-invariant)
 Phase 3 last activity: 2026-11-18 — Completed 03-07-PLAN.md (every ostro:runtime import over the replay core, build_linker = bindings + WASI shim + store-aware step fuel, det-basic/wit-surface guests, live->evict->resume->replay byte-identical)
 Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 
@@ -74,6 +74,7 @@ Progress: [█░░░░░░░░░] 7% (1/14 phases)
 | Phase 02 P03 | 15min | 2 tasks | 8 files |
 | Phase 02 P06 | 12min | 2 tasks | 4 files |
 | Phase 02 P05 | 20min | 2 tasks | 10 files |
+| Phase 02 P09 | 25min | 2 tasks | 11 files |
 | Phase 02 P07 | 20min | 2 tasks | 8 files |
 | Phase 03 P07 | 40min | 3 tasks | 12 files |
 
@@ -133,6 +134,7 @@ Recent decisions affecting current work:
 - [Phase 02 / 02-05]: State store = one fjall Database per partition at <data>/state/pNNNN, 13 keyspaces (Table/TABLES digest order); StoreConfig default 1 worker / 64 MiB journal / 8 MiB memtable / 16 MiB cache; ApplyBatch BTreeMap overlay counts keyspace reads (overlay free, range_prefix = 1) and commits data + applied_offset/state_hash/cursor/inbound_seen in one WriteBatch; digest = blake3 over one snapshot excluding only meta checkpointed_offset; ostro-partition failpoints feature still needs "fail/failpoints" (02-11)
 - [Phase 02 / 02-07]: ostro-log recover_partition(wal_dir, pid, floor=applied_offset) is sync (spawn_blocking), scans every segment via declared_record_size + WalRecord::from_bytes (never the vendored readers), verify_record = frame CRC → V2 → partition → Gap → envelope → trailer. Torn iff last non-empty segment AND expected base >= floor AND (incomplete at EOF | aligned all-zero 512 B sector | all-zero headerless remainder); cut = set_len + fsync file + fsync dir before any WAL queue opens. Empty segments listed, never deleted. EnvelopeError is now Clone
 - [Phase 03 / 03-07]: Host adapter = HostState over ReplayState; build_linker(engine) is the one production linker (ostro bindings + WASI shim). Per-step fuel: begin-step / [method]step.complete shadowed with sync func_wrap getting StoreContextMut (bindgen `store` flag needs component-model-async, not enabled); dropped budgeted step charges its full budget. record_terminal: replayed terminal of a different kind = NonDeterminism. Unsatisfied wait traps Evict{WaitUnsatisfied} (03-08 flushes after unwind)
+- [Phase 02 / 02-09]: Apply core = pure apply_command(batch, cursor, off, env_epoch, bytes) → ApplyOutcome; validate-all-then-write, ≤1 keyspace read per hot-path command; outcome codes frozen (Accepted 0, Duplicate 1, Rejected 16+idx: StaleEpoch 16 … Invalid 26) and folded into H_n = blake3(H_{n-1}‖off_le‖code‖cmd) (golden fold_hash([0;32],0,0,"x") = 2044af1e…f75e); Cursor.next = applied_offset; delayed start = timer (ready_at, run, START_DELAY_OP=u64::MAX); added InvalidCode::BadIntent/FieldTooLong
 
 ### Pending Todos
 
