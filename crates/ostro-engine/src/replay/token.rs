@@ -1,4 +1,19 @@
-//! Await tokens (stub; implemented in the GREEN step).
+//! Await tokens (WIT-05 `create-await-token`).
+//!
+//! `"ot1_" + base32_lower_nopad(partition BE(2) || len(run_id) u8 || run_id ||
+//! op BE(8) || hmac_sha256(key, those bytes)[..10])`. The token routes an external
+//! completion to its partition, run and op; the truncated HMAC (80 bits) authenticates
+//! it. The base32 decoder accepts only canonical RFC 4648 encodings (lowercase, no
+//! padding, zero trailing bits), so every token has exactly one spelling.
+
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+const PREFIX: &str = "ot1_";
+const TAG_LEN: usize = 10;
+const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 /// Decoded token fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,29 +23,102 @@ pub struct TokenParts {
     pub op: u64,
 }
 
-#[allow(unused_variables)]
+fn mac(key: &[u8; 32], body: &[u8]) -> HmacSha256 {
+    let mut m = <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
+    m.update(body);
+    m
+}
+
+/// Mint a token for `(partition, run_id, op)`.
+///
+/// # Panics
+///
+/// If `run_id` is longer than 255 bytes (engine-generated run ids are far shorter).
 pub fn mint(partition: u16, run_id: &str, op: u64, key: &[u8; 32]) -> String {
-    todo!()
+    let len = u8::try_from(run_id.len()).expect("run id longer than 255 bytes");
+    let mut bytes = Vec::with_capacity(2 + 1 + run_id.len() + 8 + TAG_LEN);
+    bytes.extend_from_slice(&partition.to_be_bytes());
+    bytes.push(len);
+    bytes.extend_from_slice(run_id.as_bytes());
+    bytes.extend_from_slice(&op.to_be_bytes());
+    let tag = mac(key, &bytes).finalize().into_bytes();
+    bytes.extend_from_slice(&tag[..TAG_LEN]);
+    format!("{PREFIX}{}", base32_encode(&bytes))
 }
 
-#[allow(unused_variables)]
+/// Decoded body and tag of a well-formed token.
+fn split(token: &str) -> Option<(TokenParts, Vec<u8>, usize)> {
+    let bytes = base32_decode(token.strip_prefix(PREFIX)?)?;
+    let len = usize::from(*bytes.get(2)?);
+    if bytes.len() != 2 + 1 + len + 8 + TAG_LEN {
+        return None;
+    }
+    let partition = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let run_id = std::str::from_utf8(&bytes[3..3 + len]).ok()?.to_owned();
+    let op = u64::from_be_bytes(bytes[3 + len..3 + len + 8].try_into().ok()?);
+    let body_len = 3 + len + 8;
+    Some((
+        TokenParts {
+            partition,
+            run_id,
+            op,
+        },
+        bytes,
+        body_len,
+    ))
+}
+
+/// Parse a token's fields without checking its HMAC.
 pub fn parse(token: &str) -> Option<TokenParts> {
-    todo!()
+    split(token).map(|(parts, _, _)| parts)
 }
 
-#[allow(unused_variables)]
+/// Whether `token` is well formed and its HMAC verifies under `key` (constant time).
 pub fn verify(token: &str, key: &[u8; 32]) -> bool {
-    todo!()
+    let Some((_, bytes, body_len)) = split(token) else {
+        return false;
+    };
+    let (body, tag) = bytes.split_at(body_len);
+    mac(key, body).verify_truncated_left(tag).is_ok()
 }
 
-#[allow(unused_variables)]
+/// RFC 4648 base32, lowercase alphabet, no padding.
 fn base32_encode(bytes: &[u8]) -> String {
-    todo!()
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for &b in bytes {
+        acc = ((acc << 8) | u32::from(b)) & 0xffff;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(char::from(ALPHABET[((acc >> bits) & 31) as usize]));
+        }
+    }
+    if bits > 0 {
+        out.push(char::from(ALPHABET[((acc << (5 - bits)) & 31) as usize]));
+    }
+    out
 }
 
-#[allow(unused_variables)]
+/// Inverse of [`base32_encode`]; rejects non-alphabet chars, impossible lengths and
+/// non-zero trailing bits.
 fn base32_decode(s: &str) -> Option<Vec<u8>> {
-    todo!()
+    let mut out = Vec::with_capacity(s.len() * 5 / 8);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes() {
+        let v = ALPHABET.iter().position(|&a| a == c)? as u32;
+        acc = ((acc << 5) | v) & 0xffff;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    // Leftover bits must be fewer than 5 (otherwise a whole char was redundant) and zero.
+    if bits >= 5 || acc & ((1 << bits) - 1) != 0 {
+        return None;
+    }
+    Some(out)
 }
 
 #[cfg(test)]

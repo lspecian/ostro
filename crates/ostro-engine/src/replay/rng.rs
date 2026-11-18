@@ -1,50 +1,118 @@
-//! Per-run deterministic randomness (stub; implemented in the GREEN step).
+//! Per-run deterministic randomness (ENG-04, WIT-04).
+//!
+//! Every run has four independent RFC 8439 ChaCha20 keystreams derived from its
+//! journaled [`RngSeed`]: key = seed bytes, nonce = `(stream as u32).to_le_bytes() ||
+//! [0u8; 8]`, block counter starting at 0. Output is the raw keystream consumed
+//! sequentially, so the same seed yields the same bytes in the same order on every
+//! replay. The encoding is pinned by golden vectors (computed independently).
 
+use chacha20::ChaCha20;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 use ostro_types::journal::RngSeed;
+use sha2::{Digest, Sha256};
 
 use crate::env::RandomStream;
 
-/// One ChaCha20 keystream.
+/// Domain separator for `wasi:random/insecure-seed`.
+const INSECURE_SEED_DOMAIN: &[u8] = b"ostro/insecure-seed/v1";
+
+/// One deterministic ChaCha20 keystream.
 pub struct ChaChaStream {
-    _p: (),
+    cipher: ChaCha20,
 }
 
-#[allow(unused_variables)]
+impl std::fmt::Debug for ChaChaStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChaChaStream").finish_non_exhaustive()
+    }
+}
+
 impl ChaChaStream {
+    /// Keystream `stream` of the run seeded with `seed`.
     pub fn new(seed: &RngSeed, stream: RandomStream) -> Self {
-        todo!()
+        let mut nonce = [0u8; 12];
+        nonce[..4].copy_from_slice(&(stream as u32).to_le_bytes());
+        Self {
+            cipher: ChaCha20::new(&seed.0.into(), &nonce.into()),
+        }
     }
+
+    /// Overwrite `buf` with the next keystream bytes.
     pub fn fill(&mut self, buf: &mut [u8]) {
-        todo!()
+        buf.fill(0);
+        self.cipher.apply_keystream(buf);
     }
+
+    /// Next 8 keystream bytes as a little-endian u64.
     pub fn next_u64(&mut self) -> u64 {
-        todo!()
+        let mut b = [0u8; 8];
+        self.fill(&mut b);
+        u64::from_le_bytes(b)
     }
 }
 
 /// The four independent per-run streams.
+#[derive(Debug)]
 pub struct RngStreams {
-    _p: (),
+    ctx: ChaChaStream,
+    uuid: ChaChaStream,
+    wasi: ChaChaStream,
+    insecure: ChaChaStream,
 }
 
-#[allow(unused_variables)]
 impl RngStreams {
+    /// All streams of the run seeded with `seed`, each at position 0.
     pub fn new(seed: &RngSeed) -> Self {
-        todo!()
+        Self {
+            ctx: ChaChaStream::new(seed, RandomStream::CtxRandom),
+            uuid: ChaChaStream::new(seed, RandomStream::Uuid),
+            wasi: ChaChaStream::new(seed, RandomStream::WasiRandom),
+            insecure: ChaChaStream::new(seed, RandomStream::WasiInsecure),
+        }
     }
+
+    /// The stream for `stream`.
     pub fn stream(&mut self, stream: RandomStream) -> &mut ChaChaStream {
-        todo!()
+        match stream {
+            RandomStream::CtxRandom => &mut self.ctx,
+            RandomStream::Uuid => &mut self.uuid,
+            RandomStream::WasiRandom => &mut self.wasi,
+            RandomStream::WasiInsecure => &mut self.insecure,
+        }
     }
 }
 
-#[allow(unused_variables)]
+/// `wasi:random/insecure-seed`: first 16 bytes of
+/// `sha256(b"ostro/insecure-seed/v1" || seed)` as two little-endian u64.
 pub fn insecure_seed(seed: &RngSeed) -> (u64, u64) {
-    todo!()
+    let mut h = Sha256::new();
+    h.update(INSECURE_SEED_DOMAIN);
+    h.update(seed.0);
+    let d = h.finalize();
+    let mut a = [0u8; 8];
+    let mut b = [0u8; 8];
+    a.copy_from_slice(&d[..8]);
+    b.copy_from_slice(&d[8..16]);
+    (u64::from_le_bytes(a), u64::from_le_bytes(b))
 }
 
-#[allow(unused_variables)]
+/// RFC 9562 UUIDv7: 48-bit big-endian `now_ms`, version 7, then 74 random bits from
+/// 10 bytes of `stream` with the variant bits set; lowercase hyphenated.
 pub fn uuid_v7(now_ms: u64, stream: &mut ChaChaStream) -> String {
-    todo!()
+    let mut b = [0u8; 16];
+    b[..6].copy_from_slice(&now_ms.to_be_bytes()[2..]);
+    stream.fill(&mut b[6..]);
+    b[6] = (b[6] & 0x0f) | 0x70;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 #[cfg(test)]
