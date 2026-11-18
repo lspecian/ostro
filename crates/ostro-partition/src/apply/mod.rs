@@ -18,6 +18,9 @@
 //!   (outcome codes: see [`outcome`]).
 //! - **Read budget:** hot-path commands (`StartRun`, `AttemptGranted`,
 //!   `EventsAppended`) issue at most one keyspace point read each.
+//!   `TimerFired` reads at most twice (timer row, then run record);
+//!   `OutboxTruncated` is blind (zero reads); `InboundBatch` reads per
+//!   message (see `inbound`).
 //! - **No chunk leakage (Pitfall 9):** nothing depends on batch boundaries;
 //!   [`apply_chunk`] is a plain loop over [`apply_command`].
 
