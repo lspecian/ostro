@@ -13,7 +13,11 @@ use ostro_meta::{
 use proptest::prelude::*;
 
 fn put(record: MetaRecord, expected_version: Option<u64>) -> MetaCommand {
-    MetaCommand::Put { key: record.key(), expected_version, record }
+    MetaCommand::Put {
+        key: record.key(),
+        expected_version,
+        record,
+    }
 }
 
 fn version_of(state: &MetaState, key: &MetaKey) -> Option<u64> {
@@ -38,18 +42,40 @@ fn every_kind_create_conflict_cas_stale_delete() {
 
         // Delete / CAS on an absent key.
         assert_eq!(
-            s.apply(next(), MetaCommand::Delete { key: key.clone(), expected_version: 1 }),
+            s.apply(
+                next(),
+                MetaCommand::Delete {
+                    key: key.clone(),
+                    expected_version: 1
+                }
+            ),
             MetaResult::NotFound,
             "{kind:?}"
         );
-        assert_eq!(s.apply(next(), put(r1.clone(), Some(1))), MetaResult::NotFound, "{kind:?}");
-        assert_eq!(s, MetaState::default(), "{kind:?}: rejected ops leave state unchanged");
+        assert_eq!(
+            s.apply(next(), put(r1.clone(), Some(1))),
+            MetaResult::NotFound,
+            "{kind:?}"
+        );
+        assert_eq!(
+            s,
+            MetaState::default(),
+            "{kind:?}: rejected ops leave state unchanged"
+        );
 
         // Create.
         let at = next();
-        assert_eq!(s.apply(at, put(r1.clone(), None)), MetaResult::Ok { version: 1 }, "{kind:?}");
+        assert_eq!(
+            s.apply(at, put(r1.clone(), None)),
+            MetaResult::Ok { version: 1 },
+            "{kind:?}"
+        );
         let got = s.get(&key).expect("created");
-        assert_eq!((got.version, got.updated_index, &got.value), (1, at, &r1), "{kind:?}");
+        assert_eq!(
+            (got.version, got.updated_index, &got.value),
+            (1, at, &r1),
+            "{kind:?}"
+        );
 
         // Create of an existing key -> Conflict, unchanged.
         let before = s.clone();
@@ -71,7 +97,11 @@ fn every_kind_create_conflict_cas_stale_delete() {
         }
 
         // CAS chain.
-        assert_eq!(s.apply(next(), put(r2.clone(), Some(1))), MetaResult::Ok { version: 2 }, "{kind:?}");
+        assert_eq!(
+            s.apply(next(), put(r2.clone(), Some(1))),
+            MetaResult::Ok { version: 2 },
+            "{kind:?}"
+        );
         assert_eq!(s.get(&key).unwrap().value, r2, "{kind:?}");
         let before = s.clone();
         assert_eq!(
@@ -80,23 +110,43 @@ fn every_kind_create_conflict_cas_stale_delete() {
             "{kind:?}: pre-CAS version is stale"
         );
         assert_eq!(s, before, "{kind:?}");
-        assert_eq!(s.apply(next(), put(r3.clone(), Some(2))), MetaResult::Ok { version: 3 }, "{kind:?}");
+        assert_eq!(
+            s.apply(next(), put(r3.clone(), Some(2))),
+            MetaResult::Ok { version: 3 },
+            "{kind:?}"
+        );
 
         // Delete requires the exact version.
         let before = s.clone();
         assert_eq!(
-            s.apply(next(), MetaCommand::Delete { key: key.clone(), expected_version: 2 }),
+            s.apply(
+                next(),
+                MetaCommand::Delete {
+                    key: key.clone(),
+                    expected_version: 2
+                }
+            ),
             MetaResult::StaleVersion { current: 3 },
             "{kind:?}"
         );
         assert_eq!(s, before, "{kind:?}");
         assert_eq!(
-            s.apply(next(), MetaCommand::Delete { key: key.clone(), expected_version: 3 }),
+            s.apply(
+                next(),
+                MetaCommand::Delete {
+                    key: key.clone(),
+                    expected_version: 3
+                }
+            ),
             MetaResult::Ok { version: 3 },
             "{kind:?}"
         );
         assert_eq!(version_of(&s, &key), None, "{kind:?}");
-        assert_eq!(s, MetaState::default(), "{kind:?}: delete leaves nothing behind");
+        assert_eq!(
+            s,
+            MetaState::default(),
+            "{kind:?}: delete leaves nothing behind"
+        );
     }
 }
 
@@ -107,12 +157,29 @@ fn key_record_mismatch_is_invalid() {
         let other = MetaKind::ALL[(i + 1) % MetaKind::ALL.len()];
         let record = MetaRecord::sample(other, 1, 1);
         let key = MetaRecord::sample(kind, 1, 1).key();
-        let r = s.apply(1, MetaCommand::Put { key, expected_version: None, record });
-        assert!(matches!(r, MetaResult::Invalid(_)), "{kind:?} key with {other:?} record: {r:?}");
+        let r = s.apply(
+            1,
+            MetaCommand::Put {
+                key,
+                expected_version: None,
+                record,
+            },
+        );
+        assert!(
+            matches!(r, MetaResult::Invalid(_)),
+            "{kind:?} key with {other:?} record: {r:?}"
+        );
     }
     // Same kind, different identity.
     let record = MetaRecord::sample(MetaKind::Queue, 1, 1);
-    let r = s.apply(1, MetaCommand::Put { key: MetaKey::Queue("other".into()), expected_version: None, record });
+    let r = s.apply(
+        1,
+        MetaCommand::Put {
+            key: MetaKey::Queue("other".into()),
+            expected_version: None,
+            record,
+        },
+    );
     assert!(matches!(r, MetaResult::Invalid(_)), "{r:?}");
     assert_eq!(s, MetaState::default());
 }
@@ -132,11 +199,22 @@ fn init_cluster_creates_and_is_idempotent() {
     let mut s = MetaState::default();
     assert_eq!(s.apply(1, init(16)), MetaResult::Ok { version: 1 });
     let c = s.cluster().unwrap();
-    assert_eq!((c.value.cluster_id.as_str(), c.value.partitions), ("c1", 16));
+    assert_eq!(
+        (c.value.cluster_id.as_str(), c.value.partitions),
+        ("c1", 16)
+    );
     assert_eq!(s.member(1).unwrap().value.node_id, 1);
     for p in 0..16 {
         let a = s.partition(p).unwrap();
-        assert_eq!((a.version, a.value.epoch, a.value.leader, a.value.isr.clone()), (0, 0, 1, vec![1]));
+        assert_eq!(
+            (
+                a.version,
+                a.value.epoch,
+                a.value.leader,
+                a.value.isr.clone()
+            ),
+            (0, 0, 1, vec![1])
+        );
     }
     assert!(s.partition(16).is_none());
     assert_eq!(s.token_key(), Some([7; 32]));
@@ -159,13 +237,21 @@ fn init_cluster_creates_and_is_idempotent() {
         other => panic!("expected Invalid, got {other:?}"),
     }
     assert_eq!(s, before);
-    assert!(matches!(MetaState::default().apply(1, init(0)), MetaResult::Invalid(_)));
+    assert!(matches!(
+        MetaState::default().apply(1, init(0)),
+        MetaResult::Invalid(_)
+    ));
 }
 
 #[test]
 fn set_partition_leader_epochs() {
     let mut s = MetaState::default();
-    let set = |epoch, leader| MetaCommand::SetPartitionLeader { partition: 3, epoch, leader, isr: vec![leader] };
+    let set = |epoch, leader| MetaCommand::SetPartitionLeader {
+        partition: 3,
+        epoch,
+        leader,
+        isr: vec![leader],
+    };
     assert_eq!(s.apply(1, set(1, 1)), MetaResult::NotFound);
     s.apply(2, init(16));
     assert_eq!(s.apply(3, set(2, 1)), MetaResult::Ok { version: 2 });
@@ -179,13 +265,24 @@ fn set_partition_leader_epochs() {
     assert_eq!(s.apply(5, set(2, 9)), MetaResult::Conflict { current: 2 });
     assert_eq!(s, before);
     // Lower epoch: stale.
-    assert_eq!(s.apply(6, set(1, 1)), MetaResult::StaleVersion { current: 2 });
+    assert_eq!(
+        s.apply(6, set(1, 1)),
+        MetaResult::StaleVersion { current: 2 }
+    );
     assert_eq!(s, before);
     assert_eq!(s.apply(7, set(5, 2)), MetaResult::Ok { version: 5 });
     assert_eq!(s.partition(3).unwrap().value.leader, 2);
     // A Put with a lower epoch is stale too.
-    let lower = MetaRecord::Partition(ostro_meta::PartitionAssignment { partition: 3, leader: 1, epoch: 4, isr: vec![1] });
-    assert_eq!(s.apply(8, put(lower, Some(5))), MetaResult::StaleVersion { current: 5 });
+    let lower = MetaRecord::Partition(ostro_meta::PartitionAssignment {
+        partition: 3,
+        leader: 1,
+        epoch: 4,
+        isr: vec![1],
+    });
+    assert_eq!(
+        s.apply(8, put(lower, Some(5))),
+        MetaResult::StaleVersion { current: 5 }
+    );
 }
 
 #[test]
@@ -201,7 +298,11 @@ fn encoding_round_trips_and_rejects_unknown_format() {
     let mut trailing = bytes;
     trailing.push(0);
     assert!(decode_command(&trailing).is_err());
-    for r in [MetaResult::Ok { version: 3 }, MetaResult::StaleVersion { current: 1 }, MetaResult::Invalid("x".into())] {
+    for r in [
+        MetaResult::Ok { version: 3 },
+        MetaResult::StaleVersion { current: 1 },
+        MetaResult::Invalid("x".into()),
+    ] {
         assert_eq!(decode_result(&encode_result(&r)).unwrap(), r);
     }
 }
