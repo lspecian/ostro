@@ -6,10 +6,10 @@
 
 use bytes::Bytes;
 use ostro_types::command::{
-    self, AttemptGranted, AttemptTokenMsg, CancelTimer, ChildCompleted, CompleteRun, ConflictPolicy,
-    CronStart, Derived, EnqueueReady, EventsAppended, InboundBatch, InboundMsg, JournalEvent,
-    LeaderAnnounced, OutboxMsg, OutboxTruncated, ParentRef, ScheduleTimer, SendMessage, Signal,
-    StartChild, StartRun, TerminalStatus, TimerFired, decode_command, encode_command,
+    self, AttemptGranted, AttemptTokenMsg, CancelTimer, ChildCompleted, CompleteRun,
+    ConflictPolicy, CronStart, Derived, EnqueueReady, EventsAppended, InboundBatch, InboundMsg,
+    JournalEvent, OutboxMsg, OutboxTruncated, ParentRef, ScheduleTimer, SendMessage, Signal,
+    StartRun, TerminalStatus, TimerFired, decode_command, encode_command,
 };
 use ostro_types::{AttemptToken, Command, Epoch, PartitionId, PayloadRef, RunId};
 use proptest::prelude::*;
@@ -22,7 +22,13 @@ fn run(p: u16, tail: u8) -> RunId {
 }
 
 fn token(epoch: u32, n: u32) -> Option<AttemptTokenMsg> {
-    Some(AttemptToken { epoch: Epoch(epoch), n }.into())
+    Some(
+        AttemptToken {
+            epoch: Epoch(epoch),
+            n,
+        }
+        .into(),
+    )
 }
 
 fn sample_start(p: u16) -> StartRun {
