@@ -3,8 +3,10 @@
 //! fjall replaced redb after spike S3 (see docs/spikes/S3-redb-durability.md
 //! and PROJECT.md Key Decisions).
 
+pub mod apply;
 pub mod store;
 
+pub use apply::{Action, ApplyOutcome, Cursor, RejectReason, apply_chunk, apply_command};
 pub use store::{PartitionStore, StoreConfig, StoreError, StoreMeta, TABLES, Table};
 
 // Dependencies wired in plan 02-01 ahead of their consuming plans.
@@ -12,7 +14,6 @@ pub use store::{PartitionStore, StoreConfig, StoreError, StoreMeta, TABLES, Tabl
 use bytes as _;
 use metrics as _;
 use ostro_blob as _;
-use ostro_log as _;
 use tokio as _;
 use tracing as _;
 

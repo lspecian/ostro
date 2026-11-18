@@ -13,8 +13,7 @@ use ostro_partition::store::values::{self, ReadySlot, ReadyValue, RunRecord, Run
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
     AttemptGranted, AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EnqueueReady,
-    EventsAppended, JournalEvent, ScheduleTimer, StartRun, TerminalStatus, derived,
-    encode_command,
+    EventsAppended, JournalEvent, ScheduleTimer, StartRun, TerminalStatus, derived, encode_command,
 };
 use ostro_types::{
     AttemptToken, Command, Epoch, INLINE_PAYLOAD_LIMIT, PartitionCount, PartitionId, PayloadRef,
@@ -411,9 +410,7 @@ fn start_run_delayed() {
             concurrency_key: "ck".into()
         }]
     );
-    let input = h
-        .get(Table::Payloads, &payload_key(&r2, 0))
-        .expect("input");
+    let input = h.get(Table::Payloads, &payload_key(&r2, 0)).expect("input");
     assert_eq!(PayloadRef::decode(&*input).unwrap(), inline(b"in").unwrap());
 
     assert_eq!(h.apply(0, &grant(&r2, 0, 1)), ApplyOutcome::Accepted);
@@ -503,7 +500,9 @@ fn complete_run_then_more_intents_is_invalid() {
         result: None,
         completed_at_ms: 9,
     }));
-    let again = intent(derived::Intent::EnqueueReady(EnqueueReady { ready_at_ms: 5 }));
+    let again = intent(derived::Intent::EnqueueReady(EnqueueReady {
+        ready_at_ms: 5,
+    }));
     assert_eq!(
         h.apply(1, &events(&r, (1, 1), 0, vec![], vec![done, again])),
         rej(RejectReason::Invalid(InvalidCode::BadIntent))
@@ -514,7 +513,9 @@ fn complete_run_then_more_intents_is_invalid() {
 #[test]
 fn enqueue_ready_intent() {
     let (mut h, r) = running(0, 1);
-    let rdy = intent(derived::Intent::EnqueueReady(EnqueueReady { ready_at_ms: 77 }));
+    let rdy = intent(derived::Intent::EnqueueReady(EnqueueReady {
+        ready_at_ms: 77,
+    }));
     let (o, a) = h.apply_act(1, &events(&r, (1, 1), 0, vec![ev(0)], vec![rdy]));
     assert_eq!(o, ApplyOutcome::Accepted);
     let run = h.run(&r).expect("run");
