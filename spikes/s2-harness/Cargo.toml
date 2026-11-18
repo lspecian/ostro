@@ -1,0 +1,18 @@
+[package]
+name = "s2-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of the root Ostro workspace.
+[workspace]
+
+[dependencies]
+wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "cranelift", "component-model", "pooling-allocator", "parallel-compilation", "std"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+
+[profile.release]
+debug = false
