@@ -27,8 +27,10 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 
 Phase: 2 and 3 of 14 (planning in parallel; Phase 1 complete)
 Plan: 0 of TBD in current phases
+Phase 2 plan: 1 of 16 complete (02-02 WAL patches P1/P2/P3 done; 02-01 Wave 0 pending)
 Phase 3 plan: 1 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next)
 Status: Planning Phases 2 (Durable Partition Log & State Machine) and 3 (Deterministic Wasm Engine & WIT 0.1)
+Phase 2 last activity: 2026-11-18 — Completed 02-02-PLAN.md (vendored WAL poison-on-I/O-error, dir fsync, failpoints; failpoint CI step)
 Phase 3 last activity: 2026-11-18 — Completed 03-01-PLAN.md (WIT 0.1 world compiles host+guest; engine skeleton; ostro_types::journal)
 Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 
@@ -61,6 +63,7 @@ Progress: [█░░░░░░░░░] 7% (1/14 phases)
 | Phase 01 P07 | 15min | 2 tasks | 3 files |
 | Phase 01 P08 | 14min | 2 tasks | 11 files |
 | Phase 03 P01 | 25min | 3 tasks | 35 files |
+| Phase 02 P02 | 14min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -99,6 +102,8 @@ Recent decisions affecting current work:
 - [Phase 01 / 01-08]: Phase 2 research items tagged [S3] (durability tiers, Durability::None + Immediate checkpoint, 2PC/quick-repair, repair time) now apply to fjall: PersistMode/persist cadence, journal-replay reopen time, memtable/journal sizing, flush/compaction workers. STOR-05's "redb" wording is superseded by the fjall decision
 - [Phase 01 / 01-08]: DECIDED Wasmtime pin policy = track latest major monthly, pinned exactly (=50.0.2 now; 51 due ~2026-12-20), one bump PR per release with replay corpus green; ship 1.0 on 60 LTS (~Aug 2027); fallback freeze on 48 LTS if bumps cost > ~1 day each; bump rust-toolchain.toml with Wasmtime's MSRV
 - [Phase 01 / 01-08]: Python embedded by default (6.5 MB RSS/instance, NFR-2.3 met with >20x margin, confirmed on a quiet machine); pools sized per language class (Python = 38 core instances/instance; default pool fits 26 Python instances), workers remain the scaling path. Revisit memory in Phase 9 with a realistic stdlib footprint
+- [Phase 02 / 02-02]: ostro-wal is fail-stop per partition: any write/fsync (or seal/rotate/truncate) I/O error poisons the queue (WalError::Poisoned, worker stops, GroupCommitWal::is_poisoned); poison flag checked under the pending lock; truncate_to on a poisoned partition returns Poisoned. Recovery = reopen the WAL
+- [Phase 02 / 02-02]: Failpoint suites run single-threaded via FAILPOINT_CRATES in scripts/ci-local.sh (+ linux-x86_64-gnu CI step); later Phase 2 crates append themselves and need `failpoints = ["dep:fail", "fail/failpoints"]`
 - [Phase 03 / 03-01]: guests/ is a separate cargo workspace (excluded from root, guests/Cargo.lock gitignored, deps pinned exactly); integration tests get guest wasm via tests/common::guest_wasm(name)
 - [Phase 03 / 03-01]: Toolchain cargo has a per-crate `unused_dependencies` lint; deps wired before their consuming plan are anchored with `use x as _;` (engine lib.rs: chacha20/hmac/metrics/tracing; ostro-types journal.rs: postcard/sha2)
 - [Phase 03 / 03-01]: Journal EventKind codes pinned: RunStarted=1, guest commands 16–28, inputs 64–69 (ranges 1–15 run record, 16–63 commands, 64–127 inputs, 128+ reserved)
