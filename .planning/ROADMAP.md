@@ -63,7 +63,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [x] 01-01-PLAN.md — Workspace skeleton (11 crates with real deps) on Rust 1.100.0 + cargo-deny policy and negative fixtures (W1)
 - [ ] 01-02-PLAN.md — Spike S3: redb durability-tier benchmark, crash sanity, report vs 90k cmds/s rule (W1)
-- [ ] 01-03-PLAN.md — Spike S2 apparatus: shared WIT, py/ts/rust guests, Wasmtime 50.0.2 harness (W1)
+- [x] 01-03-PLAN.md — Spike S2 apparatus: shared WIT, py/ts/rust guests, Wasmtime 50.0.2 harness (W1)
 - [ ] 01-04-PLAN.md — Vendor + modernise raft stack (ostro-raft-proto/-rs/-driver), wire ostro-meta, start VENDORED.md (W2)
 - [ ] 01-05-PLAN.md — Spike S2 measurements and report (sizes, instantiate, memory, cold start, randomness, step handle) (W2)
 - [ ] 01-06-PLAN.md — Vendor + modernise WAL (ostro-wal), wire ostro-log, complete VENDORED.md, check-vendored.sh (W3)
@@ -241,7 +241,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation, Vendoring & Spikes | 1/8 | In Progress | - |
+| 1. Foundation, Vendoring & Spikes | 2/8 | In Progress | - |
 | 2. Durable Partition Log & State Machine | 0/TBD | Not started | - |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 0/TBD | Not started | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-11-18T17:23:57.744Z"
-last_activity: 2026-11-18 — Roadmap created (14 phases, 136/136 v1 requirements mapped)
+status: executing
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-11-18T17:24:52.927Z"
+last_activity: 2026-11-18 — Completed 01-03-PLAN.md (S2 spike apparatus)
 progress:
   total_phases: 14
   completed_phases: 0
   total_plans: 8
-  completed_plans: 1
-  percent: 13
+  completed_plans: 2
+  percent: 25
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 ## Current Position
 
 Phase: 1 of 14 (Foundation, Vendoring & Spikes)
-Plan: 1 of 8 in current phase
+Plan: 2 of 8 in current phase (01-01, 01-03 complete)
 Status: In progress
-Last activity: 2026-11-18 — Completed 01-01-PLAN.md (workspace bootstrap + cargo-deny policy)
+Last activity: 2026-11-18 — Completed 01-03-PLAN.md (S2 spike apparatus: shared WIT, py/ts/rust guests, wasmtime 50.0.2 harness)
 
-Progress: [█░░░░░░░░░] 13%
+Progress: [███░░░░░░░] 25%
 
 ## Performance Metrics
 
@@ -51,6 +51,7 @@ Progress: [█░░░░░░░░░] 13%
 
 *Updated after each plan completion*
 | Phase 01 P01 | 4min | 3 tasks | 37 files |
+| Phase 01 P03 | 12min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -68,6 +69,8 @@ Recent decisions affecting current work:
 - [Roadmap]: Rust `ostro build` exists only as a direct cargo build until Phase 10. CLI-04 (hermetic three-language build) is mapped to Phase 10.
 - [Phase 01]: rustls kept as a normal dep of ostro-api (pub tls_provider) so aws-lc-rs stays visible to cargo-deny with exclude-dev
 - [Phase 01]: Unused workspace-dependency warnings (metrics, thiserror, tracing, prost-build) accepted until plans 01-04/01-06 consume them
+- [Phase 01]: S2 harness defines unknown imports as traps (no wasmtime-wasi); WASI-touching probes report traps as findings
+- [Phase 01]: S2 smoke: TS completed resource steps are never dropped without explicit Symbol.dispose; Rust std HashMap traps without a WASI random shim
 
 ### Pending Todos
 
@@ -87,6 +90,6 @@ Open research gaps, from research/SUMMARY.md:
 
 ## Session Continuity
 
-Last session: 2026-11-18T17:23:57.742Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-11-18T17:24:52.926Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
