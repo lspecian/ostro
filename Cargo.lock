@@ -1285,6 +1285,11 @@ dependencies = [
 [[package]]
 name = "ostro-log"
 version = "0.1.0"
+dependencies = [
+ "ostro-wal",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "ostro-meta"
