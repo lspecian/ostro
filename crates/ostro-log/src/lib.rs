@@ -17,6 +17,7 @@ use tracing as _;
 
 #[cfg(test)]
 mod dev_dep_anchors {
+    use ostro_testkit as _;
     use proptest as _;
     use tempfile as _;
 }

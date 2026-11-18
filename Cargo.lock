@@ -1677,6 +1677,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "metrics",
+ "ostro-testkit",
  "ostro-types",
  "ostro-wal",
  "proptest",
@@ -1706,6 +1707,7 @@ dependencies = [
  "metrics",
  "ostro-blob",
  "ostro-log",
+ "ostro-testkit",
  "ostro-types",
  "postcard",
  "proptest",

@@ -52,6 +52,7 @@ xxhash-rust = { version = "0.8.21", features = ["xxh3"] }
 uuid = { version = "1", features = ["v7"] }
 fail = "0.5.1"
 proptest-state-machine = "0.9.0"
+ostro-testkit = { path = "crates/ostro-testkit" }
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

@@ -7,17 +7,41 @@ use std::path::{Path, PathBuf};
 /// Panics on Linux if the directory is under `/mnt/` (WSL2 9p), where fsync
 /// semantics are meaningless.
 pub fn tempdir() -> tempfile::TempDir {
-    unimplemented!()
+    let dir = tempfile::Builder::new()
+        .prefix("ostro-test-")
+        .tempdir_in(std::env::temp_dir())
+        .expect("create temp dir");
+    #[cfg(target_os = "linux")]
+    assert!(
+        !dir.path().starts_with("/mnt/"),
+        "tests must run on a Linux filesystem, not WSL2 9p (/mnt): fsync semantics are meaningless there (temp dir: {})",
+        dir.path().display()
+    );
+    dir
 }
 
 /// Length of the file at `path` in bytes (panics if it cannot be stat'ed).
 pub fn file_len(path: &Path) -> u64 {
-    unimplemented!("{}", path.display())
+    std::fs::metadata(path)
+        .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+        .len()
 }
 
 /// Files directly in `dir` whose names start with `prefix` and end with `suffix`, sorted by name.
 pub fn list_files_sorted(dir: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
-    unimplemented!("{} {prefix} {suffix}", dir.display())
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+        .map(|e| e.expect("dir entry"))
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(suffix))
+        })
+        .map(|e| e.path())
+        .collect();
+    out.sort();
+    out
 }
 
 #[cfg(test)]

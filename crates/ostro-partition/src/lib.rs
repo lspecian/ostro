@@ -35,6 +35,7 @@ pub fn open_smoke(path: &Path) -> fjall::Result<fjall::Database> {
 mod tests {
     use super::*;
     use fjall::{KeyspaceCreateOptions, PersistMode};
+    use ostro_testkit as _;
     use proptest as _;
     use proptest_state_machine as _;
 

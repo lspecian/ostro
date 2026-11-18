@@ -9,7 +9,10 @@ pub mod fs;
 
 /// Number of proptest cases: `PROPTEST_CASES` when set and parseable, else `default`.
 pub fn proptest_cases(default: u32) -> u32 {
-    unimplemented!("{default}")
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 #[cfg(test)]

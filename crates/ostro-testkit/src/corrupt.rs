@@ -1,35 +1,94 @@
 //! Offline corruption helpers. Each mutator opens the file read+write,
 //! applies the change and calls `sync_all()`.
 
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+
+fn open_rw(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(path)
+}
+
+fn invalid(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg)
+}
+
+fn write_zeros(f: &mut File, start: u64, len: u64) -> io::Result<()> {
+    f.seek(SeekFrom::Start(start))?;
+    let zeros = vec![0u8; usize::try_from(len).map_err(|e| invalid(e.to_string()))?];
+    f.write_all(&zeros)?;
+    f.sync_all()
+}
 
 /// Sector size used by [`zero_sector`].
 pub const SECTOR: u64 = 512;
 
 /// Flip bit `bit` (0 = LSB, must be < 8) of the byte at `byte_pos`.
 pub fn flip_bit(path: &Path, byte_pos: u64, bit: u8) -> io::Result<()> {
-    unimplemented!("{} {byte_pos} {bit}", path.display())
+    if bit >= 8 {
+        return Err(invalid(format!("bit {bit} out of range 0..8")));
+    }
+    let mut f = open_rw(path)?;
+    let len = f.metadata()?.len();
+    if byte_pos >= len {
+        return Err(invalid(format!("byte {byte_pos} past EOF ({len})")));
+    }
+    let mut b = [0u8; 1];
+    f.seek(SeekFrom::Start(byte_pos))?;
+    f.read_exact(&mut b)?;
+    b[0] ^= 1 << bit;
+    f.seek(SeekFrom::Start(byte_pos))?;
+    f.write_all(&b)?;
+    f.sync_all()
 }
 
 /// Zero `[start, start + len)`; errors if the range extends past EOF.
 pub fn zero_range(path: &Path, start: u64, len: u64) -> io::Result<()> {
-    unimplemented!("{} {start} {len}", path.display())
+    let mut f = open_rw(path)?;
+    let file_len = f.metadata()?.len();
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| invalid("range overflows u64".into()))?;
+    if end > file_len {
+        return Err(invalid(format!(
+            "range {start}..{end} past EOF ({file_len})"
+        )));
+    }
+    write_zeros(&mut f, start, len)
 }
 
 /// Zero the 512-byte aligned sector `sector`, clamped at EOF.
 pub fn zero_sector(path: &Path, sector: u64) -> io::Result<()> {
-    unimplemented!("{} {sector}", path.display())
+    let mut f = open_rw(path)?;
+    let file_len = f.metadata()?.len();
+    let start = sector
+        .checked_mul(SECTOR)
+        .ok_or_else(|| invalid("sector offset overflows u64".into()))?;
+    if start >= file_len {
+        return Err(invalid(format!(
+            "sector {sector} starts past EOF ({file_len})"
+        )));
+    }
+    let len = SECTOR.min(file_len - start);
+    write_zeros(&mut f, start, len)
 }
 
 /// Shrink the file to `len` bytes; errors if `len` exceeds the current length.
 pub fn truncate_at(path: &Path, len: u64) -> io::Result<()> {
-    unimplemented!("{} {len}", path.display())
+    let f = open_rw(path)?;
+    let cur = f.metadata()?.len();
+    if len > cur {
+        return Err(invalid(format!("truncate to {len} exceeds length {cur}")));
+    }
+    f.set_len(len)?;
+    f.sync_all()
 }
 
 /// Append `bytes` at EOF (simulates an incomplete record at the tail).
 pub fn append_garbage(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    unimplemented!("{} {}", path.display(), bytes.len())
+    let mut f = OpenOptions::new().append(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 #[cfg(test)]
