@@ -8,6 +8,7 @@ pub mod domain;
 pub mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+pub mod grpc;
 mod openapi;
 pub mod rest;
 
@@ -15,6 +16,9 @@ pub use domain::ControlPlane;
 pub use error::{ApiError, ErrorCode};
 pub use openapi::openapi;
 
+use ostro_proto::api::v1::{
+    modules_server::ModulesServer, runs_server::RunsServer, workflows_server::WorkflowsServer,
+};
 use ostro_proto::health::v1::{
     CheckRequest, CheckResponse,
     health_server::{Health, HealthServer},
@@ -60,16 +64,33 @@ impl Default for ApiConfig {
     }
 }
 
+/// Bytes allowed on top of `max_module_bytes` for the rest of an `UploadModuleRequest`
+/// (sha256, language, protobuf tags/lengths).
+const GRPC_UPLOAD_HEADROOM: usize = 4 * 1024;
+
 /// The UI shell page with the server version filled in.
 pub fn ui_shell_html() -> String {
     include_str!("ui_shell.html").replace("{{version}}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Build the combined one-port router: REST (`/v1/...`), `/openapi.json`, `/healthz`,
-/// `/readyz`, the UI shell at `/`, and the tonic gRPC services.
+/// `/readyz`, the UI shell at `/`, and the tonic gRPC services (`ostro.health.v1.Health`,
+/// `ostro.api.v1.{Modules,Workflows,Runs}`) under their `/<package>.<Service>/` paths.
+///
+/// The Modules server's decode limit is raised from tonic's 4 MiB default to
+/// `cfg.max_module_bytes` (plus framing headroom) so uploads accepted over REST are
+/// accepted over gRPC too; every other service keeps the default.
 pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
     let (rest, _doc) = rest::api_routes(cfg.max_module_bytes).split_for_parts();
-    let grpc = tonic::service::Routes::new(HealthServer::new(HealthSvc)).into_axum_router();
+    let grpc = tonic::service::Routes::new(HealthServer::new(HealthSvc))
+        .add_service(
+            ModulesServer::new(grpc::GrpcModules(cp.clone())).max_decoding_message_size(
+                cfg.max_module_bytes.saturating_add(GRPC_UPLOAD_HEADROOM),
+            ),
+        )
+        .add_service(WorkflowsServer::new(grpc::GrpcWorkflows(cp.clone())))
+        .add_service(RunsServer::new(grpc::GrpcRuns(cp.clone())))
+        .into_axum_router();
     rest.with_state(cp)
         // Route-level limits (the module upload) are inner layers and win over this one.
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes))
