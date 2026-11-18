@@ -37,14 +37,21 @@ fi
 loadavg() { cut -d' ' -f1-3 /proc/loadavg; }
 
 # tag <file> <guest> <allocator> <kind> [extra-json] : read one JSON line on
-# stdin, add tags, append compact JSON to <file>.
+# stdin, add tags, append compact JSON to <file>. The harness's own
+# allocator object (strategy + pooling overrides) is kept as allocator_config.
 tag() {
     local file="$1" guest="$2" alloc="$3" kind="$4" extra="${5:-}"
     [[ -n "$extra" ]] || extra='{}'
     jq -c --arg g "$guest" --arg a "$alloc" --arg k "$kind" \
         --arg l "$(loadavg)" --arg t "$RUN_TAG" --argjson x "$extra" \
-        '. + {guest:$g, allocator:$a, kind:$k, loadavg:$l} + (if $t == "" then {} else {run_tag:$t} end) + $x' \
+        '(if (.allocator|type) == "object" then {allocator_config:.allocator} else {} end) as $c | . + $c + {guest:$g, allocator:$a, kind:$k, loadavg:$l} + (if $t == "" then {} else {run_tag:$t} end) + $x' \
         >>"$file"
+}
+
+# Force a from-scratch Rust guest build (otherwise cargo reuses the artefact
+# and "independent builds" are byte copies).
+clean_rust() {
+    (cd "$HERE/rust" && cargo +1.100.0 clean --release --target wasm32-wasip2 -q)
 }
 
 ensure_wasm() {
@@ -156,6 +163,7 @@ phase_probes() {
     done
     # Second, independent build of each guest: answers "random across builds".
     for g in py ts rust; do
+        [[ "$g" == rust ]] && clean_rust
         bash "$HERE/build.sh" "$g" -b
         "$HARNESS" compile "$OUT/$g-b.wasm" "$OUT/$g-b.cwasm" >/dev/null
         "$HARNESS" probes "$OUT/$g-b.cwasm" | tag "$fp" "$g" "on-demand" probes '{"build":"b"}'
@@ -171,6 +179,7 @@ phase_repro() {
     for g in py ts rust; do
         echo "## $g (PYTHONHASHSEED unset)" >>"$f"
         for s in r1 r2 r3; do
+            [[ "$g" == rust ]] && clean_rust
             env -u PYTHONHASHSEED bash "$HERE/build.sh" "$g" "-$s" | grep '^built' >>"$f"
         done
     done
@@ -188,6 +197,9 @@ phase_repro() {
             else
                 echo "$g-$base vs $g-$s: differ ($(cmp -l "$OUT/$g-$base.wasm" "$OUT/$g-$s.wasm" | wc -l) bytes)" >>"$f"
                 cmp -l "$OUT/$g-$base.wasm" "$OUT/$g-$s.wasm" | head -20 | sed 's/^/  /' >>"$f" || true
+                echo "  section attribution (wasm_sections.py, first 8 paths):" >>"$f"
+                python3 -I "$HERE/wasm_sections.py" "$OUT/$g-$base.wasm" "$OUT/$g-$s.wasm" \
+                    | head -9 | sed 's/^/    /' >>"$f" || true
             fi
         done
     done
