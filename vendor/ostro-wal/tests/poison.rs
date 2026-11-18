@@ -151,8 +151,10 @@ async fn pending_writes_behind_a_failed_batch_all_fail() {
     // Create the queue up front so all 50 race on the same worker.
     wal.append(TOPIC.into(), 0, record(0, 0), 1).await.expect("healthy append");
 
-    // Slow the failing fsync down so later appends pile up behind it.
-    fail::cfg("wal::fsync", "sleep(50)->return").unwrap();
+    // Park the worker inside the next write (`pause`), let the remaining
+    // appends pile up in the queue behind it, then make that batch's fsync
+    // fail and release the worker.
+    fail::cfg("wal::write", "pause").unwrap();
     let mut handles = Vec::new();
     for i in 1..=50i64 {
         let wal = Arc::clone(&wal);
@@ -160,6 +162,9 @@ async fn pending_writes_behind_a_failed_batch_all_fail() {
             wal.append(TOPIC.into(), 0, record(0, i), 1).await
         }));
     }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    fail::cfg("wal::fsync", "return").unwrap();
+    fail::remove("wal::write"); // wakes the paused write; its fsync then fails
     let mut oks = 0;
     for h in handles {
         let r = tokio::time::timeout(std::time::Duration::from_secs(10), h)

@@ -63,4 +63,9 @@ pub enum WalError {
 
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
+
+    /// Ostro P1: a write or fsync error poisoned this partition; it accepts no
+    /// further writes until the WAL is reopened (fsyncgate).
+    #[error("WAL partition poisoned: {0}")]
+    Poisoned(String),
 }

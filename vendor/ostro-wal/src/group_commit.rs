@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::RwLock;  // v2.2.10: For interior mutability of commit_callback
 use std::time::{Duration, Instant};
 use bytes::Bytes;
@@ -55,6 +55,19 @@ impl WalWriter {
 
     /// Write data to WAL
     async fn write_all(&mut self, data: &[u8]) -> Result<()> {
+        // Ostro P3: `wal::write` failpoint. `return(enospc)` writes the first
+        // half of the buffer and then fails (a torn, partial write);
+        // anything else fails with EIO before writing.
+        #[cfg(feature = "failpoints")]
+        if let Some(arg) = fail::eval("wal::write", |arg| arg) {
+            let WalWriter::Standard(file) = self;
+            if arg.as_deref() == Some("enospc") {
+                file.write_all(&data[..data.len() / 2]).await?;
+                file.flush().await?;
+                return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
+            }
+            return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
+        }
         match self {
             WalWriter::Standard(file) => {
                 file.write_all(data).await?;
@@ -65,6 +78,9 @@ impl WalWriter {
 
     /// Fsync WAL
     async fn sync_all(&self) -> Result<()> {
+        // Ostro P3: `wal::fsync` failpoint (EIO).
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("wal::fsync", |_| Err(std::io::Error::from_raw_os_error(libc::EIO).into()));
         match self {
             WalWriter::Standard(file) => {
                 file.sync_all().await?;
@@ -72,6 +88,41 @@ impl WalWriter {
             }
         }
     }
+
+    /// Ostro P1: cut the active segment back to its last durable length after a
+    /// failed write, so a partial batch does not linger as a torn tail.
+    async fn set_len(&self, len: u64) -> Result<()> {
+        match self {
+            WalWriter::Standard(file) => {
+                file.set_len(len).await?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Ostro P2: fsync a directory so entries created, renamed or removed in it
+/// (segment files) survive power loss. Blocking; see [`fsync_dir`].
+pub fn fsync_dir_blocking(dir: &Path) -> Result<()> {
+    #[cfg(feature = "failpoints")]
+    fail::fail_point!("wal::dir_fsync", |_| Err(std::io::Error::from_raw_os_error(libc::EIO).into()));
+    #[cfg(unix)]
+    {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+    Ok(())
+}
+
+/// Ostro P2: async wrapper around [`fsync_dir_blocking`] (runs on the blocking pool).
+pub async fn fsync_dir(dir: &Path) -> Result<()> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || fsync_dir_blocking(&dir))
+        .await
+        .map_err(|e| WalError::IoError(format!("directory fsync task failed: {e}")))?
 }
 
 /// Configuration for group commit behavior
@@ -350,6 +401,71 @@ struct PartitionCommitQueue {
     /// no file will ever hold. So the cache may only answer at or below this,
     /// which makes it strictly an accelerator over durable state.
     committed_through: Arc<AtomicI64>,
+
+    /// Ostro P1: set on any write/fsync error (fsyncgate). Once set, the
+    /// partition accepts no more writes and its worker stops: after a failed
+    /// fsync the kernel may have dropped dirty pages, so nothing written on
+    /// this fd afterwards can be trusted as durable.
+    poisoned: AtomicBool,
+
+    /// Ostro P1: why the partition was poisoned (first error wins).
+    poison_reason: std::sync::Mutex<Option<String>>,
+
+    /// Ostro P1: bytes of the active segment known to be durable; a failed
+    /// write is cut back to this length (best effort).
+    durable_len: AtomicU64,
+}
+
+impl PartitionCommitQueue {
+    /// Ostro P1: mark the partition poisoned (idempotent; first reason kept).
+    /// Does not touch any lock other than the reason mutex, so it is safe to
+    /// call while holding the pending or writer lock.
+    fn mark_poisoned(&self, reason: &str) {
+        if let Ok(mut r) = self.poison_reason.lock() {
+            if r.is_none() {
+                *r = Some(reason.to_string());
+            }
+        }
+        if !self.poisoned.swap(true, Ordering::SeqCst) {
+            error!(topic = %self.topic, partition = self.partition, reason = %reason,
+                "WAL partition poisoned: no further writes will be accepted");
+        }
+        // Wake the worker so it drains anything queued and stops.
+        self.write_notify.notify_one();
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::SeqCst)
+    }
+
+    fn poisoned_error(&self) -> WalError {
+        let reason = self
+            .poison_reason
+            .lock()
+            .ok()
+            .and_then(|r| r.clone())
+            .unwrap_or_else(|| format!("{}/{}", self.topic, self.partition));
+        WalError::Poisoned(reason)
+    }
+
+    /// Ostro P1: fail every queued write. Caller must not hold `pending`.
+    async fn fail_pending(&self) {
+        let drained: Vec<PendingWrite> = self.pending.lock().await.drain(..).collect();
+        self.total_queued_bytes.store(0, Ordering::Relaxed);
+        Self::fail_writes(drained, &self.poisoned_error());
+    }
+
+    fn fail_writes(writes: impl IntoIterator<Item = PendingWrite>, err: &WalError) {
+        let reason = match err {
+            WalError::Poisoned(r) => r.clone(),
+            other => other.to_string(),
+        };
+        for w in writes {
+            if let Some(tx) = w.response_tx {
+                let _ = tx.send(Err(WalError::Poisoned(reason.clone())));
+            }
+        }
+    }
 }
 
 /// A bounded, in-memory suffix of a partition's log.
@@ -856,6 +972,11 @@ impl GroupCommitWal {
 
         // Enqueue without response channel
         let mut pending = queue.pending.lock().await;
+        // Ostro P1: checked under the pending lock, so a write either lands
+        // before the poisoning drain (and is failed by it) or sees the flag.
+        if queue.is_poisoned() {
+            return Err(queue.poisoned_error());
+        }
         pending.push_back(PendingWrite {
             data,
             response_tx: None,
@@ -908,6 +1029,12 @@ impl GroupCommitWal {
         // 4. Return queue depth
         let should_commit = {
             let mut pending = queue.pending.lock().await;
+
+            // Ostro P1: refuse writes to a poisoned partition (under the lock;
+            // see enqueue_nowait).
+            if queue.is_poisoned() {
+                return Err(queue.poisoned_error());
+            }
 
             // Check backpressure (inside lock to avoid TOCTOU race)
             if !is_raft_topic && pending.len() >= self.config.max_queue_depth {
@@ -995,6 +1122,15 @@ impl GroupCommitWal {
             &wal_path,
         ).await?;
 
+        // Ostro P2: make the new segment's directory entry (and the partition
+        // and topic directories, which create_dir_all may just have made)
+        // durable before any record in it can be acknowledged.
+        fsync_dir(&partition_dir).await?;
+        if let Some(topic_dir) = partition_dir.parent() {
+            fsync_dir(topic_dir).await?;
+        }
+        fsync_dir(&self.base_dir).await?;
+
         let queue = Arc::new(PartitionCommitQueue {
             pending: Mutex::new(VecDeque::new()),
             total_queued_bytes: AtomicU64::new(0),  // Now atomic instead of Mutex
@@ -1010,6 +1146,9 @@ impl GroupCommitWal {
             truncation_epoch: Arc::new(AtomicU64::new(0)),
             tail: Mutex::new(TailCache::new(self.config.tail_cache_bytes)),
             committed_through: Arc::new(AtomicI64::new(i64::MIN)),
+            poisoned: AtomicBool::new(false),
+            poison_reason: std::sync::Mutex::new(None),
+            durable_len: AtomicU64::new(0),
         });
 
         // Publish the queue BEFORE starting its worker. The worker exits as
@@ -1078,6 +1217,14 @@ impl GroupCommitWal {
                         queue.topic, queue.partition);
                     return;
                 }
+                // Ostro P1: a poisoned partition (e.g. poisoned by a seal or
+                // truncation path) fails whatever is queued and stops.
+                if queue.is_poisoned() {
+                    queue.fail_pending().await;
+                    error!("🛑 WORKER_EXIT: partition {}:{} is poisoned, committer stopping",
+                        queue.topic, queue.partition);
+                    return;
+                }
                 // v2.2.9 fix: Changed hot-path logs from debug! to trace! to prevent log bomb
                 // With 1000s of partitions, these logs fire 10x/sec per partition = 180K lines/sec
                 trace!("🔄 WORKER_LOOP: Waiting for interval tick (PostgreSQL-style wait queue)");
@@ -1122,6 +1269,14 @@ impl GroupCommitWal {
                     &commit_callback,  // v2.2.10: Pass callback for async response delivery
                 ).await {
                     error!("❌ WORKER_ERROR: Commit batch failed: {}", e);
+                    // Ostro P1: never keep writing on an fd whose write/fsync
+                    // failed (fsyncgate). The partition is poisoned; stop.
+                    if matches!(e, WalError::Poisoned(_)) || queue.is_poisoned() {
+                        queue.fail_pending().await;
+                        error!("🛑 WORKER_EXIT: partition {}:{} poisoned, committer stopping",
+                            queue.topic, queue.partition);
+                        return;
+                    }
                 } else {
                     trace!("✅ WORKER_SUCCESS: commit_batch completed successfully");
                 }
@@ -1217,11 +1372,48 @@ impl GroupCommitWal {
             return Ok(());
         }
 
-        file.write_all(&combined_buffer).await?;
+        // Ostro P1: poisoned between drain and taking the writer (a seal or
+        // truncation failed): do not write, fail the batch and the queue.
+        if queue.is_poisoned() {
+            drop(file);
+            queue.total_queued_bytes.fetch_sub(total_bytes as u64, Ordering::Relaxed);
+            queue.tail.lock().await.clear();
+            let err = queue.poisoned_error();
+            PartitionCommitQueue::fail_writes(batch, &err);
+            queue.fail_pending().await;
+            return Err(err);
+        }
 
-        debug!("🔄 COMMIT_FSYNC: Starting fsync for {} bytes", total_bytes);
-        // Single fsync for entire batch ⭐
-        file.sync_all().await?;
+        // Ostro P1 (fsyncgate, STOR-07): a write or fsync error poisons the
+        // partition. The batch's waiters, every queued waiter and every later
+        // append get `Poisoned`; `committed_through` does not advance and the
+        // commit callback is not invoked.
+        debug!("🔄 COMMIT_FSYNC: write + fsync for {} bytes", total_bytes);
+        let io = match file.write_all(&combined_buffer).await {
+            Ok(()) => file.sync_all().await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = io {
+            let reason = format!(
+                "WAL write/fsync failed for {}/{}: {}",
+                queue.topic, queue.partition, e
+            );
+            queue.mark_poisoned(&reason);
+            // Best effort: cut the torn/undurable suffix back to the last
+            // durable length. The partition stays poisoned either way.
+            let durable = queue.durable_len.load(Ordering::SeqCst);
+            if let Err(te) = file.set_len(durable).await {
+                warn!(topic = %queue.topic, partition = queue.partition, error = %te,
+                    "best-effort truncation of failed batch did not succeed");
+            }
+            drop(file);
+            queue.total_queued_bytes.fetch_sub(total_bytes as u64, Ordering::Relaxed);
+            queue.tail.lock().await.clear();
+            let err = queue.poisoned_error();
+            PartitionCommitQueue::fail_writes(batch, &err);
+            queue.fail_pending().await;
+            return Err(err);
+        }
         drop(file);
         debug!("✅ COMMIT_FSYNC_DONE: fsync completed successfully");
 
@@ -1242,7 +1434,10 @@ impl GroupCommitWal {
         let fsync_duration = start.elapsed();
 
         // Update segment size
-        queue.segment_size_bytes.fetch_add(total_bytes as u64, Ordering::Relaxed);
+        let new_size = queue.segment_size_bytes.fetch_add(total_bytes as u64, Ordering::Relaxed)
+            + total_bytes as u64;
+        // Ostro P1: everything up to here is fsynced.
+        queue.durable_len.store(new_size, Ordering::SeqCst);
 
         // Update metrics
         if config.enable_metrics {
@@ -1343,12 +1538,28 @@ impl GroupCommitWal {
         )
         .await?;
 
+        // Ostro P2: the new segment's directory entry must be durable before
+        // any record in it is acknowledged. Failing that, the partition is
+        // poisoned (P1): we can neither trust the new file nor safely keep
+        // appending to the sealed one.
+        if let Some(dir) = new_file_path.parent() {
+            if let Err(e) = fsync_dir(dir).await {
+                let reason = format!(
+                    "directory fsync failed rotating {}/{}: {}",
+                    queue.topic, queue.partition, e
+                );
+                queue.mark_poisoned(&reason);
+                return Err(queue.poisoned_error());
+            }
+        }
+
         *file = new_writer;
         queue.segment_id.store(new_segment_id, Ordering::Relaxed);
 
         // Reset segment tracking
         *queue.segment_created_at.lock().await = Instant::now();
         queue.segment_size_bytes.store(0, Ordering::Relaxed);
+        queue.durable_len.store(0, Ordering::SeqCst);
 
         info!(
             "✅ Rotated to new segment {}/{} segment_id={}",
@@ -1380,7 +1591,16 @@ impl GroupCommitWal {
             .join(queue.partition.to_string())
             .join(format!("wal_{}_{}.log", queue.partition, old_segment_id));
 
-        file.sync_all().await?;
+        // Ostro P1: a failed seal fsync poisons the partition.
+        if queue.is_poisoned() {
+            return Err(queue.poisoned_error());
+        }
+        if let Err(e) = file.sync_all().await {
+            queue.mark_poisoned(&format!(
+                "seal fsync failed for {}/{}: {}", queue.topic, queue.partition, e
+            ));
+            return Err(queue.poisoned_error());
+        }
 
         // Size after the fsync, so the recorded size covers every durable byte.
         let file_size = if old_file_path.exists() {
@@ -1474,7 +1694,16 @@ impl GroupCommitWal {
             queue.topic, queue.partition, old_segment_id, current_size, segment_age
         );
 
-        file.sync_all().await?;
+        // Ostro P1: a failed seal fsync poisons the partition.
+        if queue.is_poisoned() {
+            return Err(queue.poisoned_error());
+        }
+        if let Err(e) = file.sync_all().await {
+            queue.mark_poisoned(&format!(
+                "seal fsync failed for {}/{}: {}", queue.topic, queue.partition, e
+            ));
+            return Err(queue.poisoned_error());
+        }
 
         // Re-read the counter under the lock: a commit may have landed between
         // the should_seal check and acquiring the writer.
@@ -1590,6 +1819,12 @@ impl GroupCommitWal {
     ) -> Result<TruncateOutcome> {
         let queue = self.get_or_create_queue(topic, partition).await?;
 
+        // Ostro P1: a poisoned partition is fail-stop; truncation (and the
+        // rotation it ends with) would write through the same failed fd.
+        if queue.is_poisoned() {
+            return Err(queue.poisoned_error());
+        }
+
         // Bump before taking any lock: a batch the commit worker has already
         // drained is past the queue lock and can only be caught here.
         queue.truncation_epoch.fetch_add(1, Ordering::SeqCst);
@@ -1614,12 +1849,35 @@ impl GroupCommitWal {
             .committed_through
             .store(target_offset.saturating_sub(1), Ordering::SeqCst);
 
-        // Everything committed so far must be visible to the scan below.
-        file.sync_all().await?;
+        // Ostro P1: any failure from here on (fsync, set_len, unlink, dir
+        // fsync, rotation) leaves the files in an unknown state, so it poisons
+        // the partition and fails the dropped writes with `Poisoned`.
+        macro_rules! poison_on_err {
+            ($e:expr, $what:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(err) => {
+                        queue.mark_poisoned(&format!(
+                            "{} failed during truncation of {}/{}: {}",
+                            $what, topic, partition, err
+                        ));
+                        drop(file);
+                        drop(pending);
+                        let perr = queue.poisoned_error();
+                        PartitionCommitQueue::fail_writes(dropped, &perr);
+                        return Err(perr);
+                    }
+                }
+            };
+        }
 
-        let mut outcome = self
-            .truncate_partition_files(topic, partition, target_offset)
-            .await?;
+        // Everything committed so far must be visible to the scan below.
+        poison_on_err!(file.sync_all().await, "fsync");
+
+        let mut outcome = poison_on_err!(
+            self.truncate_partition_files(topic, partition, target_offset).await,
+            "segment truncation"
+        );
         outcome.buffered_writes_dropped = dropped.len();
 
         if outcome.touched_disk() {
@@ -1628,12 +1886,15 @@ impl GroupCommitWal {
             // grew, which its "same id, same size ⇒ already done" bookkeeping
             // reads as new work over old bytes. A fresh segment also keeps
             // segment ids monotonic, so no deleted id is ever reused.
-            Self::rotate_to_new_segment(
-                &queue,
-                &mut file,
-                &self.base_dir,
-            )
-            .await?;
+            poison_on_err!(
+                Self::rotate_to_new_segment(
+                    &queue,
+                    &mut file,
+                    &self.base_dir,
+                )
+                .await,
+                "rotation"
+            );
 
             info!(
                 topic = %topic,
@@ -1803,6 +2064,9 @@ impl GroupCommitWal {
                         file.set_len(keep_bytes).await?;
                         file.sync_all().await?;
                         drop(file);
+                        // Ostro P2: make the new length durable in the
+                        // directory as well before reporting the cut.
+                        fsync_dir(&partition_dir).await?;
 
                         // The registry advertises sizes to the indexer; a stale
                         // one sends it reading past the new end of the file.
@@ -1871,10 +2135,15 @@ impl GroupCommitWal {
         self.sealed_segments
             .remove(&format!("{}:{}:{}", topic, partition, segment_id));
         match tokio::fs::remove_file(path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
         }
+        // Ostro P2: the unlink is durable only once the directory is fsynced.
+        if let Some(dir) = path.parent() {
+            fsync_dir(dir).await?;
+        }
+        Ok(())
     }
 
     /// Correct a sealed segment's recorded size after it was shortened.
@@ -1982,6 +2251,10 @@ impl GroupCommitWal {
         };
         if path.exists() {
             std::fs::remove_file(&path)?;
+            // Ostro P2: fsync the parent so the unlink survives power loss.
+            if let Some(dir) = path.parent() {
+                fsync_dir_blocking(dir)?;
+            }
             info!("DeleteRecords: removed WAL segment file {:?}", path);
         }
         Ok(())
@@ -2004,7 +2277,13 @@ impl GroupCommitWal {
             return Ok(false);
         };
         match std::fs::remove_file(&segment_info.file_path) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                // Ostro P2: fsync the parent so the unlink survives power loss.
+                if let Some(dir) = segment_info.file_path.parent() {
+                    fsync_dir_blocking(dir)?;
+                }
+                Ok(true)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => {
                 // Keep tracking it, so the file is not forgotten while still on disk.
@@ -2190,6 +2469,15 @@ impl GroupCommitWal {
     /// Get the base directory for WAL files
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    /// Ostro P1: whether a write/fsync error has poisoned this partition.
+    /// `false` for a partition with no queue in this process.
+    pub fn is_poisoned(&self, topic: &str, partition: i32) -> bool {
+        self.partition_queues
+            .get(&(topic.to_string(), partition))
+            .map(|q| q.is_poisoned())
+            .unwrap_or(false)
     }
 }
 
