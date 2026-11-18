@@ -1,5 +1,12 @@
 //! ostro-partition: per-partition state store (skeleton over redb).
 
+use std::path::Path;
+
+/// Open (or create) the partition's redb database at `path`.
+pub fn open(path: impl AsRef<Path>) -> Result<redb::Database, redb::DatabaseError> {
+    redb::Database::create(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
