@@ -139,7 +139,29 @@ Plans:
   3. A step that fails is retried per its policy (backoff, max attempts, non-retryable kinds). After eviction or restart, replay returns recorded results without re-executing completed steps. Native time/random calls in the guest replay identically.
   4. Starting a run twice with the same idempotency key returns the existing run or rejects, depending on the conflict policy. Run status, history and filtered run lists come back through the API.
   5. Metadata (modules, workflows, queues, tokens) persists across restart through the single-voter Raft group. A stale metadata record never overwrites a newer one. When an executor loses its lease, the run is re-dispatched after `lease_ttl` and the zombie's late completion is fenced out.
-**Plans**: TBD
+**Plans**: 20 plans (8 waves; plans editing ostro-partition apply/store/handle or ostro-types command.rs are gated behind 04-09, which requires Phase 2 complete)
+
+Plans:
+- [ ] 04-01-PLAN.md — ostro-meta: records, versioned CAS apply, MetaSm snapshot, MetaHandle with immediate campaign (META-01/02/03)
+- [ ] 04-02-PLAN.md — Workspace pins + ostro-server skeleton with layered ServerConfig + one-port smoke test (CLI-02)
+- [ ] 04-03-PLAN.md — ostro.api.v1 protos (Modules, Workflows, Runs) via protox (API-01)
+- [ ] 04-04-PLAN.md — StepAttemptFailed (kind 29, additive) + pure retry decision + replay attempt chains (WF-02)
+- [ ] 04-05-PLAN.md — Rust SDK runtime crate (sdks/rust/ostro-sdk): bindings, Ctx, step runner, ops, join!/select!, export! (SDK-01)
+- [ ] 04-06-PLAN.md — #[workflow]/#[step] macros + trybuild + SDK test guests validated on the engine (SDK-01, WF-01, WF-07)
+- [ ] 04-07-PLAN.md — Host step retry: retry-now, StepBackoff eviction, Runtime::prepared(sha) (WF-02)
+- [ ] 04-08-PLAN.md — ControlPlane trait, domain types, ApiError mapping, REST + utoipa OpenAPI + UI shell (API-01..04)
+- [ ] 04-09-PLAN.md — PHASE-4 GATE (Phase 2 complete) + StartRun fields 14..18 + Derived::Suspend (API-03)
+- [ ] 04-10-PLAN.md — Step timeout + per-step fuel breach attribution (WF-02)
+- [ ] 04-11-PLAN.md — gRPC adapters + one-port REST/gRPC parity suite (API-01)
+- [ ] 04-12-PLAN.md — Apply gaps: RunRecord fields, Running keyspace, Suspend CAS, InputAppended, query helpers (API-03, DISP-01/02)
+- [ ] 04-13-PLAN.md — TimerFired journaled as input + wake (Gap 3) (DISP-01, WF-07)
+- [ ] 04-14-PLAN.md — Dispatcher leader service: Executor trait, rebuild, no polling, soft leases (DISP-01/02/07)
+- [ ] 04-15-PLAN.md — derive (journal -> Derived), PartitionSink (ActivationSink), RunStarted synthesis, unsupported effects (WF-01/02)
+- [ ] 04-16-PLAN.md — EngineExecutor + lease heartbeat/self-fence + DISP-07 zombie fencing suite (DISP-07, WF-02)
+- [ ] 04-17-PLAN.md — Server bootstrap (meta -> runtime -> node -> API), MetaLeadership, ephemeral, modules/workflows ControlPlane (META-01/03, API-02, CLI-01)
+- [ ] 04-18-PLAN.md — Runs ControlPlane: start (idempotency), get, history, list (API-03/04, WF-01)
+- [ ] 04-19-PLAN.md — `ostro dev` / `ostro server` / `ostro openapi` binary + startup/config tests (CLI-01/02)
+- [ ] 04-20-PLAN.md — End-to-end success-criteria tests (spawned `ostro dev` + full server) + ci-local gate
 
 ### Phase 5: Workflow Semantics & Core Hardening
 **Goal**: The single-node core is feature-complete for durable workflows and proven crash-safe. The docs/05 Phase 1 exit gate passes, and WIT 0.1, the command set and the on-disk format are frozen.
