@@ -111,3 +111,16 @@ Transitive upstream for vendor/ostro-raft-rs and vendor/ostro-raft-proto: tikv/r
 **Metrics:** the WAL emits `ostro_wal_batches_total` (counter, one per committed batch) and `ostro_wal_batch_records` (histogram, records per batch) through the `metrics` facade. Library code reads no environment variables; every knob is a `GroupCommitConfig` / `WalConfig` field.
 
 **Answered research gap:** no WAL recovery path decodes `canonical_data` as Kafka. The only decoder, `manager.rs::extract_offset_range` (bincode → `MinimalCanonicalRecord`), had zero callers at 08715f4 and was deleted. `canonical_data` is opaque bytes to the vendored WAL.
+
+## Third-party WIT (not under vendor/)
+
+WASI 0.2.12 WIT for Ostro's deterministic WASI shim (plan 03-04, ENG-02). Source: the `wasip2` crate, version `1.0.4+wasi-0.2.12` (crates.io; upstream WebAssembly WASI, https://github.com/WebAssembly/WASI). Licence: `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` (see NOTICE). These files live outside `vendor/`, so `scripts/check-vendored.sh` does not scan them; this table is their provenance record. Re-vendoring steps: `crates/ostro-engine/wit-wasi/README.md`.
+
+| Ostro path | Upstream path | Upstream lines | Status | Local modifications |
+|---|---|---:|---|---|
+| crates/ostro-engine/wit-wasi/deps/io.wit | wasip2 1.0.4+wasi-0.2.12 crate wit/deps/io.wit | 299 | unchanged | — |
+| crates/ostro-engine/wit-wasi/deps/clocks.wit | wasip2 1.0.4+wasi-0.2.12 crate wit/deps/clocks.wit | 162 | unchanged | — (the `@unstable(feature = clocks-timezone)` interface stays; it is not in the shim world) |
+| crates/ostro-engine/wit-wasi/deps/random.wit | wasip2 1.0.4+wasi-0.2.12 crate wit/deps/random.wit | 92 | unchanged | — |
+| crates/ostro-engine/wit-wasi/deps/cli.wit | wasip2 1.0.4+wasi-0.2.12 crate wit/deps/cli.wit | 233 | modified | Lines 140–233 deleted: the `world imports` and `world command` blocks, which import `wasi:filesystem/*` and `wasi:sockets/*` (not vendored; Ostro guests get neither). Lines 1–139 (all interfaces) are byte-identical |
+| crates/ostro-engine/wit-wasi/shim.wit | — | — | ostro-authored | World `ostro:wasi-shim/shim`: the 18 allowed `wasi:*@0.2.12` interfaces |
+| crates/ostro-engine/wit-wasi/README.md | — | — | ostro-authored | Provenance and re-vendoring steps |

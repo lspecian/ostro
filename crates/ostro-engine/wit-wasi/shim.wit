@@ -1,0 +1,28 @@
+// Ostro's deterministic WASI 0.2 shim world (ENG-02, plan 03-04).
+//
+// The 18 wasi:*@0.2.12 interfaces a Rust wasm32-wasip2 guest may import (16 always,
+// + random/random with `rand`, + random/insecure for completeness). Everything else
+// in WASI (filesystem, sockets, http, cli/run) is deliberately absent: deploy-time
+// validation (src/validate.rs) rejects guests that import or export it.
+package ostro:wasi-shim;
+
+world shim {
+  import wasi:io/error@0.2.12;
+  import wasi:io/poll@0.2.12;
+  import wasi:io/streams@0.2.12;
+  import wasi:clocks/wall-clock@0.2.12;
+  import wasi:clocks/monotonic-clock@0.2.12;
+  import wasi:random/random@0.2.12;
+  import wasi:random/insecure@0.2.12;
+  import wasi:random/insecure-seed@0.2.12;
+  import wasi:cli/environment@0.2.12;
+  import wasi:cli/exit@0.2.12;
+  import wasi:cli/stdin@0.2.12;
+  import wasi:cli/stdout@0.2.12;
+  import wasi:cli/stderr@0.2.12;
+  import wasi:cli/terminal-input@0.2.12;
+  import wasi:cli/terminal-output@0.2.12;
+  import wasi:cli/terminal-stdin@0.2.12;
+  import wasi:cli/terminal-stdout@0.2.12;
+  import wasi:cli/terminal-stderr@0.2.12;
+}
