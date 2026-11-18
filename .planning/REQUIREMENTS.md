@@ -241,15 +241,150 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 
 ## Traceability
 
-Populated by the roadmapper.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
+| FOUND-01 | Phase 1 | Pending |
+| FOUND-02 | Phase 1 | Pending |
+| FOUND-03 | Phase 1 | Pending |
+| FOUND-04 | Phase 1 | Pending |
+| FOUND-05 | Phase 1 | Pending |
+| FOUND-06 | Phase 1 | Pending |
+| STOR-01 | Phase 2 | Pending |
+| STOR-02 | Phase 2 | Pending |
+| STOR-03 | Phase 2 | Pending |
+| STOR-04 | Phase 2 | Pending |
+| STOR-05 | Phase 2 | Pending |
+| STOR-06 | Phase 2 | Pending |
+| STOR-07 | Phase 2 | Pending |
+| STOR-08 | Phase 2 | Pending |
+| STOR-09 | Phase 2 | Pending |
+| STOR-10 | Phase 2 | Pending |
+| STOR-11 | Phase 2 | Pending |
+| STOR-12 | Phase 2 | Pending |
+| STOR-13 | Phase 2 | Pending |
+| STOR-14 | Phase 2 | Pending |
+| META-01 | Phase 4 | Pending |
+| META-02 | Phase 4 | Pending |
+| META-03 | Phase 4 | Pending |
+| ENG-01 | Phase 3 | Pending |
+| ENG-02 | Phase 3 | Pending |
+| ENG-03 | Phase 3 | Pending |
+| ENG-04 | Phase 3 | Pending |
+| ENG-05 | Phase 3 | Pending |
+| ENG-06 | Phase 3 | Pending |
+| ENG-07 | Phase 3 | Pending |
+| ENG-08 | Phase 3 | Pending |
+| ENG-09 | Phase 3 | Pending |
+| ENG-10 | Phase 13 | Pending |
+| WIT-01 | Phase 3 | Pending |
+| WIT-02 | Phase 3 | Pending |
+| WIT-03 | Phase 3 | Pending |
+| WIT-04 | Phase 3 | Pending |
+| WIT-05 | Phase 3 | Pending |
+| WIT-06 | Phase 3 | Pending |
+| WIT-07 | Phase 5 | Pending |
+| WF-01 | Phase 4 | Pending |
+| WF-02 | Phase 4 | Pending |
+| WF-03 | Phase 5 | Pending |
+| WF-04 | Phase 5 | Pending |
+| WF-05 | Phase 5 | Pending |
+| WF-06 | Phase 9 | Pending |
+| WF-07 | Phase 4 | Pending |
+| WF-08 | Phase 5 | Pending |
+| WF-09 | Phase 5 | Pending |
+| WF-10 | Phase 9 | Pending |
+| DISP-01 | Phase 4 | Pending |
+| DISP-02 | Phase 4 | Pending |
+| DISP-03 | Phase 7 | Pending |
+| DISP-04 | Phase 7 | Pending |
+| DISP-05 | Phase 7 | Pending |
+| DISP-06 | Phase 14 | Pending |
+| DISP-07 | Phase 4 | Pending |
+| API-01 | Phase 4 | Pending |
+| API-02 | Phase 4 | Pending |
+| API-03 | Phase 4 | Pending |
+| API-04 | Phase 4 | Pending |
+| API-05 | Phase 5 | Pending |
+| API-06 | Phase 5 | Pending |
+| API-07 | Phase 5 | Pending |
+| API-08 | Phase 13 | Pending |
+| TRIG-01 | Phase 8 | Pending |
+| TRIG-02 | Phase 8 | Pending |
+| TRIG-03 | Phase 8 | Pending |
+| FX-01 | Phase 6 | Pending |
+| FX-02 | Phase 6 | Pending |
+| FX-03 | Phase 6 | Pending |
+| FX-04 | Phase 6 | Pending |
+| FX-05 | Phase 6 | Pending |
+| FX-06 | Phase 6 | Pending |
+| FX-07 | Phase 6 | Pending |
+| FX-08 | Phase 6 | Pending |
+| FX-09 | Phase 6 | Pending |
+| FX-10 | Phase 6 | Pending |
+| WORK-01 | Phase 7 | Pending |
+| WORK-02 | Phase 7 | Pending |
+| WORK-03 | Phase 7 | Pending |
+| WORK-04 | Phase 7 | Pending |
+| WORK-05 | Phase 7 | Pending |
+| WORK-06 | Phase 7 | Pending |
+| BACK-01 | Phase 8 | Pending |
+| BACK-02 | Phase 8 | Pending |
+| BACK-03 | Phase 8 | Pending |
+| BACK-04 | Phase 8 | Pending |
+| OPS-01 | Phase 7 | Pending |
+| OPS-02 | Phase 11 | Pending |
+| OPS-03 | Phase 11 | Pending |
+| OPS-04 | Phase 11 | Pending |
+| OPS-05 | Phase 11 | Pending |
+| OPS-06 | Phase 5 | Pending |
+| OPS-07 | Phase 11 | Pending |
+| SDK-01 | Phase 4 | Pending |
+| SDK-02 | Phase 9 | Pending |
+| SDK-03 | Phase 9 | Pending |
+| SDK-04 | Phase 9 | Pending |
+| SDK-05 | Phase 9 | Pending |
+| SDK-06 | Phase 10 | Pending |
+| SDK-07 | Phase 10 | Pending |
+| CLI-01 | Phase 4 | Pending |
+| CLI-02 | Phase 4 | Pending |
+| CLI-03 | Phase 10 | Pending |
+| CLI-04 | Phase 10 | Pending |
+| CLI-05 | Phase 10 | Pending |
+| CLI-06 | Phase 5 | Pending |
+| CLI-07 | Phase 10 | Pending |
+| CLI-08 | Phase 10 | Pending |
+| UI-01 | Phase 11 | Pending |
+| UI-02 | Phase 11 | Pending |
+| UI-03 | Phase 11 | Pending |
+| OBS-01 | Phase 8 | Pending |
+| OBS-02 | Phase 8 | Pending |
+| OBS-03 | Phase 8 | Pending |
+| SEC-01 | Phase 7 | Pending |
+| SEC-02 | Phase 14 | Pending |
+| SEC-03 | Phase 14 | Pending |
+| SEC-04 | Phase 14 | Pending |
+| SEC-05 | Phase 14 | Pending |
+| CLUS-01 | Phase 12 | Pending |
+| CLUS-02 | Phase 12 | Pending |
+| CLUS-03 | Phase 12 | Pending |
+| CLUS-04 | Phase 12 | Pending |
+| CLUS-05 | Phase 13 | Pending |
+| CLUS-06 | Phase 13 | Pending |
+| CLUS-07 | Phase 13 | Pending |
+| DIST-01 | Phase 14 | Pending |
+| DIST-02 | Phase 14 | Pending |
+| DIST-03 | Phase 14 | Pending |
+| QA-01 | Phase 5 | Pending |
+| QA-02 | Phase 5 | Pending |
+| QA-03 | Phase 7 | Pending |
+| QA-04 | Phase 14 | Pending |
+| QA-05 | Phase 14 | Pending |
 
 **Coverage:**
 - v1 requirements: 136 total
-- Mapped to phases: 0 (pending roadmap)
+- Mapped to phases: 136
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-11-18*
-*Last updated: 2026-11-18 after initial definition*
+*Last updated: 2026-11-18 after roadmap creation (14 phases)*
