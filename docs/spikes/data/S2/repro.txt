@@ -1,0 +1,195 @@
+# S2 build reproducibility (2026-11-18T17:31:03Z)
+# build.sh <lang> <suffix>; sha256 and bytes per build
+## py (PYTHONHASHSEED unset)
+built py-r1.wasm sha256=b719b25ab5d2c6b86d91dcfc637b4df3ca6f2a940da2207030f468f08bcda6b0 bytes=18576677
+built py-r2.wasm sha256=30bdf17566e7f1b979a0f6ce911c3e84fd8394bd0fa6826cba7cef1a57aceaed bytes=18537576
+built py-r3.wasm sha256=dcb1b3bd205a197fe69cfbc1032bb10d50478e6923f8b38be646c9b7f58315ca bytes=18572612
+## ts (PYTHONHASHSEED unset)
+built ts-r1.wasm sha256=0db2c7a2ae6b6c2c42a47db70eead79cee660750a5e6522d720880acfcd4642c bytes=12017259
+built ts-r2.wasm sha256=563e9bf938a9d4014016eb7e06ade2486245a4f1498decb8720a5b2356f99797 bytes=12017240
+built ts-r3.wasm sha256=afa7a54d7f12c2f6ecfefae75dc7c34524d4ae8076758daa5045d8bfea51ff4e bytes=12017296
+## rust (PYTHONHASHSEED unset)
+built rust-r1.wasm sha256=12e270713c448389f0adbb4a949f0a5c746df96795c1d5b7f7d48bae2103d1b1 bytes=81981
+built rust-r2.wasm sha256=12e270713c448389f0adbb4a949f0a5c746df96795c1d5b7f7d48bae2103d1b1 bytes=81981
+built rust-r3.wasm sha256=12e270713c448389f0adbb4a949f0a5c746df96795c1d5b7f7d48bae2103d1b1 bytes=81981
+## py (PYTHONHASHSEED=0)
+built py-h1.wasm sha256=4ee7b0bf2e2712c807fe9d823e58a564e088c33317985a35fed254ecb2716bf0 bytes=18552343
+built py-h2.wasm sha256=dac68af804ad002e172df4b8e97bb7d4dd635d653f9d0cd1e1a1d6af3e51b758 bytes=18551328
+built py-h3.wasm sha256=9ad137dcae83f4721568a2f3c8e45e954c37552eefb8b594e46e77d199cc4004 bytes=18551971
+## first differing bytes (cmp -l | head -20), offset is 1-based decimal, bytes octal
+py-r1 vs py-r2: differ (12855356 bytes)
+       344 207 312
+       345 335 253
+       346 263 261
+     59068 243 346
+     59069 222 340
+     59070 260 255
+     59072 215 261
+     64871 260 140
+     64872 175 115
+     64873 233 161
+     65148 260 140
+     65149 175 115
+     65150 233 161
+     65243 260 140
+     65244 175 115
+     65245 233 161
+     65435 260 140
+     65436 175 115
+     65437 233 161
+     66795 260 140
+  section attribution (wasm_sections.py, first 8 paths):
+    first divergence at offset 59067 in /4:core-module/9:data
+      /4:core-module/9:data: 6022845 differing bytes (len 11274536 vs 11235435)
+      /5:core-module/0:type: 199 differing bytes (len 17 vs 202)
+      /5:core-module/1:function: 27 differing bytes (len 6 vs 31)
+      /5:core-module/2:export: 936 differing bytes (len 61 vs 940)
+      /5:core-module/3:code: 102 differing bytes (len 15 vs 115)
+      /6:core-module/0:type: 42 differing bytes (len 44 vs 7)
+      /6:core-module/1:function: 9 differing bytes (len 11 vs 4)
+      /6:core-module/2:export: 264 differing bytes (len 265 vs 15)
+py-r1 vs py-r3: differ (13150886 bytes)
+       344 207 246
+       345 335 275
+     59068 243 302
+     59069 222 362
+     59070 260 257
+     59072 215 216
+     64871 260 120
+     64872 175 162
+     64873 233 162
+     65148 260 120
+     65149 175 162
+     65150 233 162
+     65243 260 120
+     65244 175 162
+     65245 233 162
+     65435 260 120
+     65436 175 162
+     65437 233 162
+     66795 260 120
+     66796 175 162
+  section attribution (wasm_sections.py, first 8 paths):
+    first divergence at offset 59067 in /4:core-module/9:data
+      /4:core-module/9:data: 6311950 differing bytes (len 11274536 vs 11270471)
+      /5:core-module/0:type: 12 differing bytes (len 17 vs 7)
+      /5:core-module/1:function: 4 differing bytes (len 6 vs 4)
+      /5:core-module/2:export: 43 differing bytes (len 61 vs 35)
+      /5:core-module/3:code: 10 differing bytes (len 15 vs 7)
+      /6:core-module/0:type: 42 differing bytes (len 44 vs 7)
+      /6:core-module/1:function: 9 differing bytes (len 11 vs 4)
+      /6:core-module/2:export: 263 differing bytes (len 265 vs 22)
+ts-r1 vs ts-r2: differ (2168555 bytes)
+       344 230 205
+     30532 337 226
+     30533 303 246
+     30534 334 212
+     30535 234 264
+     30852 337 226
+     30853 303 246
+     30854 334 212
+     30855 234 264
+   9256446 351 326
+   9257751 101 261
+   9257752  20   2
+   9257754   0  20
+   9257755 345   0
+   9257756  17 345
+   9257757   0  17
+   9257766 110   0
+   9257767  70 110
+   9257768  56  70
+   9257769   0  56
+  section attribution (wasm_sections.py, first 8 paths):
+    first divergence at offset 30531 in /4:core-module/9:code
+      /4:core-module/9:code: 8 differing bytes (len 9225980 vs 9225980)
+      /4:core-module/10:data: 2163179 differing bytes (len 2755182 vs 2755163)
+ts-r1 vs ts-r3: differ (2068360 bytes)
+       344 230 275
+     30532 337 250
+     30533 303 373
+     30534 334 367
+     30535 234 313
+     30852 337 250
+     30853 303 373
+     30854 334 367
+     30855 234 313
+   9256446 351 216
+   9256447 224 225
+   9257082 163 216
+   9257083  16   1
+   9257084  15  16
+   9257085   0  15
+   9257089   1   0
+   9257090   0   1
+   9257101 235   0
+   9257102 346 235
+   9257103 100 346
+  section attribution (wasm_sections.py, first 8 paths):
+    first divergence at offset 30531 in /4:core-module/9:code
+      /4:core-module/9:code: 8 differing bytes (len 9225980 vs 9225980)
+      /4:core-module/10:data: 2063037 differing bytes (len 2755182 vs 2755219)
+rust-r1 vs rust-r2: identical
+rust-r1 vs rust-r3: identical
+py-h1 vs py-h2: differ (12695852 bytes)
+       344 371 202
+       345 236 227
+     59068 225 236
+     59069 324 314
+     59072 221 222
+     64871 320 120
+     64872 201 162
+     64873 173 162
+     65148 320 120
+     65149 201 162
+     65150 173 162
+     65243 320 120
+     65244 201 162
+     65245 173 162
+     65435 320 120
+     65436 201 162
+     65437 173 162
+     66795 320 120
+     66796 201 162
+     66797 173 162
+  section attribution (wasm_sections.py, first 8 paths):
+    first divergence at offset 59067 in /4:core-module/9:data
+      /4:core-module/9:data: 5866557 differing bytes (len 11250202 vs 11249187)
+      /5:core-module/0:type: 3 differing bytes (len 7 vs 7)
+      /5:core-module/2:export: 13 differing bytes (len 10 vs 15)
+      /6:core-module/0:type: 4 differing bytes (len 8 vs 7)
+      /6:core-module/2:export: 20 differing bytes (len 23 vs 26)
+      /7:core-module/2:export: 19 differing bytes (len 22 vs 16)
+      /8:core-module/0:type: 18 differing bytes (len 7 vs 21)
+      /8:core-module/1:function: 5 differing bytes (len 4 vs 7)
+py-h1 vs py-h3: differ (12731876 bytes)
+       344 371 205
+       345 236 234
+     59068 225 241
+     59069 324 321
+     59072 221 245
+     64871 320   0
+     64872 201 313
+     64873 173 201
+     65148 320   0
+     65149 201 313
+     65150 173 201
+     65243 320   0
+     65244 201 313
+     65245 173 201
+     65435 320   0
+     65436 201 313
+     65437 173 201
+     66795 320   0
+     66796 201 313
+     66797 173 201
+  section attribution (wasm_sections.py, first 8 paths):
+    first divergence at offset 59067 in /4:core-module/9:data
+      /4:core-module/9:data: 5928384 differing bytes (len 11250202 vs 11249830)
+      /5:core-module/0:type: 4 differing bytes (len 7 vs 8)
+      /5:core-module/2:export: 21 differing bytes (len 10 vs 23)
+      /6:core-module/0:type: 5 differing bytes (len 8 vs 6)
+      /6:core-module/2:export: 21 differing bytes (len 23 vs 25)
+      /7:core-module/0:type: 9 differing bytes (len 7 vs 11)
+      /7:core-module/1:function: 3 differing bytes (len 4 vs 5)
+      /7:core-module/2:export: 34 differing bytes (len 22 vs 37)
