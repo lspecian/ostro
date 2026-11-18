@@ -220,3 +220,186 @@ pub fn copy_dir(src: &Path, dst: &Path) {
 pub fn run_on(p: u16) -> RunId {
     RunId::new_v7(PartitionId(p))
 }
+
+// ---------------------------------------------------------------- multi-partition helpers
+// (plan 02-13: shuffler / exactly-once suites)
+
+/// Open a node with `p` partitions under `dir` in Leader mode, letting `f` adjust the config
+/// (router wrapper, shuffler tuning, ...).
+pub async fn open_node_cfg(
+    dir: &Path,
+    p: u16,
+    f: impl FnOnce(&mut ostro_partition::NodeConfig),
+) -> ostro_partition::Node {
+    let mut cfg = ostro_partition::NodeConfig::new(
+        dir.to_path_buf(),
+        PartitionCount::new(p).expect("non-zero"),
+    );
+    f(&mut cfg);
+    timeout(T, ostro_partition::Node::open(cfg))
+        .await
+        .expect("node open timed out")
+        .expect("node open")
+}
+
+/// Shuffler tuned for tests: short idle poll.
+pub fn fast_shuffler(cfg: &mut ostro_partition::NodeConfig) {
+    cfg.leader.shuffler.idle_poll = Duration::from_millis(20);
+}
+
+pub fn handle_of(node: &ostro_partition::Node, p: PartitionId) -> &PartitionHandle<Rf1Log> {
+    node.handle(p).expect("partition ready")
+}
+
+/// Start `run` (on its own partition) and grant it an attempt under the current epoch.
+pub async fn start_and_grant(
+    node: &ostro_partition::Node,
+    run: &RunId,
+) -> ostro_types::AttemptToken {
+    let h = handle_of(node, run.partition());
+    let o = timeout(T, h.submit_one(start_cmd(run)))
+        .await
+        .expect("start timed out")
+        .expect("start");
+    assert_eq!(o, ApplyOutcome::Accepted, "start {run}");
+    grant(node, run).await
+}
+
+/// Grant the next attempt of an existing run.
+pub async fn grant(node: &ostro_partition::Node, run: &RunId) -> ostro_types::AttemptToken {
+    let h = handle_of(node, run.partition());
+    timeout(T, h.grant_attempt(*run))
+        .await
+        .expect("grant timed out")
+        .expect("grant")
+}
+
+/// `EventsAppended` (no journal events) carrying one `SendMessage` per `kinds` entry.
+pub fn send_cmd(
+    run: &RunId,
+    t: ostro_types::AttemptToken,
+    kinds: Vec<ostro_types::command::outbox_msg::Kind>,
+) -> Command {
+    use ostro_types::command::{
+        AttemptTokenMsg, Derived, EventsAppended, OutboxMsg, SendMessage, derived,
+    };
+    Command::events_appended(EventsAppended {
+        run_id: run.as_bytes().to_vec(),
+        token: Some(AttemptTokenMsg {
+            epoch: t.epoch.0,
+            n: t.n,
+        }),
+        from_seq: 0,
+        events: vec![],
+        derived: kinds
+            .into_iter()
+            .map(|k| Derived {
+                intent: Some(derived::Intent::SendMessage(SendMessage {
+                    msg: Some(OutboxMsg { kind: Some(k) }),
+                })),
+            })
+            .collect(),
+    })
+}
+
+pub fn signal_kind(target: &RunId, name: &str) -> ostro_types::command::outbox_msg::Kind {
+    ostro_types::command::outbox_msg::Kind::Signal(ostro_types::command::Signal {
+        target_run: target.as_bytes().to_vec(),
+        name: name.into(),
+        payload: Some(PayloadRef::inline(Bytes::from_static(b"p"))),
+    })
+}
+
+pub fn cancel_kind(target: &RunId) -> ostro_types::command::outbox_msg::Kind {
+    ostro_types::command::outbox_msg::Kind::CancelRun(ostro_types::command::CancelRun {
+        target_run: target.as_bytes().to_vec(),
+        reason: "stop".into(),
+    })
+}
+
+/// Submit and require `Accepted`.
+pub async fn submit_ok(node: &ostro_partition::Node, p: PartitionId, cmds: Vec<Command>) {
+    let h = handle_of(node, p);
+    let out = timeout(T, h.submit(cmds))
+        .await
+        .expect("submit timed out")
+        .expect("submit");
+    for o in out {
+        assert_eq!(o, ApplyOutcome::Accepted);
+    }
+}
+
+/// Decoded inbox entries of `run`.
+pub fn inbox(
+    node: &ostro_partition::Node,
+    run: &RunId,
+) -> Vec<ostro_partition::store::values::InboxMsg> {
+    handle_of(node, run.partition())
+        .reader()
+        .prefix(ostro_partition::Table::Inbox, run.as_bytes(), usize::MAX)
+        .expect("inbox")
+        .into_iter()
+        .map(|(_, v)| ostro_partition::store::values::decode(&v).expect("decode inbox"))
+        .collect()
+}
+
+/// Signal names in `run`'s inbox, in inbox order.
+pub fn signal_names(node: &ostro_partition::Node, run: &RunId) -> Vec<String> {
+    inbox(node, run)
+        .into_iter()
+        .filter_map(|m| match m {
+            ostro_partition::store::values::InboxMsg::Signal { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Number of `CancelRequested` inbox entries of `run`.
+pub fn cancel_count(node: &ostro_partition::Node, run: &RunId) -> usize {
+    inbox(node, run)
+        .into_iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ostro_partition::store::values::InboxMsg::CancelRequested { .. }
+            )
+        })
+        .count()
+}
+
+/// Outbox rows over every ready partition.
+pub fn outbox_rows(node: &ostro_partition::Node) -> usize {
+    node.slots()
+        .iter()
+        .filter_map(|s| match s {
+            ostro_partition::PartitionSlot::Ready(h) => Some(h),
+            _ => None,
+        })
+        .map(|h| {
+            h.reader()
+                .prefix(ostro_partition::Table::Outbox, &[], usize::MAX)
+                .expect("outbox")
+                .len()
+        })
+        .sum()
+}
+
+/// Poll `f` every 10 ms until it holds; panics with `what` after `limit`.
+pub async fn wait_until(limit: Duration, what: &str, mut f: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if f() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out after {limit:?} waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Wait until every outbox of `node` is empty.
+pub async fn wait_drained(node: &ostro_partition::Node, limit: Duration) {
+    wait_until(limit, "outboxes to drain", || outbox_rows(node) == 0).await;
+}

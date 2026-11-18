@@ -25,7 +25,7 @@ use crate::handle::PartitionHandle;
 use crate::leader::{self, LeaderConfig, LeaderCtx, LeaderTasks};
 use crate::leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 use crate::machine::{MachineConfig, MachineHandle, PartitionHealth};
-use crate::router::InProcessRouter;
+use crate::router::{InProcessRouter, PartitionRouter};
 use crate::startup::{StartupEvent, StartupLog};
 use crate::store::{PartitionStore, StoreConfig, StoreMeta};
 
@@ -43,6 +43,11 @@ pub enum StartMode {
     Inspect,
 }
 
+/// Wraps the node's [`InProcessRouter`] before it is handed to the leader services (test
+/// doubles: lossy/duplicating delivery, instrumentation).
+pub type RouterWrapper =
+    Arc<dyn Fn(Arc<InProcessRouter>) -> Arc<dyn PartitionRouter> + Send + Sync>;
+
 /// Node configuration.
 #[derive(Clone)]
 pub struct NodeConfig {
@@ -56,6 +61,9 @@ pub struct NodeConfig {
     pub mode: StartMode,
     pub leadership: Arc<dyn LeadershipSource>,
     pub clock: Arc<dyn Clock>,
+    /// Optional wrapper around the router used by the leader services (default: none, the
+    /// services use the [`InProcessRouter`] directly).
+    pub router_wrapper: Option<RouterWrapper>,
 }
 
 impl NodeConfig {
@@ -73,6 +81,7 @@ impl NodeConfig {
             mode: StartMode::Leader,
             leadership: Arc::new(LocalLeadership),
             clock: Arc::new(SystemClock),
+            router_wrapper: None,
         }
     }
 }
@@ -274,6 +283,10 @@ impl Node {
         let mut leaders = Vec::new();
 
         if cfg.mode == StartMode::Leader {
+            let services_router: Arc<dyn PartitionRouter> = match &cfg.router_wrapper {
+                Some(wrap) => wrap(Arc::clone(&router)),
+                None => Arc::clone(&router) as Arc<dyn PartitionRouter>,
+            };
             // 6. barriers + routing, then services once every partition is routable.
             for slot in &slots {
                 if let PartitionSlot::Ready(h) = slot {
@@ -290,7 +303,7 @@ impl Node {
                         partition: p,
                         count,
                         handle: h.clone(),
-                        router: Arc::clone(&router) as Arc<dyn crate::router::PartitionRouter>,
+                        router: Arc::clone(&services_router),
                         barrier: barriers[p.index()].clone(),
                         clock: Arc::clone(&cfg.clock),
                         shutdown: shutdown.subscribe(),
