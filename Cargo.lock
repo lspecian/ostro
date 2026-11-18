@@ -1712,6 +1712,7 @@ dependencies = [
  "postcard",
  "proptest",
  "proptest-state-machine",
+ "prost",
  "serde",
  "tempfile",
  "thiserror",
