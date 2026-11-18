@@ -12,7 +12,11 @@ fn apply(sm: &mut MetaSm, index: u64, cmd: &MetaCommand) -> MetaResult {
 }
 
 fn put(record: MetaRecord, expected_version: Option<u64>) -> MetaCommand {
-    MetaCommand::Put { key: record.key(), expected_version, record }
+    MetaCommand::Put {
+        key: record.key(),
+        expected_version,
+        record,
+    }
 }
 
 #[test]
@@ -36,10 +40,20 @@ fn every_kind_round_trips_through_snapshot() {
             let r = apply(&mut sm, index, &put(record, expected));
             if kind == MetaKind::Cluster {
                 // The cluster record already exists (InitCluster, version 1).
-                let want = if expected.is_none() { MetaResult::Conflict { current: 1 } } else { MetaResult::Ok { version: 2 } };
+                let want = if expected.is_none() {
+                    MetaResult::Conflict { current: 1 }
+                } else {
+                    MetaResult::Ok { version: 2 }
+                };
                 assert_eq!(r, want);
             } else {
-                assert_eq!(r, MetaResult::Ok { version: u64::from(generation) }, "{kind:?}");
+                assert_eq!(
+                    r,
+                    MetaResult::Ok {
+                        version: u64::from(generation)
+                    },
+                    "{kind:?}"
+                );
             }
         }
     }
@@ -47,7 +61,11 @@ fn every_kind_round_trips_through_snapshot() {
     let state = view.read(|s| s.clone());
     for kind in MetaKind::ALL {
         let key = MetaRecord::sample(kind, 20, 1).key();
-        assert_eq!(state.get(&key).unwrap().value, MetaRecord::sample(kind, 20, 2), "{kind:?}");
+        assert_eq!(
+            state.get(&key).unwrap().value,
+            MetaRecord::sample(kind, 20, 2),
+            "{kind:?}"
+        );
     }
 
     let snap = sm.snapshot();
@@ -55,8 +73,16 @@ fn every_kind_round_trips_through_snapshot() {
     let (mut restored, rview) = MetaSm::new();
     restored.restore(index, &snap).expect("restore");
     assert_eq!(rview.read(|s| s.clone()), state);
-    assert_eq!(*rview.subscribe().borrow(), index, "restore bumps the applied watch");
-    assert_eq!(restored.snapshot(), snap, "equal states snapshot byte-identically");
+    assert_eq!(
+        *rview.subscribe().borrow(),
+        index,
+        "restore bumps the applied watch"
+    );
+    assert_eq!(
+        restored.snapshot(),
+        snap,
+        "equal states snapshot byte-identically"
+    );
     assert_eq!(rview.read(|s| s.token_key()), Some([3; 32]));
 }
 
@@ -84,18 +110,22 @@ fn arb_command() -> impl Strategy<Value = MetaCommand> {
             key: MetaRecord::sample(MetaKind::ALL[k], id, 1).key(),
             expected_version: e,
         }),
-        (0u16..4, 0u32..6, 1u64..3).prop_map(|(p, epoch, leader)| MetaCommand::SetPartitionLeader {
-            partition: p,
-            epoch,
-            leader,
-            isr: vec![leader],
+        (0u16..4, 0u32..6, 1u64..3).prop_map(|(p, epoch, leader)| {
+            MetaCommand::SetPartitionLeader {
+                partition: p,
+                epoch,
+                leader,
+                isr: vec![leader],
+            }
         }),
-        (prop_oneof![Just(4u16), Just(8u16)], any::<u8>()).prop_map(|(partitions, b)| MetaCommand::InitCluster {
-            cluster_id: format!("c{b}"),
-            node_id: 1,
-            partitions,
-            created_at_ms: u64::from(b),
-            token_key: [b; 32],
+        (prop_oneof![Just(4u16), Just(8u16)], any::<u8>()).prop_map(|(partitions, b)| {
+            MetaCommand::InitCluster {
+                cluster_id: format!("c{b}"),
+                node_id: 1,
+                partitions,
+                created_at_ms: u64::from(b),
+                token_key: [b; 32],
+            }
         }),
     ]
 }

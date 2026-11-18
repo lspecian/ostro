@@ -4,9 +4,11 @@
 //! - [`command`]: [`MetaKey`], [`MetaCommand`], [`MetaResult`] and their
 //!   `[META_FORMAT] ‖ postcard` encoding.
 //! - [`state`]: [`MetaState`] with deterministic, versioned (CAS) apply.
+//! - [`sm`]: [`MetaSm`] (Raft `StateMachine`, postcard snapshots) and [`MetaView`].
 
 pub mod command;
 pub mod records;
+pub mod sm;
 pub mod state;
 
 pub use command::{
@@ -18,6 +20,7 @@ pub use records::{
     ModuleRecord, PartitionAssignment, QueueConfig, Schedule, SealedSecret, TOKEN_KEY_PLAINTEXT_ID,
     TOKEN_KEY_SECRET, Tenant, Versioned, WorkflowVersion,
 };
+pub use sm::{MetaSm, MetaView};
 pub use state::MetaState;
 
 pub use ostro_raft_driver::{
