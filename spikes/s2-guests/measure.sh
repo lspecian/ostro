@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spike S2 measurement protocol (plan 01-05).
 #
-#   measure.sh <env|pool|perf|probes|repro|all>
+#   measure.sh <env|pool|perf|probes|repro|all|confirm>
 #
 # Drives build.sh and spikes/s2-harness (one process per measurement) and
 # appends compact JSON lines to docs/spikes/data/S2/. Every latency line is
@@ -206,12 +206,44 @@ phase_repro() {
     echo "wrote $f"
 }
 
+# Quiet-machine confirmation (plan 01-08): instantiate --n N_INST and N_COLD
+# cold starts per guest and allocator, appended to confirm.jsonl. Uses the
+# existing AOT artefacts; waits (max 120 s) for the 1-min load to drop below 2.0.
+phase_confirm() {
+    local f="$DATA/confirm.jsonl" g a flag i line t0 t1 w
+    : >"$f"
+    for g in $GUESTS; do
+        [[ -f "$OUT/$g.cwasm" ]] || { ensure_wasm "$g"; "$HARNESS" compile "$OUT/$g.wasm" "$OUT/$g.cwasm" >/dev/null; }
+        for a in pooling on-demand; do
+            flag=""
+            if [[ "$a" == pooling ]]; then
+                flag="--pooling"
+                [[ "$g" == py ]] && flag="$flag --pool-total-core-instances $((N_MEM * 38))"
+            fi
+            w=0
+            while awk '{exit !($1 >= 2.0)}' /proc/loadavg && [[ $w -lt 24 ]]; do sleep 5; w=$((w + 1)); done
+            # shellcheck disable=SC2086
+            "$HARNESS" instantiate $flag --n "$N_INST" "$OUT/$g.cwasm" | tag "$f" "$g" "$a" instantiate
+            for ((i = 1; i <= N_COLD; i++)); do
+                t0="$(date +%s%N)"
+                # shellcheck disable=SC2086
+                line="$("$HARNESS" cold $flag "$OUT/$g.cwasm")"
+                t1="$(date +%s%N)"
+                echo "$line" | tag "$f" "$g" "$a" cold \
+                    "{\"iter\":$i,\"process_wall_ms\":$(awk "BEGIN{print ($t1-$t0)/1e6}")}"
+            done
+        done
+        echo "confirm done: $g"
+    done
+}
+
 case "$PHASE" in
+    confirm) phase_confirm ;;
     env) phase_env ;;
     perf) phase_env; phase_pool; phase_perf ;;
     pool) phase_pool ;;
     probes) phase_probes ;;
     repro) phase_repro ;;
     all) phase_env; phase_pool; phase_perf; phase_probes; phase_repro ;;
-    *) echo "usage: $0 <env|pool|perf|probes|repro|all>" >&2; exit 2 ;;
+    *) echo "usage: $0 <env|pool|perf|probes|repro|all|confirm>" >&2; exit 2 ;;
 esac

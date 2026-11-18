@@ -1,12 +1,14 @@
 # Spike S3: redb durability tiers (and the fjall fallback)
 
-Status: complete (FOUND-06, S3 half). Run on 2026-11-18. A quiet-machine confirmation re-run follows in plan 01-08.
+Status: complete (FOUND-06, S3 half). Run on 2026-11-18. The quiet-machine confirmation run, the fjall crash test and the read-modify-write benchmark (plan 01-08) are at the end of this report. **Outcome: fjall 3.1.13 adopted for STOR-05** (see "Confirmation run").
 Harness: `spikes/s3-redb-bench` (a standalone cargo workspace, `redb = "=4.6.0"`, optional `fjall = "=3.1.13"`).
 Runner: `spikes/s3-redb-bench/run.sh`. Raw data is in `docs/spikes/data/S3/`:
 - `env.txt`
 - `results.jsonl` (redb, 5 tiers x 3 reps)
 - `crash.jsonl` (5 kill -9 runs)
 - `fjall.jsonl` (paired redb T2 and fjall reps)
+- `confirm.jsonl` (01-08: interleaved redb/fjall T2, plain and read-modify-write, 3 reps)
+- `crash-confirm.jsonl` (01-08: 5 kill -9 runs per engine with the row-level torn-batch check)
 
 ## Summary
 
@@ -155,7 +157,80 @@ This recommendation is conditional. It is a storage-engine switch, so it is a de
 
 ## Open items
 
-- Plan 01-08 appends a quiet-machine confirmation run of T2 (redb and, given this outcome, fjall) to this report.
-- Port the crash-test subcommand to `--engine fjall` (Phase 2 or 01-08).
-- Add a read-before-write variant of the workload (get the run row before update) to compare engines on the realistic apply path.
+- ~~Plan 01-08 appends a quiet-machine confirmation run of T2 (redb and, given this outcome, fjall) to this report.~~ Done, see below.
+- ~~Port the crash-test subcommand to `--engine fjall` (Phase 2 or 01-08).~~ Done in 01-08: 5/5 pass.
+- ~~Add a read-before-write variant of the workload (get the run row before update) to compare engines on the realistic apply path.~~ Done in 01-08 (`--rmw`).
 - Optional: sequential-key variant (`--keys sequential` is already implemented) to quantify how much ULID-style run ids would help redb.
+
+## Confirmation run (quiet machine, plan 01-08)
+
+Run on 2026-11-18 by `spikes/s3-redb-bench/confirm.sh` (built with `--features fjall`), with no other executors running. The script waits for the 1-minute load to fall below 2.0 before each run. Same machine, filesystem and db dir (`/tmp/ostro-s3`, ext4) as above.
+
+- **Load average:** 0.19 at the first run, 0.25–1.34 across all 12 bench runs, and 1.29–1.50 during the crash tests (nproc 12, so the `nproc / 4` = 3 quiet threshold was always met). Every value is recorded per line in `confirm.jsonl` / `crash-confirm.jsonl`.
+- **Parameters:** identical to the 01-02 runs: T2, 200,000 measured commands, 20,000 warm-up, B = 64, checkpoint every 100 ms or 256 batches, random 16-byte keys. Each of the 3 reps runs {redb plain, fjall plain, redb RMW, fjall RMW} back to back, so both engines see the same load.
+
+### Read-modify-write workload (`--rmw`)
+
+The 01-02 workload only inserts fresh runs. The real `apply_batch` first loads the run it applies a command to. The new `--rmw` mode models this per command:
+1. Pick a run. 25% of commands start a new run (`--new-ratio 0.25`). The rest update an existing run, picked 90% from the 64Ki most recent runs and 10% uniformly from all runs.
+2. **Read** the `runs` row (`get`). The bench counts reads whose hit or miss disagrees with the picker (`read_mismatch`). It was 0 in every run.
+3. Write the updated row (status advanced, update counter bumped), move the run in `runs_by_status` (remove the old status key, insert the new one), and do the same outbox insert + ring delete as before. Write `applied_offset` once per batch.
+4. **Preload:** 1,000,000 runs are inserted before warm-up and not measured (`--preload 1000000`). The db is 543 MiB (redb) / 465 MiB (fjall), so reads hit a realistically sized tree, not a cache-sized one.
+
+redb reads inside the write transaction (it sees its own uncommitted writes). A fjall `WriteBatch` has no read-your-writes, so the fjall path reads `Keyspace::get` through a per-batch overlay map of rows already written in the batch. A single-writer partition state machine would keep the same overlay.
+
+### Throughput (T2, median of 3)
+
+| Engine / workload | cmds/s (3 reps) | **median cmds/s** | steps/s | 01-02 median | txn p50 / p99 / max (µs) | checkpoint n, p50 / max (µs) |
+|---|---|---|---|---|---|---|
+| redb T2 plain | 67,377 / 68,272 / 67,477 | **67,477** | 22,492 | 62,404 (load 5–7); 65,831 (load 1.7) | 636 / 906 / 3,151 | 20, 52,706 / 65,935 |
+| fjall T2 plain | 233,784 / 228,350 / 248,857 | **233,784** | 77,928 | 242,412 (load 1.6–2.5) | 246 / 412 / 762 | 13, 5,945 / 8,183 |
+| redb T2 RMW | 30,947 / 30,817 / 31,227 | **30,947** | 10,316 | (new) | 1,123 / 1,517 / 2,681 | 36, 80,173 / 95,225 |
+| fjall T2 RMW | 106,873 / 106,176 / 108,573 | **106,873** | 35,624 | (new) | 513 / 754 / 122,605 | 18, 5,683 / 10,242 |
+
+(The latency cells show the median-throughput rep; the max column is the max over the 3 reps.)
+
+**Observations:**
+- **The quiet machine moved redb only slightly.** Plain T2 went from 62.4k (loaded) and 65.8k (paired run) to 67.5k. That is still 25% short of 90k. The 01-02 verdict was not a load artefact.
+- **Read-before-write halves both engines,** but redb falls much further: 31k vs 107k, so fjall is **3.45x** redb on the realistic path, about the same ratio as for the insert-only path (3.5x). The LSM point-read cost feared in 01-02 is real but affordable: with 1M+ runs, the read adds about 5 µs per command (9.4 µs vs 4.3 µs per command at the medians).
+- **redb checkpoints grow with the dirty set.** RMW touches pages all over a 543 MiB tree. Its Immediate checkpoint rises to about 80 ms p50 (95 ms max), and 36 checkpoints take about 2.9 s of the 6.5 s wall. fjall's journal fsync stays at about 5.7 ms.
+- **fjall tail latency: one stall of about 120 ms per RMW run.** The txn max was 120–123 ms in all 3 RMW reps, while p99 stayed under 0.85 ms. With 1M preloaded runs, this matches a write stall or memtable rotation during a background flush. It needs a Phase 2 look (memtable/journal sizing, flush worker count). It does not change throughput enough to affect the rule.
+
+### fjall crash test (precondition 1)
+
+`crash-test --engine fjall` mirrors the redb test. A child runs fjall T2 forever: one `WriteBatch` per 64 commands, default buffered journal flush on each commit, and every 100 ms / 256 batches it commits `checkpointed_offset` and then calls `persist(SyncAll)`. It prints `CKPT <offset>` only after the fsync returns. The parent sends SIGKILL after 3 s, reopens the database and checks:
+- (a) the db opens;
+- (b) `applied_offset ≥ last CKPT seen` and `checkpointed_offset ≥ last CKPT seen`;
+- (c) `applied_offset % 64 == 0`;
+- (d) **new, row-level torn-batch check (both engines):** the number of `runs` rows equals `applied_offset` exactly, and the highest outbox key is `applied_offset − 1`. Every crash-child command inserts exactly one fresh run and one outbox seq, so any partially applied batch, or a data/meta mismatch across keyspaces or tables, would fail it.
+
+redb was re-run with the same stronger check, so both engines are on the same footing (`crash-confirm.jsonl`):
+
+| Engine | runs | pass | last CKPT seen (range) | gap applied − last CKPT | `runs` rows == applied, outbox last == applied − 1 | reopen time | db at kill |
+|---|---|---|---|---|---|---|---|
+| redb T2 | 5 | **5/5** | 210,880 – 212,800 | 0 in all 5 | yes, all 5 | 83–97 ms (full repair, 3 callbacks) | 136 MiB |
+| fjall T2 | 5 | **5/5** | 506,496 – 540,224 | 3,328 – 16,384 | yes, all 5 | **3.19–3.44 s** (journal replay) | 353 MiB |
+
+**What differs, and why it is safe:**
+- **redb rolls back to the last Immediate commit,** so `applied_offset == last durable checkpoint` (gap 0).
+- **fjall keeps more.** Its buffered commits are `write(2)`-flushed to the OS page cache on every commit. A process kill (OS still up) loses none of them, so after reopen `applied_offset` is up to 256 batches (16,384 commands) ahead of the last fsynced checkpoint. Every such state was still batch-aligned and row-exact, so no batch was torn. Equality with the last checkpoint is therefore the wrong invariant for fjall. The invariant that matters is that the state is a consistent prefix at `applied_offset ≥ last durable checkpoint`, and that held 5/5.
+- Under power loss (not testable here), fjall falls back to its last synced journal position. Its journal recovery truncates an incomplete tail entry. That is again a consistent prefix ≥ the last `persist`.
+- This is safe under Ostro's log-first design for two reasons. First, the state machine only applies commands that are already durable in the WAL, so the state can never get ahead of the log. Second, recovery must replay the WAL from the **state's own `applied_offset`**, not from `checkpointed_offset`. Phase 2 (STOR-05/recovery) must encode that rule.
+- **Recovery time is the cost.** fjall replays its whole un-flushed journal into memtables on open: 3.2–3.4 s for about 540k commands (353 MiB on disk, including the journal). That is far slower than redb's 80–100 ms full repair at this size, and it scales with journal size, not db size. Phase 2 must bound it: cap the journal size / memtable size so that flushes keep the replay window small, and measure reopen time in the recovery test against an NFR target.
+
+### Verdict
+
+Decision rule: PASS (fjall 3.1.13) — fjall T2 RMW median = 106,873 commands/s (= 35,624 steps/s) and plain median = 233,784 commands/s vs threshold 90,000 commands/s, at load 0.25–1.34. redb 4.6 FAILS again: T2 plain median = 67,477 commands/s, T2 RMW median = 30,947 commands/s.
+
+- **The redb verdict did not change** from 01-02 (FAIL). The quiet re-run makes it slightly less bad on the insert-only path and much worse on the realistic read-before-write path.
+- **fjall meets both preconditions from 01-02:**
+  - Crash sanity: 5/5 with the stronger row-level check.
+  - Read-modify-write: 106.9k ≥ 90k under the same interleaved load.
+- **The RMW margin is 1.19x, not 2.6x.** Phase 2 should keep the apply path lean: one `get` per command, an overlay for in-batch writes, and no extra index reads.
+- **Outcome:** STOR-05 switches from redb to **fjall 3.1.13** with this durability design:
+  - One atomic `WriteBatch` per apply batch, with `applied_offset` in the batch.
+  - Default buffered journal flush on each commit.
+  - `persist(SyncAll)` every 100 ms or 256 batches, recording `checkpointed_offset`.
+  - Recovery replays the WAL from the state's `applied_offset`.
+  - Phase 2 must bound the journal/memtable size (reopen time) and look at the ~120 ms write stall.
+- Logged in PROJECT.md Key Decisions ("State store: redb vs fjall").

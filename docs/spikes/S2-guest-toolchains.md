@@ -1,8 +1,8 @@
 # Spike S2: guest toolchains (Python, TypeScript, Rust)
 
-Status: complete (FOUND-06, S2 half). Run on 2026-11-18. Plan 01-08 appends a quiet-machine confirmation of instantiate p50 and cold start.
+Status: complete (FOUND-06, S2 half). Run on 2026-11-18. The quiet-machine confirmation of instantiate p50 and cold start (plan 01-08) is at the end; it confirms every number. Step handle **decided: resource** (PROJECT.md Key Decisions).
 Apparatus (plan 01-03): `spikes/wit/spike.wit`, `spikes/s2-guests/build.sh` and `spikes/s2-harness` (wasmtime 50.0.2).
-Runner: `spikes/s2-guests/measure.sh <env|pool|perf|probes|repro|all>`. Each measurement runs in its own harness process.
+Runner: `spikes/s2-guests/measure.sh <env|pool|perf|probes|repro|all|confirm>`. Each measurement runs in its own harness process.
 Raw data is in `docs/spikes/data/S2/`:
 
 | File | Contents |
@@ -12,6 +12,7 @@ Raw data is in `docs/spikes/data/S2/`:
 | `pool-limits.jsonl` | smallest pooling limits per component instance |
 | `probes.jsonl` | ambient-nondeterminism probes, reseed, step round trip and drop counts, for build `a` and an independent build `b` |
 | `imports.jsonl` | component imports and exports |
+| `confirm.jsonl` | 01-08 quiet-machine confirmation: instantiate n=1000 and 10 cold starts per guest and allocator |
 | `repro.txt` | 3 builds per language (plus Python ×3 with `PYTHONHASHSEED=0`): sha256, size, first differing bytes, section attribution |
 
 All numbers below cite their source as `file[selector]`. For example, `perf[py/pooling/instantiate]` means the `perf.jsonl` line with `guest=py`, `allocator=pooling`, `kind=instantiate`.
@@ -260,4 +261,27 @@ The preliminary run used on-demand allocation, in-memory `Component::deserialize
 - **Phase 9/10 SDKs:** reseed and patch every ambient source listed above. Wrap steps in `with` / `using` / RAII. Never rely on `HostStep::drop` for correctness.
 - **Phase 10 CLI-04:** reproducible Python/TS builds need a deterministic pre-init or a canonicaliser. Python also has non-deterministic shim-module ordering.
 - **Phase 9:** re-measure Python per-instance memory with a realistic stdlib footprint before finalising the "Python embedded by default" recommendation.
-- **Plan 01-08:** quiet-machine confirmation of instantiate p50 and cold start, appended below.
+- ~~**Plan 01-08:** quiet-machine confirmation of instantiate p50 and cold start, appended below.~~ Done.
+
+## Confirmation run (quiet machine, plan 01-08)
+
+Run on 2026-11-18 with `N_INST=1000 N_COLD=10 spikes/s2-guests/measure.sh confirm`, which writes `confirm.jsonl`. No other executors were running, and the S3 confirmation had finished before it started.
+- Same wasmtime 50.0.2 harness and the same AOT artefacts (`spikes/out/<g>.cwasm`) as the main run.
+- Both allocators were measured: pooling first (the better default for TS and Rust per the main run), then on-demand. Python pooling again used `total_core_instances = 1900`.
+- **Load average:** 0.18–0.24 (1-min) throughout, against 1.06–1.07 for the main run (nproc 12).
+
+| | Python on-demand | Python pooling | TS on-demand | TS pooling | Rust on-demand | Rust pooling |
+|---|---|---|---|---|---|---|
+| steady instantiate p50, **confirm** | **440 µs** | **445 µs** | **19.4 µs** | **9.9 µs** | **16.5 µs** | **9.1 µs** |
+| steady instantiate p50, main run | 440 µs | 454 µs | 19.5 µs | 10.2 µs | 15.7 µs | 9.2 µs |
+| steady instantiate p99, confirm | 670 µs | 658 µs | 36.9 µs | 19.3 µs | 35.2 µs | 20.4 µs |
+| first call per fresh instance p50, confirm | 893 µs | 879 µs | 590 µs | 590 µs | 5.6 µs | 7.5 µs |
+| cold start in-process median (n=10), **confirm** | **5.07 ms** | **5.27 ms** | **2.87 ms** | **2.86 ms** | **0.58 ms** | **0.77 ms** |
+| cold start in-process median (n=20), main run | 5.07 ms | 5.35 ms | 2.47 ms | 2.69 ms | 0.72 ms | 0.80 ms |
+| cold start process wall median, confirm | 8.76 ms | 8.91 ms | 6.39 ms | 6.08 ms | 3.19 ms | 3.46 ms |
+
+**Verdict:** the quiet machine confirms every main-run number within run-to-run noise:
+- Instantiate p50 is within ±5% in all six cells.
+- Cold start is within ±0.4 ms. TS is about 0.3 ms slower and Rust on-demand about 0.15 ms faster, both well inside the spread of 10–20 single-process samples.
+
+**The NFR-2.3 conclusions are unchanged:** the target is met in all six cells by more than 20x for Python (< 10 ms) and by 50–100x for TS and Rust (< 1 ms). The memory, pool-sizing and step-handle conclusions above did not depend on load and were not re-measured.
