@@ -2,11 +2,14 @@
 # Spike S3 runner: builds the bench, captures the environment, runs every redb
 # durability tier N times and the kill -9 crash sanity test x5.
 #
-# Usage: run.sh [--quick] [DB_DIR]
+# Usage: run.sh [--quick | --fjall] [DB_DIR]
 #   DB_DIR   directory for database files (default ${TMPDIR:-/tmp}/ostro-s3).
 #            Must be on the Linux filesystem; paths under /mnt/ are refused.
 #   --quick  smoke mode: 20k commands / 2k warm-up, 1 rep, 1 crash test,
 #            output to docs/spikes/data/S3/quick.jsonl (not committed).
+#   --fjall  decision-rule fallback: build with --features fjall and run 3 paired
+#            reps of {redb t2, fjall t1, fjall t2, fjall t3} into fjall.jsonl
+#            (redb t2 re-run interleaved so both engines see the same load).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,11 +17,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DATA="$REPO_ROOT/docs/spikes/data/S3"
 
 QUICK=0
+FJALL=0
 DB_DIR=""
 for arg in "$@"; do
   case "$arg" in
     --quick) QUICK=1 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    --fjall) FJALL=1 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) DB_DIR="$arg" ;;
   esac
 done
@@ -35,8 +40,24 @@ case "$FSTYPE" in
   tmpfs|ramfs|9p|drvfs) echo "refusing DB_DIR on $FSTYPE (fsync would be meaningless or distorted): $DB_DIR" >&2; exit 2 ;;
 esac
 
-(cd "$SCRIPT_DIR" && cargo +1.100.0 build --release)
 BIN="$SCRIPT_DIR/target/release/s3-redb-bench"
+if [[ $FJALL -eq 1 ]]; then
+  (cd "$SCRIPT_DIR" && cargo +1.100.0 build --release --features fjall)
+  OUT="$DATA/fjall.jsonl"; : > "$OUT"
+  echo "## fjall run $(date -u +%Y-%m-%dT%H:%M:%SZ) loadavg $(cat /proc/loadavg)" >> "$DATA/env.txt"
+  for rep in 1 2 3; do
+    for spec in "redb t2" "fjall t1" "fjall t2" "fjall t3"; do
+      set -- $spec
+      echo "== $1 $2 rep $rep (load: $(cut -d' ' -f1-3 /proc/loadavg))" >&2
+      "$BIN" bench --engine "$1" --tier "$2" --dir "$DB_DIR" --commands 200000 --warmup 20000 \
+        --batch 64 --checkpoint-ms 100 --checkpoint-batches 256 --keys random \
+        | sed "s/^{/{\"rep\":$rep,/" >> "$OUT"
+    done
+  done
+  echo "done: $OUT" >&2
+  exit 0
+fi
+(cd "$SCRIPT_DIR" && cargo +1.100.0 build --release)
 
 TIERS=(t1 t2 t3 t2-2pc t2-qr)
 if [[ $QUICK -eq 1 ]]; then
