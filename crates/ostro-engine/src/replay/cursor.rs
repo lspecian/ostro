@@ -55,7 +55,7 @@ pub enum ReplayError {
     BadJournal(String),
 }
 
-fn protocol(msg: impl Into<String>) -> ReplayError {
+pub(super) fn protocol(msg: impl Into<String>) -> ReplayError {
     ReplayError::Protocol(ProtocolViolation(msg.into()))
 }
 
@@ -204,7 +204,7 @@ impl ReplayState {
             .map(|m| m.hash_ver)
     }
 
-    fn check_no_open_step(&self) -> Result<(), ReplayError> {
+    pub(super) fn check_no_open_step(&self) -> Result<(), ReplayError> {
         match self.open_step {
             Some(_) => Err(protocol(OPEN_STEP)),
             None => Ok(()),

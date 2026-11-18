@@ -12,8 +12,7 @@ use ostro_types::journal::{
     OpId, WaitMode, WaitResolved,
 };
 
-use super::cursor::{ReplayError, ReplayState};
-use crate::error::ProtocolViolation;
+use super::cursor::{ReplayError, ReplayState, protocol};
 
 /// Outcome of [`ReplayState::wait`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,10 +34,6 @@ fn is_op_scheduling(kind: EventKind) -> bool {
     )
 }
 
-fn protocol(msg: String) -> ReplayError {
-    ReplayError::Protocol(ProtocolViolation(msg))
-}
-
 impl ReplayState {
     /// `effects.wait(ops, mode)`.
     pub fn wait(
@@ -47,11 +42,9 @@ impl ReplayState {
         mode: WaitMode,
         hash: CommandHash,
     ) -> Result<WaitOutcome, ReplayError> {
-        if self.open_step.is_some() {
-            return Err(protocol("journaled command inside an open step".into()));
-        }
+        self.check_no_open_step()?;
         if ops.is_empty() && mode == WaitMode::Any {
-            return Err(protocol("wait(any) on an empty op list".into()));
+            return Err(protocol("wait(any) on an empty op list"));
         }
         for &op in ops {
             if op != CANCELLATION_OP && !self.is_issued_op(op) {
