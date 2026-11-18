@@ -94,7 +94,21 @@ Plans:
   3. Deploy-time validation rejects a component that imports anything outside the allowed WIT/WASI set. Accepted modules are AOT-compiled in a bounded pool and cached by `sha256 + compat hash + Ostro version`. A tampered cache artefact fails HMAC verification and is recompiled.
   4. Warm modules instantiate through `InstancePre` + pooling within the NFR targets (Rust < 1 ms p50). Pool misconfiguration under address-space limits fails with a clear error. Evicted activations replay correctly within a bounded node memory budget.
   5. The WIT world compiles for guests with context, journal, effects/`wait`, log and the workflows export. It also covers cancel-vs-terminate, `continue-as-new`, await tokens, `set-status`, run timeouts and the non-retryable error kind.
-**Plans**: TBD
+**Plans**: 12 plans (6 waves)
+
+Plans:
+- [ ] 03-01-PLAN.md — Contracts + scaffold: full WIT 0.1, guests workspace + build helper, engine module skeleton/deps, error/sink/env contracts, ostro-types journal types (W1)
+- [ ] 03-02-PLAN.md — TDD: journal event/result codec + per-kind command hash v1 with golden vectors (W2)
+- [ ] 03-03-PLAN.md — Engine config (NaN canon, det. relaxed SIMD, 4 MiB fiber stack), pooling per language class + wrapped failure/fallback, limiter + node budget, epoch ticker (W2)
+- [ ] 03-04-PLAN.md — Ostro-owned deterministic WASI 0.2.12 shim + deploy-time import/export validation + import-probe snapshot (W2)
+- [ ] 03-05-PLAN.md — TDD: pure replay core (cursor/divergence, time rule, wait ordering, patch/status/cancel, ChaCha streams, await tokens) (W2)
+- [ ] 03-06-PLAN.md — AOT cache: bounded single-flight compile pool, sha256+compat-hash+version key, HMAC-verified load (W2)
+- [ ] 03-07-PLAN.md — Host adapter for every ostro:runtime import over the replay core + production linker + det-basic/wit-surface guests (W3)
+- [ ] 03-08-PLAN.md — Activation driver + Runtime facade + failure classification + FakeSink testkit (W4)
+- [ ] 03-09-PLAN.md — Determinism suite: 1,000 records/replays, divergence at exact seq, golden journal (W5)
+- [ ] 03-10-PLAN.md — Sandbox (fuel/epoch/memory/recursion/isolation) + max-depth host-call stack test (W5)
+- [ ] 03-12-PLAN.md — WIT-01..06 behaviour tests: every import, cancel/cleanup, continue-as-new, await tokens, set-status, failures/timeouts (W5)
+- [ ] 03-11-PLAN.md — Hot-wait vs evict, LRU node-budget eviction, Runtime AOT/InstancePre cache, warm p50; full ci-local gate (W6)
 **Research flag**: Wasmtime 50.0.2 pooling allocator and fiber-stack sizing
 
 ### Phase 4: Single-Node Server & Rust MVP
@@ -243,7 +257,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 |-------|----------------|--------|-----------|
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 0/TBD | Not started | - |
-| 3. Deterministic Wasm Engine & WIT 0.1 | 0/TBD | Not started | - |
+| 3. Deterministic Wasm Engine & WIT 0.1 | 0/12 | Planned | - |
 | 4. Single-Node Server & Rust MVP | 0/TBD | Not started | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
