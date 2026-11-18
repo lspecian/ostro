@@ -4,7 +4,8 @@
 //! attempt, with the stable reason code from `activation::classify`:
 //! fuel → `FuelExhausted`, epoch deadline → `Timeout`, limiter breach →
 //! `MemoryExceeded`, Wasm stack limit → `StackOverflow`. A per-step fuel budget trips
-//! only inside that step. Hostile runs sharing one Runtime with a healthy det-basic
+//! only inside that step and, since plan 04-10 (WF-02), fails that STEP (recorded as
+//! non-retryable `fuel_exhausted`) instead of the attempt. Hostile runs sharing one Runtime with a healthy det-basic
 //! run leave its output unchanged.
 
 mod common;
@@ -13,13 +14,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ostro_engine::config::EngineConfig;
-use ostro_engine::error::AttemptFailure;
+use ostro_engine::error::{AttemptFailure, EvictReason};
 use ostro_engine::runtime::{Prepared, Runtime, RuntimeOptions};
 use ostro_engine::sink::{ActivationOutcome, RunRef};
 use ostro_engine::testkit::{
     DEFAULT_ACCEPTED_AT, Drive, FakeClock, RunSpec, Script, drive_to_completion,
 };
-use ostro_types::journal::{Event, EventBody};
+use ostro_types::journal::{Event, EventBody, Failure};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -79,6 +80,29 @@ fn assert_failed(d: &Drive, expected: &AttemptFailure) {
         ActivationOutcome::AttemptFailed(expected.clone()),
         "journal steps: {:?}",
         completed_steps(&d.journal)
+    );
+}
+
+/// The `step-fuel` run: the hot step's fuel breach is recorded for that step (the first
+/// activation evicts `StepInterrupted`), and the re-activation fails the run with it.
+fn assert_step_fuel_failed(d: &Drive) {
+    match &d.outcome {
+        ActivationOutcome::Failed {
+            failure: Failure::NonRetryable(e),
+        } => assert_eq!(e.kind, "fuel_exhausted"),
+        other => panic!("expected run failed with fuel_exhausted, got {other:?}"),
+    }
+    assert_eq!(
+        d.outcomes.first(),
+        Some(&ActivationOutcome::Evicted {
+            reason: EvictReason::StepInterrupted
+        })
+    );
+    assert_eq!(d.activations, 2);
+    assert_eq!(
+        completed_steps(&d.journal),
+        vec!["ok".to_string(), "hot".to_string()],
+        "the earlier step is kept, the hot step is recorded as failed"
     );
 }
 
@@ -150,15 +174,10 @@ async fn sandbox_step_fuel() {
     let p = prepare(&rt, "sandbox");
     let t0 = Instant::now();
     let d = drive(&rt, &p, "step-fuel", "step-fuel").await;
-    assert_failed(&d, &AttemptFailure::FuelExhausted);
+    assert_step_fuel_failed(&d);
     assert!(
         t0.elapsed() < Duration::from_secs(30),
         "the step cap tripped, not the activation fuel or timeout"
-    );
-    assert_eq!(
-        completed_steps(&d.journal),
-        vec!["ok".to_string()],
-        "the earlier step is kept, the hot step never completes"
     );
 }
 
@@ -191,11 +210,12 @@ async fn sandbox_isolation() {
     let sandbox = prepare(&rt, "sandbox");
     let det = prepare(&rt, "det-basic");
 
+    // `None`: the step-fuel run (fails the step, then the run; see assert_step_fuel_failed).
     let hostile = [
-        ("iso-fuel", "step-fuel", AttemptFailure::FuelExhausted),
-        ("iso-epoch", "loop", AttemptFailure::Timeout),
-        ("iso-bomb", "bomb", AttemptFailure::MemoryExceeded),
-        ("iso-deep", "deep", AttemptFailure::StackOverflow),
+        ("iso-fuel", "step-fuel", None),
+        ("iso-epoch", "loop", Some(AttemptFailure::Timeout)),
+        ("iso-bomb", "bomb", Some(AttemptFailure::MemoryExceeded)),
+        ("iso-deep", "deep", Some(AttemptFailure::StackOverflow)),
     ];
     let mut handles = Vec::new();
     for (id, wf, expected) in hostile {
@@ -227,7 +247,10 @@ async fn sandbox_isolation() {
     );
     for h in handles {
         let (d, expected) = h.await.expect("hostile task");
-        assert_failed(&d, &expected);
+        match expected {
+            Some(f) => assert_failed(&d, &f),
+            None => assert_step_fuel_failed(&d),
+        }
     }
 
     // The shared engine is still healthy afterwards.

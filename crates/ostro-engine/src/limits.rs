@@ -344,6 +344,10 @@ impl Drop for OstroLimiter {
 pub trait HasLimits {
     fn limiter(&mut self) -> &mut OstroLimiter;
     fn wall_deadline(&self) -> Instant;
+    /// `(seq, deadline)` of the open live step's `timeout-ms` (WF-02), if any.
+    fn step_deadline(&self) -> Option<(u64, Instant)> {
+        None
+    }
 }
 
 #[cfg(test)]

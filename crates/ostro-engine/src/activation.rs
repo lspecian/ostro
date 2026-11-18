@@ -11,6 +11,13 @@
 //! hot-wait window evicts with `StepBackoff { retry_at_nanos }` after its
 //! `StepAttemptFailed` is flushed (WF-02); the run is re-dispatched at `retry_at`.
 //!
+//! A live step interrupted by its `timeout-ms` (trap payload [`StepTimedOut`]) or by its
+//! fuel budget (`Trap::OutOfFuel` while the step budget was binding) fails the STEP, not
+//! the attempt (plan 04-10): after the unwind the driver records the open attempt's
+//! failure (`HostState::fail_interrupted_step`), flushes, and ends `Evicted
+//! { StepBackoff { retry_at } }` (a retry is left) or `Evicted { StepInterrupted }` (the
+//! step's failure is recorded: re-activate immediately and continue from replay).
+//!
 //! Every attempt-ending error is classified by [`classify`] into an
 //! [`AttemptFailure`] reason code; a failure ends only this attempt (the store is
 //! dropped, the memory budget released).
@@ -25,8 +32,10 @@ use wasmtime::{Store, Trap};
 use crate::engine::configure_store;
 use crate::error::{
     AttemptFailure, Evict, EvictReason, Fenced, GuestExit, NonDeterminism, ProtocolViolation,
+    StepTimedOut,
 };
 use crate::host::bindings::ostro::runtime::types as wit_types;
+use crate::host::journal::StepInterrupt;
 use crate::host::state::{HostState, HotWait, RunReturn, run_return_from_wit};
 use crate::limits::{Breach, HasLimits};
 use crate::replay::ReplayError;
@@ -47,6 +56,7 @@ pub enum Classified {
 /// Classify a `call_run` error.
 ///
 /// Order: [`NonDeterminism`] → [`Evict`] → [`Fenced`] → [`ProtocolViolation`] → [`GuestExit`] →
+/// unattributed [`StepTimedOut`] (`Timeout`) →
 /// limiter breach (`Breach::Memory`/`Table` → `MemoryExceeded`; a memory cap breach
 /// is a limiter error, not a [`Trap`]) → `Trap::OutOfFuel` → `FuelExhausted`,
 /// `Trap::Interrupt` → `Timeout`, `Trap::StackOverflow` → `StackOverflow` →
@@ -67,6 +77,11 @@ pub fn classify(e: &wasmtime::Error, breach: Option<Breach>, stderr_tail: &str) 
     }
     if let Some(GuestExit(code)) = e.downcast_ref::<GuestExit>() {
         return Classified::Failure(AttemptFailure::GuestExit(*code));
+    }
+    // Only reached when the timed-out step could not be attributed (the driver records
+    // attributable step timeouts before classifying).
+    if e.downcast_ref::<StepTimedOut>().is_some() {
+        return Classified::Failure(AttemptFailure::Timeout);
     }
     if breach.is_some() || e.downcast_ref::<crate::error::MemoryExceeded>().is_some() {
         return Classified::Failure(AttemptFailure::MemoryExceeded);
@@ -229,6 +244,8 @@ async fn execute(
         }
     };
 
+    // Remaining fuel, for the `fuel_used` of an interrupted step.
+    let fuel_left = store.get_fuel().ok();
     let st = store.data_mut();
     let outcome = match result {
         // External eviction: the call future (and its fiber) is already dropped.
@@ -266,17 +283,22 @@ async fn execute(
         }
         Some(Err(e)) => {
             let breach = st.limiter().breach;
-            match classify(&e, breach, &st.stderr_tail()) {
-                Classified::Evict(reason) => {
-                    flush_then(st, ActivationOutcome::Evicted { reason }).await
+            let interrupt = if let Some(t) = e.downcast_ref::<StepTimedOut>() {
+                Some(StepInterrupt::Timeout { seq: t.seq })
+            } else if breach.is_none() && matches!(e.downcast_ref::<Trap>(), Some(Trap::OutOfFuel))
+            {
+                Some(StepInterrupt::FuelExhausted)
+            } else {
+                None
+            };
+            let recorded = interrupt.and_then(|i| st.fail_interrupted_step(i, fuel_left));
+            match recorded {
+                Some(Ok(reason)) => flush_then(st, ActivationOutcome::Evicted { reason }).await,
+                Some(Err(re)) => {
+                    let f = replay_failure(re);
+                    flush_then(st, ActivationOutcome::AttemptFailed(f)).await
                 }
-                // The attempt lost ownership: nothing more may be appended.
-                Classified::Fenced => ActivationOutcome::Fenced,
-                Classified::Failure(f @ AttemptFailure::NonDeterminism(_)) => {
-                    ActivationOutcome::AttemptFailed(f)
-                }
-                // Best effort: completed live steps survive into the retry.
-                Classified::Failure(f) => flush_then(st, ActivationOutcome::AttemptFailed(f)).await,
+                None => classify_outcome(st, &e, breach).await,
             }
         }
     };
@@ -285,6 +307,24 @@ async fn execute(
     }
     drop(store);
     outcome
+}
+
+/// Outcome of a `call_run` error that is not an attributable step interrupt.
+async fn classify_outcome(
+    st: &mut HostState,
+    e: &wasmtime::Error,
+    breach: Option<Breach>,
+) -> ActivationOutcome {
+    match classify(e, breach, &st.stderr_tail()) {
+        Classified::Evict(reason) => flush_then(st, ActivationOutcome::Evicted { reason }).await,
+        // The attempt lost ownership: nothing more may be appended.
+        Classified::Fenced => ActivationOutcome::Fenced,
+        Classified::Failure(f @ AttemptFailure::NonDeterminism(_)) => {
+            ActivationOutcome::AttemptFailed(f)
+        }
+        // Best effort: completed live steps survive into the retry.
+        Classified::Failure(f) => flush_then(st, ActivationOutcome::AttemptFailed(f)).await,
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +400,11 @@ mod tests {
         assert_eq!(
             class(wasmtime::Error::new(Trap::Interrupt)),
             Classified::Failure(AttemptFailure::Timeout)
+        );
+        assert_eq!(
+            class(wasmtime::Error::new(StepTimedOut { seq: 3 })),
+            Classified::Failure(AttemptFailure::Timeout),
+            "an unattributed step timeout ends the attempt as a timeout"
         );
         assert_eq!(
             class(wasmtime::Error::new(Trap::StackOverflow)),

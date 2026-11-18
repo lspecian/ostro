@@ -5,7 +5,9 @@
 //! plus [`GuestEnv`] for the deterministic WASI shim and [`HasLimits`] for the store
 //! limiter. Imports are `async fn` per the bindgen flags; the only ones that await are
 //! a hot-parked `wait` (flush + park, 03-11) and a retried `[method]step.complete`
-//! (flush + in-activation backoff sleep, WF-02). [`HostState::flush`] is otherwise
+//! (flush + in-activation backoff sleep, WF-02). The open live step's `timeout-ms`
+//! deadline is kept in [`HostState`] (`HasLimits::step_deadline`) where the store's
+//! epoch-deadline callback can see it (plan 04-10). [`HostState::flush`] is otherwise
 //! called by the activation driver (03-08) outside guest code.
 //!
 //! [`build_linker`] assembles the single production linker: ostro bindings + WASI shim +
@@ -154,6 +156,17 @@ pub(crate) struct StepFuel {
     pub outer: Option<u64>,
 }
 
+/// The open live step as seen by the epoch-deadline callback and the activation driver
+/// (step `timeout-ms` and per-step fuel attribution, WF-02 / plan 04-10).
+#[derive(Debug, Clone)]
+pub(crate) struct OpenStep {
+    /// The current attempt's handle state (seq, attempt, policy, budgets).
+    pub rep: StepRep,
+    /// Wall-clock deadline of the current attempt (`begin + timeout-ms`). It only
+    /// decides live behaviour; the journal records just the resulting `Timeout`.
+    pub deadline: Option<Instant>,
+}
+
 /// Store data of one activation.
 pub struct HostState {
     pub(crate) replay: ReplayState,
@@ -186,6 +199,8 @@ pub struct HostState {
     pub(crate) retry_window: Duration,
     /// Cancels an in-activation retry sleep (external eviction).
     pub(crate) retry_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// The open live step (timeout deadline + interrupt attribution).
+    pub(crate) open_step: Option<OpenStep>,
 }
 
 impl std::fmt::Debug for HostState {
@@ -224,6 +239,7 @@ impl HostState {
             fuel_restore: None,
             retry_window: init.hot.as_ref().map_or(Duration::ZERO, |h| h.hot_wait),
             retry_cancel: None,
+            open_step: None,
             hot: init.hot,
         })
     }
@@ -465,6 +481,12 @@ impl HasLimits for HostState {
 
     fn wall_deadline(&self) -> Instant {
         self.wall_deadline
+    }
+
+    fn step_deadline(&self) -> Option<(u64, Instant)> {
+        self.open_step
+            .as_ref()
+            .and_then(|o| o.deadline.map(|d| (o.rep.seq, d)))
     }
 }
 

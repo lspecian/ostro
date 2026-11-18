@@ -210,7 +210,11 @@ async fn hung_step_times_out_retries_then_records_timeout() {
         total < Duration::from_secs(10),
         "2 x 200 ms + backoff, far below activation_timeout: {total:?}"
     );
-    assert!(sink.outcomes().iter().all(|(_, _, o)| !matches!(o, ActivationOutcome::AttemptFailed(_))));
+    assert!(
+        sink.outcomes()
+            .iter()
+            .all(|(_, _, o)| !matches!(o, ActivationOutcome::AttemptFailed(_)))
+    );
 
     // Replay of the final journal appends nothing and never waits on the timeout.
     let j = sink.journal(&s.run);
@@ -271,7 +275,10 @@ async fn busy_loop_outside_steps_hits_activation_timeout() {
     let sink = seeded(&p, &s);
     let started = Instant::now();
     let out = activate(&rt, &p, &sink, &s.run).await;
-    assert_eq!(out, ActivationOutcome::AttemptFailed(AttemptFailure::Timeout));
+    assert_eq!(
+        out,
+        ActivationOutcome::AttemptFailed(AttemptFailure::Timeout)
+    );
     assert!(started.elapsed() >= Duration::from_millis(300));
     assert_eq!(sink.journal(&s.run).len(), 1, "nothing journaled");
 }
@@ -285,7 +292,14 @@ async fn earlier_activation_deadline_wins_over_step_timeout() {
     let started = Instant::now();
     let out = activate(&rt, &p, &sink, &s.run).await;
     let took = started.elapsed();
-    assert_eq!(out, ActivationOutcome::AttemptFailed(AttemptFailure::Timeout));
+    assert_eq!(
+        out,
+        ActivationOutcome::AttemptFailed(AttemptFailure::Timeout)
+    );
     assert!(took < Duration::from_secs(3), "{took:?}");
-    assert_eq!(sink.journal(&s.run).len(), 1, "the open step journals nothing");
+    assert_eq!(
+        sink.journal(&s.run).len(),
+        1,
+        "the open step journals nothing"
+    );
 }

@@ -9,7 +9,8 @@
 //!   arguments chosen by `selector` (see [`call_imports`]) and completes with
 //!   `completed`.
 //! - `step-fuel`: step `ok` completes, then step `hot` (budget `fuel = 1_000_000`)
-//!   loops forever inside its body.
+//!   loops forever inside its body; its recorded failure (non-retryable
+//!   `fuel_exhausted`, plan 04-10) becomes the run's failure.
 //!
 //! `build.rs` raises the shadow stack to 16 MiB so the native Wasm stack limit
 //! (`max_wasm_stack`, 512 KiB) is what deep recursion hits.
@@ -197,8 +198,13 @@ fn wf_deep_call(input: &Payload) -> Result<RunResult, Failure> {
 
 fn wf_step_fuel() -> Result<RunResult, Failure> {
     step("ok", None, || b"ok".to_vec());
-    step("hot", Some(1_000_000), || spin());
-    Ok(RunResult::Completed(payload(b"unreachable".to_vec())))
+    // Since plan 04-10 a per-step fuel breach fails the step (recorded as non-retryable
+    // `fuel_exhausted`), not the attempt; the run then fails with that step failure.
+    match journal::begin_step("hot", &opts(Some(1_000_000))) {
+        StepStart::Replayed(Err(f)) => Err(f),
+        StepStart::Replayed(Ok(_)) => Ok(RunResult::Completed(payload(b"unreachable".to_vec()))),
+        StepStart::Execute(_s) => spin(),
+    }
 }
 
 struct Sandbox;

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use wasmtime::{PoolConcurrencyLimitError, PoolingAllocatorMetrics, Store, UpdateDeadline};
 
 use crate::config::{EngineConfig, build_on_demand_config, build_wasmtime_config};
-use crate::error::EngineError;
+use crate::error::{EngineError, StepTimedOut};
 use crate::limits::{HasLimits, NodeMemoryBudget, OstroLimiter};
 
 /// Per-slot address space the pooling allocator reserves: 4 GiB memory reservation
@@ -244,7 +244,14 @@ impl OstroEngine {
 ///
 /// The callback yields to the async executor every epoch tick (time slicing on
 /// fibers) and interrupts the guest (`Trap::Interrupt`) once the store's wall
-/// deadline has passed.
+/// deadline has passed. When the open live step's `timeout-ms` deadline
+/// ([`HasLimits::step_deadline`]) passes first, it traps with [`StepTimedOut`] instead,
+/// so the driver fails that step rather than the attempt (WF-02, plan 04-10).
+///
+/// The effective deadline is `min(wall deadline, step deadline)`; a step deadline is
+/// checked at epoch granularity (`engine.epoch_tick`). Wasmtime 50.0.2 hands the
+/// callback a `StoreHookState<T>` whose `data()` is the store data, so the per-step
+/// deadline lives in `HostState` and is moved by `begin-step` / `complete`.
 pub fn configure_store<T: HasLimits + Send + 'static>(
     store: &mut Store<T>,
     fuel: u64,
@@ -253,7 +260,15 @@ pub fn configure_store<T: HasLimits + Send + 'static>(
     store.set_fuel(fuel)?;
     store.set_epoch_deadline(1);
     store.epoch_deadline_callback(|st| {
-        if Instant::now() >= st.data().wall_deadline() {
+        let now = Instant::now();
+        let wall = st.data().wall_deadline();
+        if let Some((seq, at)) = st.data().step_deadline()
+            && now >= at
+            && at <= wall
+        {
+            return Err(wasmtime::Error::new(StepTimedOut { seq }));
+        }
+        if now >= wall {
             Ok(UpdateDeadline::Interrupt)
         } else {
             Ok(UpdateDeadline::Yield(1))

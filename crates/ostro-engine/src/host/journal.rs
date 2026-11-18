@@ -22,9 +22,23 @@
 //! re-activation that resumes a step whose last attempt's `retry_at` is still in the
 //! future re-evicts with `StepBackoff` without running the body. Replayed attempt
 //! chains are consumed by the replay core and never sleep.
+//!
+//! Step timeouts and per-step fuel (WF-02, plan 04-10): a live attempt with `timeout-ms`
+//! gets a wall-clock deadline (`begin + timeout`, re-armed on `retry-now`) that the
+//! store's epoch-deadline callback compares against; when it passes, the guest traps
+//! with [`StepTimedOut`](crate::error::StepTimedOut). A body that exhausts its step fuel
+//! budget traps `OutOfFuel`. Both unwind the guest, so the retry cannot happen in place:
+//! after the unwind the driver calls [`HostState::fail_interrupted_step`], which records
+//! the open attempt's failure through the same [`retry::decide`] path (`Timeout` is
+//! retryable; a fuel breach is `NonRetryable { kind: "fuel_exhausted" }`). A retry
+//! journals `StepAttemptFailed(Requeue)` and evicts `StepBackoff { retry_at }`; no retry
+//! left journals `StepCompleted(Err(..))` and evicts `StepInterrupted` (re-activate at
+//! once; the run continues from replay).
+
+use std::time::{Duration, Instant};
 
 use ostro_types::journal::{
-    AttemptBackoff, CommandArgs, CommandMeta, EventBody, Failure, HASH_VER, Payload,
+    AttemptBackoff, CommandArgs, CommandMeta, ErrorInfo, EventBody, Failure, HASH_VER, Payload,
     StepAttemptFailed, StepCompleted, command_hash, decode_result, encode_result,
 };
 use wasmtime::component::Resource;
@@ -35,8 +49,8 @@ use crate::host::bindings::StepRep;
 use crate::host::bindings::ostro::runtime::journal::{CompletionAck, Host, HostStep, StepStart};
 use crate::host::bindings::ostro::runtime::types::{self as wit_types, StepOptions};
 use crate::host::effects::{convert, flush_trap};
-use crate::host::state::{HostState, StepFuel, trap, violation};
-use crate::replay::StepBegin;
+use crate::host::state::{HostState, OpenStep, StepFuel, trap, violation};
+use crate::replay::{ReplayError, StepBegin};
 use crate::retry::{self, RetryDecision, RetryPolicy};
 
 fn retry_policy_from_wit(p: wit_types::RetryPolicy) -> RetryPolicy {
@@ -51,6 +65,29 @@ fn retry_policy_from_wit(p: wit_types::RetryPolicy) -> RetryPolicy {
 
 fn evict<T>(reason: EvictReason) -> wasmtime::Result<T> {
     Err(wasmtime::Error::new(Evict { reason }))
+}
+
+/// Wall-clock deadline of an attempt starting now (`None`: no timeout or overflow).
+fn attempt_deadline(timeout_ms: Option<u64>) -> Option<Instant> {
+    timeout_ms.and_then(|t| Instant::now().checked_add(Duration::from_millis(t)))
+}
+
+/// Why the open live step's guest code was unwound (plan 04-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepInterrupt {
+    /// The epoch callback trapped with `StepTimedOut { seq }`.
+    Timeout { seq: u64 },
+    /// `Trap::OutOfFuel` while the step's fuel budget was the binding limit.
+    FuelExhausted,
+}
+
+fn step_command_meta(name: &str) -> Result<CommandMeta, ReplayError> {
+    let hash = command_hash(HASH_VER, &CommandArgs::Step { name })
+        .map_err(|e| ReplayError::BadJournal(format!("step hash: {e:?}")))?;
+    Ok(CommandMeta {
+        hash_ver: HASH_VER,
+        hash,
+    })
 }
 
 impl HostState {
@@ -111,7 +148,7 @@ impl HostState {
                     (None, _) => (0, None, None),
                 };
                 self.step_fuel = fuel.map(|_| StepFuel { seq, start, outer });
-                let rep = GuestEnv::table(self).push(StepRep {
+                let rep = StepRep {
                     seq,
                     name,
                     fuel_before: fuel,
@@ -119,7 +156,12 @@ impl HostState {
                     retry: opts.retry.map(retry_policy_from_wit),
                     timeout_ms: opts.timeout_ms,
                     fuel_budget: opts.fuel,
-                })?;
+                };
+                self.open_step = Some(OpenStep {
+                    deadline: attempt_deadline(rep.timeout_ms),
+                    rep: rep.clone(),
+                });
+                let rep = GuestEnv::table(self).push(rep)?;
                 Ok((StepStart::Execute(rep), set))
             }
         }
@@ -187,6 +229,7 @@ impl HostState {
                     r.fuel_before = fuel;
                 }
                 if backoff == AttemptBackoff::Requeue {
+                    self.open_step = None;
                     // The driver flushes the attempt failure after the trap unwinds.
                     metrics::counter!("ostro_step_retries_total", "backoff" => "requeue")
                         .increment(1);
@@ -223,6 +266,12 @@ impl HostState {
                     .clone()
                     .or_else(|| self.hot.as_ref().map(|h| h.cancel.clone()));
                 retry_sleep(delay, cancel).await?;
+                // The next attempt's timeout starts when its body starts (after the sleep).
+                let next_rep = GuestEnv::table(self).get(&step)?.clone();
+                self.open_step = Some(OpenStep {
+                    deadline: attempt_deadline(next_rep.timeout_ms),
+                    rep: next_rep,
+                });
                 metrics::counter!("ostro_step_retries_total", "backoff" => "in_activation")
                     .increment(1);
                 return Ok((CompletionAck::RetryNow, set));
@@ -241,7 +290,107 @@ impl HostState {
             )
             .map_err(trap)?;
         self.completed_steps.insert(rep.seq);
+        self.open_step.take_if(|o| o.rep.seq == rep.seq);
         Ok((CompletionAck::Recorded, restore))
+    }
+
+    /// Whether an `OutOfFuel` trap is attributable to the open step's fuel budget: a
+    /// budget was applied and it was lower than the outer remaining fuel (if the budget
+    /// was not the binding limit, the activation's own fuel ran out).
+    pub(crate) fn step_fuel_breach(&self) -> bool {
+        match (&self.open_step, self.step_fuel) {
+            (Some(o), Some(sf)) => {
+                sf.seq == o.rep.seq && sf.outer.is_some_and(|out| sf.start < out)
+            }
+            _ => false,
+        }
+    }
+
+    /// Record the failure of the open live step whose guest code was unwound by its
+    /// timeout or fuel budget (called by the activation driver after the trap, with the
+    /// store's remaining fuel).
+    ///
+    /// Returns `None` if the interrupt does not belong to the open step (the caller then
+    /// classifies the trap as an attempt failure). Otherwise the failure goes through
+    /// [`retry::decide`] with a zero in-activation window (the guest stack is gone, so a
+    /// retry always re-dispatches): `StepAttemptFailed(Requeue)` -> `StepBackoff`, or
+    /// `StepCompleted(Err(..))` -> `StepInterrupted`. The caller flushes.
+    pub(crate) fn fail_interrupted_step(
+        &mut self,
+        cause: StepInterrupt,
+        fuel: Option<u64>,
+    ) -> Option<Result<EvictReason, ReplayError>> {
+        let open = self.open_step.clone()?;
+        let rep = open.rep;
+        let failure = match cause {
+            StepInterrupt::Timeout { seq } if seq == rep.seq => Failure::Timeout,
+            StepInterrupt::Timeout { .. } => return None,
+            StepInterrupt::FuelExhausted if self.step_fuel_breach() => {
+                let budget = rep.fuel_budget.unwrap_or_default();
+                Failure::NonRetryable(ErrorInfo {
+                    kind: "fuel_exhausted".to_string(),
+                    message: format!("step fuel budget of {budget} exhausted"),
+                    details: None,
+                })
+            }
+            StepInterrupt::FuelExhausted => return None,
+        };
+        self.open_step = None;
+        let fuel_used = match (self.step_fuel.take_if(|s| s.seq == rep.seq), fuel) {
+            (Some(sf), Some(now)) => sf.start.saturating_sub(now),
+            (Some(sf), None) => sf.start,
+            _ => 0,
+        };
+        Some(self.record_interrupted(rep, failure, fuel_used))
+    }
+
+    fn record_interrupted(
+        &mut self,
+        rep: StepRep,
+        failure: Failure,
+        fuel_used: u64,
+    ) -> Result<EvictReason, ReplayError> {
+        let meta = step_command_meta(&rep.name)?;
+        let now = self.replay.live_now_nanos();
+        metrics::counter!(
+            "ostro_step_interrupts_total",
+            "cause" => if failure == Failure::Timeout { "timeout" } else { "fuel" }
+        )
+        .increment(1);
+        if let RetryDecision::Retry { retry_at_nanos, .. } = retry::decide(
+            rep.retry.as_ref(),
+            rep.attempt,
+            &failure,
+            now,
+            Duration::ZERO,
+        ) {
+            self.replay.record_attempt_failed(
+                rep.seq,
+                EventBody::StepAttemptFailed(StepAttemptFailed {
+                    meta,
+                    name: rep.name,
+                    attempt: rep.attempt,
+                    failure,
+                    retry_at_nanos,
+                    // The guest stack was unwound: the retry always re-dispatches.
+                    backoff: AttemptBackoff::Requeue,
+                    fuel_used,
+                }),
+            )?;
+            metrics::counter!("ostro_step_retries_total", "backoff" => "requeue").increment(1);
+            return Ok(EvictReason::StepBackoff { retry_at_nanos });
+        }
+        self.replay.complete_step(
+            rep.seq,
+            EventBody::StepCompleted(StepCompleted {
+                meta,
+                name: rep.name,
+                outcome: encode_result(&Err::<Payload, Failure>(failure)),
+                fuel_used,
+            }),
+        )?;
+        self.completed_steps.insert(rep.seq);
+        Ok(EvictReason::StepInterrupted)
     }
 }
 
@@ -292,6 +441,7 @@ impl HostStep for HostState {
             return Ok(());
         }
         self.replay.abandon_step(rep.seq);
+        self.open_step.take_if(|o| o.rep.seq == rep.seq);
         if let Some(sf) = self.step_fuel.take_if(|s| s.seq == rep.seq)
             && let Some(outer) = sf.outer
         {

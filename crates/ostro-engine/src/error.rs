@@ -48,6 +48,15 @@ pub struct Evict {
     pub reason: EvictReason,
 }
 
+/// The open live step at `seq` ran past its `timeout-ms`; raised by the epoch-deadline
+/// callback as a trap payload (distinct from the activation's `Trap::Interrupt`). The
+/// activation driver records the step's `Timeout` failure after the unwind (WF-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("step at seq {seq} timed out")]
+pub struct StepTimedOut {
+    pub seq: u64,
+}
+
 /// The guest issued a command that does not match the journal at `seq`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("nondeterminism at seq {seq}: expected {expected}, actual {actual}")]
