@@ -162,7 +162,10 @@ pub async fn check_reads<L: ReplicatedLog>(log: &L, model: &Model) {
     }
 
     // upto beyond HW is capped at HW.
-    let capped = log.read(from, Offset(hw.0 + 1000), usize::MAX).await.unwrap();
+    let capped = log
+        .read(from, Offset(hw.0 + 1000), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(capped.last().map(|b| b.end()), got.last().map(|b| b.end()));
 }
 
@@ -236,7 +239,11 @@ async fn rf1_reopen_preserves_leo_and_epochs() {
     let log = &logs[0];
     assert_eq!(log.log_end(), leo);
     assert_eq!(log.epochs(), epochs);
-    assert_eq!(*log.high_watermark().borrow(), leo, "HW == LEO after reopen");
+    assert_eq!(
+        *log.high_watermark().borrow(),
+        leo,
+        "HW == LEO after reopen"
+    );
     assert_eq!(log.recovery().leo, leo);
     check_invariant(&**log);
     check_reads(&**log, &model).await;

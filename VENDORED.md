@@ -124,3 +124,11 @@ WASI 0.2.12 WIT for Ostro's deterministic WASI shim (plan 03-04, ENG-02). Source
 | crates/ostro-engine/wit-wasi/deps/cli.wit | wasip2 1.0.4+wasi-0.2.12 crate wit/deps/cli.wit | 233 | modified | Lines 140–233 deleted: the `world imports` and `world command` blocks, which import `wasi:filesystem/*` and `wasi:sockets/*` (not vendored; Ostro guests get neither). Lines 1–139 (all interfaces) are byte-identical |
 | crates/ostro-engine/wit-wasi/shim.wit | — | — | ostro-authored | World `ostro:wasi-shim/shim`: the 18 allowed `wasi:*@0.2.12` interfaces |
 | crates/ostro-engine/wit-wasi/README.md | — | — | ostro-authored | Provenance and re-vendoring steps |
+
+## Ported into Ostro crates
+
+Pure logic ported from Chronik into Ostro-owned crates (not under `vendor/`, so `scripts/check-vendored.sh` does not scan them). Each file carries the header `// Ported from chronik-stream@08715f4 <upstream path>; modified by Ostro (see VENDORED.md).`
+
+| Ostro path | Upstream path | Upstream lines | Status | Local modifications |
+|---|---|---:|---|---|
+| crates/ostro-log/src/epoch_cache.rs | crates/chronik-server/src/replication/leader_epoch.rs | 36–187, 435–621 | modified | Only `LeaderEpochCache` (renamed `EpochCache`: `assign`, `epoch_for_offset`, `end_offset_for_epoch`, `truncate_from_end`, `truncate_from_start`) and its unit tests. Ostro `Epoch(u32)`/`Offset(u64)` replace `i32`/`i64`; Kafka's `(UNDEFINED_EPOCH, UNDEFINED_OFFSET)` answer is `None`; the unstamped-epoch (`-1`) case and its test are gone (every envelope carries an epoch); `from_pairs`/`to_pairs` added; `LeaderEpochStore` (DashMap + checkpoint files) and the Kafka batch stamping helpers are not ported (the history is rebuilt from the WAL at open) |
