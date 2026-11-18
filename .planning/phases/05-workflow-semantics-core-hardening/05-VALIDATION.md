@@ -24,7 +24,7 @@ created: 2026-11-19
 | **Failpoint binary** | `cargo build --release -p ostro --features failpoints --target-dir target/failpoints` (05-17) |
 | **Quick run command** | `cargo test -p <touched crate> --locked` |
 | **Full suite command** | `bash scripts/ci-local.sh --no-musl` |
-| **Phase gate commands** | 1. `bash scripts/ci-local.sh` (with musl).<br>2. The sharded kill campaign, in batches or in the background: `OSTRO_CAMPAIGN_FAULTS=10000 OSTRO_CAMPAIGN_SHARDS=20 [OSTRO_CAMPAIGN_SHARD_IDS=a-b] OSTRO_CAMPAIGN_PARALLEL=6 cargo test --release -p ostro-crashtest --features failpoints --test server_campaign -- --ignored --nocapture campaign`, then the same command with `report` (gate: `kills ≥ 10000`, `lost_acked_runs=0`, `duplicate_journal_entries=0`, `non_terminal_runs=0`).<br>3. `cargo test -p ostro-engine --test replay_corpus` (all CI legs).<br>4. Perf: `OSTRO_BENCH_PROFILE=a cargo test --release -p ostro-server --test perf -- --ignored --nocapture` (the native NVMe run is human_needed). |
+| **Phase gate commands** | 1. `bash scripts/ci-local.sh` (with musl).<br>2. The sharded kill campaign, in batches or in the background: `rm -rf target/campaign-gate`, then `OSTRO_CAMPAIGN_STATE_DIR=target/campaign-gate OSTRO_CAMPAIGN_FAULTS=10000 OSTRO_CAMPAIGN_SHARDS=20 [OSTRO_CAMPAIGN_SHARD_IDS=a-b] OSTRO_CAMPAIGN_PARALLEL=6 cargo test --release -p ostro-crashtest --features failpoints --test server_campaign -- --ignored --nocapture campaign`, then the same command with `report` (gate: `kills ≥ 10000`, `lost_acked_runs=0`, `duplicate_journal_entries=0`, `non_terminal_runs=0`).<br>3. `cargo test -p ostro-engine --test replay_corpus` (all CI legs).<br>4. Perf: `OSTRO_BENCH_PROFILE=a cargo test --release -p ostro-server --test perf -- --ignored --nocapture` (the native NVMe run is human_needed). |
 | **Estimated runtime** | Quick: < 60 s. Full: ~8–12 min debug. Kill campaign: projected in 05-18 from a measured 200-kill run (≈ 1–2 h with 6 parallel shards expected). |
 
 ---
@@ -51,8 +51,8 @@ created: 2026-11-19
 | 4 | 05-10 server seam (+ resume re-arm, pause hook), 05-11 replay corpus | Only 05-11 edits Cargo.lock. |
 | 5 | 05-12 ControlPlane lifecycle + start fields + long-poll | — |
 | 6 | 05-13 CLI, 05-14 semantics e2e | 05-13 owns Cargo.lock, Cargo.toml and crates/ostro. 05-14 owns ostro-server tests/common, ci-local.sh and ci.yml (serial sleepers step). |
-| 7 | 05-15 perf + start-path optimisations, 05-16 order-saga CLI + quickstart + docs | Disjoint files. |
-| 8 | 05-17 failpoint chain + sites | Owns crates/ostro Cargo/main, ci-local.sh, ci.yml and Cargo.lock. |
+| 7 | 05-15 perf + start-path optimisations | — |
+| 8 | 05-16 order-saga CLI + quickstart + docs (after 05-15), 05-17 failpoint chain + sites | 05-17 owns crates/ostro Cargo/main, ci-local.sh, ci.yml and Cargo.lock. 05-16 edits only crates/ostro/tests, examples/order-saga and docs, so there is no overlap. |
 | 9 | 05-18 whole-server kill campaign | Owns ostro-crashtest, ci-local.sh, ci.yml and Cargo.lock. |
 | 10 | 05-19 phase gate + freeze flip | — |
 
@@ -69,7 +69,7 @@ created: 2026-11-19
 | 5-02-02 | 02 | 2 | WF-09, OPS-06, API-05 (terminal cleanup of waits + wait timers) | integration | `cargo test -p ostro-partition --test timers --test apply_timer_input --test apply_core` | ✅ | ⬜ pending |
 | 5-02-03 | 02 | 2 | (seams, outcome codes) | integration + proptest | `cargo test -p ostro-partition --test apply_seams --test rebuild_digest` | ❌ W0 | ⬜ pending |
 | 5-03-01 | 03 | 2 | WF-03 | unit + proptest | `cargo test -p ostro-engine --lib` (incl. `replay::tests::gather_race_prop`, hot_waitable false for signal/token) | ❌ W0 | ⬜ pending |
-| 5-03-02 | 03 | 2 | WF-08 | integration (engine) | `cargo test -p ostro-engine --test patching` | ❌ W0 | ⬜ pending |
+| 5-03-02 | 03 | 2 | WF-08 | integration (engine) | `cargo test -p ostro-engine --test patching --test determinism` | ❌ W0 | ⬜ pending |
 | 5-03-03 | 03 | 2 | WF-04, API-07 | integration | `cargo test -p ostro-engine --test live_activations && cargo test -p ostro-engine --lib token` | ❌ W0 | ⬜ pending |
 | 5-04-01 | 04 | 2 | API-05/06/07 | unit | `cargo test -p ostro-proto -p ostro-api --lib && cargo build --workspace --all-targets` | ✅ (extended) | ⬜ pending |
 | 5-04-02 | 04 | 2 | API-05/06/07 | integration + parity + insta | `cargo test -p ostro-api --test lifecycle_surface --test parity --test openapi` | ❌ W0 / ✅ parity | ⬜ pending |
@@ -99,14 +99,14 @@ created: 2026-11-19
 | 5-14-03 | 14 | 6 | OPS-06, API-06 | e2e | `cargo test -p ostro-server --test semantics_e2e -- continue_as_new retention` | ❌ W0 | ⬜ pending |
 | 5-15-01/03 | 15 | 7 | SC-4 perf (D15/D16), OPS-06 (expiry cost) | benchmark (`#[ignore]`) | `OSTRO_BENCH_PROFILE=a cargo test --release -p ostro-server --test perf -- --ignored --nocapture` (WSL2 advisory; native NVMe human_needed) | ❌ W0 | ⬜ pending |
 | 5-15-02 | 15 | 7 | SC-4 (start path) | integration | `cargo test -p ostro-partition && cargo test -p ostro-server && cargo test -p ostro-engine --test replay_corpus` | ❌ W0 (apply_run_started) | ⬜ pending |
-| 5-16-01 | 16 | 7 | SC-1, CLI-06 | e2e (CLI) | `cargo test -p ostro --test order_saga` | ❌ W0 | ⬜ pending |
-| 5-16-02 | 16 | 7 | SC-1 (< 10 min) | containerised | `bash examples/order-saga/quickstart.sh` prints `QUICKSTART_RESULT: within_budget` (docker) or `HUMAN_NEEDED:` + local cold-clone time | ❌ W0 | ⬜ pending |
-| 5-16-03 | 16 | 7 | docs | check | grep checks on docs/workflow-semantics.md and docs/03 | n/a | ⬜ pending |
+| 5-16-01 | 16 | 8 | SC-1, CLI-06 | e2e (CLI) | `cargo test -p ostro --test order_saga` | ❌ W0 | ⬜ pending |
+| 5-16-02 | 16 | 8 | SC-1 (< 10 min) | containerised | `bash examples/order-saga/quickstart.sh` prints `QUICKSTART_RESULT: within_budget` (docker) or `HUMAN_NEEDED:` + local cold-clone time | ❌ W0 | ⬜ pending |
+| 5-16-03 | 16 | 8 | docs | check | grep checks on docs/workflow-semantics.md and docs/03 | n/a | ⬜ pending |
 | 5-17-01 | 17 | 8 | QA-01 (sites) | failpoint suites | `cargo build --release -p ostro --features failpoints --target-dir target/failpoints` + meta/aot/executor/dispatcher failpoint tests | ❌ W0 | ⬜ pending |
 | 5-17-02 | 17 | 8 | QA-01 (CI sync) | check + gate | FAILPOINT_CRATES ⊇ {ostro-server, ostro-meta, ostro-engine}, mirrored in ci.yml; `bash scripts/ci-local.sh --no-musl` | n/a | ⬜ pending |
 | 5-18-01 | 18 | 9 | QA-01 (checker) | unit (negative controls) | `cargo test -p ostro-crashtest --test check_controls` | ❌ W0 | ⬜ pending |
-| 5-18-02 | 18 | 9 | QA-01 (smoke) | integration (`#[ignore]`, run by ci-local) | `OSTRO_CAMPAIGN_FAULTS=20 … --test server_campaign -- --ignored campaign` then `report` (kills ≥ 20, 0 violations) | ❌ W0 | ⬜ pending |
-| 5-19-01 | 19 | 10 | QA-01 | gate (long-running, sharded) | report: `kills ≥ 10000`, `lost_acked_runs=0`, `duplicate_journal_entries=0`, `non_terminal_runs=0` | n/a | ⬜ pending |
+| 5-18-02 | 18 | 9 | QA-01 (smoke) | integration (`#[ignore]`, run by ci-local) | `rm -rf target/campaign-smoke`; `OSTRO_CAMPAIGN_STATE_DIR=target/campaign-smoke OSTRO_CAMPAIGN_FAULTS=20 … --test server_campaign -- --ignored campaign` then `report` (kills ≥ 20, 0 violations) | ❌ W0 | ⬜ pending |
+| 5-19-01 | 19 | 10 | QA-01 | gate (long-running, sharded) | Clean `target/campaign-gate`, fixed seed. Report: `kills ≥ 10000`, `lost_acked_runs=0`, `duplicate_journal_entries=0`, `non_terminal_runs=0` | n/a | ⬜ pending |
 | 5-19-02 | 19 | 10 | WIT-07, QA-02 | gate | `cargo test -p ostro-witcheck && cargo test -p ostro-types --test golden_frozen && cargo test -p ostro-engine --test replay_corpus && cargo test -p ostro-partition --test format_corpus` + local tag, no remote | n/a | ⬜ pending |
 | 5-19-03 | 19 | 10 | all | gate | `bash scripts/ci-local.sh` | n/a | ⬜ pending |
 
