@@ -1,0 +1,275 @@
+//! Per-partition state store on fjall 3.1.13.
+//!
+//! Durability design (STOR-05, adapted from S3 to fjall, see
+//! docs/spikes/S3-redb-durability.md):
+//! - One atomic `WriteBatch` per apply chunk carries the data together with
+//!   `applied_offset`, `state_hash` and the cursor ([`ApplyBatch::commit`]).
+//! - Commits use fjall's default buffered journal flush (`write(2)` per
+//!   commit, no fsync).
+//! - [`PartitionStore::checkpoint`] records `checkpointed_offset` and calls
+//!   `persist(PersistMode::SyncAll)`. The caller runs it every 100 ms or 256
+//!   batches.
+//! - Recovery replays the WAL from the state's OWN `applied_offset`. After a
+//!   process kill fjall may reopen ahead of the last checkpoint. That is safe:
+//!   the state only ever applies WAL-durable commands.
+//!
+//! Each partition has its own fjall `Database` at `<data>/state/pNNNN` (see
+//! [`config`]).
+
+pub mod batch;
+pub mod config;
+pub mod keys;
+pub mod meta;
+pub mod values;
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use ostro_types::{Offset, PartitionCount, PartitionId};
+
+pub use batch::{ApplyBatch, MetaUpdate};
+pub use config::{StoreConfig, state_dir};
+use values::CursorMeta;
+
+/// Key/value rows in key order.
+pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// The fixed keyspace set. Declaration order is the logical digest order.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Table {
+    Meta,
+    Runs,
+    Events,
+    Payloads,
+    Ready,
+    Timers,
+    Inbox,
+    Dedupe,
+    Outbox,
+    InboundSeen,
+    Children,
+    Dlq,
+    Effects,
+}
+
+/// Every table, in fixed (declaration) order.
+pub const TABLES: [Table; 13] = [
+    Table::Meta,
+    Table::Runs,
+    Table::Events,
+    Table::Payloads,
+    Table::Ready,
+    Table::Timers,
+    Table::Inbox,
+    Table::Dedupe,
+    Table::Outbox,
+    Table::InboundSeen,
+    Table::Children,
+    Table::Dlq,
+    Table::Effects,
+];
+
+impl Table {
+    /// fjall keyspace name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Table::Meta => "meta",
+            Table::Runs => "runs",
+            Table::Events => "events",
+            Table::Payloads => "payloads",
+            Table::Ready => "ready",
+            Table::Timers => "timers",
+            Table::Inbox => "inbox",
+            Table::Dedupe => "dedupe",
+            Table::Outbox => "outbox",
+            Table::InboundSeen => "inbound_seen",
+            Table::Children => "children",
+            Table::Dlq => "dlq",
+            Table::Effects => "effects",
+        }
+    }
+
+    fn idx(self) -> usize {
+        self as usize
+    }
+}
+
+/// Decoded meta keyspace (plus `inbound_seen` rows).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoreMeta {
+    pub partition: PartitionId,
+    pub count: PartitionCount,
+    pub applied: Offset,
+    pub checkpointed: Offset,
+    pub state_hash: [u8; 32],
+    pub cursor: CursorMeta,
+    pub inbound_seen: BTreeMap<u16, u64>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("fjall: {0}")]
+    Fjall(#[from] fjall::Error),
+    #[error("state codec: {0}")]
+    Codec(String),
+    #[error("unsupported state format version {found}")]
+    FormatVersion { found: u32 },
+    #[error("state store belongs to partition {found}, expected {expected}")]
+    PartitionMismatch { expected: u16, found: u16 },
+    #[error("state store was created with partition count {found}, configured {expected}")]
+    PartitionCountMismatch { expected: u16, found: u16 },
+    #[error("injected failure at {0}")]
+    Injected(&'static str),
+}
+
+/// One partition's fjall-backed state. `Send + Sync`; the apply thread is
+/// the only writer.
+pub struct PartitionStore {
+    db: Database,
+    ks: [Keyspace; 13],
+}
+
+impl std::fmt::Debug for PartitionStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartitionStore")
+            .field("path", &self.ks[0].path())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartitionStore {
+    /// Opens (creating if missing) the state store of partition `p`.
+    ///
+    /// A fresh store gets all meta keys in one batch, then
+    /// `persist(SyncAll)`. An existing store must have format version 1 and
+    /// the configured partition id and partition count (STOR-09).
+    pub fn open(
+        data_dir: &Path,
+        p: PartitionId,
+        count: PartitionCount,
+        cfg: &StoreConfig,
+    ) -> Result<(Self, StoreMeta), StoreError> {
+        let db = Database::builder(state_dir(data_dir, p))
+            .worker_threads(cfg.worker_threads)
+            .max_journaling_size(cfg.max_journaling_size)
+            .cache_size(cfg.cache_size)
+            .open()?;
+        let memtable = cfg.max_memtable_size;
+        let mut handles = Vec::with_capacity(TABLES.len());
+        for t in TABLES {
+            handles.push(db.keyspace(t.name(), || {
+                KeyspaceCreateOptions::default().max_memtable_size(memtable)
+            })?);
+        }
+        let ks: [Keyspace; 13] = handles
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("one keyspace per table"));
+        let store = Self { db, ks };
+
+        match meta::read_format_version(store.ks(Table::Meta))? {
+            None => {
+                let mut b = store.db.batch();
+                meta::write_initial(&mut b, store.ks(Table::Meta), p, count);
+                b.commit()?;
+                store.persist()?;
+            }
+            Some(meta::FORMAT_VERSION) => {}
+            Some(found) => return Err(StoreError::FormatVersion { found }),
+        }
+        let m = store.read_meta()?;
+        if m.partition != p {
+            return Err(StoreError::PartitionMismatch {
+                expected: p.0,
+                found: m.partition.0,
+            });
+        }
+        if m.count != count {
+            return Err(StoreError::PartitionCountMismatch {
+                expected: count.get(),
+                found: m.count.get(),
+            });
+        }
+        Ok((store, m))
+    }
+
+    /// Whether partition `p` has a state directory under `data_dir`.
+    pub fn exists(data_dir: &Path, p: PartitionId) -> bool {
+        state_dir(data_dir, p).is_dir()
+    }
+
+    /// Starts an apply batch (overlay + read counter).
+    pub fn batch(&self) -> ApplyBatch<'_> {
+        ApplyBatch::new(self)
+    }
+
+    /// Records `checkpointed_offset = applied` and fsyncs everything
+    /// (`persist(SyncAll)`).
+    pub fn checkpoint(&self, applied: Offset) -> Result<(), StoreError> {
+        self.ks(Table::Meta)
+            .insert(meta::K_CHECKPOINTED, applied.0.to_be_bytes())?;
+        self.persist()
+    }
+
+    fn persist(&self) -> Result<(), StoreError> {
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!("state::persist", |_| Err(StoreError::Injected(
+            "state::persist"
+        )));
+        self.db.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
+    /// Read handle for leader services and tests.
+    pub fn reader(&self) -> StoreReader {
+        StoreReader {
+            ks: self.ks.clone(),
+        }
+    }
+
+    pub fn read_meta(&self) -> Result<StoreMeta, StoreError> {
+        meta::read(self.ks(Table::Meta), self.ks(Table::InboundSeen))
+    }
+
+    fn ks(&self, t: Table) -> &Keyspace {
+        &self.ks[t.idx()]
+    }
+}
+
+/// Cheap-to-clone read handle (cloned fjall keyspace handles).
+#[derive(Clone)]
+pub struct StoreReader {
+    ks: [Keyspace; 13],
+}
+
+impl StoreReader {
+    pub fn get(&self, t: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(self.ks[t.idx()].get(key)?.map(|v| v.to_vec()))
+    }
+
+    /// Up to `limit` rows whose key starts with `prefix`, in key order.
+    pub fn prefix(&self, t: Table, prefix: &[u8], limit: usize) -> Result<Rows, StoreError> {
+        collect(self.ks[t.idx()].prefix(prefix), limit)
+    }
+
+    /// Up to `limit` rows with `from <= key < to`, in key order.
+    pub fn range(
+        &self,
+        t: Table,
+        from: &[u8],
+        to: &[u8],
+        limit: usize,
+    ) -> Result<Rows, StoreError> {
+        collect(self.ks[t.idx()].range(from..to), limit)
+    }
+}
+
+fn collect(iter: fjall::Iter, limit: usize) -> Result<Rows, StoreError> {
+    let mut out = Vec::new();
+    for g in iter.take(limit) {
+        let (k, v) = g.into_inner()?;
+        out.push((k.to_vec(), v.to_vec()));
+    }
+    Ok(out)
+}

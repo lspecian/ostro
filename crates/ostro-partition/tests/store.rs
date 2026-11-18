@@ -263,10 +263,7 @@ fn checkpoint_survives_reopen() -> Result<(), Box<dyn std::error::Error>> {
     let (store, meta) = open(dir.path(), 1, 16)?;
     assert_eq!(meta.checkpointed, Offset(42));
     assert_eq!(meta.applied, Offset(42));
-    assert_eq!(
-        store.reader().get(Table::Runs, b"r")?,
-        Some(b"v".to_vec())
-    );
+    assert_eq!(store.reader().get(Table::Runs, b"r")?, Some(b"v".to_vec()));
     Ok(())
 }
 
@@ -283,12 +280,16 @@ fn reader_prefix_and_range() -> Result<(), Box<dyn std::error::Error>> {
     let r = store.reader().clone();
     let rows = r.prefix(Table::Outbox, &outbox_prefix(2), 3)?;
     assert_eq!(
-        rows.iter().map(|(k, _)| decode_outbox_key(k)).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|(k, _)| decode_outbox_key(k))
+            .collect::<Vec<_>>(),
         vec![Some((2, 0)), Some((2, 1)), Some((2, 2))]
     );
     let rows = r.range(Table::Outbox, &outbox_key(1, 8), &outbox_key(2, 1), 100)?;
     assert_eq!(
-        rows.iter().map(|(k, _)| decode_outbox_key(k)).collect::<Vec<_>>(),
+        rows.iter()
+            .map(|(k, _)| decode_outbox_key(k))
+            .collect::<Vec<_>>(),
         vec![Some((1, 8)), Some((1, 9)), Some((2, 0))],
         "range is [from, to)"
     );
@@ -339,7 +340,14 @@ fn ready_key_sorts_higher_priority_first_then_earlier() {
         .collect();
     assert_eq!(
         decoded,
-        vec![(i32::MAX, 100), (10, 1), (10, 9), (0, 5), (-3, 0), (i32::MIN, 0)]
+        vec![
+            (i32::MAX, 100),
+            (10, 1),
+            (10, 9),
+            (0, 5),
+            (-3, 0),
+            (i32::MIN, 0)
+        ]
     );
 }
 
