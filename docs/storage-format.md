@@ -1,0 +1,258 @@
+# Ostro on-disk format (Phase 2)
+
+Status: fixed at the end of Phase 2 (plan 02-16). This document describes what the code writes today. Each section names the source file that defines the format, and the golden files and tests that pin it.
+
+**Freeze policy:** the format is **frozen at the end of Phase 5**. After that, only additive changes are allowed: new command fields, new oneof variants, new enum values, new keyspaces, new meta keys, new outcome codes appended at the end. Field numbers, tags, codes and key layouts are never reused or renumbered. Until Phase 5 ends, any incompatible change must bump the relevant version (`node.toml` `format_version`, meta `format_ver`, envelope `codec_ver`, value format byte) and update this document in the same commit.
+
+All multi-byte integers are **little-endian in the log** (WAL frame, envelope) and **big-endian in state keys** (so byte order equals numeric order).
+
+---
+
+## 1. Data directory layout
+
+```
+<data>/
+├── node.toml                       # format_version = 1, partitions = P   (crates/ostro-partition/src/node.rs)
+├── wal/
+│   └── p/<id>/wal_<id>_<seg>.log   # partition <id>'s log segments (vendored ostro-wal), <seg> = 0, 1, 2, ...
+├── state/
+│   └── pNNNN/                      # partition NNNN's fjall database (zero-padded to 4 digits)
+│       ├── <n>.jnl                 # fjall journal(s)
+│       ├── keyspaces/<k>/...       # one LSM tree per keyspace (fjall-internal layout)
+│       ├── version, lock           # fjall-internal
+├── blobs/<hh>/<sha256 hex>         # content-addressed blobs, <hh> = first two hex chars (crates/ostro-blob)
+└── tmp/<sha256 hex>.<pid>.<n>      # in-flight blob writes; deleted by BlobStore::open
+```
+
+- **`node.toml`**: two `key = value` lines, `format_version = 1` and `partitions = <P>`. The file is written durably (tmp + fsync + rename + dir fsync) on first start. A different `partitions` value at open is fatal (`NodeError::PartitionCountMismatch`, STOR-09). The partition count is also recorded in every state store.
+- **WAL**: one shared group-commit WAL per node (`wal/`), topic `p`, one partition directory per partition. The vendored WAL opens a **new** segment on each process's first append to a partition, rotates at 250 MB or 30 min (vendored defaults), and fsyncs a segment before rotating away from it. Empty segment files can exist and are ignored. Retention deletes only whole segments below the safe floor (§8).
+- **State**: one fjall `Database` per partition. Deleting `state/pNNNN` and reopening rebuilds that partition from its log (STOR-06). The fjall-internal file layout is not part of Ostro's format. Ostro's format is the logical content (keyspaces, keys, values) in §5–§6.
+- **Blobs**: payloads over 256 KiB are written as `blobs/<hh>/<sha256>` (tmp write, fsync, rename, dir fsync) **before** the command that references them is appended. A visible blob is always complete. Blob GC and object-store backends come in Phase 8.
+
+## 2. WAL record (vendored `ostro-wal` V2 frame)
+
+Defined in `vendor/ostro-wal/src/record.rs`, parsed by `vendor/ostro-wal/src/truncate.rs` and `crates/ostro-log/src/recovery.rs`. Little-endian:
+
+| off | field | type | value |
+|---|---|---|---|
+| 0 | magic | u16 | `0xCA7E` |
+| 2 | version | u8 | 2 |
+| 3 | flags | u8 | |
+| 4 | length | u32 | bytes after this 12-byte header |
+| 8 | crc32 | u32 | frame CRC32 (`WalRecord::calculate_checksum`) |
+| 12 | topic_len | u16 | 1 |
+| 14 | topic | bytes | `p` |
+| 14+tl | partition | i32 | partition id |
+| 18+tl | data_len | u32 | envelope length |
+| 22+tl | canonical_data | bytes | **exactly one Ostro envelope** (§3) |
+| 22+tl+dl | base_offset | i64 | envelope `base_off` |
+| 30+tl+dl | last_offset | i64 | `base_off + cmd_count - 1` |
+| 38+tl+dl | record_count | i32 | envelope `cmd_count` |
+
+A record occupies `12 + length` bytes, and `12 + length == 42 + topic_len + data_len`. The vendored V2 `verify_checksum` is a no-op, so Ostro's verified reader (`crates/ostro-log/src/verify.rs`) checks every record itself, in this order: frame CRC, V2 only, partition, envelope (§3), envelope header vs trailer (base, count, last), `base == previous last + 1`, epoch non-decreasing. Offsets are contiguous across records and segments.
+
+## 3. Envelope (`crates/ostro-types/src/envelope.rs`)
+
+32-byte little-endian header followed by the body:
+
+| off | field | type | value |
+|---|---|---|---|
+| 0 | magic | u32 | `b"OSTR"` |
+| 4 | codec_ver | u16 | 1 (`CODEC_VERSION`) |
+| 6 | flags | u16 | must be 0 |
+| 8 | partition | u16 | |
+| 10 | reserved | u16 | must be 0 |
+| 12 | epoch | u32 | leader epoch that wrote the batch |
+| 16 | base_off | u64 | offset of the first command |
+| 24 | cmd_count | u32 | ≥ 1 |
+| 28 | crc32c | u32 | CRC32C over `header[0..28] ‖ body` |
+
+Body = `cmd_count × (u32 LE len ‖ command bytes)`. Verification order: length ≥ 32 → magic → codec → flags → reserved → CRC32C → `cmd_count ≥ 1` → exactly `cmd_count` commands (a clean short body is `CountMismatch`, an overrun is `BodyMalformed`) → no trailing bytes. The envelope CRC is the only integrity check that covers the command bytes. Default maximum envelope size is 4 MiB (`DEFAULT_MAX_ENVELOPE_BYTES`). Callers split larger batches.
+
+## 4. Command set (`crates/ostro-types/src/command.rs`)
+
+Commands are hand-written prost (protobuf) messages. Unknown fields are skipped on decode. Golden bytes: `crates/ostro-types/tests/golden/commands.txt`.
+
+`Command { oneof cmd }` tags (8..=63 reserved for future variants):
+
+| tag | variant | fields (number = name) |
+|---|---|---|
+| 1 | `LeaderAnnounced` | 1 epoch u32, 2 node_id u64, 3 announced_at_ms u64 |
+| 2 | `StartRun` | 1 run_id bytes(18), 2 workflow string, 3 workflow_version u32, 4 queue string, 5 input PayloadRef, 6 idempotency_key bytes, 7 conflict_policy enum, 8 concurrency_key string, 9 priority i32, 10 ready_at_ms u64, 11 requested_at_ms u64, 12 parent ParentRef, 13 rng_seed bytes(32) |
+| 3 | `AttemptGranted` | 1 run_id bytes, 2 token AttemptTokenMsg |
+| 4 | `EventsAppended` | 1 run_id bytes, 2 token AttemptTokenMsg, 3 from_seq u64, 4 events repeated JournalEvent, 5 derived repeated Derived |
+| 5 | `TimerFired` | 1 run_id bytes, 2 op u64, 3 due_at_ms u64, 4 fired_at_ms u64 |
+| 6 | `InboundBatch` | 1 src u32, 2 msgs repeated InboundMsg |
+| 7 | `OutboxTruncated` | 1 target u32, 2 upto_seq u64 |
+
+Nested messages:
+
+| message | fields |
+|---|---|
+| `ParentRef` | 1 run_id bytes, 2 op u64 |
+| `AttemptTokenMsg` | 1 epoch u32, 2 n u32 |
+| `JournalEvent` | 1 seq u64, 2 kind u32, 3 payload PayloadRef. **Opaque to Phase 2**: Phase 3 (`ostro-types/src/journal.rs`) owns kinds and payload semantics |
+| `Derived { oneof intent }` | 1 ScheduleTimer, 2 CancelTimer, 3 SendMessage, 4 EnqueueReady, 5 CompleteRun |
+| `ScheduleTimer` / `CancelTimer` | 1 op u64, 2 due_at_ms u64 |
+| `SendMessage` | 1 msg OutboxMsg |
+| `EnqueueReady` | 1 ready_at_ms u64 |
+| `CompleteRun` | 1 status TerminalStatus, 2 result PayloadRef, 3 completed_at_ms u64 |
+| `OutboxMsg { oneof kind }` | 1 StartChild, 2 ChildCompleted, 3 Signal, 4 CancelRun, 5 CronStart |
+| `StartChild` | 1 start StartRun |
+| `ChildCompleted` | 1 parent_run bytes, 2 child_run bytes, 3 op u64, 4 status TerminalStatus, 5 result PayloadRef |
+| `Signal` | 1 target_run bytes, 2 name string, 3 payload PayloadRef |
+| `CancelRun` | 1 target_run bytes, 2 reason string |
+| `CronStart` | 1 schedule_id string, 2 fire_time_ms u64, 3 start StartRun |
+| `InboundMsg` | 1 seq u64, 2 msg OutboxMsg |
+| `PayloadRef { oneof kind }` (`payload.rs`) | 1 inline bytes, 2 blob BlobRef |
+| `BlobRef` | 1 sha256 bytes(32), 2 len u64 |
+
+Enums: `ConflictPolicy` ReturnExisting = 0, Reject = 1. `TerminalStatus` Completed = 0, Failed = 1, Cancelled = 2.
+
+Inline payloads are limited to 256 KiB (`INLINE_PAYLOAD_LIMIT`). Apply rejects a larger inline payload with `PayloadTooLarge`.
+
+## 5. Ids and routing (`crates/ostro-types/src/ids.rs`, `routing.rs`)
+
+- **RunId**: 18 bytes = `partition u16 BE ‖ uuid (16 bytes, UUIDv7 at submit time)`. `RunId::partition()` is a pure byte read. String form: 29 characters of lowercase Crockford base32 (`0123456789abcdefghjkmnpqrstvwxyz`) over the 144 bits, with the final character's padding bits required to be zero (only canonical strings parse). `i`/`l` decode as `1` and `o` as `0`.
+- **Routing**: keyed submission → `xxh3_64(u32 LE len(workflow) ‖ workflow ‖ idempotency_key) % P`. Unkeyed → `xxh3_64(uuid bytes) % P`. Pinned by `crates/ostro-types/tests/golden/routing.txt` (re-bless with `OSTRO_BLESS=1`) and an in-test xxh3 computation.
+- Offsets are u64. Epochs are u32. Partition ids are u16. `PartitionCount` is 1..=65535 (defaults: 16 single node, 64 cluster).
+
+## 6. State keyspaces (`crates/ostro-partition/src/store/`)
+
+There are 13 fjall keyspaces per partition. Their declaration order (`TABLES`) is the digest order. Keys use big-endian integers. A string inside a key is `u16 BE len ‖ utf8`. A run id inside a key is its 18 raw bytes. Values marked *postcard* are `VALUE_FORMAT (0x01) ‖ postcard(value)` (`values.rs`). Values marked *prost* are the protobuf bytes of the named message.
+
+| # | keyspace | key | value |
+|---|---|---|---|
+| 0 | `meta` | ASCII key name (§7) | see §7 |
+| 1 | `runs` | run (18) | postcard `RunRecord` |
+| 2 | `events` | run ‖ seq u64 | prost `JournalEvent` |
+| 3 | `payloads` | run ‖ kind u8 (0 = input, 1 = result) | prost `PayloadRef` |
+| 4 | `ready` | str queue ‖ !(priority as u32 ^ 0x8000_0000) u32 (higher priority first) ‖ ready_at_ms u64 ‖ run | postcard `ReadyValue { concurrency_key }` |
+| 5 | `timers` | due_at_ms u64 ‖ run ‖ op u64 (op `u64::MAX` = delayed run start) | empty |
+| 6 | `inbox` | run ‖ n u64 | postcard `InboxMsg` (Signal / ChildCompleted / CancelRequested / TimerFired) |
+| 7 | `dedupe` | str workflow ‖ idempotency key (raw, rest of key); cron: str `"__cron/<schedule_id>"` ‖ fire_time_ms u64 | run id (18) |
+| 8 | `outbox` | target u16 ‖ seq u64 (seqs start at 1) | prost `OutboxMsg` |
+| 9 | `inbound_seen` | source partition u16 | highest applied seq u64 BE |
+| 10 | `children` | parent run ‖ child run | empty |
+| 11 | `dlq` | reserved (no rows written in Phase 2) | |
+| 12 | `effects` | reserved (no rows written in Phase 2) | |
+
+`RunRecord` (postcard, field order is the encoding): workflow String, workflow_version u32, queue String, status `RunStatus` (Scheduled, Ready, Running, Completed, Failed, Cancelled), current_attempt `Option<(u32, u32)>`, next_seq u64, ready `Option<ReadySlot{priority i32, ready_at_ms u64}>`, parent `Option<([u8;18], u64)>`, cancel_requested bool, concurrency_key String, priority i32, created_at_ms u64, rng_seed `Vec<u8>`, inbox_next u64, children u32. Because postcard is positional, changing a stored struct means a new `VALUE_FORMAT` byte or a new key.
+
+## 7. Meta keys (`store/meta.rs`)
+
+| key | value |
+|---|---|
+| `format_ver` | u32 BE = 1 |
+| `partition` | u16 BE |
+| `partition_count` | u16 BE |
+| `applied_offset` | u64 BE: next offset to apply (every offset below it is applied) |
+| `state_hash` | 32 bytes: rolling hash (§9) |
+| `checkpointed_offset` | u64 BE: `applied_offset` at the last `persist(SyncAll)`. **Excluded from the digest** |
+| `cursor` | postcard `CursorMeta { epoch u32, epoch_history Vec<(u32, u64)>, outbox_next_seq BTreeMap<u16,u64>, outbox_truncated BTreeMap<u16,u64> }` |
+
+A fresh store writes every meta key in one batch and then persists. An existing store must have `format_ver = 1` and the configured partition id and count. Each apply chunk commits its data plus `applied_offset`, `state_hash`, `cursor` and changed `inbound_seen` rows in **one** atomic fjall `WriteBatch`.
+
+## 8. Outcome codes (`crates/ostro-partition/src/apply/outcome.rs`)
+
+Folded into the rolling hash, so they are part of the format. New codes are appended.
+
+| outcome | code |
+|---|---|
+| Accepted | 0 |
+| Duplicate | 1 |
+| Rejected(StaleEpoch) | 16 |
+| Rejected(Fenced) | 17 |
+| Rejected(SeqMismatch) | 18 |
+| Rejected(SeqGap) | 19 |
+| Rejected(RunNotFound) | 20 |
+| Rejected(RunTerminal) | 21 |
+| Rejected(RunExists) | 22 |
+| Rejected(IdempotencyConflict) | 23 |
+| Rejected(PayloadTooLarge) | 24 |
+| Rejected(WrongPartition) | 25 |
+| Rejected(Invalid(_)) (any detail) | 26 |
+
+`InvalidCode` details (Decode, Empty, BadRunId, MissingToken, EventsNotContiguous, MissingField, NotImplemented, BadIntent, FieldTooLong, BadSource, TruncateBeyondEnd) are not hashed separately, because the command bytes that determine them are hashed. They are append-only.
+
+## 9. Rolling hash and logical digest
+
+- **Rolling hash** (`apply/mod.rs::fold_hash`), per applied command: `state_hash = blake3(prev ‖ offset u64 LE ‖ [outcome code] ‖ command bytes)`, starting from 32 zero bytes. Rejected commands are folded too, because they consume their offset.
+- **Logical digest** (`store/digest.rs`): blake3 over one fjall snapshot. For each keyspace in `TABLES` order it hashes `u16 LE name_len ‖ name`, then every row in key order as `u32 LE key_len ‖ key ‖ u32 LE value_len ‖ value`, then `u64 LE row_count`. The only skipped row is meta `checkpointed_offset`. Always compare digests, never fjall file bytes: file layout depends on flush and compaction timing.
+
+## 10. Recovery rules
+
+Order (`Node::open`, `crates/ostro-partition/src/node.rs`):
+1. `node.toml` (format and partition count).
+2. Open every state store in parallel. Its `applied_offset` is the partition's durable floor. An unreadable store gets floor `u64::MAX`, so its log tail is never cut.
+3. Recover every log in parallel (`crates/ostro-log/src/recovery.rs`): list segments, read and verify every record (§2–§3), classify the first failure, then make the log durable.
+4. Validate: `applied > LEO` is "state ahead of log" (fatal for the partition). `applied < log_start` is "snapshot required".
+5. Replay from the state's **own `applied_offset`** (not `checkpointed_offset`), up to the HW. Then the epoch bump, `LeaderAnnounced{e+1}` as the first entry of the new term, readiness barrier, leader services.
+
+Any per-partition failure marks only that partition `Failed`.
+
+**Torn tail vs corruption.** The first bad record is torn, and its segment is cut at the record start (`set_len` + fsync file + fsync dir) before the WAL opens, only if all of the following hold:
+- it is in the **last non-empty segment**;
+- it starts at or above the floor (`expected base ≥ applied_offset`);
+- it is incomplete at EOF, or contains an all-zero 512-byte aligned sector, or has an unreadable header followed by zeros to EOF.
+
+Anything else fails the partition with `LogError::Corrupt`, naming the segment and byte position. Nothing is ever skipped. Records after a cut are discarded too: they were in the same un-fsynced window and cannot have been acknowledged.
+
+**Durability after recovery.** Only the last non-empty segment can hold bytes that were never fsynced. Earlier segments were fsynced by the WAL before it rotated away from them, or were the tail at an earlier recovery, which fsynced them before any newer segment could be created. Recovery therefore fsyncs the last non-empty segment, which makes the whole retained log durable, and HW starts at the recovered LEO. Before plan 02-16 recovery fsynced every segment. That cost about 0.55 ms per segment and made reopen grow with the restart count.
+
+**State durability.** Apply commits use fjall's buffered journal (`write(2)`, no fsync). `checkpoint` writes `checkpointed_offset` and calls `persist(SyncAll)` every 100 ms or 256 chunks (`MachineConfig`), on `force_checkpoint`, and on graceful shutdown. After a crash, fjall may reopen ahead of the last checkpoint. That is safe because the state only ever applies WAL-durable commands (HW = fsynced LEO at RF=1).
+
+**Trim floor.** Retention deletes whole segments below `min(durable checkpoint, snapshot_floor, retention_floor)`, and only with a `TrimPermit` minted after the partition's readiness barrier opened. `snapshot_floor` stays 0 until Phase 8, so Phase 2 never deletes log segments.
+
+## 11. fjall configuration and measurements
+
+`StoreConfig::default()` (`crates/ostro-partition/src/store/config.rs`), one fjall 3.1.13 database per partition:
+
+| setting | default | why |
+|---|---|---|
+| `worker_threads` | 1 | P databases means P worker pools; 2 workers measured within noise |
+| `max_journaling_size` | 64 MiB (fjall's minimum) | bounds the journal replayed on reopen |
+| `max_memtable_size` (per keyspace) | 8 MiB | fjall's 64 MiB default reproduces the S3 ~120 ms write stall |
+| `cache_size` (block cache) | 16 MiB | per partition, so memory scales with P; see the throughput note below |
+
+How fjall bounds the replay window: each journal file is preallocated to 64 MiB. The active journal is rotated during a memtable flush once its write position passes 64,000,000 bytes. When sealed journals reach `max_journaling_size`, the keyspaces pinning the oldest journal are flushed. Reopen replays the un-flushed journal(s): about one active journal plus sealed ones up to the cap.
+
+Measurements from plan 02-16, 2026-11-18/19. Same dev machine as spike S3: WSL2, ext4 tempdirs, 12 threads, release builds. These are not NFR evidence; they are the bounds the defaults were checked against. Commands: `cargo test --release -p ostro-crashtest --test reopen_time|apply_throughput -- --ignored --nocapture --test-threads=1`.
+
+**Reopen after kill -9 at the journal cap** (`reopen_time_store_variants`). P=4, `crash-target --pipeline 64 --blob-pct 0` for 20 s (about 800k acks, 1.3M commands applied), then SIGKILL. Loadavg before the first variant was 1.92. The workload itself drives it to 3–6, which is why the later variants show higher values.
+
+| variant | store open ms per partition (p50 / max) | WAL scan ms (p50 / max) | Node::open ms (Leader, all Ready) |
+|---|---|---|---|
+| **default** | **637.7 / 660.1** | 62.1 / 80.5 | **871.8** |
+| journal 128 MiB | 616.3 / 632.5 | 78.7 / 80.9 | 1,037.9 |
+| memtable 32 MiB | 876.3 / 897.8 | 62.1 / 100.1 | 1,403.9 |
+| workers 2 | 604.0 / 605.1 | 69.6 / 94.7 | 827.9 |
+
+A second run of the default gave store open 620.0 / 672.0 ms and Node::open 922.7 ms. Reopen stays under the 1 s per partition target. S3 measured 3.2–3.4 s with fjall's 512 MiB default journal.
+
+**Reopen vs WAL segment count** (`reopen_time_segments`). P=4, 300 kill -9 cycles of 5–300 ms each. Every process start opens a new segment per partition, so there are 300 segments per partition by the end (about 24.7k offsets each).
+
+| | Inspect Node::open at 300 restarts | recover_partition (max partition) |
+|---|---|---|
+| fsync every retained segment (before 02-16) | 741.1 ms | 182.6 ms |
+| fsync only the last non-empty segment (§10) | 153.8 ms | 11.5 ms |
+
+Breakdown at 300 segments, summed over P=4: reading and verifying every segment takes 7–9 ms, fsyncing every (already clean) segment 660–671 ms, fsyncing the last one 2.2 ms. The remaining growth (about 0.5 ms per restart) comes from other per-segment work (listing, opening, reading). Not merging the small per-restart segments is tracked as a todo.
+
+**Apply throughput, read-modify-write** (`apply_throughput_*`). S3's `--rmw` workload: 1M preloaded and granted runs, 200k measured commands, 25% new `StartRun`, 75% update (90% of picks from the 64Ki most recent runs, 10% uniform). An update is `AttemptGranted` or `EventsAppended`. Loadavg 1.1–1.8.
+
+| level | config | cmds/s | keyspace reads/cmd | batch ms p50 / p99 / max | batches ≥ 100 ms | checkpoint ms p50 / max |
+|---|---|---|---|---|---|---|
+| store, chunk 64 | default (16 MiB cache) | **80,832** | 1.00 | 0.68 / 1.28 / 33.38 | 0 | 4.42 / 6.21 |
+| store, chunk 1024 | default | 76,286 | 1.00 | 11.83 / 36.17 / 45.14 | 0 | 4.46 / 6.63 |
+| store, chunk 64 | cache 64 MiB | 84,589 | 1.00 | 0.66 / 1.21 / 40.56 | 0 | 4.31 / 6.86 |
+| store, chunk 64 | **cache 128 MiB** | **152,985** | 1.00 | 0.33 / 0.56 / 31.21 | 0 | 4.81 / 5.11 |
+| store, chunk 64 | memtable 64 MiB | 66,559 | 1.00 | 0.37 / 3.50 / **120.65** | 1 | 3.94 / 6.24 |
+| store, chunk 64 | workers 2 | 84,180 | 1.00 | 0.65 / 1.24 / 37.47 | 0 | 4.46 / 6.22 |
+| machine (P=1 Node, WAL + apply thread), 64 cmds/envelope, 32 submitters | default | **83,634** end to end | | 10.68 / 26.15 / 50.08 | 0 | 4.62 / 11.11 |
+| machine, 1 cmd/envelope, 32 submitters | default | 6,581 (latency-bound) | | 0.26 / 0.93 / 51.88 | 0 | 3.00 / 8.45 |
+
+Findings:
+- The S3 ~120 ms write stall does **not** appear with the 8 MiB memtables: no apply batch reached 100 ms, and the worst was 50 ms at machine level. Setting fjall's 64 MiB memtables reproduces it (120.65 ms).
+- Apply keeps to exactly one keyspace point read per command.
+- **Store-level RMW is below the S3 90k cmds/s rule at the default 16 MiB block cache (80.8k).** It reaches 153k once the read working set fits the block cache (cliff between 64 and 128 MiB for 1M runs, because the 10% uniform picks touch the whole `runs` keyspace). This is a per-partition memory-budget question: fjall 3.1.13 has no public API to share one cache across databases. The default stays at 16 MiB for now. The open concern is recorded in STATE.md: size the cache from a node-level memory budget (`budget / P`) in server configuration.

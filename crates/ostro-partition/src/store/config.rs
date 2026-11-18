@@ -23,7 +23,9 @@ pub struct StoreConfig {
     pub max_journaling_size: u64,
     /// Per-keyspace memtable size.
     pub max_memtable_size: u64,
-    /// Block cache size for the database.
+    /// Block cache size for the database (per partition). Plan 02-16 measured the RMW apply
+    /// rate as cache-bound: 80.8k cmds/s at 16 MiB vs 153k at 128 MiB with 1M runs (see
+    /// docs/storage-format.md §11); size it from a node memory budget.
     pub cache_size: u64,
 }
 

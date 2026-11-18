@@ -57,7 +57,7 @@ flowchart TB
 │  ┌──▼──────────────────────────────────────────────────────────────────────────────┐  │
 │  │ Partition replicas (one per assigned partition)                                 │  │
 │  │   journal log (chronik-wal: segments, group commit)                             │  │
-│  │   state machine  ── apply(committed entries) ──► redb state store               │  │
+│  │   state machine  ── apply(committed entries) ──► fjall state store              │  │
 │  │   if leader:  dispatcher · ready queues · timer wheel · effect index            │  │
 │  └──▲───────────────────────────────▲──────────────────────────────────────────────┘  │
 │     │ Activate / Append / Ack       │ follower fetch (replication)                    │
@@ -122,7 +122,9 @@ Leases are **soft state** on the leader (not logged). Fencing: `EventsAppended` 
 | `clock_read` / `patch_marker` | logical time observations / versioning markers |
 | `run_completed` / `run_failed` | terminal |
 
-### 2.4 Partition state (redb tables)
+### 2.4 Partition state (fjall keyspaces)
+
+One fjall database per partition at `state/pNNNN/`, one keyspace per table (fjall replaced redb after spike S3). The table below is the design view; the frozen key and value encodings (13 keyspaces, big-endian keys, postcard values, meta keys) are in [storage-format.md](storage-format.md).
 
 | Table | Key → Value | Purpose |
 |---|---|---|
@@ -145,22 +147,22 @@ The state store is derived: deleting it and replaying the log (or restoring a sn
 
 ```
 /var/lib/ostro/
-├── node.toml                  # node id, cluster id (generated on first start)
+├── node.toml                  # format_version, fixed partition count (later: node id, cluster id)
 ├── meta/                      # metadata Raft log + snapshot (chronik-raft RaftLogStore)
 │   ├── state                  # HardState + ConfState (tmp+fsync+rename)
 │   ├── snapshot
 │   └── log/<index>.seg        # [len u32][crc32 u32][entry]
-├── partitions/
-│   └── p0007/
-│       ├── wal/<base_offset>.seg   # chronik-wal segments; leader epoch stamped per batch
-│       ├── wal/epochs              # derived leader-epoch history cache
-│       └── state.redb              # partition state machine
+├── wal/p/7/wal_7_<seg>.log     # partition 7's log: vendored WAL segments (wal/p/<id>/wal_<id>_<seg>.log),
+│                              #   one OSTR envelope per record, leader epoch in every envelope
+├── state/p0007/               # partition 7's state machine: one fjall database (13 keyspaces)
 ├── blobs/<sha256[0:2]>/<sha256>    # uploaded components (zstd), large payloads
 ├── cache/aot/<key>.cwasm           # Wasmtime AOT artefacts (rebuildable; HMAC'd)
-└── tmp/
+└── tmp/                       # in-flight blob writes (renamed into blobs/ when complete)
 ```
 
-**Bottomless (D9):** an uploader task copies sealed WAL segments, periodic `state.redb` snapshots, metadata snapshots and blobs to object storage (S3/GCS/Azure/local backends from `chronik-storage::object_store`). `ostro restore --from s3://…` rebuilds a node: metadata snapshot → per-partition state snapshot → segment tail.
+The frozen Phase 2 on-disk format (directory layout, WAL record and envelope bytes, command field numbers, keyspaces and key encodings, outcome codes, rolling hash and digest, recovery rules) is specified in [storage-format.md](storage-format.md). The leader-epoch history is not stored separately: recovery rebuilds it from the epochs in the envelopes.
+
+**Bottomless (D9):** an uploader task copies sealed WAL segments, periodic `state/pNNNN` (fjall) snapshots, metadata snapshots and blobs to object storage (S3/GCS/Azure/local backends from `chronik-storage::object_store`). `ostro restore --from s3://…` rebuilds a node: metadata snapshot → per-partition state snapshot → segment tail.
 
 ---
 
@@ -190,7 +192,7 @@ Proposals return the state machine's result (validated at apply), and retrying a
 - Leader tracks each follower's log end offset (LEO); **high watermark HW = min(LEO over ISR)**. Commands are *committed* when HW passes them. Single node: ISR = {self}, HW = fsynced LEO — **same code path** (D5).
 - Every batch is stamped with the **leader epoch**. A returning replica asks "where did epoch *e* end?" and truncates its divergent tail (Kafka KIP-101/279 semantics, as in `chronik-server::replication::leader_epoch` + `chronik-wal::truncate`).
 - **Failover:** metadata leader elects the new partition leader **only from the ISR** recorded in metadata. The new leader: waits until its state store has applied up to its LEO, bumps attempts of in-flight runs, rebuilds ready queue + timer wheel from state, starts dispatching.
-- Followers **apply committed entries** to their own `state.redb` (hot standby), so failover does not need a replay from scratch.
+- Followers **apply committed entries** to their own `state/pNNNN` fjall store (hot standby), so failover does not need a replay from scratch.
 - `min_insync_replicas` (default 2 of 3): if the ISR shrinks below it, the partition stops accepting writes (availability traded for durability, explicitly).
 
 ### 4.3 Commit semantics exposed to the engine
@@ -656,7 +658,7 @@ pub trait ActivationSink: Send + Sync {
     async fn done(&self, run: RunId, outcome: ActivationOutcome);
 }
 
-/// Implemented by redb (default) and fjall (alternative).
+/// Implemented by fjall (STOR-05; redb was rejected in spike S3).
 pub trait StateStore: Send + Sync {
     fn apply_batch(&self, offset: u64, cmds: &[Command]) -> Result<()>;
     fn applied_offset(&self) -> Result<u64>;
