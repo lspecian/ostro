@@ -28,10 +28,10 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 Phase: 2 and 3 of 14 (planning in parallel; Phase 1 complete)
 Plan: 0 of TBD in current phases
 Phase 2 plan: 2 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2: 02-03/02-04 next)
-Phase 3 plan: 4 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next; 03-02 journal codec + command hash v1 done; 03-06 AOT cache + compile pool done; 03-03 engine config + pooling + limiter + epoch ticker done)
+Phase 3 plan: 5 of 12 complete (03-01 contracts + scaffold done; wave 2: 03-02..03-06 next; 03-02 journal codec + command hash v1 done; 03-06 AOT cache + compile pool done; 03-03 engine config + pooling + limiter + epoch ticker done; 03-05 replay core done)
 Status: Planning Phases 2 (Durable Partition Log & State Machine) and 3 (Deterministic Wasm Engine & WIT 0.1)
 Phase 2 last activity: 2026-11-18 — Completed 02-01-PLAN.md (fjall 3.1.13 replaces redb; Phase 2 deps pinned; deny green with fjall tree; ostro-testkit; nextest crash profile)
-Phase 3 last activity: 2026-11-18 — Completed 03-03-PLAN.md (deterministic Wasmtime config pinned by snapshot; pooling per language class with wrapped failure + on-demand fallback; trapping limiter + node budget; epoch ticker; ENG-01, ENG-08)
+Phase 3 last activity: 2026-11-18 — Completed 03-05-PLAN.md (pure replay core: cursor/divergence at exact seq, time rule, wait ordering, step guard, ChaCha streams, ot1_ await tokens)
 Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 
 Progress: [█░░░░░░░░░] 7% (1/14 phases)
@@ -68,6 +68,7 @@ Progress: [█░░░░░░░░░] 7% (1/14 phases)
 | Phase 03 P02 | 15min | 1 tasks | 3 files |
 | Phase 03 P06 | 20min | 2 tasks | 3 files |
 | Phase 03 P03 | 35min | 2 tasks | 8 files |
+| Phase 03 P05 | 30min | 1 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -116,6 +117,8 @@ Recent decisions affecting current work:
 - [Phase 03 / 03-03]: Resource refusals always trap (never Ok(false)); node memory budget is soft (pressure Notify). Pool reservation failure falls back to on-demand by default with a message naming engine.pool.total_instances; config pinned by describe_wasmtime_config() snapshot (backtrace details Disable)
 - [Phase 03 / 03-02]: Journal codec v1 = [ver] ‖ postcard((ts_nanos, payload)), seq outside; command hash v1 = sha256("ostro/cmd"‖ver‖kind‖hand-specified canonical args)[..16] (header names ASCII-lowercased+sorted, values/timeouts/status/terminal output unhashed, NaN canonicalised); golden vectors in crates/ostro-types/tests/golden/journal_v1.txt — any mirror-type field/variant change requires a codec version bump
 - [Phase 03 / 03-06]: AOT cache key = hex(sha256(module))-<16 hex of sha256(Wasmtime compat hash + wasmtime/ostro versions + target triple)>; artefacts = cwasm‖HMAC-SHA256(node-local 0600 aot.key), verified on in-memory bytes before Component::deserialize; single flight covers disk lookup + compile. Wasmtime accepts cross-opt-level artefacts (only tunables/features are rejected). 03-03: pin wasm_backtrace_details(Disable) in engine_config
+- [Phase 03 / 03-05]: Replay core API: `ReplayState::patched` returns `Result<bool, ReplayError>` (open-step guard); live event ts = max(clock, last command ts); wait rejects un-issued/non-op ids and wait(any,[]); deliver_inputs rejected while a step is open; finish() abandons an open step
+- [Phase 03 / 03-05]: RNG = RFC 8439 ChaCha20 (key=seed, nonce=stream u32 LE‖0^8); await token = ot1_ + canonical lowercase base32(partition BE‖len u8‖run_id‖op BE‖HMAC-SHA256[..10]); golden vectors computed independently in Python
 
 ### Pending Todos
 
