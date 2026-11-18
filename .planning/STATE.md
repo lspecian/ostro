@@ -90,6 +90,11 @@ Recent decisions affecting current work:
 - [Phase 01]: CI: zig 0.17.1 + cargo-zigbuild 0.24.1 build a static x86_64 musl ostro (mimalloc, aws-lc-rs) with no fallback needed; test runner is `cargo-zigbuild test` (not `cargo zigbuild test`)
 - [Phase 01]: Unused workspace pins removed (raft, raft-proto, metrics, tracing, thiserror, prost-build); vendored crates pin their own deps; build is now warning-free and ci-local.sh enforces it
 - [Phase 01]: FOUND-05 PARTIAL until the user pushes and the Actions run (lint, x86_64/aarch64 musl, macos-aarch64, x86_64-gnu) is green
+- [Phase 01 / 01-08]: DECIDED Step handle = `resource step` (S2). The engine must not rely on `HostStep::drop` (TS never drops completed steps); SDKs wrap steps in with/using/RAII. See docs/spikes/S2-guest-toolchains.md
+- [Phase 01 / 01-08]: DECIDED State store = fjall 3.1.13 (redb vs fjall → fjall). Quiet re-run: redb T2 67.5k plain / 30.9k RMW (FAIL); fjall T2 233.8k plain / 106.9k RMW (PASS); fjall kill -9 crash 5/5. Design: WriteBatch per apply batch + applied_offset, buffered commit, persist(SyncAll) every 100 ms/256 batches; recovery replays the WAL from the state's applied_offset (fjall keeps OS-buffered commits after a process kill, so applied may be > checkpointed). See docs/spikes/S3-redb-durability.md
+- [Phase 01 / 01-08]: Phase 2 research items tagged [S3] (durability tiers, Durability::None + Immediate checkpoint, 2PC/quick-repair, repair time) now apply to fjall: PersistMode/persist cadence, journal-replay reopen time, memtable/journal sizing, flush/compaction workers. STOR-05's "redb" wording is superseded by the fjall decision
+- [Phase 01 / 01-08]: DECIDED Wasmtime pin policy = track latest major monthly, pinned exactly (=50.0.2 now; 51 due ~2026-12-20), one bump PR per release with replay corpus green; ship 1.0 on 60 LTS (~Aug 2027); fallback freeze on 48 LTS if bumps cost > ~1 day each; bump rust-toolchain.toml with Wasmtime's MSRV
+- [Phase 01 / 01-08]: Python embedded by default (6.5 MB RSS/instance, NFR-2.3 met with >20x margin, confirmed on a quiet machine); pools sized per language class (Python = 38 core instances/instance; default pool fits 26 Python instances), workers remain the scaling path. Revisit memory in Phase 9 with a realistic stdlib footprint
 
 ### Pending Todos
 
@@ -97,17 +102,25 @@ None yet.
 
 ### Blockers/Concerns
 
-Open research gaps, from research/SUMMARY.md:
-- ~~Do componentize-py/js reseed randomness after pre-init?~~ Answered by S2 (01-05): no; SDKs must reseed/patch from ctx.
-- ~~Python per-instance memory vs NFR-2.~~ Answered by S2 (01-05): about 6.5 MB/instance; recommend embedded by default (decision logged in 01-08).
-- macOS notarization entitlement for Cranelift. (Phase 1 smoke test)
-- ~~Does any WAL V2 recovery path decode `canonical_data` as Kafka?~~ Answered in 01-06: no. The only decoder (`extract_offset_range`) had zero callers and was deleted.
-- Wasmtime 50.0.2 default stack and pool sizes. (Phase 3)
-- Pin policy: Wasmtime 48 LTS vs tracking monthly releases to 60 LTS. (Phase 1 decision)
+Open:
+- macOS notarization entitlement for Cranelift (`allow-jit`): a **Phase 14** release-signing concern; unsigned test binaries JIT fine. The macOS CI leg itself awaits the user's first push (human_needed, see FOUND-05).
+- FOUND-05 remote CI legs (aarch64 musl, macOS, the Actions run itself) are human_needed: no git remote exists yet.
+- Wasmtime 50.0.2 default stack and pool sizes. (Phase 3; S2 input: Python needs 38 core instances per instance, `max_memory_size` floor 13.2 MB Python / 9.5 MB TS / 1.1 MB Rust)
 - Fixed partition count (P=16 single node / 64 cluster) must be confirmed before Phase 5 freezes the format.
 - The MVP is larger than docs/02. Streaming and debounce/singleton are already v2. The saga helper (WF-10) is a candidate cut if scope pressure appears.
-- FOUND-05 remote CI legs (aarch64 musl, macOS, the Actions run itself) are human_needed: no git remote exists yet
-- Storage engine choice for STOR-05: redb failed S3 rule, fjall recommended; needs user confirmation in FOUND-06 decision logging (01-08)
+- NEW (S3, **Phase 2**): fjall reopen replays the un-flushed journal (3.2–3.4 s for ~540k commands). Bound journal/memtable size and measure reopen time in the recovery test.
+- NEW (S3, **Phase 2**): fjall RMW runs show one ~120 ms write stall per 200k commands (p99 < 0.85 ms); tune memtable/flush workers. RMW margin over the 90k rule is only 1.19x, so keep the apply path to one point read per command plus an in-batch overlay.
+- NEW (S3, **Phase 2**): recovery must replay the WAL from the state's own `applied_offset` (not `checkpointed_offset`); apply only WAL-durable commands. Add fjall's dependency tree (lsm-tree, lz4) to the cargo-deny/licence check when it enters the workspace.
+- NEW (S2, **Phase 3/4**, ENG-02): Rust wasm32-wasip2 guests import 16 `wasi:*@0.2.12` interfaces even without WASI calls; the deterministic WASI shim must cover them (std `HashMap` needs random).
+- NEW (S2, **Phase 10**, CLI-04): Python and TS builds are not reproducible (pre-init snapshot data differs; Python also shuffles shim-module order). Needs deterministic pre-init or a canonicaliser.
+- NEW (S2, **Phase 4**): Python/TS AOT compile costs ~1 s and ~0.5 GB peak RSS each; bound concurrent compiles.
+
+Resolved in Phase 1:
+- ~~Do componentize-py/js reseed randomness after pre-init?~~ **Resolved** (S2, 01-05): no. Host-driven reseed works in all three languages; SDKs must reseed/patch from ctx. See docs/spikes/S2-guest-toolchains.md#determinism-probes
+- ~~Python per-instance memory vs NFR-2.~~ **Resolved** (S2, 01-05/01-08): ~6.5 MB RSS per live instance (TS ~2.5 MB, Rust ~40 KB); recommendation adopted: Python runs embedded by default under NFR-1.3 budgets, workers are the scaling path. See docs/spikes/S2-guest-toolchains.md#memory-per-instance
+- ~~Does any WAL V2 recovery path decode `canonical_data` as Kafka?~~ **Resolved** (01-06): no. The only decoder (`extract_offset_range`) had zero callers and was deleted.
+- ~~Pin policy: Wasmtime 48 LTS vs tracking monthly releases to 60 LTS.~~ **Resolved** (01-08): track monthly, pinned exactly, ship 1.0 on 60 LTS; 48 LTS fallback. See PROJECT.md Key Decisions and 01-RESEARCH.md#decisions-to-log-in-projectmd-found-06
+- ~~Storage engine choice for STOR-05 (redb failed the S3 rule).~~ **Resolved** (01-08): fjall 3.1.13; both preconditions (fjall crash test, RMW benchmark) met. See docs/spikes/S3-redb-durability.md#confirmation-run-quiet-machine-plan-01-08
 
 ## Session Continuity
 
