@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use ostro_types::journal::{AttemptBackoff, Failure, StepAttemptFailed};
 use ostro_types::journal::{
     AwaitTokenCreated, CANCELLATION_OP, CancelRequested, ChildCompleted, ChildOptions,
     ChildStarted, CommandHash, CommandKind, CommandMeta, EffectCompleted, EffectRequest,
@@ -11,7 +12,6 @@ use ostro_types::journal::{
     RunStarted, SignalWaitStarted, SqlRequest, StatusPublished, StepCompleted, TimerFired,
     TimerStarted, WaitMode, WaitResolved,
 };
-use ostro_types::journal::{AttemptBackoff, Failure, StepAttemptFailed};
 use proptest::prelude::*;
 
 use super::*;

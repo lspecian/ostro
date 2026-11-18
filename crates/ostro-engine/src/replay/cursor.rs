@@ -7,6 +7,12 @@
 //! recorded guest command is left, commands run live: each gets the next seq, is stamped
 //! with the clock, and is appended to both the journal (so op lookups see it) and the
 //! pending batch the caller hands to the sink.
+//!
+//! Step retry (WF-02, plan 04-04): a step whose attempts failed and were retried is
+//! journaled as a chain of `StepAttemptFailed` events (same command hash as the step)
+//! followed by its `StepCompleted`. [`ReplayState::begin_step`] consumes the whole chain;
+//! if the chain is not yet closed by a completion the step goes live at attempt `k + 1`,
+//! so the attempt count always comes from the journal and never resets on restart.
 
 use std::sync::Arc;
 
@@ -37,8 +43,15 @@ pub enum CommandResult<'a> {
 pub enum StepBegin<'a> {
     /// The step completed in a previous activation: the recorded `StepCompleted`.
     Replayed(&'a Event),
-    /// The step runs live; `seq` is reserved for its `StepCompleted`.
-    Live { seq: u64 },
+    /// The step runs live; `seq` is reserved for its `StepCompleted` (or the next
+    /// `StepAttemptFailed`). `attempt` is 1-based: `1 + ` the number of recorded failed
+    /// attempts consumed. `last_retry_at_nanos` is the `retry_at_nanos` of the last
+    /// recorded failed attempt, so the host can re-evict if it is still in the future.
+    Live {
+        seq: u64,
+        attempt: u32,
+        last_retry_at_nanos: Option<u64>,
+    },
 }
 
 /// Replay failure.
@@ -74,7 +87,7 @@ pub(super) fn family_matches(ev: EventKind, cmd: CommandKind) -> bool {
     use EventKind as E;
     matches!(
         (ev, cmd),
-        (E::StepCompleted, C::Step)
+        (E::StepCompleted | E::StepAttemptFailed, C::Step)
             | (E::TimerStarted, C::Sleep | C::SleepUntil)
             | (E::EffectScheduled, C::Http | C::Sql | C::Object)
             | (E::SignalWaitStarted, C::WaitSignal)
@@ -347,25 +360,79 @@ impl ReplayState {
         }
     }
 
-    /// Start a step. Replay: returns the recorded `StepCompleted` and opens no guard.
-    /// Live: reserves `seq = next_seq` and opens the step guard; nothing is appended
-    /// until [`complete_step`](Self::complete_step).
+    /// Start a step. Replay: consumes any recorded `StepAttemptFailed` chain for this
+    /// step, then returns the recorded `StepCompleted` and opens no guard. Live (no
+    /// completion recorded): reserves `seq = next_seq`, opens the step guard and reports
+    /// the attempt number; nothing is appended until
+    /// [`complete_step`](Self::complete_step) or
+    /// [`record_attempt_failed`](Self::record_attempt_failed).
     pub fn begin_step(
         &mut self,
         hash: CommandHash,
         actual: &dyn Fn() -> String,
     ) -> Result<StepBegin<'_>, ReplayError> {
         self.check_no_open_step()?;
-        if let Some(i) = self.match_next(CommandKind::Step, hash, actual)? {
-            return Ok(StepBegin::Replayed(&self.journal[i]));
+        let mut failed: u32 = 0;
+        let mut last_retry_at_nanos = None;
+        while let Some(i) = self.match_next(CommandKind::Step, hash, actual)? {
+            let ev = &self.journal[i];
+            match &ev.body {
+                EventBody::StepAttemptFailed(f) => {
+                    let expected = failed.saturating_add(1);
+                    if f.attempt != expected {
+                        return Err(ReplayError::BadJournal(format!(
+                            "step attempt {} at seq {} where attempt {expected} was expected",
+                            f.attempt, ev.seq
+                        )));
+                    }
+                    failed = expected;
+                    last_retry_at_nanos = Some(f.retry_at_nanos);
+                }
+                _ => return Ok(StepBegin::Replayed(&self.journal[i])),
+            }
         }
         let seq = self.next_seq;
+        self.open_live_step(seq);
+        Ok(StepBegin::Live {
+            seq,
+            attempt: failed.saturating_add(1),
+            last_retry_at_nanos,
+        })
+    }
+
+    /// Open the step guard at `seq` with step-local randomness seeded from `seq`. The
+    /// run-level streams are saved once (on the first attempt) and restored on close.
+    fn open_live_step(&mut self, seq: u64) {
         self.open_step = Some(seq);
         // The closure runs live only: give it step-local randomness so it never moves
         // the run-level streams (which replay, skipping the closure, would not move).
         let local = RngStreams::new(&step_seed(&self.run.rng_seed, seq));
-        self.outer_rng = Some(std::mem::replace(&mut self.rng, local));
-        Ok(StepBegin::Live { seq })
+        let previous = std::mem::replace(&mut self.rng, local);
+        if self.outer_rng.is_none() {
+            self.outer_rng = Some(previous);
+        }
+    }
+
+    /// Journal a failed attempt of the open step: appends `body` (a
+    /// `StepAttemptFailed`) at the step's reserved `seq`, keeps the step open at the next
+    /// seq (with a fresh step-local RNG seeded from the NEW seq) and returns that seq,
+    /// which is reserved for attempt `k + 1`.
+    pub fn record_attempt_failed(&mut self, seq: u64, body: EventBody) -> Result<u64, ReplayError> {
+        if self.open_step != Some(seq) {
+            return Err(protocol(format!(
+                "attempt-failed for step {seq} that is not open"
+            )));
+        }
+        if !matches!(body, EventBody::StepAttemptFailed(_)) {
+            return Err(protocol(format!(
+                "attempt-failed with {} instead of a step attempt failure",
+                body.summary()
+            )));
+        }
+        self.append_live(seq, body);
+        let next = self.next_seq;
+        self.open_live_step(next);
+        Ok(next)
     }
 
     /// Close the open step (if any) and restore the run-level random streams.

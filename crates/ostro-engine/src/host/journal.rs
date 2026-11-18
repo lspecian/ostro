@@ -63,7 +63,8 @@ impl HostState {
                     None,
                 ))
             }
-            StepBegin::Live { seq } => {
+            // attempt / last_retry_at are consumed by the retry wiring (plan 04-07).
+            StepBegin::Live { seq, .. } => {
                 let (start, outer, set) = match (fuel, opts.fuel) {
                     (Some(rem), Some(budget)) => {
                         let s = budget.min(rem);
