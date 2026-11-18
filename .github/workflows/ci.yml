@@ -1,0 +1,134 @@
+# Ostro CI. scripts/ci-local.sh mirrors the lint job and the linux-x86_64-musl leg.
+# Third-party actions are pinned to full commit SHAs (resolved with git ls-remote).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_DENY_VERSION: 0.21.0
+  CARGO_ZIGBUILD_VERSION: 0.24.1
+  # zig version verified locally with cargo-zigbuild (scripts/ci-local.sh, 01-07)
+  ZIG_VERSION: 0.17.1
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: lint
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }}
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy (Ostro crates, -D warnings)
+        run: >-
+          cargo clippy --workspace --all-targets --locked
+          --exclude ostro-raft-rs --exclude ostro-raft-proto
+          --exclude ostro-raft-driver --exclude ostro-wal
+          -- -D warnings
+      - name: cargo deny check
+        run: cargo deny check
+      - name: Vendored provenance check
+        run: |
+          jq --version
+          bash scripts/check-vendored.sh
+      - name: cargo-deny negative fixtures
+        run: bash scripts/check-deny-fixtures.sh
+      - name: No chronik / tokio-uring / prometheus in the tree
+        run: "! cargo tree --workspace -e normal --locked | grep -E 'chronik|tokio-uring|prometheus '"
+
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-musl
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            zig: true
+          - name: linux-aarch64-musl
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            zig: true
+          - name: macos-aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+            zig: false
+          - name: linux-x86_64-gnu
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            zig: false
+    env:
+      T: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml) + target
+        run: |
+          rustup toolchain install
+          rustup target add "$T"
+          rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+
+      # --- musl legs: cargo-zigbuild + zig, static binary, mimalloc ---
+      - if: matrix.zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - if: matrix.zig
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+      - if: matrix.zig
+        name: cargo-zigbuild test
+        # the zigbuild test runner is `cargo-zigbuild test` (`cargo zigbuild` only builds)
+        run: cargo-zigbuild test --workspace --locked --target "$T"
+      - if: matrix.zig
+        name: cargo zigbuild --release (ostro)
+        run: cargo zigbuild --release --locked -p ostro --target "$T"
+      - if: matrix.zig
+        name: Assert static binary + mimalloc
+        run: |
+          bin="target/$T/release/ostro"
+          desc="$(file "$bin")"
+          echo "$desc"
+          grep -Eq 'statically linked|static-pie linked' <<<"$desc"
+          info="$("$bin" build-info)"
+          echo "$info"
+          grep -q 'allocator=mimalloc' <<<"$info"
+          grep -q "target=$T" <<<"$info"
+
+      # --- native legs: macOS arm64, linux gnu (fast feedback) ---
+      - if: ${{ !matrix.zig }}
+        name: cargo test
+        run: cargo test --workspace --locked
+      - if: matrix.os == 'macos-15'
+        name: cargo build --release (ostro) + build-info
+        run: |
+          cargo build --release --locked -p ostro
+          info="$(target/release/ostro build-info)"
+          echo "$info"
+          grep -q 'allocator=mimalloc' <<<"$info"
