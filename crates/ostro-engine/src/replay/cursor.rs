@@ -113,6 +113,11 @@ pub struct ReplayState {
     pub(super) last_cmd_ts: u64,
     /// Seq of the most recent consumed/appended guest command (0 before any).
     pub(super) last_cmd_seq: u64,
+    /// Max ts over every event in the journal (recorded, delivered inputs and live
+    /// appends). Live events are stamped at least this, so journal ts never decrease
+    /// across a live append and `now()` after a wait is never earlier than the input
+    /// (e.g. `TimerFired`) that resolved it, whatever the node's wall clock says.
+    pub(super) max_ts: u64,
     pub(super) clock: Arc<dyn Clock>,
 }
 
@@ -158,7 +163,9 @@ impl ReplayState {
                 )));
             }
         }
+        let max_ts = journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
         Ok(Self {
+            max_ts,
             next_seq: journal.len() as u64,
             cursor: 1,
             pending: Vec::new(),
@@ -191,7 +198,9 @@ impl ReplayState {
     }
 
     /// Logical "now": ts of the most recent guest-command event at or before the cursor
-    /// (`accepted_at` before the first). Input events never move it.
+    /// (`accepted_at` before the first). Input events never move it directly, but every
+    /// live command is stamped at least the max ts of all journaled events (inputs
+    /// included), so `now()` after the wait that consumed an input is >= that input's ts.
     pub fn logical_now_nanos(&self) -> u64 {
         self.last_cmd_ts
     }
@@ -249,8 +258,13 @@ impl ReplayState {
     /// Append a live guest-command event at the next seq; returns `(seq, ts)`.
     pub(super) fn append_live(&mut self, seq: u64, body: EventBody) -> (u64, u64) {
         debug_assert_eq!(seq, self.next_seq);
-        // Logical time never moves backwards, even if the wall clock does.
-        let ts = self.clock.now_unix_nanos().max(self.last_cmd_ts);
+        // Logical time never moves backwards, even if the wall clock does or lags the
+        // timestamps of committed inputs (timer fire time, a skewed leader's commit ts).
+        let ts = self
+            .clock
+            .now_unix_nanos()
+            .max(self.last_cmd_ts)
+            .max(self.max_ts);
         let ev = Event {
             seq,
             ts_nanos: ts,
@@ -260,6 +274,7 @@ impl ReplayState {
         self.pending.push(ev);
         self.next_seq = seq + 1;
         self.cursor = self.journal.len();
+        self.max_ts = ts;
         self.last_cmd_ts = ts;
         self.last_cmd_seq = seq;
         (seq, ts)
@@ -430,6 +445,9 @@ impl ReplayState {
                 )));
             }
             expect += 1;
+        }
+        if let Some(m) = events.iter().map(|e| e.ts_nanos).max() {
+            self.max_ts = self.max_ts.max(m);
         }
         self.journal.extend(events);
         self.next_seq = expect;

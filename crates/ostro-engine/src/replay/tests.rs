@@ -396,7 +396,9 @@ fn time_rule() {
     rec.push(st.logical_now_nanos());
     cmd(&mut st, CommandKind::Sleep, h(2)).unwrap();
     rec.push(st.logical_now_nanos());
-    assert_eq!(rec, [ACCEPTED, 10_000, 10_000, 11_000]);
+    // The delivered input does not move logical now, but the next live command is
+    // stamped at least the input's ts (monotonic over all journaled events).
+    assert_eq!(rec, [ACCEPTED, 10_000, 10_000, 9_000_000_000_002]);
     st.take_pending();
     let journal = st.journal().to_vec();
 
@@ -413,6 +415,62 @@ fn time_rule() {
     let (seq, live) = cmd(&mut st, CommandKind::SetStatus, h(3)).unwrap();
     assert!(!live);
     assert_eq!(st.logical_now_nanos(), st.journal()[seq as usize].ts_nanos);
+}
+
+/// Regression (03-09 observation): a frozen or lagging wall clock must not stamp live
+/// events earlier than a committed input. Journal ts never decrease across live
+/// appends, and logical now after the wait that consumed a timer is >= its fire ts.
+#[test]
+fn time_monotonic_over_inputs() {
+    const FIRE: u64 = 9_000_000_000_000;
+    // Frozen clock far behind the timer's fire time (e.g. a skewed node).
+    struct Frozen;
+    impl Clock for Frozen {
+        fn now_unix_nanos(&self) -> u64 {
+            1_000
+        }
+    }
+    let check = |st: &ReplayState| {
+        let ts: Vec<u64> = st.journal().iter().map(|e| e.ts_nanos).collect();
+        assert!(ts.windows(2).all(|w| w[0] <= w[1]), "ts decreased: {ts:?}");
+    };
+
+    let mut st = ReplayState::new(vec![run_started()], Arc::new(Frozen)).unwrap();
+    let (op, _) = cmd(&mut st, CommandKind::Sleep, h(1)).unwrap();
+    st.take_pending();
+    st.deliver_inputs(vec![Event {
+        seq: 2,
+        ts_nanos: FIRE,
+        body: EventBody::TimerFired(TimerFired { op }),
+    }])
+    .unwrap();
+    assert_eq!(
+        st.wait(&[op], WaitMode::All, h(2)).unwrap(),
+        WaitOutcome::Resolved(vec![op])
+    );
+    assert!(
+        st.logical_now_nanos() >= FIRE,
+        "now() after the timer < fire ts"
+    );
+    cmd(&mut st, CommandKind::SetStatus, h(3)).unwrap();
+    assert_eq!(st.logical_now_nanos(), FIRE);
+    check(&st);
+    let journal = st.journal().to_vec();
+
+    // Inputs already in the loaded journal count too (re-activation after eviction).
+    let mut st = ReplayState::new(journal[..3].to_vec(), Arc::new(Frozen)).unwrap();
+    cmd(&mut st, CommandKind::Sleep, h(1)).unwrap();
+    assert_eq!(st.logical_now_nanos(), journal[1].ts_nanos);
+    st.wait(&[op], WaitMode::All, h(2)).unwrap();
+    assert_eq!(st.logical_now_nanos(), FIRE);
+    check(&st);
+
+    // Replay returns the recorded values at the same points.
+    let mut st = ReplayState::new(journal, Arc::new(Frozen)).unwrap();
+    cmd(&mut st, CommandKind::Sleep, h(1)).unwrap();
+    st.wait(&[op], WaitMode::All, h(2)).unwrap();
+    assert_eq!(st.logical_now_nanos(), FIRE);
+    assert_eq!(st.pending_len(), 0);
 }
 
 /// a = Sleep (op 1), b = Http (op 2), seqs 3..=6 filler commands.

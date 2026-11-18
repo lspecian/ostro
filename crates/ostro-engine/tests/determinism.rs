@@ -287,6 +287,13 @@ async fn thousand_replays() {
 #[tokio::test]
 async fn golden_det_basic_journal() {
     let d = record("basic").await;
+    // Logical time is monotonic over every journaled event, inputs included (03-11):
+    // with the frozen clock, events after TimerFired are stamped at its fire time.
+    let ts: Vec<u64> = d.journal.iter().map(|e| e.ts_nanos).collect();
+    assert!(
+        ts.windows(2).all(|w| w[0] <= w[1]),
+        "journal ts decreased: {ts:?}"
+    );
     let mut text = String::new();
     for e in &d.journal {
         let (_, bytes) = encode_event(e);
