@@ -408,3 +408,127 @@ async fn host_surface_journals_every_command() {
     assert_eq!(st.logs.lines.len(), 1);
     assert_eq!(st.logs.lines[0].message, "surface log line");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_surface_resume_and_replay_effects() {
+    use ostro_types::journal::{
+        EffectCompleted, HttpResponse, OpOutput, SqlResult, SqlValue, TimerFired,
+    };
+    use sha2::{Digest, Sha256};
+
+    let mut journal = vec![run_started("surface", b"", SEED_S)];
+    let (out, mut store) = activate("wit-surface", journal.clone()).await;
+    assert_evicted(&out);
+    journal.extend(store.data_mut().take_pending());
+
+    let seqs = |k: EventKind| -> Vec<u64> {
+        journal
+            .iter()
+            .filter(|e| e.body.kind() == k)
+            .map(|e| e.seq)
+            .collect()
+    };
+    let effects = seqs(EventKind::EffectScheduled);
+    let (http, sql, object) = (effects[0], effects[1], effects[2]);
+    let sleep_op = seqs(EventKind::TimerStarted)[0];
+    let body = vec![0xff, 0x00, 0x01];
+    let http_out: Result<OpOutput, Failure> = Ok(OpOutput::Http(HttpResponse {
+        status: 200,
+        headers: vec![
+            ostro_types::journal::Header {
+                name: "b".into(),
+                value: "2".into(),
+            },
+            ostro_types::journal::Header {
+                name: "a".into(),
+                value: "1".into(),
+            },
+        ],
+        body: body.clone(),
+    }));
+    let sql_out: Result<OpOutput, Failure> = Ok(OpOutput::Sql(SqlResult {
+        columns: vec!["x".into()],
+        rows: vec![vec![SqlValue::Int8(1)]],
+        rows_affected: 1,
+    }));
+    let object_out: Result<OpOutput, Failure> = Err(Failure::Timeout);
+    // Completion order differs from the order the guest lists the ops in.
+    let inputs = vec![
+        EventBody::EffectCompleted(EffectCompleted {
+            op: sql,
+            outcome: encode_result(&sql_out),
+        }),
+        EventBody::EffectCompleted(EffectCompleted {
+            op: http,
+            outcome: encode_result(&http_out),
+        }),
+        EventBody::EffectCompleted(EffectCompleted {
+            op: object,
+            outcome: encode_result(&object_out),
+        }),
+        EventBody::TimerFired(TimerFired { op: sleep_op }),
+    ];
+    for body in inputs {
+        journal.push(Event {
+            seq: journal.len() as u64,
+            ts_nanos: ACCEPTED_AT + 10_000_000_000,
+            body,
+        });
+    }
+
+    let (out, mut store) = activate("wit-surface", journal.clone()).await;
+    let live = completed(out);
+    let st = store.data_mut();
+    let pending = st.take_pending();
+    assert_eq!(
+        kinds(&pending),
+        vec![EventKind::WaitResolved, EventKind::WaitResolved]
+    );
+    let EventBody::WaitResolved(w) = &pending[0].body else {
+        unreachable!()
+    };
+    assert_eq!(
+        w.completed,
+        vec![sql, http, object],
+        "journal completion order"
+    );
+    let EventBody::WaitResolved(w) = &pending[1].body else {
+        unreachable!()
+    };
+    assert_eq!(w.completed, vec![sleep_op]);
+    let dump = String::from_utf8(live.data.clone()).expect("utf8 dump");
+    let body_sha: String = Sha256::digest(&body)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(
+        dump.contains(&format!(
+            "op {http}: http 200 [b=2,a=1] body-sha256 {body_sha}"
+        )),
+        "{dump}"
+    );
+    assert!(
+        dump.contains(&format!("op {object}: failed timeout")),
+        "{dump}"
+    );
+    assert!(dump.contains(&format!("op {sleep_op}: timer")), "{dump}");
+    // Activation 2 starts by replaying activation 1's commands.
+    assert!(dump.contains("is-replaying true"), "{dump}");
+    journal.extend(pending);
+    st.record_terminal(&Ok(RunReturn::Completed(live.clone())))
+        .expect("terminal");
+    journal.extend(st.take_pending());
+
+    // Full replay: identical dump (decoded from the same recorded bytes), no appends.
+    let (out, mut store) = activate("wit-surface", journal).await;
+    let replayed = completed(out);
+    assert_eq!(
+        replayed, live,
+        "byte-identical replay of effect completions"
+    );
+    let st = store.data_mut();
+    st.record_terminal(&Ok(RunReturn::Completed(replayed)))
+        .expect("terminal");
+    assert!(st.take_pending().is_empty());
+    assert!(st.logs.lines.is_empty(), "logs are suppressed on replay");
+}
