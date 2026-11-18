@@ -123,7 +123,7 @@ impl std::fmt::Debug for Rf1Log {
 
 impl Rf1Log {
     /// Build from a successful recovery. `hw` is the sender the node's commit callback
-    /// advances; it starts at `recovery.leo` (recovery fsynced every retained segment).
+    /// advances; it starts at `recovery.leo` (recovery left every retained segment durable).
     pub(crate) fn new(
         pid: PartitionId,
         cfg: &LogNodeConfig,

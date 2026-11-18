@@ -7,8 +7,10 @@
 //! 2. verify every record: WAL frame CRC, envelope CRC32C, partition, `base == prev_last + 1`,
 //!    epoch non-decreasing, codec known ([`verify_record`]);
 //! 3. classify the first failure (torn tail → cut; anything else → [`LogError::Corrupt`]);
-//! 4. fsync every retained segment once (after a crash, readable is not durable), rebuild
-//!    the epoch history, `leo = last + 1`, `log_start = first base`.
+//! 4. make every retained segment durable (after a crash, readable is not durable) by
+//!    fsyncing the last non-empty one (earlier segments are already durable, see
+//!    [`recover_partition`]), rebuild the epoch history, `leo = last + 1`,
+//!    `log_start = first base`.
 //!
 //! Records are parsed with [`declared_record_size`] + [`WalRecord::from_bytes`] over the
 //! whole file read into memory. This module never calls the vendored `WalManager` segment
@@ -349,9 +351,18 @@ pub fn recover_partition(
         }
     }
 
-    // After a crash, readable is not durable: make every retained segment durable once
-    // before anything (state apply, acks) relies on it.
-    for path in &retained {
+    // After a crash, readable is not durable: every retained segment must be durable before
+    // anything (state apply, acks) relies on it. Only the LAST non-empty segment can hold
+    // bytes that were never fsynced (plan 02-16; fsyncing all of them made reopen grow with
+    // the segment count, about 1 s per partition after 500 restarts):
+    // - a segment the WAL rotated away from was fsynced before the rotation (seal and
+    //   truncation paths in the vendored `GroupCommitWal` call `sync_all` first);
+    // - a segment that was the tail when a process died was the last non-empty segment at
+    //   the next recovery, which fsynced it here before `LogNode::open` created the WAL (a
+    //   new WAL queue opens a NEW segment, so nothing newer can exist before that fsync).
+    //   A crash during recovery leaves the same layout, so the next recovery repeats it.
+    // By induction every non-tail segment is durable; a torn cut already fsynced the tail.
+    if let Some(path) = retained.last() {
         File::open(path)?.sync_all()?;
     }
 
