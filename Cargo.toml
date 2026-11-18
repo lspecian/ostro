@@ -11,9 +11,8 @@ license = "Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-# vendored (see VENDORED.md)
-raft = { package = "ostro-raft-rs", path = "vendor/ostro-raft-rs", default-features = false, features = ["prost-codec"] }
-raft-proto = { package = "ostro-raft-proto", path = "vendor/ostro-raft-proto" }
+# vendored (see VENDORED.md). Vendored crates pin their own deps; add workspace pins
+# (metrics, tracing, thiserror, raft, ...) only when an Ostro crate consumes them.
 ostro-raft-driver = { path = "vendor/ostro-raft-driver" }
 ostro-wal = { path = "vendor/ostro-wal" }
 # stack (versions verified 2026-11-18)
@@ -25,16 +24,12 @@ tonic-prost = "0.14.9"
 prost = "0.14.6"
 axum = { version = "0.8.9", features = ["http2", "json", "macros"] }
 redb = "4.6.0"
-metrics = "0.24.6"
 mimalloc = "0.1.52"
-tracing = "0.1.44"
 clap = { version = "4.6.8", features = ["derive", "env"] }
-thiserror = "2"
 tempfile = "3"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 # build
 protox = "0.10.0"
-prost-build = "0.14.6"
 tonic-prost-build = "0.14.9"
 
 [workspace.lints.rust]
