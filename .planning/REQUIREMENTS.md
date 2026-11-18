@@ -9,10 +9,10 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Foundation & Toolchain
 
-- [ ] **FOUND-01**: Cargo workspace builds on pinned Rust 1.100 with crate layout per research (ostro-types, ostro-log, ostro-partition, ostro-meta, ostro-engine, ostro-bridge, ostro-proto, ostro-api, ostro-blob, ostro, ostro-cli)
+- [x] **FOUND-01**: Cargo workspace builds on pinned Rust 1.100 with crate layout per research (ostro-types, ostro-log, ostro-partition, ostro-meta, ostro-engine, ostro-bridge, ostro-proto, ostro-api, ostro-blob, ostro, ostro-cli)
 - [ ] **FOUND-02**: Needed Chronik code (raft driver + log store + vendored raft/raft-proto, WAL group commit/segment/index/truncate) is vendored with Apache-2.0 attribution, source commit and a `VENDORED.md` listing local modifications; no dependency on the Chronik repo
 - [ ] **FOUND-03**: Vendored code is modernised: no unused chronik-common/monitoring deps, `metrics` facade instead of MetricsRecorder, no tokio-uring, raft crates renamed so no `[patch]` is required
-- [ ] **FOUND-04**: cargo-deny bans duplicate tonic/prost/hyper/axum/opentelemetry versions and disallowed licences in CI
+- [x] **FOUND-04**: cargo-deny bans duplicate tonic/prost/hyper/axum/opentelemetry versions and disallowed licences in CI
 - [ ] **FOUND-05**: CI matrix builds and tests on linux x86_64 + aarch64 (musl via cargo-zigbuild, mimalloc) and macOS
 - [ ] **FOUND-06**: Spike results recorded: guest toolchain size/memory/cold-start + pre-init randomness behaviour (S2), redb durability-tier throughput (S3); decisions (resource vs u64 step handle, redb vs fjall, Wasmtime pin policy) logged in PROJECT.md
 
@@ -243,10 +243,10 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FOUND-01 | Phase 1 | Pending |
+| FOUND-01 | Phase 1 | Complete |
 | FOUND-02 | Phase 1 | Pending |
 | FOUND-03 | Phase 1 | Pending |
-| FOUND-04 | Phase 1 | Pending |
+| FOUND-04 | Phase 1 | Complete |
 | FOUND-05 | Phase 1 | Pending |
 | FOUND-06 | Phase 1 | Pending |
 | STOR-01 | Phase 2 | Pending |

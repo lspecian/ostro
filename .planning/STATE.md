@@ -1,3 +1,19 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+status: planning
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-11-18T17:23:57.744Z"
+last_activity: 2026-11-18 — Roadmap created (14 phases, 136/136 v1 requirements mapped)
+progress:
+  total_phases: 14
+  completed_phases: 0
+  total_plans: 8
+  completed_plans: 1
+  percent: 13
+---
+
 # Project State
 
 ## Project Reference
@@ -10,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 ## Current Position
 
 Phase: 1 of 14 (Foundation, Vendoring & Spikes)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-11-18 — Roadmap created (14 phases, 136/136 v1 requirements mapped)
+Plan: 1 of 8 in current phase
+Status: In progress
+Last activity: 2026-11-18 — Completed 01-01-PLAN.md (workspace bootstrap + cargo-deny policy)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 13%
 
 ## Performance Metrics
 
@@ -34,6 +50,7 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+| Phase 01 P01 | 4min | 3 tasks | 37 files |
 
 ## Accumulated Context
 
@@ -49,6 +66,8 @@ Recent decisions affecting current work:
 - [Research 2/3]: `ostro-types` ownership split. Phase 2 owns the log envelope (32-byte LE header + CRC32C), partition `Command` framing, fencing (`LeaderAnnounced`, `AttemptGranted`) and routing. Phase 3 owns `journal::Event` payload semantics, the per-kind command-hash spec and `RunStarted.rng_seed`. Whichever phase executes first creates the crate; the other phase extends it.
 - [Research 3]: Wasmtime host imports are async (`imports: { default: async | trappable }`) with sync WIT, `async_stack_size` = 4 MiB, and an Ostro-owned deterministic WASI 0.2 shim (Rust wasip2 guests always import 17 WASI interfaces). `wasmtime-wasi` is not used.
 - [Roadmap]: Rust `ostro build` exists only as a direct cargo build until Phase 10. CLI-04 (hermetic three-language build) is mapped to Phase 10.
+- [Phase 01]: rustls kept as a normal dep of ostro-api (pub tls_provider) so aws-lc-rs stays visible to cargo-deny with exclude-dev
+- [Phase 01]: Unused workspace-dependency warnings (metrics, thiserror, tracing, prost-build) accepted until plans 01-04/01-06 consume them
 
 ### Pending Todos
 
@@ -68,6 +87,6 @@ Open research gaps, from research/SUMMARY.md:
 
 ## Session Continuity
 
-Last session: 2026-11-18
-Stopped at: Roadmap and state initialized; ready for `/gsd:plan-phase 1`
+Last session: 2026-11-18T17:23:57.742Z
+Stopped at: Completed 01-01-PLAN.md
 Resume file: None
