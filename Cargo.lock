@@ -1676,6 +1676,7 @@ name = "ostro-log"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "fail",
  "metrics",
  "ostro-testkit",
  "ostro-types",

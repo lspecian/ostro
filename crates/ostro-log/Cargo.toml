@@ -14,11 +14,20 @@ bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
+fail = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
 ostro-testkit.workspace = true
+
+[features]
+# Fault-injection suites (tests/fatal_io.rs): enables the vendored WAL's failpoints.
+failpoints = ["dep:fail", "fail/failpoints", "ostro-wal/failpoints"]
+
+[[test]]
+name = "fatal_io"
+required-features = ["failpoints"]
 
 [lints]
 workspace = true

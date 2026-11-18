@@ -33,6 +33,9 @@ pub use verify::{Corruption, VerifiedBatch, verify_record};
 // Dependencies wired in plan 02-01 ahead of their consuming plans.
 // The anchors keep cargo's per-crate `unused_dependencies` lint quiet.
 use metrics as _;
+// `fail` is used by the failpoint test suites only (feature `failpoints`).
+#[cfg(feature = "failpoints")]
+use fail as _;
 
 #[cfg(test)]
 mod dev_dep_anchors {

@@ -131,6 +131,7 @@ jobs:
         run: |
           cargo test -p ostro-wal --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-blob --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro-log --features failpoints --locked -- --test-threads=1
       - if: matrix.os == 'macos-15'
         name: cargo build --release (ostro) + build-info
         run: |
