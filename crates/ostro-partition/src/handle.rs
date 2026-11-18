@@ -115,6 +115,20 @@ impl<L: ReplicatedLog> PartitionHandle<L> {
 
     /// Append `cmds` as one envelope and return their outcomes in order, after apply.
     pub async fn submit(&self, cmds: Vec<Command>) -> Result<Vec<ApplyOutcome>, PartitionError> {
+        Ok(self
+            .submit_with_offsets(cmds)
+            .await?
+            .into_iter()
+            .map(|(_, o)| o)
+            .collect())
+    }
+
+    /// Like [`submit`](Self::submit), pairing each outcome with the log offset of its
+    /// command (`receipt.base + i`).
+    pub async fn submit_with_offsets(
+        &self,
+        cmds: Vec<Command>,
+    ) -> Result<Vec<(Offset, ApplyOutcome)>, PartitionError> {
         if cmds.is_empty() {
             return Ok(Vec::new());
         }
@@ -134,7 +148,7 @@ impl<L: ReplicatedLog> PartitionHandle<L> {
                 reason = wait_failed(&mut health) => return Err(PartitionError::Failed(reason)),
             };
             match r {
-                Ok(Ok(o)) => out.push(o),
+                Ok(Ok(o)) => out.push((off, o)),
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err(PartitionError::AckLost(off)),
             }

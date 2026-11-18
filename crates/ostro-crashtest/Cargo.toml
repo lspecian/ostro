@@ -1,0 +1,33 @@
+[package]
+name = "ostro-crashtest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Phase 2 crash/corruption harness (plan 02-15): the `crash-target` load generator plus
+# kill -9, offline torn-tail/corruption and failpoint I/O loops (tests/crash_loop.rs, all
+# #[ignore]; run explicitly with `-- --ignored`, see 02-VALIDATION.md).
+
+[features]
+# crash_loop_io_errors: crash-target reads FAILPOINTS via fail::FailScenario::setup().
+failpoints = ["dep:fail", "fail/failpoints", "ostro-partition/failpoints"]
+
+[dependencies]
+ostro-partition = { path = "../ostro-partition" }
+ostro-log = { path = "../ostro-log" }
+ostro-types.workspace = true
+ostro-testkit.workspace = true
+tokio.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+tempfile.workspace = true
+fail = { workspace = true, optional = true }
+
+[[bin]]
+name = "crash-target"
+path = "src/bin/crash-target.rs"
+
+[lints]
+workspace = true

@@ -1649,6 +1649,21 @@ name = "ostro-cli"
 version = "0.1.0"
 
 [[package]]
+name = "ostro-crashtest"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "fail",
+ "ostro-log",
+ "ostro-partition",
+ "ostro-testkit",
+ "ostro-types",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ostro-engine"
 version = "0.1.0"
 dependencies = [
