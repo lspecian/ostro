@@ -1,51 +1,86 @@
 //! Journal events -> Phase 2 [`Derived`] storage intents (04-RESEARCH "Mapping journal
-//! events to Derived intents"; normative except `StepAttemptFailed`, see below).
+//! events to Derived intents", extended for Phase 5 in plan 05-11).
 //!
 //! # API shape (two phases, chosen in plan 04-15)
 //!
-//! [`intents`] is synchronous and pure: no I/O, no clock. The parts that need I/O are
-//! resolved by the caller ([`crate::sink::PartitionSink`]) before calling it:
+//! [`derive`] is synchronous and pure: no I/O, no clock, no randomness. The parts that need
+//! I/O are resolved by the caller ([`crate::sink::PartitionSink`]) before calling it:
 //!
-//! 1. [`terminal_result_bytes`] returns the bytes of the run's result when the batch ends
-//!    the run (`RunCompleted` output data, or the failure JSON of `RunFailed` /
-//!    `RunContinuedAsNew`). The caller turns them into a [`PayloadRef`] with
-//!    `PartitionHandle::prepare_payload`, which writes payloads over 256 KiB to the blob
-//!    store **before** the append.
+//! 1. The bytes of the run's result when the batch ends the run: [`terminal_result_bytes`]
+//!    (`RunCompleted` output data, the failure JSON of `RunFailed`) or
+//!    [`continued_as_new_json`] (`{"next_run_id"}` of a continue-as-new). The caller turns
+//!    them into a [`PayloadRef`] with `PartitionHandle::prepare_payload`, which writes
+//!    payloads over 256 KiB to the blob store **before** the append.
 //! 2. `OpCancelled{op}` needs the event that started `op`. If it is not in the batch, the
 //!    caller reads it from the journal and serves it through the `prior` lookup.
-//! 3. [`intents`] maps the batch with the prepared result and the lookup.
+//! 3. `RunContinuedAsNew` needs the successor's `StartRun`, built by [`successor_start`] from
+//!    the predecessor's record, the [`ModuleResolver`] and the [`PolicyResolver`], with a
+//!    run id, seed and prepared input chosen by the caller. The caller generates the run id
+//!    **once per flush** and logs it inside the command, so the successor id is part of the
+//!    log and replay never re-derives it (derive only runs at a live flush, never during
+//!    apply or replay).
+//! 4. [`derive`] maps the batch with that [`DeriveCtx`].
 //!
 //! # Mapping
 //!
-//! | journal event | intent |
+//! | journal event at seq `s`, ts `t` | intent |
 //! |---|---|
-//! | `TimerStarted{fire_at_nanos}` at seq `s` | `ScheduleTimer{op: s, due_at_ms: ceil(fire_at / 1e6)}` |
+//! | `TimerStarted{fire_at_nanos}` | `ScheduleTimer{op: s, due_at_ms: ceil(fire_at / 1e6)}` |
+//! | `SignalWaitStarted{name, timeout_ms}` | `RegisterWait{op: s, Signal, name, timeout_due_ms, at_ms: ceil(t / 1e6)}` |
+//! | `AwaitTokenCreated{timeout_ms}` | `RegisterWait{op: s, Token, "", timeout_due_ms, at_ms}` |
 //! | `OpCancelled{op}`, `op` a `TimerStarted` | `CancelTimer{op, due_at_ms}` (same rounding) |
+//! | `OpCancelled{op}`, `op` a signal / token wait | `CancelWait{op}` |
 //! | `OpCancelled{op}`, `op` anything else | none |
-//! | `RunCompleted{output}` | `CompleteRun{Completed, result, completed_at_ms: ceil(ts / 1e6)}` |
+//! | `RunCompleted{output}` | `CompleteRun{Completed, result, completed_at_ms: ceil(t / 1e6)}` |
+//! | `RunFailed{Cancelled}` | `CompleteRun{Cancelled, result: failure JSON}` |
 //! | `RunFailed{failure}` | `CompleteRun{Failed, result: failure JSON}` |
-//! | `RunContinuedAsNew` | `CompleteRun{Failed, result: unsupported JSON}` (Phase 5 implements it) |
+//! | `RunContinuedAsNew` | `SendMessage(StartRun(successor))` + `CompleteRun{ContinuedAsNew, {"next_run_id"}}` |
+//! | `RunContinuedAsNew`, no successor (resolution failed) | `CompleteRun{Failed, result}` |
 //! | everything else | none |
 //!
+//! `timeout_due_ms = ceil((t + timeout_ms * 1e6) / 1e6)` when a timeout is given, else 0.
+//! Guest terminal events are never `resumable` (D1: a guest terminal is restarted as a new
+//! linked run, not resumed).
+//!
+//! **Terminal batches** (the last event ends the run) carry no `RegisterWait`/`CancelWait`:
+//! the terminal transition deletes every wait row and wait-timeout timer itself
+//! (`terminal::on_terminal`), and apply rejects wait intents in a continue-as-new batch.
+//! A continue-as-new batch has the shape apply accepts (05-09): events, `ScheduleTimer` /
+//! `CancelTimer`, exactly one `SendMessage(StartRun)`, then `CompleteRun{ContinuedAsNew}`.
+//!
 //! `StepAttemptFailed` maps to nothing: the executor (04-16) submits its own `EnqueueReady`
-//! after `Evicted{StepBackoff}`. Effects, children and await tokens map to nothing here; the
-//! sink adds the Phase 4 "unsupported" completions ([`crate::sink`]).
+//! after `Evicted{StepBackoff}`. Effects and children map to nothing here; the sink adds the
+//! Phase 4 "unsupported" completions ([`crate::sink`]) until Phase 6/9.
 //!
 //! Units: commands carry milliseconds, journal events nanoseconds; due and completion
 //! times round **up** (a timer never fires before its journaled time).
 //!
 //! `CompleteRun` is always the last intent (apply rejects anything after it).
+//!
+//! # Resume re-arm (B2)
+//!
+//! [`rearm_unresolved`] recomputes, from a replayed journal, the intents of every op that
+//! is still open: the same `ScheduleTimer` / `RegisterWait` rows the original flush derived
+//! (same due times), so a resumed run's waits and timers come back exactly as they were. An
+//! op is open iff no input completes it (`completes_op() == Some(op)`) and the guest did not
+//! cancel it (`OpCancelled{op}`), the rule of the engine's `ReplayState::completion_for`.
 
-use ostro_types::PayloadRef;
+use ostro_partition::store::values::RunRecord;
 use ostro_types::command::{
-    CancelTimer, CompleteRun, Derived, ScheduleTimer, TerminalStatus, derived::Intent,
+    CancelTimer, CompleteRun, Derived, OutboxMsg, ParentRef, ScheduleTimer, SendMessage, StartRun,
+    TerminalStatus, WaitKind, derived::Intent,
 };
-use ostro_types::journal::{Event, EventBody, Failure};
+use ostro_types::journal::{CANCELLATION_OP, Continuation, Event, EventBody, Failure};
+use ostro_types::{PayloadRef, RunId};
 
 /// Result-payload `reason_code` of a run that ended with `RunFailed`.
 pub const REASON_WORKFLOW_FAILED: &str = "workflow_failed";
-/// `reason_code` of features that Phase 4 does not support (continue-as-new, await tokens).
+/// `reason_code` of features that are not supported yet (effects and children until
+/// Phase 6/9).
 pub const REASON_UNSUPPORTED: &str = "unsupported";
+/// `reason_code` of a continue-as-new whose successor could not be resolved (unknown
+/// workflow or version).
+pub const REASON_CONTINUE_AS_NEW_FAILED: &str = "continue_as_new_failed";
 
 /// Errors of the mapping. Each one is a bug in the engine or the caller, never user input.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -59,6 +94,9 @@ pub enum DeriveError {
     /// A prepared result payload, but the batch has no terminal event.
     #[error("prepared result payload but no terminal event in the batch")]
     UnexpectedResult,
+    /// A successor `StartRun`, but the batch does not end with `RunContinuedAsNew`.
+    #[error("successor start but no continue-as-new in the batch")]
+    UnexpectedSuccessor,
     /// `OpCancelled{op}` where `op` is neither in the batch nor known to the lookup.
     #[error("OpCancelled at seq {seq} names unknown op {op}")]
     UnknownOp { seq: u64, op: u64 },
@@ -67,6 +105,14 @@ pub enum DeriveError {
 /// Nanoseconds -> milliseconds, rounded up.
 pub fn ceil_ms(nanos: u64) -> u64 {
     nanos.div_ceil(1_000_000)
+}
+
+/// Due time (ms) of a wait timeout of `timeout_ms` started at `ts_nanos`; 0 = no timeout.
+pub fn wait_timeout_due_ms(ts_nanos: u64, timeout_ms: Option<u64>) -> u64 {
+    match timeout_ms {
+        Some(ms) => ceil_ms(ts_nanos.saturating_add(ms.saturating_mul(1_000_000))),
+        None => 0,
+    }
 }
 
 /// JSON body of a failure result: `{"reason_code", "kind", "message"}` (plus `detail` when
@@ -105,68 +151,161 @@ pub fn unsupported_json(detail: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Detail text of `RunContinuedAsNew` in Phase 4.
-pub const CONTINUE_AS_NEW_DETAIL: &str = "continue-as-new arrives in Phase 5";
+/// Result JSON of a run that continued as new: `{"next_run_id": "<successor>"}`.
+pub fn continued_as_new_json(next: &RunId) -> Vec<u8> {
+    serde_json::json!({ "next_run_id": next.to_string() })
+        .to_string()
+        .into_bytes()
+}
 
-/// `(status, result bytes)` when `ev` is a terminal event.
-fn terminal(ev: &Event) -> Option<(TerminalStatus, Vec<u8>)> {
+/// `(status, result bytes)` of a terminal event other than continue-as-new.
+fn guest_terminal(ev: &Event) -> Option<(TerminalStatus, Vec<u8>)> {
     match &ev.body {
         EventBody::RunCompleted(c) => Some((TerminalStatus::Completed, c.output.data.clone())),
-        EventBody::RunFailed(f) => Some((TerminalStatus::Failed, run_failed_json(&f.failure))),
-        EventBody::RunContinuedAsNew(_) => Some((
-            TerminalStatus::Failed,
-            unsupported_json(CONTINUE_AS_NEW_DETAIL),
-        )),
+        EventBody::RunFailed(f) => {
+            let status = match f.failure {
+                Failure::Cancelled => TerminalStatus::Cancelled,
+                _ => TerminalStatus::Failed,
+            };
+            Some((status, run_failed_json(&f.failure)))
+        }
         _ => None,
     }
 }
 
-/// Bytes of the run result when `events` contains a terminal event (phase 1 of the API).
-///
-/// `RunCompleted` stores the output's raw `data` (the SDK's JSON); its content type stays in
-/// the journal event. Failures store [`run_failed_json`] / [`unsupported_json`].
-pub fn terminal_result_bytes(events: &[Event]) -> Option<Vec<u8>> {
-    events.iter().find_map(terminal).map(|(_, b)| b)
+fn is_terminal(ev: &Event) -> bool {
+    matches!(
+        ev.body,
+        EventBody::RunCompleted(_) | EventBody::RunFailed(_) | EventBody::RunContinuedAsNew(_)
+    )
 }
 
-/// Map one appended batch to its intents (phase 3 of the API; see the module docs).
+/// Bytes of the run result when `events` contains a `RunCompleted` / `RunFailed` event.
 ///
-/// - `prior(op)`: the body of the journal event at seq `op` when it is not in `events`
-///   (only consulted for `OpCancelled`).
-/// - `result`: the prepared payload of [`terminal_result_bytes`]; required iff the batch
-///   has a terminal event.
+/// `RunCompleted` stores the output's raw `data` (the SDK's JSON); its content type stays in
+/// the journal event. Failures store [`run_failed_json`]. A continue-as-new returns `None`:
+/// its result is [`continued_as_new_json`] of the successor id chosen by the caller (or a
+/// failure JSON when the successor cannot be resolved).
+pub fn terminal_result_bytes(events: &[Event]) -> Option<Vec<u8>> {
+    events.iter().find_map(guest_terminal).map(|(_, b)| b)
+}
+
+/// The `RunContinuedAsNew` continuation of the batch, if any.
+pub fn continuation(events: &[Event]) -> Option<(&Event, &Continuation)> {
+    events.iter().find_map(|e| match &e.body {
+        EventBody::RunContinuedAsNew(c) => Some((e, &c.continuation)),
+        _ => None,
+    })
+}
+
+/// Inputs of [`derive`] resolved by the caller.
+pub struct DeriveCtx<'a> {
+    /// The body of the journal event at seq `op` when it is not in the batch (only
+    /// consulted for `OpCancelled`).
+    pub prior: &'a dyn Fn(u64) -> Option<EventBody>,
+    /// Prepared result payload; required iff the batch has a terminal event.
+    pub result: Option<PayloadRef>,
+    /// The continue-as-new successor ([`successor_start`]); `None` for a continue-as-new
+    /// whose successor could not be resolved (the run then completes `Failed` with
+    /// `result`).
+    pub successor: Option<StartRun>,
+}
+
+/// Map one appended batch to its intents (Phase 4 signature, kept for callers without a
+/// continue-as-new successor: a `RunContinuedAsNew` then completes the run `Failed` with
+/// `result`).
 pub fn intents(
     events: &[Event],
     prior: &dyn Fn(u64) -> Option<EventBody>,
     result: Option<PayloadRef>,
 ) -> Result<Vec<Derived>, DeriveError> {
+    derive(
+        events,
+        DeriveCtx {
+            prior,
+            result,
+            successor: None,
+        },
+    )
+}
+
+fn complete(status: TerminalStatus, result: PayloadRef, ts_nanos: u64) -> Derived {
+    Derived::new(Intent::CompleteRun(CompleteRun {
+        status: status as i32,
+        result: Some(result),
+        completed_at_ms: ceil_ms(ts_nanos),
+        resumable: false,
+        parent_event: None,
+    }))
+}
+
+/// The intent that registers the wait of a wait-starting event, if `ev` starts one.
+fn register_wait(ev: &Event) -> Option<Derived> {
+    let at_ms = ceil_ms(ev.ts_nanos);
+    match &ev.body {
+        EventBody::SignalWaitStarted(w) => Some(Derived::register_wait(
+            ev.seq,
+            WaitKind::Signal,
+            w.name.clone(),
+            wait_timeout_due_ms(ev.ts_nanos, w.timeout_ms),
+            at_ms,
+        )),
+        EventBody::AwaitTokenCreated(t) => Some(Derived::register_wait(
+            ev.seq,
+            WaitKind::Token,
+            String::new(),
+            wait_timeout_due_ms(ev.ts_nanos, t.timeout_ms),
+            at_ms,
+        )),
+        _ => None,
+    }
+}
+
+fn schedule_timer(op: u64, fire_at_nanos: u64) -> Derived {
+    Derived::new(Intent::ScheduleTimer(ScheduleTimer {
+        op,
+        due_at_ms: ceil_ms(fire_at_nanos),
+    }))
+}
+
+/// Map one appended batch to its intents (see the module docs).
+pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, DeriveError> {
+    let DeriveCtx {
+        prior,
+        mut result,
+        mut successor,
+    } = ctx;
+    let terminal_batch = events.last().is_some_and(is_terminal);
     let mut out = Vec::new();
-    let mut result = result;
     let mut done = false;
     for (i, ev) in events.iter().enumerate() {
-        if let Some((status, _)) = terminal(ev) {
+        if is_terminal(ev) {
             if done || i + 1 != events.len() {
                 return Err(DeriveError::TerminalNotLast { seq: ev.seq });
             }
             let r = result
                 .take()
                 .ok_or(DeriveError::MissingResult { seq: ev.seq })?;
-            out.push(Derived::new(Intent::CompleteRun(CompleteRun {
-                status: status as i32,
-                result: Some(r),
-                completed_at_ms: ceil_ms(ev.ts_nanos),
-                resumable: false,
-                parent_event: None,
-            })));
+            match (guest_terminal(ev), successor.take()) {
+                (Some(_), Some(_)) => return Err(DeriveError::UnexpectedSuccessor),
+                (Some((status, _)), None) => out.push(complete(status, r, ev.ts_nanos)),
+                (None, Some(start)) => {
+                    out.push(Derived::new(Intent::SendMessage(SendMessage {
+                        msg: Some(OutboxMsg::start_run(start)),
+                    })));
+                    out.push(complete(TerminalStatus::ContinuedAsNew, r, ev.ts_nanos));
+                }
+                (None, None) => out.push(complete(TerminalStatus::Failed, r, ev.ts_nanos)),
+            }
             done = true;
             continue;
         }
         match &ev.body {
-            EventBody::TimerStarted(t) => {
-                out.push(Derived::new(Intent::ScheduleTimer(ScheduleTimer {
-                    op: ev.seq,
-                    due_at_ms: ceil_ms(t.fire_at_nanos),
-                })));
+            EventBody::TimerStarted(t) => out.push(schedule_timer(ev.seq, t.fire_at_nanos)),
+            EventBody::SignalWaitStarted(_) | EventBody::AwaitTokenCreated(_) => {
+                if !terminal_batch && let Some(d) = register_wait(ev) {
+                    out.push(d);
+                }
             }
             EventBody::OpCancelled(c) => {
                 let started = events
@@ -178,36 +317,259 @@ pub fn intents(
                         seq: ev.seq,
                         op: c.op,
                     })?;
-                if let EventBody::TimerStarted(t) = started {
-                    out.push(Derived::new(Intent::CancelTimer(CancelTimer {
-                        op: c.op,
-                        due_at_ms: ceil_ms(t.fire_at_nanos),
-                    })));
+                match started {
+                    EventBody::TimerStarted(t) => {
+                        out.push(Derived::new(Intent::CancelTimer(CancelTimer {
+                            op: c.op,
+                            due_at_ms: ceil_ms(t.fire_at_nanos),
+                        })));
+                    }
+                    EventBody::SignalWaitStarted(_) | EventBody::AwaitTokenCreated(_) => {
+                        if !terminal_batch {
+                            out.push(Derived::cancel_wait(c.op));
+                        }
+                    }
+                    // Effects and children: Phase 6/9.
+                    _ => {}
                 }
             }
             // No intent: RunStarted (seq 0, written by the executor), StepCompleted,
             // StepAttemptFailed (the executor requeues itself, 04-16), PatchMarker,
-            // StatusPublished, WaitResolved, EffectScheduled / ChildStarted /
-            // AwaitTokenCreated (the sink adds the Phase 4 unsupported completion),
-            // SignalWaitStarted (Phase 5), and inputs (never appended by the engine).
+            // StatusPublished, WaitResolved, EffectScheduled / ChildStarted (the sink adds
+            // the unsupported completion), and inputs (journaled by apply, or by the
+            // executor's first-activation CancelRequested).
             _ => {}
         }
     }
     if result.is_some() {
         return Err(DeriveError::UnexpectedResult);
     }
+    if successor.is_some() {
+        return Err(DeriveError::UnexpectedSuccessor);
+    }
     Ok(out)
+}
+
+/// Intents re-arming every unresolved op of `journal` (B2, see the module docs): a
+/// `ScheduleTimer` per open `TimerStarted` and a `RegisterWait` per open `SignalWaitStarted`
+/// / `AwaitTokenCreated`, with the original due times and `at_ms`. Effects, children and
+/// [`CANCELLATION_OP`] are skipped. Empty for a journal that ends the run.
+pub fn rearm_unresolved(journal: &[Event]) -> Vec<Derived> {
+    if journal.iter().any(is_terminal) {
+        return Vec::new();
+    }
+    let mut closed = std::collections::BTreeSet::new();
+    for ev in journal {
+        if let Some(op) = ev.body.completes_op() {
+            closed.insert(op);
+        }
+        if let EventBody::OpCancelled(c) = &ev.body {
+            closed.insert(c.op);
+        }
+    }
+    journal
+        .iter()
+        .filter(|ev| ev.seq != CANCELLATION_OP && !closed.contains(&ev.seq))
+        .filter_map(|ev| match &ev.body {
+            EventBody::TimerStarted(t) => Some(schedule_timer(ev.seq, t.fire_at_nanos)),
+            _ => register_wait(ev),
+        })
+        .collect()
+}
+
+// ------------------------------------------------------------------- continue-as-new
+
+/// A workflow version as the continue-as-new successor runs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedWorkflow {
+    pub version: u32,
+    pub module_sha: [u8; 32],
+    /// The version's `describe()` run timeout (a fresh deadline for the successor).
+    pub run_timeout_ms: Option<u64>,
+}
+
+/// Resolves `(qualified workflow, version)` to its module (meta lookup in the server).
+pub trait ModuleResolver: Send + Sync {
+    /// `version` `None` = the workflow's active version. `None` = unknown.
+    fn resolve(&self, workflow: &str, version: Option<u32>) -> Option<ResolvedWorkflow>;
+}
+
+/// Resolves a new run's `(retention_ms, schedule_to_start_ms)` for `(workflow, queue)`, both
+/// in qualified form (D9; [`crate::retention`]).
+pub trait PolicyResolver: Send + Sync {
+    fn resolve(&self, workflow: &str, queue: &str) -> (u64, u64);
+}
+
+/// The resolver used when no metadata is wired (harnesses): knows nothing, so a successor
+/// on the predecessor's own workflow and version reuses the predecessor's module and run
+/// timeout, and any other successor fails to resolve.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoModules;
+
+impl ModuleResolver for NoModules {
+    fn resolve(&self, _workflow: &str, _version: Option<u32>) -> Option<ResolvedWorkflow> {
+        None
+    }
+}
+
+/// The policy used when no metadata is wired: the successor inherits the predecessor's
+/// retention (see [`SuccessorParts`]) and has no schedule-to-start timeout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InheritPolicy;
+
+impl PolicyResolver for InheritPolicy {
+    fn resolve(&self, _workflow: &str, _queue: &str) -> (u64, u64) {
+        (0, 0)
+    }
+}
+
+/// D23 storage form of a module-local `name` in `tenant` (bare for the default tenant).
+pub fn qualify(tenant: Option<&str>, name: &str) -> String {
+    match tenant {
+        Some(t) if !t.is_empty() => format!("{t}/{name}"),
+        _ => name.to_owned(),
+    }
+}
+
+/// Everything about a successor that the caller chooses (I/O, randomness, clock).
+#[derive(Clone, Debug)]
+pub struct SuccessorParts<'a> {
+    /// The predecessor and its record.
+    pub pred_id: RunId,
+    pub pred: &'a RunRecord,
+    /// The successor's run id (generated once per flush by the caller).
+    pub run_id: RunId,
+    /// 32-byte RNG seed.
+    pub rng_seed: [u8; 32],
+    /// The prepared continuation input bytes.
+    pub input: PayloadRef,
+    /// `requested_at_ms` / `ready_at_ms` of the successor (the continue-as-new event time).
+    pub at_ms: u64,
+}
+
+/// Why a successor could not be built.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SuccessorError {
+    #[error("continue-as-new into workflow {workflow:?} version {version:?}: not registered")]
+    Unresolved {
+        workflow: String,
+        version: Option<u32>,
+    },
+}
+
+/// Build the successor `StartRun` of a continue-as-new (D10, D23, Phase 14 F11, PF-F2).
+///
+/// - **Workflow (D23):** the continuation's module-local name qualified with the
+///   predecessor's tenant, or the predecessor's (already qualified) workflow.
+/// - **Version and module:** the continuation's version, else the active version when the
+///   workflow changes, else the predecessor's version. Resolved through `modules`; an
+///   unregistered target is [`SuccessorError::Unresolved`], except that the predecessor's
+///   own workflow and version fall back to its pinned module and run timeout.
+/// - **Copied (F11, PF-F2):** tenant, tags, traceparent, queue, priority, concurrency key and
+///   the parent link. `continued_from` = the predecessor. No idempotency key.
+/// - **Own deadlines:** `run_timeout_ms` from the version metadata (a fresh run timeout);
+///   retention and schedule-to-start from `policy`, where a retention of 0 (no policy) keeps
+///   the predecessor's retention.
+pub fn successor_start(
+    cont: &Continuation,
+    parts: SuccessorParts<'_>,
+    modules: &dyn ModuleResolver,
+    policy: &dyn PolicyResolver,
+) -> Result<StartRun, SuccessorError> {
+    let pred = parts.pred;
+    let workflow = match &cont.workflow {
+        Some(name) => qualify(pred.tenant.as_deref(), name),
+        None => pred.workflow.clone(),
+    };
+    let same_workflow = workflow == pred.workflow;
+    let version = match cont.version {
+        Some(v) => Some(v),
+        None if same_workflow => Some(pred.workflow_version),
+        None => None,
+    };
+    let resolved = match modules.resolve(&workflow, version) {
+        Some(r) => r,
+        None if same_workflow && version == Some(pred.workflow_version) => match pred.module_sha {
+            Some(sha) => ResolvedWorkflow {
+                version: pred.workflow_version,
+                module_sha: sha,
+                run_timeout_ms: pred.run_timeout_ms,
+            },
+            None => return Err(SuccessorError::Unresolved { workflow, version }),
+        },
+        None => return Err(SuccessorError::Unresolved { workflow, version }),
+    };
+    let (retention, s2s) = policy.resolve(&workflow, &pred.queue);
+    let retention_ms = if retention == 0 {
+        pred.retention_ms
+    } else {
+        retention
+    };
+    Ok(StartRun {
+        run_id: parts.run_id.as_bytes().to_vec(),
+        workflow,
+        workflow_version: resolved.version,
+        queue: pred.queue.clone(),
+        input: Some(parts.input),
+        idempotency_key: Vec::new(),
+        conflict_policy: 0,
+        concurrency_key: pred.concurrency_key.clone(),
+        priority: pred.priority,
+        ready_at_ms: parts.at_ms,
+        requested_at_ms: parts.at_ms,
+        parent: pred.parent.map(|(id, op)| ParentRef {
+            run_id: id.to_vec(),
+            op,
+        }),
+        rng_seed: parts.rng_seed.to_vec(),
+        module_sha: resolved.module_sha.to_vec(),
+        tags: pred.tags.clone(),
+        tenant: pred.tenant.clone().unwrap_or_default(),
+        traceparent: pred.traceparent.clone().unwrap_or_default(),
+        run_timeout_ms: resolved.run_timeout_ms.unwrap_or(0),
+        schedule_to_start_ms: s2s,
+        retention_ms,
+        retry_of: Vec::new(),
+        continued_from: parts.pred_id.as_bytes().to_vec(),
+        run_started: None,
+    })
+}
+
+/// [`ModuleResolver`] over the metadata state machine (workflow versions and the active
+/// version, keyed by the qualified name).
+#[derive(Clone)]
+pub struct MetaModules(pub ostro_meta::MetaView);
+
+impl std::fmt::Debug for MetaModules {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MetaModules")
+    }
+}
+
+impl ModuleResolver for MetaModules {
+    fn resolve(&self, workflow: &str, version: Option<u32>) -> Option<ResolvedWorkflow> {
+        self.0.read(|s| {
+            let v = match version {
+                Some(v) => v,
+                None => s.active(workflow)?.value.version,
+            };
+            s.workflow(workflow, v).map(|w| ResolvedWorkflow {
+                version: w.value.version,
+                module_sha: w.value.module_sha256,
+                run_timeout_ms: w.value.run_timeout_ms,
+            })
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use ostro_types::journal::{
-        AttemptBackoff, AwaitTokenCreated, ChildOptions, ChildStarted, CommandHash, CommandMeta,
-        Continuation, EffectRequest, EffectScheduled, ErrorInfo, HttpRequest, OpCancelled,
-        PatchMarker, Payload, RecordedResult, RunCompleted, RunContinuedAsNew, RunFailed,
-        SignalWaitStarted, StatusPublished, StepAttemptFailed, StepCompleted, TimerStarted,
-        WaitResolved,
+        AttemptBackoff, ChildOptions, ChildStarted, CommandHash, CommandMeta, Continuation,
+        EffectRequest, EffectScheduled, ErrorInfo, HttpRequest, OpCancelled, PatchMarker, Payload,
+        RecordedResult, RunCompleted, RunContinuedAsNew, RunFailed, StatusPublished,
+        StepAttemptFailed, StepCompleted, TimerStarted, WaitResolved,
     };
 
     use super::*;
@@ -329,12 +691,19 @@ mod tests {
     }
 
     #[test]
-    fn op_cancelled_non_timer_is_no_intent() {
+    fn op_cancelled_effect_is_no_intent() {
         let prior = |_: u64| {
-            Some(EventBody::SignalWaitStarted(SignalWaitStarted {
+            Some(EventBody::EffectScheduled(EffectScheduled {
                 meta: meta(),
-                name: "x".into(),
-                timeout_ms: None,
+                request: EffectRequest::Http(HttpRequest {
+                    method: "GET".into(),
+                    url: "http://x".into(),
+                    headers: vec![],
+                    body: None,
+                    timeout_ms: None,
+                    idempotency_key: None,
+                    redact: vec![],
+                }),
             }))
         };
         assert!(
@@ -438,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn continue_as_new_is_unsupported_failure() {
+    fn continue_as_new_without_successor_completes_failed() {
         let events = [ev(
             2,
             1,
@@ -451,13 +820,14 @@ mod tests {
                 },
             }),
         )];
-        let v = json(&terminal_result_bytes(&events).unwrap());
-        assert_eq!(v["reason_code"], "unsupported");
-        assert_eq!(v["detail"], "continue-as-new arrives in Phase 5");
+        // The result of a continue-as-new is chosen by the caller.
+        assert_eq!(terminal_result_bytes(&events), None);
+        assert!(continuation(&events).is_some());
         let d = intents(&events, &none, Some(pref(b"x"))).unwrap();
+        assert_eq!(d.len(), 1);
         assert!(matches!(
             intent(&d[0]),
-            Intent::CompleteRun(c) if c.status == TerminalStatus::Failed as i32
+            Intent::CompleteRun(c) if c.status == TerminalStatus::Failed as i32 && !c.resumable
         ));
     }
 
@@ -504,16 +874,6 @@ mod tests {
                     detached: false,
                     run_timeout_ms: None,
                 },
-            }),
-            EventBody::SignalWaitStarted(SignalWaitStarted {
-                meta: meta(),
-                name: "x".into(),
-                timeout_ms: Some(5),
-            }),
-            EventBody::AwaitTokenCreated(AwaitTokenCreated {
-                meta: meta(),
-                token: "t".into(),
-                timeout_ms: None,
             }),
         ];
         let events: Vec<Event> = bodies

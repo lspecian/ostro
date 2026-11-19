@@ -6,6 +6,10 @@
 //! - [`run_started`]: `RunStarted` (seq 0) synthesis from a `RunRecord`.
 //! - [`journal_io`]: reading a run's journal back as engine events.
 //!
+//! Phase 5 (05-11): [`derive`] maps waits, tokens, cancel-op, the Cancelled status and
+//! continue-as-new (successor `StartRun` via a [`derive::ModuleResolver`]) and re-arms
+//! unresolved ops after a resume.
+//!
 //! Execution (04-16): [`executor::EngineExecutor`], the dispatcher's `Executor` running
 //! activations on the engine (lease heartbeat, self-fence, outcome state machine).
 //!

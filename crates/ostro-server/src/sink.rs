@@ -3,8 +3,9 @@
 //! One sink per activation. It holds the activation's [`AttemptToken`]; every engine flush
 //! becomes exactly one fenced `EventsAppended` command:
 //!
-//! 1. the result payload of a terminal event is prepared (blob store first when > 256 KiB),
-//! 2. intents come from the pure [`derive::intents`] mapping,
+//! 1. the result payload of a terminal event is prepared (blob store first when > 256 KiB);
+//!    a continue-as-new also gets its successor `StartRun` here (see below),
+//! 2. intents come from the pure [`derive::derive`] mapping,
 //! 3. every event is encoded (`encode_event`) and its bytes prepared (`prepare_payload`),
 //! 4. the command is submitted and its outcome mapped:
 //!
@@ -18,10 +19,21 @@
 //! Fencing is entirely apply's: the sink never second-guesses the token beyond the
 //! `attempt != token.n` sanity check (research "Key insight": no second fencing check).
 //!
-//! # Phase 4 "unsupported" completions (locked decision; Phase 6 replaces this)
+//! # Continue-as-new (05-11)
 //!
-//! Effects, child workflows and await tokens are not implemented in Phase 4. Instead of
-//! hanging, the run gets an immediate non-retryable failure:
+//! A batch ending in `RunContinuedAsNew` reads the run's own record and builds the
+//! successor with [`derive::successor_start`]: a fresh run id (uuid v7 on this run's
+//! partition) and OS-random seed generated **once per flush** and logged inside the command
+//! (so replay never re-derives them), the continuation input prepared like any payload, the
+//! module from the [`ModuleResolver`] and retention / schedule-to-start from the
+//! [`PolicyResolver`]. The run's result is `{"next_run_id"}`. An unresolvable successor
+//! (unknown workflow or version) completes the run `Failed` with reason
+//! `continue_as_new_failed` instead.
+//!
+//! # Phase 4 "unsupported" completions (locked decision; Phase 6/9 replace this)
+//!
+//! Effects and child workflows are not implemented yet. Instead of hanging, the run gets an
+//! immediate non-retryable failure (await tokens are real since Phase 5: `RegisterWait`):
 //!
 //! - `EffectScheduled{seq s}` -> input `EffectCompleted{op: s, outcome: Err(NonRetryable{kind:
 //!   "unsupported"})}`; `ChildStarted` -> `ChildCompleted` likewise. They are journaled with
@@ -29,9 +41,6 @@
 //!   succeeded, and sent on the activation's `inputs` channel (hot wait). The engine's own
 //!   next append then usually conflicts (`AppendConflict` -> re-activation), which is
 //!   correct: the re-activation replays the completion.
-//! - `AwaitTokenCreated` -> `CompleteRun{Failed, reason unsupported}` in the **same**
-//!   append (atomic; `TokenCompleted` has no failure variant). Later appends are rejected
-//!   `RunTerminal` and map to `Fenced`.
 //!
 //! Completions are skipped when the batch itself ends the run. If journaling them fails
 //! with an unavailable partition, `append` returns `Unavailable` although the scheduling
@@ -48,8 +57,7 @@ use ostro_log::{ReplicatedLog, Rf1Log};
 use ostro_partition::apply::InvalidCode;
 use ostro_partition::{ApplyOutcome, PartitionHandle, RejectReason};
 use ostro_types::command::{
-    AttemptTokenMsg, CompleteRun, Derived, EventsAppended, JournalEvent, TerminalStatus,
-    derived::Intent,
+    AttemptTokenMsg, Derived, EventsAppended, JournalEvent, derived::Intent,
 };
 use ostro_types::journal::{
     ChildCompleted, EffectCompleted, ErrorInfo, Event, EventBody, Failure, OpOutput, encode_event,
@@ -58,7 +66,7 @@ use ostro_types::journal::{
 use ostro_types::{AttemptToken, Command, PayloadRef, RunId};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::derive;
+use crate::derive::{self, InheritPolicy, ModuleResolver, NoModules, PolicyResolver};
 use crate::journal_io;
 
 /// Error kind of every Phase 4 unsupported completion.
@@ -67,8 +75,6 @@ pub const UNSUPPORTED_KIND: &str = "unsupported";
 pub const EFFECTS_UNSUPPORTED: &str = "effects arrive in Phase 6";
 /// Message of the unsupported child completion.
 pub const CHILDREN_UNSUPPORTED: &str = "child workflows arrive in Phase 6/9";
-/// Detail of the run failure after `AwaitTokenCreated`.
-pub const TOKENS_UNSUPPORTED: &str = "await tokens arrive in Phase 5";
 
 /// Attempts to journal unsupported completions when the journal end moves underneath
 /// (an input such as `TimerFired` landed between the two appends).
@@ -88,6 +94,8 @@ pub struct PartitionSink<L: ReplicatedLog = Rf1Log> {
     next_seq: AtomicU64,
     terminal: AtomicBool,
     outcome: Mutex<Option<ActivationOutcome>>,
+    modules: Arc<dyn ModuleResolver>,
+    policy: Arc<dyn PolicyResolver>,
 }
 
 impl<L: ReplicatedLog> std::fmt::Debug for PartitionSink<L> {
@@ -163,7 +171,22 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             next_seq: AtomicU64::new(next),
             terminal: AtomicBool::new(false),
             outcome: Mutex::new(None),
+            modules: Arc::new(NoModules),
+            policy: Arc::new(InheritPolicy),
         }
+    }
+
+    /// Resolve continue-as-new successors through `modules` / `policy` (the server wires
+    /// the meta-backed ones). Without this, a successor on the run's own workflow and
+    /// version reuses its module and retention, and any other successor fails the run.
+    pub fn with_resolvers(
+        mut self,
+        modules: Arc<dyn ModuleResolver>,
+        policy: Arc<dyn PolicyResolver>,
+    ) -> Self {
+        self.modules = modules;
+        self.policy = policy;
+        self
     }
 
     pub fn run(&self) -> RunId {
@@ -378,6 +401,45 @@ impl<L: ReplicatedLog> PartitionSink<L> {
         self.journal_inputs(bodies, ts).await
     }
 
+    /// The successor start and result bytes of a continue-as-new batch (module docs).
+    async fn successor(
+        &self,
+        ev: &Event,
+        cont: &ostro_types::journal::Continuation,
+    ) -> Result<(Option<ostro_types::command::StartRun>, Vec<u8>), AppendError> {
+        let pred = self
+            .handle
+            .read_run(&self.run)
+            .map_err(unavailable)?
+            .ok_or_else(|| unavailable(format!("run {} has no record", self.run_str)))?;
+        let run_id = RunId::new_v7(self.run.partition());
+        let mut rng_seed = [0u8; 32];
+        getrandom::fill(&mut rng_seed).map_err(unavailable)?;
+        let input = self.prepare(cont.input.data.clone()).await?;
+        let parts = derive::SuccessorParts {
+            pred_id: self.run,
+            pred: &pred,
+            run_id,
+            rng_seed,
+            input,
+            at_ms: derive::ceil_ms(ev.ts_nanos),
+        };
+        match derive::successor_start(cont, parts, &*self.modules, &*self.policy) {
+            Ok(start) => Ok((Some(start), derive::continued_as_new_json(&run_id))),
+            Err(e) => {
+                tracing::warn!(run = %self.run_str, error = %e, "continue-as-new failed");
+                Ok((
+                    None,
+                    derive::failure_json(
+                        derive::REASON_CONTINUE_AS_NEW_FAILED,
+                        derive::REASON_CONTINUE_AS_NEW_FAILED,
+                        &e.to_string(),
+                    ),
+                ))
+            }
+        }
+    }
+
     /// Bodies of earlier journal events named by `OpCancelled` but not in `events`.
     async fn prior_events(
         &self,
@@ -417,36 +479,31 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
                 self.run_str, run.partition, run.run_id
             )));
         }
-        // 1. Terminal result payload (blob store first when large).
-        let result = match derive::terminal_result_bytes(&events) {
+        // 1. Terminal result payload (blob store first when large), and the
+        //    continue-as-new successor.
+        let (successor, bytes) = match derive::continuation(&events) {
+            Some((ev, cont)) => {
+                let (s, b) = self.successor(ev, cont).await?;
+                (s, Some(b))
+            }
+            None => (None, derive::terminal_result_bytes(&events)),
+        };
+        let result = match bytes {
             Some(b) => Some(self.prepare(b).await?),
             None => None,
         };
         // 2. Intents (pure).
         let prior = self.prior_events(&events).await?;
-        let mut derived =
-            derive::intents(&events, &|op| prior.get(&op).cloned(), result).map_err(unavailable)?;
-        let ends_run = derived
-            .iter()
-            .any(|d| matches!(d.intent, Some(Intent::CompleteRun(_))));
+        let derived = derive::derive(
+            &events,
+            derive::DeriveCtx {
+                prior: &|op| prior.get(&op).cloned(),
+                result,
+                successor,
+            },
+        )
+        .map_err(unavailable)?;
         let max_ts = events.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
-        // Phase 4: an await token fails the run in the same append.
-        if !ends_run
-            && let Some(tok) = events
-                .iter()
-                .find(|e| matches!(e.body, EventBody::AwaitTokenCreated(_)))
-        {
-            let r = self
-                .prepare(derive::unsupported_json(TOKENS_UNSUPPORTED))
-                .await?;
-            derived.push(Derived::new(Intent::CompleteRun(CompleteRun {
-                status: TerminalStatus::Failed as i32,
-                result: Some(r),
-                completed_at_ms: derive::ceil_ms(tok.ts_nanos),
-                resumable: false,
-                parent_event: None,
-            })));
-        }
         // 3. Events.
         let jevs = self.encode(&events).await?;
         // 4. Submit.

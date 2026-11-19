@@ -523,7 +523,8 @@ async fn repair_completes_effects_left_without_completion() {
 }
 
 #[tokio::test]
-async fn await_token_fails_run_unsupported() {
+async fn await_token_registers_a_wait() {
+    // Phase 5 (05-11): await tokens are real; the Phase 4 "unsupported" failure is gone.
     let f = Fixture::new().await;
     let tok = ev(
         1,
@@ -534,14 +535,14 @@ async fn await_token_fails_run_unsupported() {
         }),
     );
     assert_eq!(f.append(1, vec![tok]).await, Ok(2));
-    assert!(f.sink.is_terminal());
+    assert!(!f.sink.is_terminal());
     let rec = f.record();
-    assert_eq!(rec.status, RunStatus::Failed);
-    let v: serde_json::Value = serde_json::from_slice(&f.result_bytes().await).expect("json");
-    assert_eq!(v["reason_code"], "unsupported");
+    assert_eq!(rec.status, RunStatus::Running);
+    assert_eq!(rec.open_waits, 1, "RegisterWait{{Token}} derived");
     assert_eq!(
         f.append(2, vec![step(2, b"1".to_vec())]).await,
-        Err(AppendError::Fenced)
+        Ok(3),
+        "the run goes on"
     );
 }
 
