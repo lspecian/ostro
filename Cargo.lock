@@ -2047,24 +2047,32 @@ name = "ostro-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "config",
  "getrandom 0.4.3",
  "jiff",
+ "ostro-api",
  "ostro-blob",
  "ostro-engine",
  "ostro-log",
+ "ostro-meta",
  "ostro-partition",
+ "ostro-proto",
  "ostro-testkit",
  "ostro-types",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
+ "tonic",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

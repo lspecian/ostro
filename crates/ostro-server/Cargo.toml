@@ -29,10 +29,20 @@ ostro-log = { path = "../ostro-log" }
 ostro-blob = { path = "../ostro-blob" }
 bytes.workspace = true
 async-trait.workspace = true
+# server bootstrap + real ControlPlane (04-17)
+ostro-meta = { path = "../ostro-meta" }
+ostro-api = { path = "../ostro-api" }
+axum.workspace = true
+sha2.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 ostro-engine = { path = "../ostro-engine", features = ["testkit"] }
 ostro-testkit.workspace = true
+# full-server tests (04-17): REST + gRPC clients on the one port
+reqwest.workspace = true
+tonic.workspace = true
+ostro-proto = { path = "../ostro-proto" }
 
 [lints]
 workspace = true

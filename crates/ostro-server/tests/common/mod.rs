@@ -410,3 +410,154 @@ pub fn evicted_external(a: &Option<ActivationOutcome>) -> bool {
         })
     )
 }
+
+// ---------------------------------------------------------------------------------
+// Full-server harness (plan 04-17): the real `Server` on 127.0.0.1:0 over a tmpfs data
+// dir, with REST (reqwest) and gRPC (tonic) clients on the one port.
+// ---------------------------------------------------------------------------------
+
+use ostro_server::config::ServerConfig;
+use ostro_server::executor::ExecutorHooks as ServerHooks;
+use ostro_server::{ServerError, ServerHandle};
+use tempfile::TempDir;
+
+/// A fresh test directory on `/dev/shm` when writable, else the OS temp dir.
+pub fn tmpfs_dir() -> TempDir {
+    let shm = Path::new("/dev/shm");
+    if shm.is_dir()
+        && let Ok(d) = tempfile::Builder::new()
+            .prefix("ostro-test-")
+            .tempdir_in(shm)
+    {
+        return d;
+    }
+    tempfile::Builder::new()
+        .prefix("ostro-test-")
+        .tempdir()
+        .expect("tempdir")
+}
+
+/// Full-server knobs.
+#[derive(Clone, Debug)]
+pub struct ServerOpts {
+    pub partitions: u16,
+    pub ephemeral: bool,
+}
+
+impl Default for ServerOpts {
+    /// P=4 (fast opens), persistent tmpfs dir.
+    fn default() -> Self {
+        Self {
+            partitions: 4,
+            ephemeral: false,
+        }
+    }
+}
+
+/// `server_defaults()` on 127.0.0.1:0 with the given data dir and options.
+pub fn server_config(dir: &Path, opts: &ServerOpts) -> ServerConfig {
+    let mut cfg = ServerConfig::server_defaults();
+    cfg.api.listen = "127.0.0.1:0".parse().expect("addr");
+    cfg.node.data_dir = dir.to_path_buf();
+    cfg.node.partitions = opts.partitions;
+    cfg.node.ephemeral = opts.ephemeral;
+    cfg
+}
+
+/// A running in-process server plus clients. `restart()` keeps the data dir.
+pub struct TestServer {
+    pub handle: Option<ServerHandle>,
+    pub cfg: ServerConfig,
+    pub hooks: Arc<ServerHooks>,
+    pub http: reqwest::Client,
+    /// Owns the data dir across restarts (None in ephemeral mode).
+    pub dir: Option<TempDir>,
+}
+
+impl TestServer {
+    /// Start on a fresh tmpfs dir.
+    pub async fn start(opts: ServerOpts) -> Self {
+        let dir = tmpfs_dir();
+        let cfg = server_config(dir.path(), &opts);
+        Self::start_cfg(cfg, Some(dir)).await
+    }
+
+    /// Start with an explicit config (the data dir is owned by `dir` when given).
+    pub async fn start_cfg(cfg: ServerConfig, dir: Option<TempDir>) -> Self {
+        let hooks = Arc::new(ServerHooks::default());
+        let handle = Self::boot(cfg.clone(), Arc::clone(&hooks))
+            .await
+            .expect("server start");
+        Self {
+            handle: Some(handle),
+            cfg,
+            hooks,
+            http: reqwest::Client::new(),
+            dir,
+        }
+    }
+
+    pub async fn boot(
+        cfg: ServerConfig,
+        hooks: Arc<ServerHooks>,
+    ) -> Result<ServerHandle, ServerError> {
+        timeout(T, ostro_server::server::start_with_hooks(cfg, hooks))
+            .await
+            .expect("server start timed out")
+    }
+
+    pub fn h(&self) -> &ServerHandle {
+        self.handle.as_ref().expect("server running")
+    }
+
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.h().local_addr()
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr())
+    }
+
+    /// A gRPC channel to the one port.
+    pub async fn channel(&self) -> tonic::transport::Channel {
+        tonic::transport::Channel::from_shared(format!("http://{}", self.addr()))
+            .expect("uri")
+            .connect()
+            .await
+            .expect("grpc connect")
+    }
+
+    /// Poll `/readyz` until 200 or `limit`.
+    pub async fn wait_ready(&self, limit: Duration) -> Duration {
+        let start = Instant::now();
+        loop {
+            if let Ok(r) = self.http.get(self.url("/readyz")).send().await
+                && r.status() == reqwest::StatusCode::OK
+            {
+                return start.elapsed();
+            }
+            assert!(start.elapsed() < limit, "server not ready within {limit:?}");
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Graceful shutdown, keeping the data dir.
+    pub async fn shutdown(&mut self) {
+        if let Some(h) = self.handle.take() {
+            timeout(T, h.shutdown())
+                .await
+                .expect("shutdown timed out")
+                .expect("shutdown");
+        }
+    }
+
+    /// Shut down and start again on the same data dir (new port).
+    pub async fn restart(&mut self) {
+        self.shutdown().await;
+        self.http = reqwest::Client::new();
+        let handle = Self::boot(self.cfg.clone(), Arc::clone(&self.hooks))
+            .await
+            .expect("server restart");
+        self.handle = Some(handle);
+    }
+}
