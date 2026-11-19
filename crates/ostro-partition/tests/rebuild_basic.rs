@@ -7,7 +7,7 @@ mod common;
 use bytes::Bytes;
 use common::{T, copy_dir, open_node, run_on, start_run};
 use ostro_log::ReplicatedLog;
-use ostro_partition::{ApplyOutcome, Node, StartMode, Table};
+use ostro_partition::{ApplyOutcome, Node, RejectReason, StartMode, Table};
 use ostro_types::command::{
     AttemptTokenMsg, CompleteRun, Derived, EventsAppended, JournalEvent, OutboxMsg, ScheduleTimer,
     SendMessage, Signal, TerminalStatus, derived, outbox_msg,
@@ -105,10 +105,20 @@ async fn workload(node: &Node) {
                     result: inline(b"out"),
                     completed_at_ms: 9,
                 }));
-                assert_eq!(
-                    submit(node, p, events(run, t, 1, vec![done])).await,
-                    ApplyOutcome::Accepted
-                );
+                // The timer above is already overdue (real clock), so the timer service may
+                // have journaled its TimerFired input at seq 1 (plan 04-13): follow
+                // SeqMismatch to the journal end.
+                let mut from = 1;
+                loop {
+                    match submit(node, p, events(run, t, from, vec![done.clone()])).await {
+                        ApplyOutcome::Accepted => break,
+                        ApplyOutcome::Rejected(RejectReason::SeqMismatch { expected }) => {
+                            assert!(expected > from, "seq went backwards");
+                            from = expected;
+                        }
+                        o => panic!("complete: {o:?}"),
+                    }
+                }
             }
         }
     }
