@@ -53,6 +53,7 @@ An override that lands before the matching plan executes can be folded in. An ov
 ## Conventions (no format change)
 
 - `SealedSecret{name: "<tenant|_>/<name>", ciphertext: [ver=1][nonce 12][ct+tag], key_id: "aes256gcm:<kid>" | "plaintext-v0"}`. AAD = `b"ostro/secret/v1" ‖ name ‖ key_id`. `kid` = the first 8 hex characters of sha256(key).
+- Module names in grants and egress policies are the tenant-qualified deployed module name `<tenant>/<name>` (D23), resolved through the run's `WorkflowVersion.module` (05-07). They never come from the sha-keyed, nameless `ModuleRecord`.
 - `Grant{id: "secret:<module>:<secret>", subject: "module:<module>", scopes: ["origin:https://api.stripe.com", …, "body"?]}`.
 - `Connection{name, kind: "sql-postgres" | "sql-mysql" | "object" | "http-target", config: JSON {"v":1, …}}`. For `http-target`, the name is the normalised origin (`https://api.stripe.com`); REST paths percent-encode it.
 - `EgressPolicy{name: <module>, allow: ["https://api.stripe.com", "https://*.example.com:8443", "connection:orders-db", …]}`. A module without a policy has no egress.
