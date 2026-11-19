@@ -19,6 +19,12 @@ enum RunStatus {
   COMPLETED = 4;
   FAILED = 5;
   CANCELLED = 6;
+  // Hard-stopped by an operator (Phase 5).
+  TERMINATED = 7;
+  // Run timeout or schedule-to-start timeout (Phase 5).
+  TIMED_OUT = 8;
+  // Continued as a new run (Phase 5).
+  CONTINUED_AS_NEW = 9;
 }
 
 // Behaviour when a StartRun idempotency key already exists.

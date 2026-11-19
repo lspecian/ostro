@@ -100,10 +100,9 @@ pub(crate) fn terminal_status(code: i32) -> Option<RunStatus> {
         TerminalStatus::Completed => Some(RunStatus::Completed),
         TerminalStatus::Failed => Some(RunStatus::Failed),
         TerminalStatus::Cancelled => Some(RunStatus::Cancelled),
-        // Phase 5: mapped to RunStatus by 05-01 Task 3; apply arms land in 05-09.
-        TerminalStatus::Terminated | TerminalStatus::TimedOut | TerminalStatus::ContinuedAsNew => {
-            None
-        }
+        TerminalStatus::Terminated => Some(RunStatus::Terminated),
+        TerminalStatus::TimedOut => Some(RunStatus::TimedOut),
+        TerminalStatus::ContinuedAsNew => Some(RunStatus::ContinuedAsNew),
     }
 }
 
@@ -390,7 +389,13 @@ fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus) -> Check<(
                 msg_target(cur, msg)?;
             }
             Intent::CompleteRun(c) => {
-                terminal_status(c.status).ok_or(invalid(InvalidCode::BadIntent))?;
+                match terminal_status(c.status) {
+                    Some(RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled) => {}
+                    // Terminated/TimedOut are set by apply-side paths only (05-09); executors
+                    // must never send them. ContinuedAsNew: Phase 5, implemented in 05-09
+                    // (arms the outbox successor start). Rejected until then.
+                    _ => return Err(invalid(InvalidCode::BadIntent)),
+                }
                 completed = true;
             }
             Intent::Suspend(_) => {

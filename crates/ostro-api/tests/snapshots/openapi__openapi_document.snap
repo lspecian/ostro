@@ -1021,7 +1021,10 @@ expression: pretty
           "running",
           "completed",
           "failed",
-          "cancelled"
+          "cancelled",
+          "terminated",
+          "timed_out",
+          "continued_as_new"
         ]
       },
       "RunSummaryDto": {

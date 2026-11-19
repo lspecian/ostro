@@ -71,6 +71,9 @@ fn run_status_from_proto(field: &str, v: i32) -> Result<domain::RunStatus, ApiEr
         Ok(pb::RunStatus::Completed) => Ok(S::Completed),
         Ok(pb::RunStatus::Failed) => Ok(S::Failed),
         Ok(pb::RunStatus::Cancelled) => Ok(S::Cancelled),
+        Ok(pb::RunStatus::Terminated) => Ok(S::Terminated),
+        Ok(pb::RunStatus::TimedOut) => Ok(S::TimedOut),
+        Ok(pb::RunStatus::ContinuedAsNew) => Ok(S::ContinuedAsNew),
         Ok(pb::RunStatus::Unspecified) | Err(_) => Err(ApiError::invalid_argument(format!(
             "{field}: invalid run status {v}"
         ))),
@@ -87,6 +90,9 @@ impl From<domain::RunStatus> for pb::RunStatus {
             S::Completed => pb::RunStatus::Completed,
             S::Failed => pb::RunStatus::Failed,
             S::Cancelled => pb::RunStatus::Cancelled,
+            S::Terminated => pb::RunStatus::Terminated,
+            S::TimedOut => pb::RunStatus::TimedOut,
+            S::ContinuedAsNew => pb::RunStatus::ContinuedAsNew,
         }
     }
 }

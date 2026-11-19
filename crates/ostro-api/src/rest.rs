@@ -43,6 +43,12 @@ pub enum RunStatusDto {
     Failed,
     /// Cancelled.
     Cancelled,
+    /// Hard-stopped by an operator.
+    Terminated,
+    /// Run timeout or schedule-to-start timeout.
+    TimedOut,
+    /// Continued as a new run.
+    ContinuedAsNew,
 }
 
 impl From<domain::RunStatus> for RunStatusDto {
@@ -55,6 +61,9 @@ impl From<domain::RunStatus> for RunStatusDto {
             S::Completed => RunStatusDto::Completed,
             S::Failed => RunStatusDto::Failed,
             S::Cancelled => RunStatusDto::Cancelled,
+            S::Terminated => RunStatusDto::Terminated,
+            S::TimedOut => RunStatusDto::TimedOut,
+            S::ContinuedAsNew => RunStatusDto::ContinuedAsNew,
         }
     }
 }
@@ -69,6 +78,9 @@ impl From<RunStatusDto> for domain::RunStatus {
             RunStatusDto::Completed => S::Completed,
             RunStatusDto::Failed => S::Failed,
             RunStatusDto::Cancelled => S::Cancelled,
+            RunStatusDto::Terminated => S::Terminated,
+            RunStatusDto::TimedOut => S::TimedOut,
+            RunStatusDto::ContinuedAsNew => S::ContinuedAsNew,
         }
     }
 }

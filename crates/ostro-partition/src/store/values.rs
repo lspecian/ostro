@@ -31,13 +31,26 @@ pub enum RunStatus {
     Completed,
     Failed,
     Cancelled,
+    // Phase 5 (plan 05-01), appended so the postcard indices of the variants above are
+    // unchanged; mirrors TerminalStatus 3..=5 (RESERVATIONS.md §5).
+    /// Hard-stopped by an operator (D3).
+    Terminated,
+    /// Run timeout or schedule-to-start timeout (D2).
+    TimedOut,
+    /// Continued as a new run (D10).
+    ContinuedAsNew,
 }
 
 impl RunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+            RunStatus::Completed
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::Terminated
+                | RunStatus::TimedOut
+                | RunStatus::ContinuedAsNew
         )
     }
 }

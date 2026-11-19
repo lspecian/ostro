@@ -78,6 +78,9 @@ fn status_name(v: i32) -> String {
         pb::RunStatus::Completed => RunStatus::Completed,
         pb::RunStatus::Failed => RunStatus::Failed,
         pb::RunStatus::Cancelled => RunStatus::Cancelled,
+        pb::RunStatus::Terminated => RunStatus::Terminated,
+        pb::RunStatus::TimedOut => RunStatus::TimedOut,
+        pb::RunStatus::ContinuedAsNew => RunStatus::ContinuedAsNew,
         pb::RunStatus::Unspecified => panic!("unspecified status on the wire"),
     };
     st.as_str().to_owned()
@@ -92,6 +95,9 @@ fn status_proto(s: &str) -> i32 {
         RunStatus::Completed => pb::RunStatus::Completed,
         RunStatus::Failed => pb::RunStatus::Failed,
         RunStatus::Cancelled => pb::RunStatus::Cancelled,
+        RunStatus::Terminated => pb::RunStatus::Terminated,
+        RunStatus::TimedOut => pb::RunStatus::TimedOut,
+        RunStatus::ContinuedAsNew => pb::RunStatus::ContinuedAsNew,
     };
     p as i32
 }

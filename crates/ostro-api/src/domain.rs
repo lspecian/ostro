@@ -173,17 +173,26 @@ pub enum RunStatus {
     Failed,
     /// Cancelled.
     Cancelled,
+    /// Hard-stopped by an operator (Phase 5).
+    Terminated,
+    /// Run timeout or schedule-to-start timeout (Phase 5).
+    TimedOut,
+    /// Continued as a new run (Phase 5).
+    ContinuedAsNew,
 }
 
 impl RunStatus {
     /// Every status, in declaration order.
-    pub const ALL: [RunStatus; 6] = [
+    pub const ALL: [RunStatus; 9] = [
         RunStatus::Scheduled,
         RunStatus::Ready,
         RunStatus::Running,
         RunStatus::Completed,
         RunStatus::Failed,
         RunStatus::Cancelled,
+        RunStatus::Terminated,
+        RunStatus::TimedOut,
+        RunStatus::ContinuedAsNew,
     ];
 
     /// Lowercase wire name.
@@ -195,6 +204,9 @@ impl RunStatus {
             RunStatus::Completed => "completed",
             RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
+            RunStatus::Terminated => "terminated",
+            RunStatus::TimedOut => "timed_out",
+            RunStatus::ContinuedAsNew => "continued_as_new",
         }
     }
 
@@ -203,11 +215,16 @@ impl RunStatus {
         RunStatus::ALL.into_iter().find(|st| st.as_str() == s)
     }
 
-    /// Completed, Failed or Cancelled.
+    /// Completed, Failed, Cancelled, Terminated, TimedOut or ContinuedAsNew.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+            RunStatus::Completed
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::Terminated
+                | RunStatus::TimedOut
+                | RunStatus::ContinuedAsNew
         )
     }
 }

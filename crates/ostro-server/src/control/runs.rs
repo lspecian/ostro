@@ -139,6 +139,9 @@ pub(crate) fn status(s: values::RunStatus) -> RunStatus {
         values::RunStatus::Completed => RunStatus::Completed,
         values::RunStatus::Failed => RunStatus::Failed,
         values::RunStatus::Cancelled => RunStatus::Cancelled,
+        values::RunStatus::Terminated => RunStatus::Terminated,
+        values::RunStatus::TimedOut => RunStatus::TimedOut,
+        values::RunStatus::ContinuedAsNew => RunStatus::ContinuedAsNew,
     }
 }
 
