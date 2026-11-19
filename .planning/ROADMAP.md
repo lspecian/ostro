@@ -176,7 +176,7 @@ Plans:
 **Plans**: 20 plans (10 waves; 05-01 is the PHASE-5 GATE requiring Phase 4 complete (all 04-*-SUMMARY + 04-VERIFICATION passed, or human_needed with by-design items only) and checking the code against .planning/RESERVATIONS.md; decisions D1–D20 adopted in 05-DECISIONS.md, user may override; 05-20 runs the sharded >= 10,000-kill campaign and flips the WIT/command/on-disk/meta freeze)
 
 Plans:
-- [ ] 05-01-PLAN.md — PHASE-5 GATE (Phase 4 complete, code vs RESERVATIONS.md) + adopted decisions to STATE + ostro-types contract (Cmd 8..12, StartRun 19..23, intents 7..8, statuses, kinds 70/71) + status parity (WIT-07 prep, all contracts)
+- [x] 05-01-PLAN.md — PHASE-5 GATE (Phase 4 complete, code vs RESERVATIONS.md) + adopted decisions to STATE + ostro-types contract (Cmd 8..12, StartRun 19..23, intents 7..8, statuses, kinds 70/71) + status parity (WIT-07 prep, all contracts)
 - [ ] 05-02-PLAN.md — Partition store schema (waits #14, signal_seen #15, inbox re-key, RunRecord fields) + apply seams/stubs + outcome codes + storage-format (amended D18, BlobRef/node.toml rules) (WF-05, WF-09, OPS-06)
 - [ ] 05-03-PLAN.md — Engine semantics: cancel-op completion, WaitTimedOut, patched memo/skip, op index, live_activations, gather/race proptest, patch-v1/v2/v3 (WF-03, WF-04, WF-08)
 - [ ] 05-04-PLAN.md — API surface: signal/cancel/terminate/retry/result/tokens/policies over REST + gRPC against FakeControlPlane (API-05, API-06, API-07)
@@ -413,7 +413,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 20/20 | Complete | 2026-11-19 |
-| 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
+| 5. Workflow Semantics & Core Hardening | 1/20 | In progress (05-01 gate + contract done) | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
