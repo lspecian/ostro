@@ -199,7 +199,7 @@ Plans:
 - [x] 05-21-PLAN.md — Empty-log anchoring at applied_offset (Phase 12 F3) in ostro-log recovery + partition startup (wave 2)
 - [ ] 05-22-PLAN.md — Ready entries (workflow/tenant/first), durable attempt_failures, status_seq, parent_event forwarding (wave 3)
 - [x] 05-23-PLAN.md — D22 retry logical clock + long_backoff expectation fixes (wave 3)
-- [ ] 05-24-PLAN.md — D23 tenant-qualified names + upload tenant/name (WorkflowVersion.module) + two-tenant test (wave 3)
+- [x] 05-24-PLAN.md — D23 tenant-qualified names + upload tenant/name (WorkflowVersion.module) + two-tenant test (wave 3)
 
 ### Phase 6: Effects Bridge, Connectors & Secrets
 **Goal**: Workflows safely call the outside world. HTTP effects are idempotent and never blindly resent. SQL effects are exactly-once. Secrets never enter guests, and egress cannot reach internal networks.
