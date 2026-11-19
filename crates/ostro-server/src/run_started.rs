@@ -21,6 +21,12 @@
 //! (tag 23): apply then journals it at seq 0 and the executor skips its own append
 //! (`next_seq > 0`). The bytes are identical to the executor's synthesis for the same run,
 //! so either path yields the same journal.
+//!
+//! Plan 05-25 (D24, amends D3): the API start and retry-restart paths always set the field
+//! (`control::runs::attach_run_started`), so a run accepted through the API but never
+//! activated has RunStarted at seq 0. The executor append (and [`first_events`]'s
+//! `CancelRequested` at seq 1) remains the path for `StartRun`s without the field: inbound
+//! outbox starts, children and continue-as-new successors.
 
 use ostro_partition::store::values::RunRecord;
 use ostro_types::RunId;

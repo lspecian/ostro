@@ -66,7 +66,9 @@ use ostro_types::routing::partition_for_new_run;
 use ostro_types::{PayloadRef, RunId};
 
 use super::ServerControlPlane;
-use super::runs::{not_found, parse_run_id, partition_error, status, store_error, task_error};
+use super::runs::{
+    attach_run_started, not_found, parse_run_id, partition_error, status, store_error, task_error,
+};
 
 const JSON: &str = "application/json";
 
@@ -360,6 +362,8 @@ pub(crate) async fn retry_run(
 }
 
 /// Start a new run linked to `old` (`retry_of`), copying its definition and the F11 fields.
+/// D24 (05-25): the StartRun carries the successor's RunStarted (seq 0, the predecessor's
+/// input bytes, no `continued_from`) through `attach_run_started`.
 async fn restart(
     cp: &ServerControlPlane,
     old_handle: &PartitionHandle<Rf1Log>,
@@ -376,6 +380,11 @@ async fn restart(
     // Inline refs are self-contained and blob refs name the node-wide, content-addressed
     // blob store, so the predecessor's input ref is valid on any partition.
     let input = input.unwrap_or_else(|| PayloadRef::inline(Bytes::from_static(b"null")));
+    // D24 (05-25): the successor's RunStarted carries the input bytes (a blob ref is read).
+    let input_bytes = old_handle
+        .fetch_payload(&input)
+        .await
+        .map_err(partition_error)?;
 
     let uuid = uuid::Uuid::now_v7();
     let p = partition_for_new_run(&uuid, cp.partition_count());
@@ -410,8 +419,10 @@ async fn restart(
         retention_ms: rec.retention_ms,
         retry_of: old.as_bytes().to_vec(),
         continued_from: Vec::new(),
+        // D24 (05-25): filled by `attach_run_started` below.
         run_started: None,
     };
+    let start = attach_run_started(handle, start, &input_bytes).await?;
     match submit(handle, Command::start_run(start)).await? {
         ApplyOutcome::Accepted | ApplyOutcome::Duplicate { .. } => Ok(RetryResponse {
             mode: RetryMode::Restarted,

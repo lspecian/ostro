@@ -50,15 +50,26 @@
 //! JSON, options, policy resolution, partition availability), reads the dedupe row for an
 //! idempotency key and reports the would-be outcome (`run_id` = the existing run, or empty
 //! for a new run; 409 under `reject`); it writes no blob and submits nothing.
+//!
+//! # RunStarted at start (05-25, D24)
+//!
+//! A real start pre-encodes the run's `RunStarted` ([`attach_run_started`], through
+//! `run_started::encode_for_start`, byte-identical to the executor's synthesis: D23 stripped
+//! workflow name, tenant, deadline) into `StartRun.run_started` (tag 23). Apply journals it
+//! at seq 0, so the first dispatch skips one WAL commit (the executor's RunStarted append).
+//! D24 (amends D3): a run that was accepted but never activated has RunStarted at seq 0
+//! (`next_seq == 1`), and a signal or cancel sent before its first activation is journaled
+//! directly at seq >= 1. A dry run still encodes and writes nothing.
 
 use bytes::Bytes;
 use ostro_api::ApiError;
 use ostro_api::domain::{ConflictPolicy, RunInfo, RunStatus, StartRunRequest, StartRunResult};
+use ostro_log::Rf1Log;
 use ostro_meta::WorkflowVersion;
 use ostro_partition::store::Table;
 use ostro_partition::store::keys::dedupe_key;
 use ostro_partition::store::values::{self, RunRecord};
-use ostro_partition::{ApplyOutcome, PartitionError, RejectReason, query};
+use ostro_partition::{ApplyOutcome, PartitionError, PartitionHandle, RejectReason, query};
 use ostro_types::command::{
     self as cmd, Command, MAX_RUN_TAG_LEN, MAX_RUN_TAGS, MAX_TENANT_LEN, MAX_TRACEPARENT_LEN,
     StartRun,
@@ -70,6 +81,7 @@ use ostro_types::{PayloadRef, RunId};
 use super::ServerControlPlane;
 use super::names;
 use crate::retention::{RunPolicy, resolve_run_policy};
+use crate::run_started;
 
 /// Queue of runs whose request and workflow name none.
 pub const DEFAULT_QUEUE: &str = "default";
@@ -325,8 +337,9 @@ pub(crate) async fn start_run(
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed)
         .map_err(|e| ApiError::internal(format!("OS random source unavailable: {e}")))?;
+    let input_bytes = Bytes::from(req.input_json);
     let input = handle
-        .prepare_payload(Bytes::from(req.input_json))
+        .prepare_payload(input_bytes.clone())
         .await
         .map_err(partition_error)?;
 
@@ -356,13 +369,40 @@ pub(crate) async fn start_run(
         // continue-as-new successor (derive), never by a plain start.
         retry_of: Vec::new(),
         continued_from: Vec::new(),
+        // D24 (05-25): filled by `attach_run_started` below.
         run_started: None,
     };
+    let start = attach_run_started(handle, start, &input_bytes).await?;
     let outcome = handle
         .submit_one(Command::start_run(start))
         .await
         .map_err(partition_error)?;
     map_outcome(run, outcome)
+}
+
+/// D24 (05-25): sets `StartRun.run_started` (tag 23) to the run's `RunStarted` (seq 0),
+/// pre-encoded from `start` itself (`run_started::encode_for_start`, so the D23 stripped
+/// name, tenant, deadline and `continued_from` follow the command) with `input` as the run
+/// input. The encoded event goes through `prepare_payload` like any payload: inline up to
+/// 256 KiB, else a durable blob written before the command is appended. Apply journals it
+/// verbatim at seq 0 and the executor skips its own RunStarted append (`next_seq > 0`).
+pub(crate) async fn attach_run_started(
+    handle: &PartitionHandle<Rf1Log>,
+    mut start: StartRun,
+    input: &[u8],
+) -> Result<StartRun, ApiError> {
+    let (kind, bytes) = run_started::encode_for_start(&start, input)
+        .map_err(|e| ApiError::internal(format!("RunStarted encoding: {e}")))?;
+    let payload = handle
+        .prepare_payload(Bytes::from(bytes))
+        .await
+        .map_err(partition_error)?;
+    start.run_started = Some(cmd::JournalEvent {
+        seq: 0,
+        kind,
+        payload: Some(payload),
+    });
+    Ok(start)
 }
 
 // ---------------------------------------------------------------------------------
