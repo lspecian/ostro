@@ -31,6 +31,13 @@ proptest.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+# QA-02 replay corpus (plan 05-12): journal.bin is length-prefixed `JournalEvent` protobufs,
+# entry.toml is read by tests/replay_corpus.rs and written by examples/record_corpus.rs.
+# All four were already in Cargo.lock (no new crates).
+prost.workspace = true
+bytes.workspace = true
+serde_json.workspace = true
+toml = "1.2"
 
 [lints]
 workspace = true
