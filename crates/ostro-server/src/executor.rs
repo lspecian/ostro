@@ -16,6 +16,13 @@
 //!    appends `RunStarted` (seq 0) built from the run record (`first_events`), followed by
 //!    `CancelRequested{cancel_reason}` at seq 1 when the cancel was requested before the
 //!    first activation (05-08 journals nothing while the journal is empty).
+//!    A run whose `StartRun` carried `run_started` (tag 23, 05-16) already has it at seq 0
+//!    (`next_seq == 1`, journaled by apply, which also journals a later cancel directly), so
+//!    the append is skipped. The server's own start paths leave the field empty (D3: a run
+//!    that never started keeps an empty journal), so this append is the normal path.
+//!    With the pipelined grant (05-16) `Job.record` is the dispatcher's pre-grant read
+//!    patched with the job's token: the grant may not be applied yet when the job starts,
+//!    but every append of the job lands after it in the log.
 //!    **Resume re-arm (B2, 05-11):** on the first job after a `RetryRun` resume
 //!    (`RunRecord.resumed_count` above the count this executor last re-armed for, kept in
 //!    memory per run), the executor loads the journal and submits

@@ -15,10 +15,19 @@
 //!   (`RunRecord.cancel_requested`; apply journals nothing while `next_seq == 0`, 05-08)
 //!   gets `CancelRequested{cancel_reason}` at seq 1 in the same flush as `RunStarted`, so the
 //!   guest's `cancellation()` resolves.
+//!
+//! Plan 05-16: [`encode_for_start`] pre-encodes the same `RunStarted` from a `StartRun`
+//! (through [`record_of_start`], the record apply will store), for `StartRun.run_started`
+//! (tag 23): apply then journals it at seq 0 and the executor skips its own append
+//! (`next_seq > 0`). The bytes are identical to the executor's synthesis for the same run,
+//! so either path yields the same journal.
 
 use ostro_partition::store::values::RunRecord;
 use ostro_types::RunId;
-use ostro_types::journal::{CancelRequested, Event, EventBody, Payload, RngSeed, RunStarted};
+use ostro_types::command::StartRun;
+use ostro_types::journal::{
+    CancelRequested, Event, EventBody, Payload, RngSeed, RunStarted, encode_event,
+};
 
 use crate::control::names::split_qualified;
 
@@ -92,6 +101,41 @@ pub fn build_run_started(
             continued_from: rec.continued_from.map(|r| r.to_string()),
         }),
     })
+}
+
+/// The fields of the [`RunRecord`] apply stores for `s` that [`build_run_started`] reads
+/// (workflow, version, created_at, seed, timeout, tenant, parent, continued_from); every
+/// other field is default. Malformed id fields are carried as absent (apply rejects them).
+pub fn record_of_start(s: &StartRun) -> RunRecord {
+    let opt_id = |b: &[u8]| (!b.is_empty()).then(|| RunId::from_bytes(b).ok()).flatten();
+    RunRecord {
+        workflow: s.workflow.clone(),
+        workflow_version: s.workflow_version,
+        queue: s.queue.clone(),
+        created_at_ms: s.requested_at_ms,
+        rng_seed: s.rng_seed.clone(),
+        run_timeout_ms: (s.run_timeout_ms != 0).then_some(s.run_timeout_ms),
+        tenant: (!s.tenant.is_empty()).then(|| s.tenant.clone()),
+        parent: s
+            .parent
+            .as_ref()
+            .and_then(|p| p.run_id().ok().map(|id| (*id.as_bytes(), p.op))),
+        continued_from: opt_id(&s.continued_from),
+        module_sha: <[u8; 32]>::try_from(s.module_sha.as_slice()).ok(),
+        ..Default::default()
+    }
+}
+
+/// `(kind, bytes)` of the `RunStarted` a fresh run started by `s` journals at seq 0, for
+/// `StartRun.run_started` (05-16). `input` is the run input (JSON bytes).
+pub fn encode_for_start(s: &StartRun, input: &[u8]) -> Result<(u32, Vec<u8>), RunStartedError> {
+    let rec = record_of_start(s);
+    let hash = rec
+        .module_sha
+        .map(|h| ostro_blob::hex(&h))
+        .unwrap_or_default();
+    let ev = build_run_started(&rec, input_payload(input.to_vec()), &hash)?;
+    Ok(encode_event(&ev))
 }
 
 /// The first flush of a run: `RunStarted` (seq 0), plus `CancelRequested{cancel_reason}` at
@@ -259,6 +303,52 @@ mod tests {
                 reason: "user".into()
             })
         );
+    }
+
+    /// 05-16: the bytes pre-encoded from a StartRun equal the executor's synthesis from the
+    /// record apply stores for it (tenant-qualified name, parent, continued_from, timeout).
+    #[test]
+    fn start_run_pre_encoding_matches_the_executor_synthesis() {
+        let parent = RunId::new_v7(PartitionId(2));
+        let pred = RunId::new_v7(PartitionId(1));
+        let s = StartRun {
+            run_id: RunId::new_v7(PartitionId(0)).as_bytes().to_vec(),
+            workflow: "acme/w".into(),
+            workflow_version: 4,
+            queue: "acme/q".into(),
+            requested_at_ms: 1_700_000_000_123,
+            rng_seed: vec![9; 32],
+            module_sha: vec![0xcd; 32],
+            tenant: "acme".into(),
+            run_timeout_ms: 30_000,
+            parent: Some(ostro_types::command::ParentRef {
+                run_id: parent.as_bytes().to_vec(),
+                op: 7,
+            }),
+            continued_from: pred.as_bytes().to_vec(),
+            ..Default::default()
+        };
+        let input = b"{\"n\":1}";
+        let (kind, bytes) = encode_for_start(&s, input).unwrap();
+        let mut rec = record();
+        rec.workflow = "acme/w".into();
+        rec.workflow_version = 4;
+        rec.created_at_ms = s.requested_at_ms;
+        rec.rng_seed = vec![9; 32];
+        rec.module_sha = Some([0xcd; 32]);
+        rec.tenant = Some("acme".into());
+        rec.run_timeout_ms = Some(30_000);
+        rec.parent = Some((*parent.as_bytes(), 7));
+        rec.continued_from = Some(pred);
+        let evs = first_events(
+            &rec,
+            input_payload(input.to_vec()),
+            &ostro_blob::hex(&[0xcd; 32]),
+        )
+        .unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(encode_event(&evs[0]), (kind, bytes));
+        assert_eq!(kind, ostro_types::journal::EventKind::RunStarted.code());
     }
 
     #[test]

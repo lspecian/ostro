@@ -786,6 +786,13 @@ fn complete_cmd(job: &Job) -> Command {
     })
 }
 
+/// `(epoch, n)` of a token as logged.
+type Tok = (u32, u32);
+/// Per run: `(offset, token)` of every logged AttemptGranted.
+type GrantLog = BTreeMap<RunId, Vec<(u64, Tok)>>;
+/// What a job saw: `(record.current_attempt, record.status, job token)`.
+type JobView = (Option<Tok>, RunStatus, AttemptToken);
+
 /// Every command in the partition log: `(offset, command)`.
 async fn log_commands(h: &Handle) -> Vec<(u64, Command)> {
     let log = h.log();
@@ -908,7 +915,7 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
     // The log: per run, granted tokens strictly increase (no token twice), and the first
     // append of every token is after a grant of that token.
     let epoch = h.epoch().0;
-    let mut grants: BTreeMap<RunId, Vec<(u64, (u32, u32))>> = BTreeMap::new();
+    let mut grants: GrantLog = BTreeMap::new();
     let mut first_append: BTreeMap<(RunId, (u32, u32)), u64> = BTreeMap::new();
     for (off, c) in log_commands(h).await {
         match c.cmd {
@@ -973,7 +980,7 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn job_record_carries_the_pipelined_token() {
     let tmp = ostro_testkit::fs::tempdir();
-    let seen_rec: Arc<Mutex<Vec<(Option<(u32, u32)>, RunStatus, AttemptToken)>>> = Arc::default();
+    let seen_rec: Arc<Mutex<Vec<JobView>>> = Arc::default();
     let s2 = Arc::clone(&seen_rec);
     let fake = Fake::new(move |job, _| {
         s2.lock()

@@ -29,6 +29,14 @@
 //!   event, read from `JournalEvent.kind` only (F10).
 //! - `CompleteRun.parent_event` is forwarded verbatim into the outbox `ChildCompleted.event`
 //!   (Phase 9 PF-F1, D21; never decoded).
+//!
+//! **Plan 05-16: `StartRun.run_started` (tag 23).** When set, the submitter's pre-encoded
+//! `RunStarted` is journaled verbatim at seq 0 (opaque like `EventsAppended` events: only
+//! `seq == 0`, `kind == RunStarted`, presence and the inline size limit are checked) and
+//! `next_seq` starts at 1; the B1 first-events hook runs right after it (free for a fresh
+//! run, `inbox_next == 0`). Signals and cancels sent before the first grant are then
+//! journaled directly (`next_seq > 0`); the executor skips its own RunStarted append. The
+//! first-activation flag stays `current_attempt.is_none()`. No extra read.
 
 use ostro_types::command::{
     AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, JournalEvent, MAX_RUN_TAG_LEN,
@@ -229,6 +237,24 @@ fn check_start_extras(s: &StartRun) -> Check<StartExtras> {
     })
 }
 
+/// Checks an optional pre-encoded `RunStarted` (`StartRun.run_started`, 05-16) without
+/// decoding its payload.
+fn check_run_started(ev: &JournalEvent) -> Check<()> {
+    if ev.seq != 0 {
+        return Err(invalid(InvalidCode::EventsNotContiguous));
+    }
+    if ev.kind != EventKind::RunStarted.code() {
+        return Err(invalid(InvalidCode::BadIntent));
+    }
+    if ev.payload.is_none() {
+        return Err(invalid(InvalidCode::MissingField));
+    }
+    if oversize(&ev.payload) {
+        return Err(RejectReason::PayloadTooLarge);
+    }
+    Ok(())
+}
+
 /// Creates a run. `dedupe` is the `(workflow, key)` idempotency row to check
 /// and claim; `None` checks the run id instead. Exactly one point read.
 pub(crate) fn start_run(
@@ -264,6 +290,11 @@ pub(crate) fn start_run(
     };
     if oversize(&s.input) {
         return reject(RejectReason::PayloadTooLarge);
+    }
+    if let Some(ev) = &s.run_started
+        && let Err(r) = check_run_started(ev)
+    {
+        return reject(r);
     }
 
     // The single point read.
@@ -338,6 +369,14 @@ pub(crate) fn start_run(
             payload_key(&run, PAYLOAD_INPUT),
             input.encode_to_vec(),
         );
+    }
+    if let Some(ev) = &s.run_started {
+        // Validated above: seq 0, kind RunStarted, inline <= 256 KiB or a blob ref.
+        put_event(b, &run, ev);
+        rec.next_seq = 1;
+        // B1 (05-08): pending signals follow the seq-0 events. A fresh run has none
+        // (`inbox_next == 0`, no read), but the hook stays the single place for it.
+        waits::on_first_events(b, &run, &mut rec, actions)?;
     }
     if ready_now {
         enqueue_ready(b, &run, &mut rec, s.ready_at_ms, actions);
