@@ -42,16 +42,44 @@
 //! computed from them once per loop turn. A [`ManualClock`](crate::clock::ManualClock) that
 //! is advanced does not wake the loop by itself (the timer service polls; this does not).
 //!
-//! # Dispatch
+//! # Dispatch (pipelined grant, plan 05-16)
 //!
-//! Dispatch = take a slot permit, record a lease in phase *Granting*, and run
-//! [`PartitionHandle::grant_attempt`] (a logged `AttemptGranted` with `n + 1` in the current
-//! epoch) plus a record read in a task, so concurrent grants share log appends. When the
-//! grant comes back, the loop first drains the action stream: every action applied before
-//! the grant is in the channel by then (the apply thread commits, acks, then fans out, one
-//! chunk at a time). An `EnqueueReady` seen while the lease is still *Granting* is therefore
-//! stale (it predates the grant) and ignored; one seen while *Executing* means the executor
-//! requeued the run itself, so the lease is dropped and the entry queued.
+//! Dispatch = take a slot permit, record a lease in phase *Granting*, and in a task: read
+//! the run record once, compute the next token `n + 1` of the current epoch from it, and
+//! **append** `AttemptGranted` to the log without waiting for its ack. The append returns
+//! once the sequencer fixed the grant's offset (the Rf1Log sequencer assigns offsets under
+//! one lock in submission order), so the job is handed to the executor right away, with the
+//! record read before the grant (patched with the new token, `Running`, no ready slot) and
+//! no second record read. Every executor append is submitted after the grant returned, so
+//! it lands at a higher offset: apply sees the grant first. The grant's fsync is shared
+//! with the executor's first append instead of being waited for on its own.
+//!
+//! - **The apply token check stays the authority.** A separately spawned ack task waits
+//!   until apply passed the grant's offset and reads the record: the grant was accepted iff
+//!   `current_attempt` equals its token. A rejected grant drops the lease (revoking the
+//!   job); the job's appends were or will be rejected by apply (`Fenced` / `StaleEpoch` /
+//!   `RunTerminal`), so nothing it did counts. A rejected grant of a run that is still
+//!   live is re-queued after `GRANT_RETRY_MS`.
+//! - **Never two concurrent grants per run.** While a grant of a run is not yet applied
+//!   (`Dispatcher::unacked`), a new grant of the same run (re-dispatch after a lease drop,
+//!   a retry re-grant) first waits until apply passed the earlier grant, so it reads a record
+//!   that already holds the earlier token and grants a strictly higher one. After a
+//!   rejected grant (whose job may still be alive with that token) the next grant of the
+//!   run also goes above the rejected token (`Dispatcher::rejected`), so the zombie stays
+//!   fenced.
+//! - **Stale `EnqueueReady`.** While the lease is *Granting* an `EnqueueReady` predates the
+//!   grant and is ignored. While the job runs but the grant is not yet acknowledged, an
+//!   `EnqueueReady` may predate the grant (same apply chunk) or be the executor's own
+//!   requeue; the dispatcher reads the record (every action is broadcast after its chunk
+//!   committed): `current_attempt == token` and status `Ready` means a requeue after the
+//!   grant (lease dropped, entry queued), anything else is stale. Once acknowledged, an
+//!   `EnqueueReady` while *Executing* is always the executor's requeue.
+//! - Retry re-grants ([`ExecOutcome::Retry`]) still await their ack (the job starts only
+//!   after the backoff anyway).
+//!
+//! When a grant or job result comes back, the loop first drains the action stream: every
+//! action of an earlier chunk is in the channel by then (the apply thread commits, acks,
+//! then fans out, one chunk at a time).
 //!
 //! # Soft leases and fencing
 //!
@@ -90,9 +118,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ostro_log::Rf1Log;
-use ostro_types::command::{AttemptGranted, AttemptTokenMsg};
-use ostro_types::{AttemptToken, Command, PartitionId, RunId};
+use ostro_log::{ReplicatedLog, Rf1Log};
+use ostro_types::command::{AttemptGranted, AttemptTokenMsg, encode_command};
+use ostro_types::{AttemptToken, Command, Offset, PartitionId, RunId};
 use tokio::sync::broadcast::{
     self,
     error::{RecvError, TryRecvError},
@@ -106,7 +134,7 @@ use super::LeaderCtx;
 use crate::apply::{Action, ApplyOutcome, RejectReason};
 use crate::handle::{PartitionError, PartitionHandle};
 use crate::query;
-use crate::store::values::RunRecord;
+use crate::store::values::{RunRecord, RunStatus};
 
 /// Default lease TTL.
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
@@ -247,6 +275,43 @@ pub struct DispatcherStats {
     pub lease_expired: AtomicU64,
     /// Jobs re-run with the same token after [`ExecOutcome::Reactivate`].
     pub reactivated: AtomicU64,
+    /// Gauge: leases currently held (*Granting* or *Executing*) over every dispatcher sharing
+    /// these stats, refreshed every loop turn (plan 05-16; the WF-04 "no lease per sleeper"
+    /// probe).
+    pub leases: AtomicU64,
+    /// Pipelined grants whose ack showed apply rejected them (lease dropped, job revoked).
+    pub grants_rejected: AtomicU64,
+    /// Test hook (plan 05-16): when it returns `true` for a run, the next pipelined grant is
+    /// submitted with a stale epoch so apply rejects it (`StaleEpoch`).
+    #[doc(hidden)]
+    pub grant_fault: GrantFault,
+}
+
+/// `run -> inject a grant rejection` (see [`DispatcherStats::grant_fault`]).
+pub type GrantFaultFn = Arc<dyn Fn(&RunId) -> bool + Send + Sync>;
+
+/// Holder of the optional [`GrantFaultFn`] test hook.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct GrantFault(std::sync::Mutex<Option<GrantFaultFn>>);
+
+impl std::fmt::Debug for GrantFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = self.0.lock().map(|g| g.is_some()).unwrap_or(true);
+        f.debug_tuple("GrantFault").field(&set).finish()
+    }
+}
+
+impl GrantFault {
+    /// Install (`Some`) or clear (`None`) the hook.
+    pub fn set(&self, f: Option<GrantFaultFn>) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = f;
+    }
+
+    fn fires(&self, run: &RunId) -> bool {
+        let f = self.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        f.is_some_and(|f| f(run))
+    }
 }
 
 /// Start the dispatcher of `ctx.partition`. Runs until `ctx.shutdown` turns true or the
@@ -323,6 +388,8 @@ enum Phase {
 struct Lease {
     generation: u64,
     phase: Phase,
+    /// Offset of the pipelined grant while its ack is outstanding.
+    grant_pending: Option<Offset>,
     entry: Entry,
     /// Deadline in ms since `State::base` (shared with the job's [`LeaseRenewer`]).
     deadline: Arc<AtomicU64>,
@@ -479,6 +546,7 @@ impl State {
         let lease = Lease {
             generation,
             phase: Phase::Granting,
+            grant_pending: None,
             entry,
             deadline: Arc::new(AtomicU64::new(at)),
             check_at: at,
@@ -543,8 +611,30 @@ impl State {
         expired
     }
 
-    /// Apply a batch of committed actions.
-    fn on_actions(&mut self, batch: &[Action], now_ms: u64) {
+    /// Whether a ready entry / `EnqueueReady` for `run` is stale with respect to its lease:
+    /// always while *Granting*; while the pipelined grant is unacknowledged, unless
+    /// `is_requeue` (a record read) shows a requeue after the grant (see module docs).
+    fn stale_for_lease(
+        &self,
+        run: &RunId,
+        is_requeue: &mut dyn FnMut(&RunId, AttemptToken) -> bool,
+    ) -> Option<bool> {
+        let l = self.leases.get(run)?;
+        Some(match l.phase {
+            Phase::Granting => true,
+            Phase::Executing(token) if l.grant_pending.is_some() => !is_requeue(run, token),
+            Phase::Executing(_) => false,
+        })
+    }
+
+    /// Apply a batch of committed actions. `is_requeue(run, token)` is consulted only for an
+    /// `EnqueueReady` of a run whose pipelined grant is not yet acknowledged.
+    fn on_actions(
+        &mut self,
+        batch: &[Action],
+        now_ms: u64,
+        is_requeue: &mut dyn FnMut(&RunId, AttemptToken) -> bool,
+    ) {
         for a in batch {
             match a {
                 Action::EnqueueReady {
@@ -557,13 +647,14 @@ impl State {
                     tenant,
                     first_activation,
                 } => {
-                    if let Some(l) = self.leases.get(run) {
-                        if l.phase == Phase::Granting {
-                            // Applied before our grant, which supersedes it.
-                            continue;
-                        }
+                    match self.stale_for_lease(run, is_requeue) {
+                        // Applied before our grant, which supersedes it.
+                        Some(true) => continue,
                         // The executor requeued the run: its lease ends here.
-                        self.drop_lease(run);
+                        Some(false) => {
+                            self.drop_lease(run);
+                        }
+                        None => {}
                     }
                     let e = Entry {
                         queue: queue.clone(),
@@ -595,7 +686,12 @@ impl State {
     /// Reconcile with a full scan. Leased runs keep their lease, except that a ready row for
     /// a run whose grant was applied means the executor requeued it. Unleased running runs
     /// are queued for an immediate re-grant (pending retries keep their delay).
-    fn apply_scan(&mut self, scan: Scan, now_ms: u64) {
+    fn apply_scan(
+        &mut self,
+        scan: Scan,
+        now_ms: u64,
+        is_requeue: &mut dyn FnMut(&RunId, AttemptToken) -> bool,
+    ) {
         let running: BTreeMap<RunId, Option<Entry>> = scan.running.into_iter().collect();
         // Keep only pending re-grants (retry backoff) of runs that are still Running.
         let old: Vec<(RunId, Entry)> = std::mem::take(&mut self.entries).into_iter().collect();
@@ -607,11 +703,12 @@ impl State {
             }
         }
         for row in scan.ready {
-            if let Some(l) = self.leases.get(&row.run) {
-                if l.phase == Phase::Granting {
-                    continue;
+            match self.stale_for_lease(&row.run, is_requeue) {
+                Some(true) => continue,
+                Some(false) => {
+                    self.drop_lease(&row.run);
                 }
-                self.drop_lease(&row.run);
+                None => {}
             }
             let run = row.run;
             self.enqueue(run, Entry::from_ready_row(row), now_ms);
@@ -630,11 +727,27 @@ impl State {
 
 // ------------------------------------------------------------------- the service
 
+/// A grant handed back to the loop: the token, the record the job runs with, and the
+/// grant's log offset while its ack is outstanding (pipelined grants only).
+struct Grant {
+    token: AttemptToken,
+    record: Box<RunRecord>,
+    pending: Option<Offset>,
+}
+
 enum Done {
     Granted {
         run: RunId,
         generation: u64,
-        res: Result<(AttemptToken, Box<RunRecord>), PartitionError>,
+        res: Result<Grant, PartitionError>,
+    },
+    /// Apply passed a pipelined grant: `Ok(accepted)`.
+    GrantAcked {
+        run: RunId,
+        generation: u64,
+        offset: Offset,
+        token: AttemptToken,
+        res: Result<bool, PartitionError>,
     },
     Executed {
         run: RunId,
@@ -651,6 +764,15 @@ struct Dispatcher {
     joins: JoinSet<Done>,
     /// Task id -> (run, generation), to attribute a panicked task.
     tasks: BTreeMap<TaskId, (RunId, u64)>,
+    /// This dispatcher's share of [`DispatcherStats::leases`] (the stats are shared by every
+    /// partition's dispatcher, so the gauge moves by deltas).
+    reported_leases: u64,
+    /// Pipelined grants appended but not yet acknowledged: `run -> grant offset`. A new grant
+    /// of the run waits until apply passed this offset (never two concurrent grants).
+    unacked: BTreeMap<RunId, Offset>,
+    /// Tokens of rejected pipelined grants whose job may still be alive: the next grant of
+    /// the run uses a strictly higher `n`, so the zombie stays fenced.
+    rejected: BTreeMap<RunId, AttemptToken>,
     m_dispatched: metrics::Counter,
     m_expired: metrics::Counter,
 }
@@ -669,6 +791,9 @@ impl Dispatcher {
             stats: cfg.stats.clone().unwrap_or_default(),
             joins: JoinSet::new(),
             tasks: BTreeMap::new(),
+            unacked: BTreeMap::new(),
+            rejected: BTreeMap::new(),
+            reported_leases: 0,
             m_dispatched: metrics::counter!("ostro_dispatcher_dispatched_total", "partition" => label.clone()),
             m_expired: metrics::counter!("ostro_dispatcher_lease_expired_total", "partition" => label),
             ctx,
@@ -710,7 +835,9 @@ impl Dispatcher {
             match self.scan().await {
                 Ok(s) => {
                     let now = self.now_ms();
-                    self.st.apply_scan(s, now);
+                    let h = &self.ctx.handle;
+                    self.st
+                        .apply_scan(s, now, &mut |r, t| requeued_after_grant(h, r, t));
                     return Ok(());
                 }
                 Err(e) => {
@@ -733,10 +860,7 @@ impl Dispatcher {
     async fn drain(&mut self, actions: &mut broadcast::Receiver<Arc<Vec<Action>>>) -> Flow {
         loop {
             match actions.try_recv() {
-                Ok(b) => {
-                    let now = self.now_ms();
-                    self.st.on_actions(&b, now);
-                }
+                Ok(b) => self.actions(&b),
                 Err(TryRecvError::Lagged(n)) => {
                     if self.lagged(n).await.is_err() {
                         return Flow::Stop;
@@ -767,23 +891,42 @@ impl Dispatcher {
         }
     }
 
+    /// Move the shared lease gauge by this dispatcher's change since the last report.
+    fn report_leases(&mut self) {
+        let now = self.st.leases.len() as u64;
+        if now > self.reported_leases {
+            self.stats
+                .leases
+                .fetch_add(now - self.reported_leases, Ordering::Relaxed);
+        } else if now < self.reported_leases {
+            self.stats
+                .leases
+                .fetch_sub(self.reported_leases - now, Ordering::Relaxed);
+        }
+        self.reported_leases = now;
+    }
+
+    /// Apply one committed action batch to the state.
+    fn actions(&mut self, b: &[Action]) {
+        let now = self.now_ms();
+        let h = &self.ctx.handle;
+        self.st
+            .on_actions(b, now, &mut |r, t| requeued_after_grant(h, r, t));
+    }
+
     fn dispatch(&mut self, permit: OwnedSemaphorePermit) {
         let Some((run, entry)) = self.st.pop_next() else {
             return; // the permit drops
         };
         let generation = self.st.new_lease(run, entry, permit);
         let h = self.ctx.handle.clone();
+        let after = self.unacked.get(&run).copied();
+        let floor = self.rejected.get(&run).copied();
+        let fault = self.stats.grant_fault.fires(&run);
         let id = self
             .joins
             .spawn(async move {
-                let res = async {
-                    let token = h.grant_attempt(run).await?;
-                    let rec = h
-                        .read_run(&run)?
-                        .ok_or(PartitionError::Rejected(RejectReason::RunNotFound))?;
-                    Ok((token, Box::new(rec)))
-                }
-                .await;
+                let res = pipelined_grant(&h, run, after, floor, fault).await;
                 Done::Granted {
                     run,
                     generation,
@@ -862,6 +1005,13 @@ impl Dispatcher {
                 generation,
                 res,
             } => self.on_granted(run, generation, res),
+            Done::GrantAcked {
+                run,
+                generation,
+                offset,
+                token,
+                res,
+            } => self.on_grant_acked(run, generation, offset, token, res),
             Done::Executed {
                 run,
                 generation,
@@ -877,16 +1027,30 @@ impl Dispatcher {
         &mut self,
         run: RunId,
         generation: u64,
-        res: Result<(AttemptToken, Box<RunRecord>), PartitionError>,
+        res: Result<Grant, PartitionError>,
     ) -> Flow {
+        // A pipelined grant is in the log whether or not its lease is still current: track
+        // it so the next grant of this run waits for it.
+        if let Ok(Grant {
+            pending: Some(off), ..
+        }) = &res
+        {
+            self.unacked.insert(run, *off);
+            self.spawn_ack(run, generation, *off, res.as_ref().map(|g| g.token).ok());
+        }
         if !self.current(&run, generation) {
             debug!(partition = self.p(), %run, "grant result for a dropped lease ignored");
             return Flow::Continue;
         }
         match res {
-            Ok((token, record)) => {
+            Ok(Grant {
+                token,
+                record,
+                pending,
+            }) => {
                 if let Some(l) = self.st.leases.get_mut(&run) {
                     l.phase = Phase::Executing(token);
+                    l.grant_pending = pending;
                 }
                 self.stats.dispatched.fetch_add(1, Ordering::Relaxed);
                 self.m_dispatched.increment(1);
@@ -915,6 +1079,116 @@ impl Dispatcher {
                 Flow::Continue
             }
         }
+    }
+
+    /// Watch a pipelined grant until apply passed it; the outcome comes back as
+    /// [`Done::GrantAcked`].
+    fn spawn_ack(
+        &mut self,
+        run: RunId,
+        generation: u64,
+        offset: Offset,
+        token: Option<AttemptToken>,
+    ) {
+        let Some(token) = token else { return };
+        let h = self.ctx.handle.clone();
+        let id = self
+            .joins
+            .spawn(async move {
+                let res = async {
+                    h.machine().wait_applied(offset).await?;
+                    let accepted = h
+                        .read_run(&run)?
+                        .is_some_and(|r| r.current_attempt == Some((token.epoch.0, token.n)));
+                    Ok(accepted)
+                }
+                .await;
+                Done::GrantAcked {
+                    run,
+                    generation,
+                    offset,
+                    token,
+                    res,
+                }
+            })
+            .id();
+        self.tasks.insert(id, (run, generation));
+    }
+
+    fn on_grant_acked(
+        &mut self,
+        run: RunId,
+        generation: u64,
+        offset: Offset,
+        token: AttemptToken,
+        res: Result<bool, PartitionError>,
+    ) -> Flow {
+        if self.unacked.get(&run) == Some(&offset) {
+            self.unacked.remove(&run);
+        }
+        let current = self.current(&run, generation);
+        if res.as_ref().is_ok_and(|accepted| *accepted) {
+            // The record now holds this token: later grants read past it.
+            self.rejected.remove(&run);
+            if current
+                && let Some(l) = self.st.leases.get_mut(&run)
+                && l.grant_pending == Some(offset)
+            {
+                l.grant_pending = None;
+            }
+            return Flow::Continue;
+        }
+        // Rejected, or the outcome is unknown: its job (if any) keeps the token, so later
+        // grants must go past it.
+        let floor = self.rejected.entry(run).or_insert(token);
+        *floor = (*floor).max(token);
+        match &res {
+            Ok(_) => {
+                // Apply rejected the grant (RunTerminal / RunNotFound / Fenced / StaleEpoch):
+                // the job's appends are rejected too.
+                self.stats.grants_rejected.fetch_add(1, Ordering::Relaxed);
+                debug!(partition = self.p(), %run, "pipelined grant rejected by apply; lease dropped");
+            }
+            Err(e) => {
+                if self.ctx.handle.machine().check_healthy().is_err() {
+                    error!(partition = self.p(), %run, error = %e, "grant ack failed; partition failing, dispatcher stops");
+                    return Flow::Stop;
+                }
+                warn!(partition = self.p(), %run, error = %e, "grant ack failed; re-granting");
+            }
+        }
+        // Stop the job of this grant. Its lease may already be gone: a job fenced by apply
+        // can report `Fenced` before this ack is handled.
+        let entry = if current {
+            self.st.drop_lease(&run).map(|l| l.entry)
+        } else {
+            None
+        };
+        if self.st.leases.contains_key(&run) || self.st.entries.contains_key(&run) {
+            return Flow::Continue; // a newer lease or a queued entry owns the run
+        }
+        match self.ctx.handle.read_run(&run) {
+            Ok(Some(rec)) if !rec.status.is_terminal() => {
+                // Still live: re-grant (above the rejected token) after a short delay.
+                let now = self.now_ms();
+                let e = entry.unwrap_or_else(|| Entry::from_record(&rec, 0));
+                self.st
+                    .enqueue(run, e.at(now.saturating_add(GRANT_RETRY_MS)), now);
+            }
+            Ok(_) => {
+                // Terminal or gone: no later grant, nothing to fence above.
+                self.rejected.remove(&run);
+            }
+            Err(e) => {
+                warn!(partition = self.p(), %run, error = %e, "run read after a rejected grant failed; re-granting");
+                let now = self.now_ms();
+                if let Some(e) = entry {
+                    self.st
+                        .enqueue(run, e.at(now.saturating_add(GRANT_RETRY_MS)), now);
+                }
+            }
+        }
+        Flow::Continue
     }
 
     fn on_executed(&mut self, run: RunId, generation: u64, outcome: ExecOutcome) {
@@ -956,13 +1230,18 @@ impl Dispatcher {
             return;
         };
         l.phase = Phase::Granting;
+        l.grant_pending = None;
         let generation = l.generation;
         let mut revoked = l.revoked.subscribe();
         let h = self.ctx.handle.clone();
+        let after = self.unacked.get(&run).copied();
         let id = self
             .joins
             .spawn(async move {
                 let res = async {
+                    if let Some(off) = after {
+                        h.machine().wait_applied(off).await?;
+                    }
                     let token = grant_after_failure(&h, run).await?;
                     tokio::select! {
                         () = tokio::time::sleep(Duration::from_millis(after_ms)) => {}
@@ -971,7 +1250,11 @@ impl Dispatcher {
                     let rec = h
                         .read_run(&run)?
                         .ok_or(PartitionError::Rejected(RejectReason::RunNotFound))?;
-                    Ok((token, Box::new(rec)))
+                    Ok(Grant {
+                        token,
+                        record: Box::new(rec),
+                        pending: None,
+                    })
                 }
                 .await;
                 Done::Granted {
@@ -1047,6 +1330,7 @@ impl Dispatcher {
             self.on_expired();
             self.st.promote_due(now);
             self.dispatch_available();
+            self.report_leases();
 
             let deadline = self.next_deadline();
             let want_slot = self.st.has_ready();
@@ -1059,8 +1343,7 @@ impl Dispatcher {
                 },
                 r = actions.recv() => match r {
                     Ok(b) => {
-                        let now = self.now_ms();
-                        self.st.on_actions(&b, now);
+                        self.actions(&b);
                         Flow::Continue
                     }
                     Err(RecvError::Lagged(n)) => match self.lagged(n).await {
@@ -1107,6 +1390,7 @@ impl Dispatcher {
     /// Revoke every lease, then give executor futures a bounded grace period.
     async fn stop(mut self) {
         self.st.revoke_all();
+        self.report_leases();
         let grace = self.cfg.lease_ttl.min(SHUTDOWN_GRACE);
         let drained = tokio::time::timeout(grace, async {
             while self.joins.join_next().await.is_some() {}
@@ -1121,6 +1405,73 @@ impl Dispatcher {
             self.joins.shutdown().await;
         }
         info!(partition = self.p(), "dispatcher stopped");
+    }
+}
+
+/// The pipelined grant (see the module docs): wait for an earlier unacknowledged grant of
+/// `run` (`after`), read the record once, append `AttemptGranted{n + 1}` and return as soon
+/// as the log fixed its offset. The returned record is the one read, patched as apply will
+/// patch it (token, `Running`, no ready slot), so the job needs no second read. `floor` is
+/// the token of an earlier rejected grant of the run (its job may still be alive): the new
+/// token is above it. `fault` (test hook) stamps the token with a stale epoch so apply
+/// rejects the grant.
+async fn pipelined_grant(
+    h: &PartitionHandle<Rf1Log>,
+    run: RunId,
+    after: Option<Offset>,
+    floor: Option<AttemptToken>,
+    fault: bool,
+) -> Result<Grant, PartitionError> {
+    if let Some(off) = after {
+        h.machine().wait_applied(off).await?;
+    }
+    let mut rec = h
+        .read_run(&run)?
+        .ok_or(PartitionError::Rejected(RejectReason::RunNotFound))?;
+    if rec.status.is_terminal() {
+        return Err(PartitionError::Rejected(RejectReason::RunTerminal));
+    }
+    let epoch = h.epoch();
+    let n = match rec.current_attempt {
+        Some((e, n)) if e == epoch.0 => n.saturating_add(1),
+        _ => 1,
+    };
+    // Above a rejected grant's token whose job may still run (same epoch).
+    let n = match floor {
+        Some(f) if f.epoch == epoch => n.max(f.n.saturating_add(1)),
+        _ => n,
+    };
+    let stamped = if fault {
+        epoch.0.wrapping_sub(1)
+    } else {
+        epoch.0
+    };
+    let cmd = Command::attempt_granted(AttemptGranted {
+        run_id: run.as_bytes().to_vec(),
+        token: Some(AttemptTokenMsg { epoch: stamped, n }),
+        after_failure: false,
+    });
+    h.machine().check_healthy()?;
+    let receipt = h.log().append(epoch, vec![encode_command(&cmd)]).await?;
+    rec.current_attempt = Some((epoch.0, n));
+    rec.status = RunStatus::Running;
+    rec.ready = None;
+    Ok(Grant {
+        token: AttemptToken { epoch, n },
+        record: Box::new(rec),
+        pending: Some(receipt.last),
+    })
+}
+
+/// Read check for an `EnqueueReady` seen while `run`'s pipelined grant `token` is not yet
+/// acknowledged: `true` = the run was requeued after the grant (record holds the token and
+/// is `Ready`); a read error also counts as a requeue (the lease is dropped, which is safe).
+fn requeued_after_grant(h: &PartitionHandle<Rf1Log>, run: &RunId, token: AttemptToken) -> bool {
+    match h.read_run(run) {
+        Ok(Some(r)) => {
+            r.current_attempt == Some((token.epoch.0, token.n)) && r.status == RunStatus::Ready
+        }
+        Ok(None) | Err(_) => true,
     }
 }
 
@@ -1162,6 +1513,11 @@ mod tests {
 
     fn run() -> RunId {
         RunId::new_v7(PartitionId(0))
+    }
+
+    /// `is_requeue` for tests without unacknowledged pipelined grants.
+    fn never(_: &RunId, _: AttemptToken) -> bool {
+        false
     }
 
     fn permit() -> OwnedSemaphorePermit {
@@ -1218,6 +1574,7 @@ mod tests {
                 Action::InputAppended { run: a, seq: 5 },
             ],
             0,
+            &mut never,
         );
         assert_eq!(rx.try_recv().ok(), Some(4));
         assert_eq!(rx.try_recv().ok(), Some(5));
@@ -1237,6 +1594,7 @@ mod tests {
                 enqueue_action(d, "q", 9, 500, "k-d"),
             ],
             100,
+            &mut never,
         );
         assert_eq!(st.delayed.len(), 1, "d is in the future");
         assert_eq!(st.entries[&a].concurrency_key, "k-a");
@@ -1252,13 +1610,13 @@ mod tests {
         let mut st = State::new(Duration::from_secs(30));
         let (a, b) = (run(), run());
         st.new_lease(a, entry("q", 0, 0, ""), permit());
-        st.on_actions(&[enqueue_action(a, "q", 0, 1, "")], 10);
+        st.on_actions(&[enqueue_action(a, "q", 0, 1, "")], 10, &mut never);
         assert!(st.leases.contains_key(&a), "granting lease kept");
         assert!(st.entries.is_empty());
 
         let _rx = leased(&mut st, b);
         let revoked = st.leases[&b].revoked.subscribe();
-        st.on_actions(&[enqueue_action(b, "q", 0, 1, "ck")], 10);
+        st.on_actions(&[enqueue_action(b, "q", 0, 1, "ck")], 10, &mut never);
         assert!(!st.leases.contains_key(&b));
         assert!(*revoked.borrow());
         assert_eq!(st.entries[&b].concurrency_key, "ck");
@@ -1283,6 +1641,7 @@ mod tests {
                 },
             ],
             0,
+            &mut never,
         );
         assert!(st.leases.is_empty() && st.entries.is_empty());
         assert!(*revoked.borrow(), "a completed run's lease is revoked");
@@ -1306,6 +1665,7 @@ mod tests {
                 running: vec![(b, Some(entry("q2", 3, 55, "ck-run")))],
             },
             100,
+            &mut never,
         );
         assert_eq!(st.entries[&a].concurrency_key, "ck-ready");
         assert_eq!(st.entries[&b], entry("q2", 3, 0, "ck-run"));
@@ -1339,6 +1699,7 @@ mod tests {
                 running: vec![],
             },
             100,
+            &mut never,
         );
         let ea = &st.entries[&a];
         assert_eq!(
@@ -1370,6 +1731,7 @@ mod tests {
                 first_activation: true,
             }],
             100,
+            &mut never,
         );
         let ec = &st.entries[&c];
         assert_eq!(

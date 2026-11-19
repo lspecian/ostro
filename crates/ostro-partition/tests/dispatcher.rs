@@ -4,7 +4,9 @@
 //! re-grant, stale outcomes ignored) and shutdown revocation. Plan 05-11: hard stops
 //! (Terminated / TimedOut) revoke the lease of a running job, retries are counted durably
 //! (`AttemptGranted{after_failure}` at once, job after the delay), and a zero-permit slot
-//! semaphore holds runs un-granted.
+//! semaphore holds runs un-granted. Plan 05-16: pipelined grants (the job starts before the
+//! grant's ack) never overlap for one run, a rejected grant (injected) is fenced by apply and
+//! re-granted with a higher token, and every executor append lands after its grant.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod common;
@@ -18,13 +20,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{OPEN_T, T, run_on, start_run};
+use ostro_log::ReplicatedLog;
 use ostro_partition::store::values::RunStatus;
 use ostro_partition::{
     ApplyOutcome, Clock, DispatcherConfig, DispatcherStats, ExecOutcome, Executor, Job, Node,
     NodeConfig, PartitionHandle, SystemClock,
 };
 use ostro_types::command::{
-    AttemptTokenMsg, Derived, EnqueueReady, EventsAppended, StartRun, TerminateRun, derived,
+    AttemptTokenMsg, Cmd, CompleteRun, Derived, EnqueueReady, EventsAppended, JournalEvent,
+    StartRun, TerminalStatus, TerminateRun, decode_command, derived,
 };
 use ostro_types::{AttemptToken, Command, PartitionCount, PartitionId, RunId};
 use tokio::sync::Semaphore;
@@ -202,6 +206,20 @@ fn attempt(h: &Handle, run: &RunId) -> Option<(u32, u32)> {
     h.read_run(run).expect("read").expect("run").current_attempt
 }
 
+/// Poll until the run's `current_attempt` is `want` (a pipelined grant is applied shortly
+/// after its job started, plan 05-16).
+async fn wait_attempt(h: &Handle, run: &RunId, want: (u32, u32)) {
+    let deadline = Instant::now() + T;
+    while attempt(h, run) != Some(want) {
+        assert!(
+            Instant::now() < deadline,
+            "attempt {:?}, want {want:?}",
+            attempt(h, run)
+        );
+        sleep(Duration::from_millis(5)).await;
+    }
+}
+
 fn status(h: &Handle, run: &RunId) -> RunStatus {
     h.read_run(run).expect("read").expect("run").status
 }
@@ -329,7 +347,7 @@ async fn rebuild_after_restart_regrants_running_under_the_new_epoch_without_poll
         let s = by_run.get(r).expect("dispatched after restart");
         assert_eq!(s.token, AttemptToken { epoch, n: 1 }, "run {i}");
         assert_eq!(s.concurrency_key, format!("ck-{i}"), "run {i}");
-        assert_eq!(attempt(h, r), Some((epoch.0, 1)));
+        wait_attempt(h, r, (epoch.0, 1)).await;
     }
 
     // Idle: nothing scans on an interval.
@@ -569,7 +587,7 @@ async fn stalled_executor_is_revoked_regranted_and_its_late_outcome_ignored() {
     assert_eq!(seen[0].token.n, 1);
     assert_eq!(seen[1].token.n, 2);
     // Logged AttemptGranted n = 2.
-    assert_eq!(attempt(h, &run), Some((h.epoch().0, 2)));
+    wait_attempt(h, &run, (h.epoch().0, 2)).await;
     let after = revoked_after_ms.load(Ordering::SeqCst);
     assert!(
         (250..2_000).contains(&after),
@@ -736,5 +754,252 @@ async fn zero_slots_hold_ready_runs_ungranted() {
     sem.add_permits(1);
     let seen = fake.wait_jobs(1, T).await;
     assert_eq!(seen[0].token.n, 1);
+    node.shutdown().await.expect("shutdown");
+}
+
+// ---------------------------------------------------------------------------------
+// Plan 05-16: pipelined grants
+// ---------------------------------------------------------------------------------
+
+/// One event plus `CompleteRun{Completed}` at the record's journal end, with the job's token.
+fn complete_cmd(job: &Job) -> Command {
+    let seq = job.record.next_seq;
+    Command::events_appended(EventsAppended {
+        run_id: job.run.as_bytes().to_vec(),
+        token: Some(AttemptTokenMsg {
+            epoch: job.token.epoch.0,
+            n: job.token.n,
+        }),
+        from_seq: seq,
+        events: vec![JournalEvent {
+            seq,
+            kind: 16,
+            payload: Some(ostro_types::PayloadRef::inline(bytes::Bytes::from_static(
+                b"e",
+            ))),
+        }],
+        derived: vec![Derived::new(derived::Intent::CompleteRun(CompleteRun {
+            status: TerminalStatus::Completed as i32,
+            completed_at_ms: 1,
+            ..Default::default()
+        }))],
+    })
+}
+
+/// Every command in the partition log: `(offset, command)`.
+async fn log_commands(h: &Handle) -> Vec<(u64, Command)> {
+    let log = h.log();
+    let end = log.log_end();
+    let mut from = log.log_start();
+    let mut out = Vec::new();
+    while from < end {
+        let batches = log.read(from, end, 4 << 20).await.expect("log read");
+        for b in &batches {
+            for (i, c) in b.commands.iter().enumerate() {
+                out.push((b.base.0 + i as u64, decode_command(c).expect("decode")));
+            }
+            from = b.end();
+        }
+    }
+    out
+}
+
+/// 1,000 runs through pipelined grants with ~1/3 of first grants rejected by apply (stale
+/// epoch, test hook): every run completes exactly once, no token is granted twice for a run,
+/// tokens only grow, and each token's first executor append is at a higher offset than its
+/// grant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
+    const RUNS: usize = 1_000;
+    let tmp = ostro_testkit::fs::tempdir();
+    let completed: Arc<Mutex<BTreeMap<RunId, usize>>> = Arc::default();
+    let live: Arc<Mutex<BTreeMap<(RunId, AttemptToken), usize>>> = Arc::default();
+    let overlaps = Arc::new(AtomicUsize::new(0));
+    let (c2, l2, o2) = (
+        Arc::clone(&completed),
+        Arc::clone(&live),
+        Arc::clone(&overlaps),
+    );
+    let fake = Fake::new(move |job, _| {
+        let (completed, live, overlaps) = (Arc::clone(&c2), Arc::clone(&l2), Arc::clone(&o2));
+        boxed(async move {
+            let key = (job.run, job.token);
+            {
+                let mut l = live.lock().expect("lock");
+                let e = l.entry(key).or_default();
+                *e += 1;
+                if *e > 1 {
+                    overlaps.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            // Give a rejected grant's ack time to arrive while the job is live.
+            sleep(Duration::from_millis(u64::from(job.run.as_bytes()[17] % 3))).await;
+            let out = job.handle.submit_one(complete_cmd(&job)).await;
+            *live.lock().expect("lock").get_mut(&key).expect("live") -= 1;
+            match out {
+                Ok(ApplyOutcome::Accepted) => {
+                    *completed.lock().expect("lock").entry(job.run).or_default() += 1;
+                    ExecOutcome::Released
+                }
+                Ok(ApplyOutcome::Rejected(ostro_partition::RejectReason::RunTerminal)) => {
+                    ExecOutcome::Released
+                }
+                Ok(ApplyOutcome::Rejected(
+                    ostro_partition::RejectReason::Fenced { .. }
+                    | ostro_partition::RejectReason::StaleEpoch { .. },
+                )) => ExecOutcome::Fenced,
+                Ok(ApplyOutcome::Rejected(ostro_partition::RejectReason::SeqMismatch {
+                    ..
+                })) => ExecOutcome::Reactivate,
+                other => panic!("unexpected append outcome {other:?}"),
+            }
+        })
+    });
+    let o = Opts::new(&fake);
+    // Reject the first grant of about a third of the runs.
+    let faulted: Arc<Mutex<std::collections::BTreeSet<RunId>>> = Arc::default();
+    let f2 = Arc::clone(&faulted);
+    o.stats.grant_fault.set(Some(Arc::new(move |r: &RunId| {
+        let h = r
+            .as_bytes()
+            .iter()
+            .fold(0u32, |a, b| a.wrapping_mul(31) ^ u32::from(*b));
+        h % 3 == 0 && f2.lock().expect("lock").insert(*r)
+    })));
+    let node = open(tmp.path(), Some(&o)).await;
+    let h = h(&node);
+    let runs: Vec<RunId> = (0..RUNS).map(|_| run_on(0)).collect();
+    for chunk in runs.chunks(100) {
+        submit_all(h, chunk.iter().map(|r| start(r, 0, "")).collect()).await;
+    }
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let done = runs
+            .iter()
+            .filter(|r| status(h, r) == RunStatus::Completed)
+            .count();
+        if done == RUNS {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {done}/{RUNS} runs completed"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    let n_faulted = faulted.lock().expect("lock").len();
+    assert!(n_faulted > 100, "the hook rejected {n_faulted} grants");
+    assert!(
+        o.stats.grants_rejected.load(Ordering::Relaxed) >= n_faulted as u64,
+        "every injected rejection is seen by the ack check"
+    );
+    let completed = completed.lock().expect("lock").clone();
+    assert_eq!(completed.len(), RUNS);
+    assert!(
+        completed.values().all(|n| *n == 1),
+        "every run completes exactly once"
+    );
+    assert_eq!(
+        overlaps.load(Ordering::Relaxed),
+        0,
+        "one live job per token"
+    );
+
+    // The log: per run, granted tokens strictly increase (no token twice), and the first
+    // append of every token is after a grant of that token.
+    let epoch = h.epoch().0;
+    let mut grants: BTreeMap<RunId, Vec<(u64, (u32, u32))>> = BTreeMap::new();
+    let mut first_append: BTreeMap<(RunId, (u32, u32)), u64> = BTreeMap::new();
+    for (off, c) in log_commands(h).await {
+        match c.cmd {
+            Some(Cmd::AttemptGranted(g)) => {
+                let r = RunId::from_bytes(&g.run_id).expect("run id");
+                let t = g.token.expect("token");
+                grants.entry(r).or_default().push((off, (t.epoch, t.n)));
+            }
+            Some(Cmd::EventsAppended(e)) => {
+                let r = RunId::from_bytes(&e.run_id).expect("run id");
+                let t = e.token.expect("token");
+                first_append.entry((r, (t.epoch, t.n))).or_insert(off);
+            }
+            _ => {}
+        }
+    }
+    let mut regranted = 0;
+    for r in &runs {
+        let g = &grants[r];
+        // A rejected (stale-epoch) grant carries epoch - 1; its job ran with the real epoch
+        // and the same n, so the next grant must use a higher n.
+        let ns: Vec<u32> = g.iter().map(|(_, (_, n))| *n).collect();
+        assert!(
+            ns.windows(2).all(|w| w[0] < w[1]),
+            "{r}: grant numbers must strictly increase: {g:?}"
+        );
+        if g.len() > 1 {
+            regranted += 1;
+        }
+        for (&(run, (e, n)), &off) in first_append.range((*r, (0, 0))..=(*r, (u32::MAX, u32::MAX)))
+        {
+            assert_eq!(run, *r);
+            let grant_off = g
+                .iter()
+                .find(|(_, (ge, gn))| *gn == n && (*ge == e || *ge == e.wrapping_sub(1)))
+                .map(|(o, _)| *o)
+                .unwrap_or_else(|| panic!("{r}: append with token ({e},{n}) without a grant"));
+            assert!(
+                grant_off < off,
+                "{r}: grant {grant_off} must precede append {off}"
+            );
+        }
+        let last = g.last().expect("granted").1;
+        assert_eq!(
+            last.0, epoch,
+            "{r}: the accepted grant is of the current epoch"
+        );
+    }
+    assert!(regranted >= n_faulted, "rejected grants are re-granted");
+    // The lease gauge is back to zero once every run finished.
+    let deadline = Instant::now() + T;
+    while o.stats.leases.load(Ordering::Relaxed) != 0 {
+        assert!(Instant::now() < deadline, "leases still held");
+        sleep(Duration::from_millis(10)).await;
+    }
+    node.shutdown().await.expect("shutdown");
+}
+
+/// Pipelined grant: the job starts before the grant is applied, yet its first append is
+/// accepted (the log orders it after the grant) and the record it gets already carries the
+/// new token and status `Running`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn job_record_carries_the_pipelined_token() {
+    let tmp = ostro_testkit::fs::tempdir();
+    let seen_rec: Arc<Mutex<Vec<(Option<(u32, u32)>, RunStatus, AttemptToken)>>> = Arc::default();
+    let s2 = Arc::clone(&seen_rec);
+    let fake = Fake::new(move |job, _| {
+        s2.lock()
+            .expect("lock")
+            .push((job.record.current_attempt, job.record.status, job.token));
+        boxed(async move {
+            let o = job.handle.submit_one(complete_cmd(&job)).await;
+            assert_eq!(o.expect("append"), ApplyOutcome::Accepted);
+            ExecOutcome::Released
+        })
+    });
+    let o = Opts::new(&fake);
+    let node = open(tmp.path(), Some(&o)).await;
+    let h = h(&node);
+    let run = run_on(0);
+    submit_all(h, vec![start(&run, 0, "")]).await;
+    let deadline = Instant::now() + T;
+    while status(h, &run) != RunStatus::Completed {
+        assert!(Instant::now() < deadline, "run did not complete");
+        sleep(Duration::from_millis(10)).await;
+    }
+    let seen = seen_rec.lock().expect("lock").clone();
+    assert_eq!(seen.len(), 1);
+    let (cur, st, tok) = seen[0];
+    assert_eq!(cur, Some((tok.epoch.0, tok.n)));
+    assert_eq!(st, RunStatus::Running);
+    assert_eq!(o.stats.grants_rejected.load(Ordering::Relaxed), 0);
     node.shutdown().await.expect("shutdown");
 }
