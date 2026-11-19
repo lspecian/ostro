@@ -432,3 +432,38 @@ fn control_journaled_signal_never_sent() {
     let vs = check_final(RUN, ledger().get(RUN).unwrap(), &completed_view(), &j);
     assert!(kinds(&vs).contains(&Kind::WrongResult), "{vs:?}");
 }
+
+#[test]
+fn failed_is_accepted_only_after_retry_exhaustion() {
+    let failed = RunView {
+        status: "failed".into(),
+        result: None,
+        failure: Some(r#"{"kind":"transient","message":"step 1 simulated failure"}"#.into()),
+    };
+    let l = ledger();
+    let r = l.get(RUN).unwrap();
+    // A transient failure without exhausted retries is a wrong status.
+    assert_eq!(
+        kinds(&check_final(RUN, r, &failed, &journal())),
+        [Kind::WrongStatus]
+    );
+    // Nine journaled attempt failures, then the final error: the documented outcome.
+    let mut j = vec![Event::new(0, "run_started", json!({}))];
+    for a in 1..=9 {
+        j.push(Event::new(
+            0,
+            "step_attempt_failed",
+            json!({"name": "step1", "attempt": a}),
+        ));
+    }
+    j.push(Event::new(
+        0,
+        "step_completed",
+        json!({"name": "step1",
+        "outcome": {"error": {"kind": "transient", "type": "retryable"}}}),
+    ));
+    j.push(Event::new(0, "run_failed", json!({})));
+    let j = renumber(j);
+    assert!(check_journal(RUN, &j, None).is_empty());
+    assert!(check_final(RUN, r, &failed, &j).is_empty());
+}

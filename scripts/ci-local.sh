@@ -53,8 +53,12 @@ FAILPOINT_LINT_ONLY=(ostro)
 # wal::, state::, blob::), configured through the FAILPOINTS env var. Build it out of the
 # way of target/release:
 #   cargo build --release -p ostro --features failpoints --target-dir target/failpoints
-# (`target/failpoints/release/ostro build-info` then ends in `failpoints=on`). The campaign's
-# own run command lives with its test (05-19).
+# (`target/failpoints/release/ostro build-info` then ends in `failpoints=on`; the campaign
+# test builds it itself when it is missing). The "server campaign smoke" step below runs 20
+# kills from a wiped target/campaign-smoke; the timing run uses target/campaign-timing and
+# the 05-20 gate target/campaign-gate (never share a state dir: the runner refuses to resume
+# a shard file from another SHARDS/FAULTS/seed). Commands: crates/ostro-crashtest/tests/
+# server_campaign.rs.
 WORKFLOW=".github/workflows/ci.yml"
 
 declare -a NAMES=() RESULTS=() TIMES=()
@@ -131,6 +135,18 @@ check_failpoint_sync() {
     return 1
   fi
   echo "$want"
+}
+
+# QA-01 whole-server kill campaign smoke (plan 05-19): 20 kill -9 faults against the
+# failpoint binary from a freshly wiped state dir, then the aggregate report (fails on any
+# lost acked run / duplicate journal entry / wrong result). Keep in sync with the "Server
+# campaign smoke" step of .github/workflows/ci.yml.
+check_campaign_smoke() {
+  rm -rf target/campaign-smoke
+  OSTRO_CAMPAIGN_STATE_DIR=target/campaign-smoke OSTRO_CAMPAIGN_FAULTS=20 \
+    cargo test --release -p ostro-crashtest --features failpoints --test server_campaign --locked -- --ignored --nocapture campaign || return 1
+  OSTRO_CAMPAIGN_STATE_DIR=target/campaign-smoke OSTRO_CAMPAIGN_FAULTS=20 \
+    cargo test --release -p ostro-crashtest --features failpoints --test server_campaign --locked -- --ignored --nocapture report
 }
 
 check_failpoints() {
@@ -280,6 +296,7 @@ step "cargo test" cargo test --workspace --locked
 step "semantics sleepers (serial)" check_sleepers
 step "failpoint list sync (ci.yml)" check_failpoint_sync
 step "failpoint suites" check_failpoints
+step "server campaign smoke (20 kills)" check_campaign_smoke
 step "cargo deny check" cargo deny check
 step "check-vendored.sh" bash scripts/check-vendored.sh
 step "check-deny-fixtures.sh" bash scripts/check-deny-fixtures.sh

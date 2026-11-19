@@ -13,8 +13,10 @@
 //! Plan 05-19 (QA-01) adds the whole-server kill campaign against the real failpoint-enabled
 //! `ostro` binary: [`server_target`] (spawn / kill -9 / restart), [`workload`] (crash-saga
 //! load over HTTP + fsynced ack log), [`check`] (lost-ack / duplicate-journal / result
-//! checker, negative controls in `tests/check_controls.rs`).
+//! checker, negative controls in `tests/check_controls.rs`) and [`campaign`] (sharded,
+//! resumable runner + report, `tests/server_campaign.rs`).
 
+pub mod campaign;
 pub mod check;
 pub mod server_target;
 pub mod workload;

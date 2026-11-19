@@ -165,6 +165,17 @@ jobs:
           cargo test -p ostro-meta --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-engine --features failpoints --test aot_failpoints --locked -- --test-threads=1
           cargo test -p ostro-server --features failpoints --test failpoints_phase5 --locked -- --test-threads=1
+      - if: matrix.name == 'linux-x86_64-gnu'
+        name: Server campaign smoke (20 kills)
+        # QA-01 whole-server kill campaign (plan 05-19) from a freshly wiped state dir; keep
+        # in sync with check_campaign_smoke in scripts/ci-local.sh
+        env:
+          OSTRO_CAMPAIGN_STATE_DIR: target/campaign-smoke
+          OSTRO_CAMPAIGN_FAULTS: "20"
+        run: |
+          rm -rf target/campaign-smoke
+          cargo test --release -p ostro-crashtest --features failpoints --test server_campaign --locked -- --ignored --nocapture campaign
+          cargo test --release -p ostro-crashtest --features failpoints --test server_campaign --locked -- --ignored --nocapture report
       - if: matrix.os == 'macos-15'
         name: cargo build --release (ostro) + build-info
         run: |

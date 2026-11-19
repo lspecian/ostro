@@ -554,6 +554,27 @@ pub fn crash_saga_expected(input: &Value, go: &Value, extra: &Value) -> Result<V
     })
 }
 
+/// Crash-saga step retry cap (`max_attempts = 10`).
+pub const STEP_MAX_ATTEMPTS: u64 = 10;
+
+/// The journal ends a step with a retryable `transient` error after its last allowed
+/// attempt: `STEP_MAX_ATTEMPTS - 1` journaled attempt failures, then the final
+/// `step_completed` error. The guest's failure counter restarts with every activation, so
+/// crashes and evictions in the middle of a step's retries can exhaust the cap; this is
+/// crash-saga's documented `failed` outcome.
+pub fn retries_exhausted(events: &[Event]) -> bool {
+    events.iter().any(|e| {
+        e.kind == "step_completed" && e.details["outcome"]["error"]["kind"] == "transient" && {
+            let name = &e.details["name"];
+            events
+                .iter()
+                .filter(|a| a.kind == "step_attempt_failed" && &a.details["name"] == name)
+                .count() as u64
+                >= STEP_MAX_ATTEMPTS - 1
+        }
+    })
+}
+
 /// (b) Final outcome of one acked run after the settle (`events` = its journal).
 pub fn check_final(
     run_id: &str,
@@ -615,7 +636,8 @@ pub fn check_final(
                 && view
                     .failure
                     .as_deref()
-                    .is_some_and(|f| f.contains("transient")) => {}
+                    .is_some_and(|f| f.contains("transient"))
+                && retries_exhausted(events) => {}
         ("failed", _) if expected.is_err() => {}
         (s, acked) => out.push(v(
             Kind::WrongStatus,
