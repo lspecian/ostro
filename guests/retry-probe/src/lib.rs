@@ -14,6 +14,9 @@
 //! - `burn`: step fuel budget 1,000,000 and a policy max 3; the body spins forever, so the
 //!   step's fuel runs out (recorded as non-retryable `fuel_exhausted`).
 //! - `spin`: spins forever OUTSIDE any step (activation wall deadline applies).
+//! - `trap` (plan 04-16): the guest panics outside any step (`AttemptFailed(Trap)`).
+//! - `sleep:MS` (plan 04-16): step `before`, one durable `effects::sleep(MS)` + `wait`,
+//!   step `after`, then completes with `slept:MS` (no `probe` step).
 //!
 //! Raw wit-bindgen (no SDK dependency). The guest loops on `retry-now`, re-running the
 //! body in the same activation. The run always completes with a summary of the step's
@@ -27,6 +30,7 @@ wit_bindgen::generate!({
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use exports::ostro::runtime::workflows::{Guest, RunResult, WorkflowMeta};
+use ostro::runtime::effects::{self, WaitMode};
 use ostro::runtime::journal::{self, CompletionAck, StepStart};
 use ostro::runtime::types::{ErrorInfo, Failure, Payload, RetryPolicy, StepOptions};
 
@@ -142,10 +146,44 @@ fn summary(r: &Result<Payload, Failure>) -> String {
     }
 }
 
+/// A step with no policy whose body succeeds with `name` (replayed when journaled).
+fn plain_step(name: &str) {
+    let opts = StepOptions {
+        retry: None,
+        timeout_ms: None,
+        fuel: None,
+    };
+    if let StepStart::Execute(s) = journal::begin_step(name, &opts) {
+        let p = Payload {
+            content_type: TEXT.to_string(),
+            data: name.as_bytes().to_vec(),
+        };
+        let _ = s.complete(Ok(&p));
+    }
+}
+
+/// `sleep:MS`: step, durable sleep + wait, step.
+fn sleeper(ms: u64) -> Result<RunResult, Failure> {
+    plain_step("before");
+    let op = effects::sleep(ms);
+    let _ = effects::wait(&[op], WaitMode::All);
+    plain_step("after");
+    Ok(RunResult::Completed(Payload {
+        content_type: TEXT.to_string(),
+        data: format!("slept:{ms}").into_bytes(),
+    }))
+}
+
 fn probe(input: Payload) -> Result<RunResult, Failure> {
     let mode = String::from_utf8_lossy(&input.data).into_owned();
     if mode == "spin" {
         spin_forever();
+    }
+    if mode == "trap" {
+        panic!("retry-probe trap mode");
+    }
+    if let Some(ms) = mode.strip_prefix("sleep:") {
+        return sleeper(ms.parse().unwrap_or(100));
     }
     let outcome = match journal::begin_step("probe", &options(&mode)) {
         StepStart::Replayed(r) => r,

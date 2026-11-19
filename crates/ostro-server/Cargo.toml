@@ -15,6 +15,8 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+# CancellationToken for activations (04-16)
+tokio-util.workspace = true
 # used by 04-19 (`--ephemeral` TempDir) and 04-17
 tempfile.workspace = true
 # OS RNG for run rng_seed / token key (04-17)

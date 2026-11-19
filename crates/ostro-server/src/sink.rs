@@ -292,6 +292,19 @@ impl<L: ReplicatedLog> PartitionSink<L> {
         self.submit(self.next_seq(), Vec::new(), derived).await
     }
 
+    /// Submit intents only at an explicit `from_seq` (04-16). The executor's `Suspend` /
+    /// `EnqueueReady` CAS uses the journal end **as the engine saw it**, not
+    /// [`next_seq`](Self::next_seq): an unsupported completion journaled by this sink but
+    /// never delivered to the engine must fail the CAS (`Conflict` -> re-activate), or the
+    /// run would be suspended over an unconsumed input (04-13 lost wake-up rule).
+    pub async fn submit_intents_at(
+        &self,
+        from_seq: u64,
+        derived: Vec<Derived>,
+    ) -> Result<u64, AppendError> {
+        self.submit(from_seq, Vec::new(), derived).await
+    }
+
     /// Journal input events at the journal end (renumbered from `next_seq`), retrying when
     /// the end moved; on accept each event is sent on `inputs`. Fenced / terminal runs are
     /// not an error here: the activation learns about it on its next append.
