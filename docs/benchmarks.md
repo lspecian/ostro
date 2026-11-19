@@ -108,3 +108,72 @@ Reading the baseline: at concurrency 1 the first step runs after three sequentia
 commits (StartRun, the awaited AttemptGranted, the executor's RunStarted append), each
 about one fsync (2.5-3 ms here), plus instantiation. Throughput under load is bounded by the group commit: about 800 device
 flushes/s carry about 1,600 runs/s.
+
+### Start-path optimisations, before / after (plan 05-16)
+
+Same machine, release, P=16. A = profile A, B = profile B; "idle" = 1 client, 300 runs.
+
+| change | A inproc steps/s (64 clients) | A http steps/s | idle start→first step p50 / p99 (inproc) | idle p50 (http) | B inproc runs/s | kept |
+|---|---|---|---|---|---|---|
+| baseline (HEAD 21d9e58) | 15,598 / 16,513 / 16,184 | 15,839 | 9.83 / 13.4 ms | 11.1 ms | 1,667 | - |
+| 1. pipelined AttemptGranted + one record read per dispatch | 20,061 / 20,854 | 18,966 | 9.72 / 15.1 ms | 10.7 ms | 1,622 / 1,428 (noisy, see below) | **yes** |
+| 2. `StartRun.run_started` set by the API (experiment) | 30,001 / 30,363 | 29,759 | **3.38 / 5.5 ms**, 3.36 / 5.3 ms | 3.56 ms | 3,213 | **no** (apply support kept, API leaves the field empty) |
+
+1. **Pipelined grant** (dispatcher): the job starts once the grant's log offset is fixed,
+   without waiting for its fsync and apply; the executor's first append shares the grant's
+   group commit. Under load the 64-client latency drops from 29-30 ms to 20 ms and
+   throughput rises about 28%. On an idle node it changes little: the executor reaches its
+   RunStarted append while the grant's fsync is still running, so the two commits stay
+   back to back.
+2. **`StartRun.run_started`**: when the API pre-encodes RunStarted into the StartRun, apply
+   journals it at seq 0 and the executor's own RunStarted commit disappears; the first step
+   then runs right after StartRun's commit. Measured with the API setting the field, it is
+   the largest single win (idle p50 9.7 → 3.4 ms, under NFR-2.4's 5 ms even on WSL2;
+   profile A about 30,000 steps/s). It is **not enabled**: a run that never started would
+   no longer have an empty journal (`next_seq == 0`), which D3 and the 05-13/05-15 suites
+   pin (`schedule_to_start_without_capacity`, `signal_immediately_after_start`,
+   `lifecycle_api::cancel_before_start_is_flag_only_and_idempotent` fail with it). Apply
+   accepts the field (tests in `crates/ostro-partition/tests/apply_run_started.rs`) and
+   `run_started::encode_for_start` produces byte-identical events, so enabling it is a
+   start-path switch once D3 is amended (see the 05-16 SUMMARY).
+
+Profile B on this machine is noisy (1,119 to 1,984 runs/s across three runs of the same
+build): the WSL2 virtual disk's flush rate varied between 400 and 770 flushes/s in those
+runs, and runs/s follows it.
+
+## Phase 5 results
+
+Final start path of Phase 5 (plan 05-16): pipelined AttemptGranted, one record read per
+dispatch, executor RunStarted append (the API does not set `StartRun.run_started`).
+Environment as above (WSL2 6.6.87.2, 12 logical CPUs, ext4 on the virtual disk, release,
+P=16). The virtual disk's fdatasync cost moved between 2.2 and 6.9 ms during the final
+session, so each row carries the harness's own fsync measurement taken right after the load.
+
+| profile | transport | clients | steps/s | runs/s | start→first step p50 / p99 | flushes/s | CPU (cores) | bytes on disk | raw fsync p50 |
+|---|---|---|---|---|---|---|---|---|---|
+| A | inproc | 64 | **20,110 / 19,589 / 20,028** | 1,959-2,011 | 20.6-21.0 / 28.8-35.8 ms | 721-745 | 2.7 | 8.97 MB | 2.6-3.1 ms |
+| A | http | 64 | 19,385 | 1,939 | 21.0 / 43.6 ms | 722 | 3.3 | 8.97 MB | 2.6 ms |
+| A | inproc | 64 | 12,652 / 12,068 | 1,207-1,265 | 34.0-35.5 / 42-44 ms | 444-460 | 1.2-1.3 | 8.98 MB | 4.2-4.3 ms |
+| A | http | 64 | 15,740 | 1,574 | 22.9 / 57.4 ms | 594 | 1.9 | 8.98 MB | 6.9 ms |
+| A | inproc | 1 (idle) | 960 / 934 | 93-96 | **7.38 / 11.4 ms, 7.50 / 11.8 ms** | 849-853 | 0.22 | 2.29 MB | 2.2 ms |
+| A | inproc | 1 (idle) | 737 | 74 | 9.72 / 14.1 ms | 706 | 0.31 | 2.31 MB | 2.6 ms |
+| A | inproc | 1 (idle) | 411 / 399 | 40-41 | 18.6-19.5 / 26.7 ms | 393-412 | 0.22 | 2.32 MB | 4.6-4.7 ms |
+| A | http | 1 (idle) | 678 | 68 | 9.08 / 20.9 ms | 654 | 0.20 | 2.32 MB | 4.1 ms |
+| B | inproc | 64 | 1,271 / 1,265 (1,018-1,130 at 4.7-4.9 ms fsync) | same | 33.6-34.1 / 43.5-44.7 ms | 455-459 | 1.24 | 25.3 MB | 4.4 ms |
+| B | http | 64 | 1,261 (1,157 at 5.1 ms fsync) | same | 33.6 / 47.2 ms | 456 | 1.5 | 25.3 MB | 4.2 ms |
+
+Expiry (OPS-06), 50,000 events: apply blocked **33.6-44.8 ms** by the EXPIRE_OP chunk
+(record gone 37-48 ms after due). No bounded-delete continuation needed.
+
+**WSL2 advisory: target ≥ 5,000 steps/s (profile A) and p50 < 5 ms on native NVMe;
+measured here 19,589-20,110 steps/s (12,068-15,740 while the virtual disk's fsync was
+4-7 ms) / idle p50 7.4-9.7 ms at 2.2-2.6 ms fsync.** Throughput clears the Phase 5 exit
+target with room to spare even on WSL2. Idle latency does not: it is **fsync-bound**. Three
+WAL commits sit in series before the first step (StartRun, the grant, which the executor's
+RunStarted append queues behind, and that append), at 2.2-4.7 ms each here, and the
+measured p50 tracks the fsync cost (7.4 ms at 2.2 ms, 9.7 ms at 2.6 ms, 18.6-19.5 ms at
+4.6-4.7 ms). With `StartRun.run_started` set by the API (not enabled, see above) the
+same machine measured 3.4 ms.
+
+**Gate status: human_needed.** Run the documented command on native Linux NVMe 8 vCPU and
+record the results in 05-VALIDATION.md.
