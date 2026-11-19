@@ -189,7 +189,7 @@ Plans:
 - [x] 05-11-PLAN.md — Server seam: derive mappings, resume re-arm, executor lifecycle, pause hook, module_override, policy resolution + [runs] config (wave 4)
 - [x] 05-12-PLAN.md — Replay corpus tooling + seed entries + format corpus tooling (wave 4; QA-02)
 - [x] 05-13-PLAN.md — Server ControlPlane: lifecycle ops, dry_run, token verify, start fields + policies, long-poll (wave 5; API-05..07)
-- [ ] 05-14-PLAN.md — CLI verbs with --json/--dry-run + minimal deploy (wave 6; CLI-06)
+- [x] 05-14-PLAN.md — CLI verbs with --json/--dry-run + minimal deploy (wave 6; CLI-06)
 - [ ] 05-15-PLAN.md — Workflow semantics e2e (incl. signal right after start, resume after timeout, 1 MiB payloads, sleepers) (wave 6)
 - [ ] 05-16-PLAN.md — Perf harness + start-path optimisations; WSL2 advisory, native NVMe human_needed (wave 7)
 - [ ] 05-17-PLAN.md — order-saga via CLI on the final start path, quickstart timing, workflow-semantics docs (wave 8; SC-1, CLI-06)
@@ -417,7 +417,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 20/20 | Complete | 2026-11-19 |
-| 5. Workflow Semantics & Core Hardening | 17/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-21 empty-log anchoring, 05-07 meta pre-freeze encoding, 05-05 WIT freeze tooling, 05-04 lifecycle API surface, 05-06 Rust SDK tokens/continue-as-new/D11, 05-02 partition store schema + apply seams, 05-23 D22 retry logical clock, 05-24 D23 tenancy/upload name, 05-22 ready entries + attempt_failures/status_seq + parent_event forwarding, 05-10 phase-5 test guests + order-saga example, 05-08 apply waits/signals/tokens/cancel, 05-09 apply terminate/retry-resume/timeouts/continue-as-new/retention expiry, 05-11 server seam (derive waits/tokens/CAN, re-arm, F9, policies), 05-12 replay corpus (24 entries) + format-corpus tooling done, 05-13 server ControlPlane (lifecycle ops, dry_run, token verify, start fields + policies, long-poll) done) | - |
+| 5. Workflow Semantics & Core Hardening | 18/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-21 empty-log anchoring, 05-07 meta pre-freeze encoding, 05-05 WIT freeze tooling, 05-04 lifecycle API surface, 05-06 Rust SDK tokens/continue-as-new/D11, 05-02 partition store schema + apply seams, 05-23 D22 retry logical clock, 05-24 D23 tenancy/upload name, 05-22 ready entries + attempt_failures/status_seq + parent_event forwarding, 05-10 phase-5 test guests + order-saga example, 05-08 apply waits/signals/tokens/cancel, 05-09 apply terminate/retry-resume/timeouts/continue-as-new/retention expiry, 05-11 server seam (derive waits/tokens/CAN, re-arm, F9, policies), 05-12 replay corpus (24 entries) + format-corpus tooling done, 05-13 server ControlPlane (lifecycle ops, dry_run, token verify, start fields + policies, long-poll) done, 05-14 CLI-06 client verbs (--json/--dry-run, deploy) done) | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |

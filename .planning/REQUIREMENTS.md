@@ -158,7 +158,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **CLI-03**: `ostro init --lang {rust,python,ts}` scaffolds a project with pinned toolchains [FR-2.1]
 - [ ] **CLI-04**: `ostro build` produces a validated component + manifest for Rust, Python and TS with hermetic toolchains (cached downloads or `--docker`) [FR-2.2/2.3]
 - [ ] **CLI-05**: `ostro deploy [--activate]` builds if needed and uploads idempotently [FR-2.4]
-- [ ] **CLI-06**: `ostro run/ls/inspect/history/signal/cancel/retry` with `--json` and `--dry-run` where applicable [FR-2.5]
+- [x] **CLI-06**: `ostro run/ls/inspect/history/signal/cancel/retry` with `--json` and `--dry-run` where applicable [FR-2.5]
 - [ ] **CLI-07**: `ostro replay <run|--sample N> --module new.wasm` detects non-determinism before deploy (CI gate) [FR-2.6]
 - [ ] **CLI-08**: `ostro dev --watch` rebuilds and redeploys on save [FR-2.7]
 
@@ -350,7 +350,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | CLI-03 | Phase 10 | Pending |
 | CLI-04 | Phase 10 | Pending |
 | CLI-05 | Phase 10 | Pending |
-| CLI-06 | Phase 5 | Pending |
+| CLI-06 | Phase 5 | Complete (spawned-binary cli_verbs suite + --json snapshots: 05-14) |
 | CLI-07 | Phase 10 | Pending |
 | CLI-08 | Phase 10 | Pending |
 | UI-01 | Phase 11 | Pending |
