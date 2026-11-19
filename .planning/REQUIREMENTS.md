@@ -286,11 +286,11 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-01 | Phase 4 | Complete |
 | WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Pending |
-| WF-04 | Phase 5 | Pending |
-| WF-05 | Phase 5 | Pending (apply: waits/signals/timeouts 05-08) |
+| WF-04 | Phase 5 | Pending (derive CancelWait for cancel-op on waits: 05-11) |
+| WF-05 | Phase 5 | Pending (apply: waits/signals/timeouts 05-08; derive RegisterWait/CancelWait + resume re-arm: 05-11) |
 | WF-06 | Phase 9 | Pending |
 | WF-07 | Phase 4 (Rust) / Phase 9 (Py, TS) | Pending |
-| WF-08 | Phase 5 | Pending |
+| WF-08 | Phase 5 | Pending (server module_override hook + nondeterminism/patch tests: 05-11) |
 | WF-09 | Phase 5 | Pending (apply timeouts: 05-09; derive/executor: 05-11; e2e: 05-15) |
 | WF-10 | Phase 9 | Pending |
 | DISP-01 | Phase 4 | Complete |
@@ -306,7 +306,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | API-04 | Phase 4 | Complete |
 | API-05 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply signal/cancel: 05-08; apply terminate/retry: 05-09; server: 05-13) |
 | API-06 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
-| API-07 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply CompleteToken: 05-08; server: 05-13) |
+| API-07 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply CompleteToken: 05-08; server: 05-13; derive token waits (no more unsupported failure): 05-11) |
 | API-08 | Phase 13 | Pending |
 | TRIG-01 | Phase 8 | Pending |
 | TRIG-02 | Phase 8 | Pending |
