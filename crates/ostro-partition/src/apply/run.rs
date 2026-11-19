@@ -157,15 +157,27 @@ pub(crate) fn enqueue_ready(
 
 // ------------------------------------------------------------------ StartRun
 
-/// Validated Phase 4 StartRun fields (14..18), as stored in [`RunRecord`].
+/// Validated Phase 4/5 StartRun fields (14..22), as stored in [`RunRecord`].
 struct StartExtras {
     module_sha: Option<[u8; 32]>,
     tenant: Option<String>,
     traceparent: Option<String>,
     run_timeout_ms: Option<u64>,
+    retry_of: Option<RunId>,
+    continued_from: Option<RunId>,
 }
 
-/// Checks fields 14..18 against the `ostro_types::command` limits. No reads.
+/// An optional run id field: empty = none, else exactly 18 valid bytes.
+fn opt_run_id(b: &[u8]) -> Check<Option<RunId>> {
+    if b.is_empty() {
+        return Ok(None);
+    }
+    RunId::from_bytes(b)
+        .map(Some)
+        .map_err(|_| invalid(InvalidCode::BadRunId))
+}
+
+/// Checks fields 14..22 against the `ostro_types::command` limits. No reads.
 fn check_start_extras(s: &StartRun) -> Check<StartExtras> {
     let module_sha = match s.module_sha.len() {
         0 => None,
@@ -183,12 +195,16 @@ fn check_start_extras(s: &StartRun) -> Check<StartExtras> {
     {
         return Err(invalid(InvalidCode::FieldTooLong));
     }
+    let retry_of = opt_run_id(&s.retry_of)?;
+    let continued_from = opt_run_id(&s.continued_from)?;
     let non_empty = |v: &String| (!v.is_empty()).then(|| v.clone());
     Ok(StartExtras {
         module_sha,
         tenant: non_empty(&s.tenant),
         traceparent: non_empty(&s.traceparent),
         run_timeout_ms: (s.run_timeout_ms != 0).then_some(s.run_timeout_ms),
+        retry_of,
+        continued_from,
     })
 }
 
@@ -279,6 +295,21 @@ pub(crate) fn start_run(
         traceparent: extras.traceparent,
         run_timeout_ms: extras.run_timeout_ms,
         completed_at_ms: None,
+        schedule_to_start_ms: s.schedule_to_start_ms,
+        retention_ms: s.retention_ms,
+        idempotency_key: s.idempotency_key.clone(),
+        terminal_reason: String::new(),
+        resumable: false,
+        retry_of: extras.retry_of,
+        continued_from: extras.continued_from,
+        cancel_reason: String::new(),
+        resumed_count: 0,
+        open_waits: 0,
+        s2s_due_ms: 0,
+        attempt_failures: 0,
+        status_seq: None,
+        continued_to: None,
+        pause: None,
     };
     if let Some(input) = &s.input {
         b.insert(

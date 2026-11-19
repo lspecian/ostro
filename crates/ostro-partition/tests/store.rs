@@ -4,19 +4,23 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use bytes::Bytes;
 use fjall::{KeyspaceCreateOptions, PersistMode};
 use ostro_partition::store::batch::MetaUpdate;
 use ostro_partition::store::config::state_dir;
 use ostro_partition::store::keys::{
-    children_key, children_prefix, decode_outbox_key, decode_ready_key, decode_timer_key,
-    dedupe_key, event_key, inbound_key, inbox_key, outbox_key, outbox_prefix, payload_key,
-    ready_key, run_key, timer_key,
+    INBOX_LEGACY_TAG, WAIT_NAME, WAIT_ROW, children_key, children_prefix, decode_outbox_key,
+    decode_ready_key, decode_signal_inbox_key, decode_timer_key, decode_wait_key,
+    decode_wait_name_key, dedupe_key, event_key, inbound_key, inbox_key, outbox_key, outbox_prefix,
+    payload_key, ready_key, run_key, run_prefix, signal_inbox_key, signal_inbox_prefix,
+    signal_seen_key, timer_key, wait_key, wait_name_key, wait_name_prefix, wait_prefixes,
 };
 use ostro_partition::store::values::{
-    self, CursorMeta, InboxMsg, ReadySlot, ReadyValue, RunRecord, RunStatus,
+    self, CursorMeta, InboxMsg, PauseMark, ReadySlot, ReadyValue, RunRecord, RunStatus, SignalSlot,
+    WaitKind, WaitRow,
 };
 use ostro_partition::{PartitionStore, StoreConfig, StoreError, StoreMeta, TABLES, Table};
-use ostro_types::{Offset, PartitionCount, PartitionId, RunId};
+use ostro_types::{Offset, PartitionCount, PartitionId, PayloadRef, RunId};
 use proptest::prelude::*;
 
 fn count(n: u16) -> PartitionCount {
@@ -77,9 +81,14 @@ fn defaults_and_tables() {
             "children",
             "dlq",
             "effects",
-            "running"
+            "running",
+            "waits",
+            "signal_seen"
         ]
     );
+    // RESERVATIONS.md §6: ordinal = declaration index.
+    assert_eq!(Table::Waits as u8, 14);
+    assert_eq!(Table::SignalSeen as u8, 15);
     let mut sorted = TABLES;
     sorted.sort();
     assert_eq!(sorted, TABLES, "TABLES is declaration order");
@@ -305,7 +314,10 @@ fn key_layouts() {
     assert_eq!(event_key(&r, 5).len(), 26);
     assert_eq!(&event_key(&r, 5)[18..], &5u64.to_be_bytes());
     assert_eq!(payload_key(&r, 1)[18], 1);
-    assert_eq!(inbox_key(&r, 9).len(), 26);
+    assert_eq!(inbox_key(&r, 9).len(), 28);
+    assert_eq!(&inbox_key(&r, 9)[18..20], &INBOX_LEGACY_TAG.to_be_bytes());
+    assert_eq!(&inbox_key(&r, 9)[20..], &9u64.to_be_bytes());
+    assert!(inbox_key(&r, 9).starts_with(&run_prefix(&r)));
     assert_eq!(inbound_key(7), 7u16.to_be_bytes().to_vec());
     assert_eq!(&dedupe_key("wf", b"idem")[..4], &[0, 2, b'w', b'f']);
     assert_eq!(&dedupe_key("wf", b"idem")[4..], b"idem");
@@ -318,6 +330,107 @@ fn key_layouts() {
         Some(("q".to_string(), -5, 99, r))
     );
     assert_eq!(decode_timer_key(b"short"), None);
+}
+
+#[test]
+fn phase5_key_layouts() {
+    let r = run(3, 1);
+    // waits: 0x01 ‖ run ‖ op and 0x02 ‖ run ‖ name_len ‖ name ‖ op.
+    let wk = wait_key(&r, 9);
+    assert_eq!(wk.len(), 1 + 18 + 8);
+    assert_eq!(wk[0], WAIT_ROW);
+    assert_eq!(&wk[1..19], r.as_bytes());
+    assert_eq!(decode_wait_key(&wk), Some((r, 9)));
+    let nk = wait_name_key(&r, "approve", 9);
+    assert_eq!(nk[0], WAIT_NAME);
+    assert_eq!(&nk[19..21], &7u16.to_be_bytes());
+    assert_eq!(&nk[21..28], b"approve");
+    assert_eq!(&nk[28..], &9u64.to_be_bytes());
+    assert_eq!(
+        decode_wait_name_key(&nk),
+        Some((r, "approve".to_string(), 9))
+    );
+    assert!(nk.starts_with(&wait_name_prefix(&r, "approve")));
+    assert!(!nk.starts_with(&wait_name_prefix(&r, "approv")));
+    let [p1, p2] = wait_prefixes(&r);
+    assert!(wk.starts_with(&p1) && !wk.starts_with(&p2));
+    assert!(nk.starts_with(&p2) && !nk.starts_with(&p1));
+    assert_eq!(decode_wait_key(&nk), None);
+    assert_eq!(decode_wait_name_key(&wk), None);
+
+    // signal inbox: run ‖ name_len ‖ name ‖ n; legacy rows never match a signal prefix.
+    let sk = signal_inbox_key(&r, "go", 4);
+    assert_eq!(sk.len(), 18 + 2 + 2 + 8);
+    assert!(sk.starts_with(&signal_inbox_prefix(&r, "go")));
+    assert!(sk.starts_with(&run_prefix(&r)));
+    assert_eq!(decode_signal_inbox_key(&sk), Some((r, "go".to_string(), 4)));
+    assert_eq!(decode_signal_inbox_key(&inbox_key(&r, 4)), None);
+    assert!(!inbox_key(&r, 0).starts_with(&signal_inbox_prefix(&r, "")));
+    assert!(signal_inbox_key(&r, "", 0).starts_with(&signal_inbox_prefix(&r, "")));
+
+    // signal_seen: run ‖ request_id.
+    assert_eq!(&signal_seen_key(&r, b"req-1")[..18], r.as_bytes());
+    assert_eq!(&signal_seen_key(&r, b"req-1")[18..], b"req-1");
+}
+
+#[test]
+fn waits_and_signal_inbox_scan_in_fifo_order() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = ostro_testkit::fs::tempdir();
+    let (store, _) = open(dir.path(), 3, 16)?;
+    let r = run(3, 1);
+    let other = run(3, 2);
+    let mut b = store.batch();
+    // Inserted out of order, across names and runs.
+    for op in [300u64, 7, 1 << 40, 42, 256] {
+        b.insert(Table::Waits, wait_name_key(&r, "a", op), Vec::new());
+        b.insert(
+            Table::Waits,
+            wait_key(&r, op),
+            values::encode(&WaitRow {
+                kind: WaitKind::Signal,
+                name: "a".into(),
+                timeout_due_ms: 0,
+            }),
+        );
+    }
+    b.insert(Table::Waits, wait_name_key(&r, "ab", 1), Vec::new());
+    b.insert(Table::Waits, wait_name_key(&r, "", 2), Vec::new());
+    b.insert(Table::Waits, wait_name_key(&other, "a", 3), Vec::new());
+    for n in [9u64, 2, 300, 0] {
+        b.insert(
+            Table::Inbox,
+            signal_inbox_key(&r, "a", n),
+            values::encode(&SignalSlot::Journaled {
+                payload_seq: n,
+                sent_at_ms: 1,
+            }),
+        );
+    }
+    b.insert(Table::Inbox, signal_inbox_key(&r, "b", 1), Vec::new());
+    b.insert(Table::Inbox, inbox_key(&r, 5), Vec::new());
+    b.commit(&meta_update(1))?;
+
+    let rd = store.reader();
+    let ops: Vec<u64> = rd
+        .prefix(Table::Waits, &wait_name_prefix(&r, "a"), usize::MAX)?
+        .iter()
+        .map(|(k, _)| decode_wait_name_key(k).expect("index key").2)
+        .collect();
+    assert_eq!(ops, vec![7, 42, 256, 300, 1 << 40], "oldest op first");
+    let [p1, p2] = wait_prefixes(&r);
+    assert_eq!(rd.prefix(Table::Waits, &p1, usize::MAX)?.len(), 5);
+    assert_eq!(rd.prefix(Table::Waits, &p2, usize::MAX)?.len(), 7);
+    let ns: Vec<u64> = rd
+        .prefix(Table::Inbox, &signal_inbox_prefix(&r, "a"), usize::MAX)?
+        .iter()
+        .map(|(k, _)| decode_signal_inbox_key(k).expect("signal key").2)
+        .collect();
+    assert_eq!(ns, vec![0, 2, 9, 300], "arrival order");
+    assert_eq!(
+        rd.prefix(Table::Inbox, &run_prefix(&r), usize::MAX)?.len(),
+        6
+    );
+    Ok(())
 }
 
 #[test]
@@ -432,7 +545,59 @@ fn value_round_trips() {
         traceparent: None,
         run_timeout_ms: Some(30_000),
         completed_at_ms: Some(99),
+        schedule_to_start_ms: 5_000,
+        retention_ms: 86_400_000,
+        idempotency_key: b"idem".to_vec(),
+        terminal_reason: "run_timeout".into(),
+        resumable: true,
+        retry_of: Some(run(3, 4)),
+        continued_from: Some(run(3, 5)),
+        cancel_reason: "stop".into(),
+        resumed_count: 2,
+        open_waits: 3,
+        s2s_due_ms: 6_000,
+        attempt_failures: 4,
+        status_seq: Some(11),
+        continued_to: Some(run(3, 6)),
+        pause: Some(PauseMark {
+            reason: 2,
+            at_ms: 77,
+            detail: "operator".into(),
+        }),
     });
+    // Defaults: every Phase 5 field empty/zero/None.
+    round_trip(&RunRecord::default());
+    round_trip(&RunRecord {
+        workflow: "wf".into(),
+        pause: None,
+        retry_of: None,
+        ..Default::default()
+    });
+    round_trip(&WaitRow {
+        kind: WaitKind::Signal,
+        name: "approve".into(),
+        timeout_due_ms: 1234,
+    });
+    round_trip(&WaitRow {
+        kind: WaitKind::Token,
+        name: String::new(),
+        timeout_due_ms: 0,
+    });
+    round_trip(&SignalSlot::Journaled {
+        payload_seq: 7,
+        sent_at_ms: 8,
+    });
+    round_trip(&SignalSlot::Pending {
+        event: PayloadRef::inline(Bytes::from_static(b"\x01encoded-signal-payload")),
+        sent_at_ms: 9,
+    });
+    // A blob-backed pending event is a PayloadRef field of a documented postcard value
+    // (BlobRef invariant), never opaque bytes.
+    round_trip(&SignalSlot::Pending {
+        event: PayloadRef::blob([0xcd; 32], 1 << 20),
+        sent_at_ms: 10,
+    });
+    round_trip(&ReadyValue::default());
     round_trip(&ReadyValue {
         concurrency_key: "ck".into(),
     });
@@ -443,9 +608,13 @@ fn value_round_trips() {
         RunStatus::Completed,
         RunStatus::Failed,
         RunStatus::Cancelled,
+        RunStatus::Terminated,
+        RunStatus::TimedOut,
+        RunStatus::ContinuedAsNew,
     ] {
         round_trip(&s);
     }
+    assert_eq!(RunStatus::default(), RunStatus::Scheduled);
     assert!(RunStatus::Completed.is_terminal());
     assert!(RunStatus::Failed.is_terminal());
     assert!(RunStatus::Cancelled.is_terminal());

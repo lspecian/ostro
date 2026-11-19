@@ -106,9 +106,142 @@ pub fn decode_timer_key(k: &[u8]) -> Option<(u64, RunId, u64)> {
     Some((due, run, op))
 }
 
-/// `inbox`: run ‖ n.
+/// Name-length sentinel of legacy `inbox` rows. Signal names are at most
+/// `MAX_SIGNAL_NAME_LEN` (256) bytes, so no signal row ever has this length field.
+pub const INBOX_LEGACY_TAG: u16 = 0xFFFF;
+
+/// Legacy `inbox` row (value [`InboxMsg`](super::values::InboxMsg)): run ‖ `0xFFFF` ‖ n.
+///
+/// Two key shapes share the `inbox` keyspace (plan 05-02): these legacy rows and the signal
+/// rows of [`signal_inbox_key`]. The sentinel keeps every [`signal_inbox_prefix`] scan free
+/// of legacy rows. `RunRecord.inbox_next` supplies `n` for both shapes.
 pub fn inbox_key(run: &RunId, n: u64) -> Vec<u8> {
-    event_key(run, n)
+    let mut k = Vec::with_capacity(RUN_LEN + 2 + 8);
+    k.extend_from_slice(run.as_bytes());
+    k.extend_from_slice(&INBOX_LEGACY_TAG.to_be_bytes());
+    k.extend_from_slice(&n.to_be_bytes());
+    k
+}
+
+/// Prefix of every `inbox` row of one run (both shapes); also the `signal_seen` and
+/// `events` run prefix.
+pub fn run_prefix(run: &RunId) -> Vec<u8> {
+    run.as_bytes().to_vec()
+}
+
+fn put_name(out: &mut Vec<u8>, name: &str) {
+    assert!(
+        name.len() < usize::from(INBOX_LEGACY_TAG),
+        "signal name too long for a key (apply validates MAX_SIGNAL_NAME_LEN first)"
+    );
+    put_str(out, name);
+}
+
+/// Prefix of the signal `inbox` rows of `(run, name)`: run ‖ name_len u16 ‖ name.
+pub fn signal_inbox_prefix(run: &RunId, name: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(RUN_LEN + 2 + name.len() + 8);
+    k.extend_from_slice(run.as_bytes());
+    put_name(&mut k, name);
+    k
+}
+
+/// Signal `inbox` row (value [`SignalSlot`](super::values::SignalSlot)):
+/// run ‖ name_len u16 ‖ name ‖ n BE. A prefix scan over [`signal_inbox_prefix`] yields one
+/// name's buffered signals in arrival (FIFO) order.
+pub fn signal_inbox_key(run: &RunId, name: &str, n: u64) -> Vec<u8> {
+    let mut k = signal_inbox_prefix(run, name);
+    k.extend_from_slice(&n.to_be_bytes());
+    k
+}
+
+/// Inverse of [`signal_inbox_key`]: `(run, name, n)`; `None` for legacy rows.
+pub fn decode_signal_inbox_key(k: &[u8]) -> Option<(RunId, String, u64)> {
+    let run = RunId::from_bytes(k.get(..RUN_LEN)?).ok()?;
+    let rest = &k[RUN_LEN..];
+    let len = u16::from_be_bytes(rest.get(..2)?.try_into().ok()?);
+    if len == INBOX_LEGACY_TAG || rest.len() != 2 + usize::from(len) + 8 {
+        return None;
+    }
+    let name = std::str::from_utf8(&rest[2..2 + usize::from(len)])
+        .ok()?
+        .to_string();
+    let n = read_u64(&rest[2 + usize::from(len)..])?;
+    Some((run, name, n))
+}
+
+/// Shape byte of a `waits` wait row ([`wait_key`]).
+pub const WAIT_ROW: u8 = 0x01;
+/// Shape byte of a `waits` FIFO index row ([`wait_name_key`]).
+pub const WAIT_NAME: u8 = 0x02;
+
+/// `waits` wait row (value [`WaitRow`](super::values::WaitRow)): `0x01` ‖ run ‖ op BE.
+pub fn wait_key(run: &RunId, op: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + RUN_LEN + 8);
+    k.push(WAIT_ROW);
+    k.extend_from_slice(run.as_bytes());
+    k.extend_from_slice(&op.to_be_bytes());
+    k
+}
+
+/// Prefix of the `waits` FIFO index rows of `(run, name)`: `0x02` ‖ run ‖ name_len ‖ name.
+pub fn wait_name_prefix(run: &RunId, name: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + RUN_LEN + 2 + name.len() + 8);
+    k.push(WAIT_NAME);
+    k.extend_from_slice(run.as_bytes());
+    put_name(&mut k, name);
+    k
+}
+
+/// `waits` FIFO index row (empty value): `0x02` ‖ run ‖ name_len u16 ‖ name ‖ op BE. A
+/// prefix scan over [`wait_name_prefix`] yields one name's waits oldest op first.
+pub fn wait_name_key(run: &RunId, name: &str, op: u64) -> Vec<u8> {
+    let mut k = wait_name_prefix(run, name);
+    k.extend_from_slice(&op.to_be_bytes());
+    k
+}
+
+/// The two `waits` prefixes of one run: `[0x01 ‖ run, 0x02 ‖ run]`.
+pub fn wait_prefixes(run: &RunId) -> [Vec<u8>; 2] {
+    let mut a = Vec::with_capacity(1 + RUN_LEN);
+    a.push(WAIT_ROW);
+    a.extend_from_slice(run.as_bytes());
+    let mut b = Vec::with_capacity(1 + RUN_LEN);
+    b.push(WAIT_NAME);
+    b.extend_from_slice(run.as_bytes());
+    [a, b]
+}
+
+/// Inverse of [`wait_key`]: `(run, op)`.
+pub fn decode_wait_key(k: &[u8]) -> Option<(RunId, u64)> {
+    if k.len() != 1 + RUN_LEN + 8 || k[0] != WAIT_ROW {
+        return None;
+    }
+    let run = RunId::from_bytes(&k[1..1 + RUN_LEN]).ok()?;
+    Some((run, read_u64(&k[1 + RUN_LEN..])?))
+}
+
+/// Inverse of [`wait_name_key`]: `(run, name, op)`.
+pub fn decode_wait_name_key(k: &[u8]) -> Option<(RunId, String, u64)> {
+    if k.first() != Some(&WAIT_NAME) {
+        return None;
+    }
+    let run = RunId::from_bytes(k.get(1..1 + RUN_LEN)?).ok()?;
+    let rest = &k[1 + RUN_LEN..];
+    let len = usize::from(u16::from_be_bytes(rest.get(..2)?.try_into().ok()?));
+    if rest.len() != 2 + len + 8 {
+        return None;
+    }
+    let name = std::str::from_utf8(&rest[2..2 + len]).ok()?.to_string();
+    Some((run, name, read_u64(&rest[2 + len..])?))
+}
+
+/// `signal_seen` (D13 signal dedupe; empty value): run ‖ request_id (raw, rest of key).
+/// Deleted with the run (prefix [`run_prefix`]).
+pub fn signal_seen_key(run: &RunId, request_id: &[u8]) -> Vec<u8> {
+    let mut k = Vec::with_capacity(RUN_LEN + request_id.len());
+    k.extend_from_slice(run.as_bytes());
+    k.extend_from_slice(request_id);
+    k
 }
 
 /// `dedupe`: workflow ‖ idempotency key (raw, rest of key).

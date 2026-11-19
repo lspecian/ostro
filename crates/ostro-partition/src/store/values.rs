@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use ostro_types::{PayloadRef, RunId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +24,10 @@ pub struct CursorMeta {
     pub outbox_truncated: BTreeMap<u16, u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunStatus {
+    /// `Default` only so `RunRecord` can derive it (literal sites use `..Default::default()`).
+    #[default]
     Scheduled,
     Ready,
     Running,
@@ -61,7 +64,12 @@ pub struct ReadySlot {
     pub ready_at_ms: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The run record (`runs` keyspace). Positional postcard: fields are only ever appended.
+///
+/// Derives `Default` so literal sites (tests, fixtures) write `..Default::default()` and keep
+/// compiling when fields are appended (plan 05-02). Apply never builds a record from
+/// `Default` without setting every field it owns.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub workflow: String,
     pub workflow_version: u32,
@@ -95,13 +103,144 @@ pub struct RunRecord {
     pub run_timeout_ms: Option<u64>,
     /// `CompleteRun.completed_at_ms` of the terminal transition (0 = none).
     pub completed_at_ms: Option<u64>,
+    // ---- Phase 5 additions (plan 05-02). Appended at the end: pre-freeze positional postcard
+    // change with no VALUE_FORMAT bump (delete pre-Phase-5 dev data dirs). After the 05-20
+    // freeze every change here needs a row migrator (amended D18, docs/storage-format.md).
+    /// `StartRun.schedule_to_start_ms` (0 = none). Initial start only (D2).
+    pub schedule_to_start_ms: u64,
+    /// `StartRun.retention_ms` of the terminal run (0 = keep forever; D9).
+    pub retention_ms: u64,
+    /// `StartRun.idempotency_key` (empty = none). Stored so expiry can delete the dedupe row
+    /// `(workflow, idempotency_key)` (05-09). Cron starts dedupe under `__cron/<schedule>`
+    /// with the fire time and store their own (usually empty) key here.
+    pub idempotency_key: Vec<u8>,
+    /// Reason of the terminal transition (`run_timeout`, `schedule_to_start`, an operator's
+    /// terminate reason; empty for executor completions).
+    pub terminal_reason: String,
+    /// The terminal run may be resumed in place by `RetryRun` (D1; `CompleteRun.resumable`).
+    pub resumable: bool,
+    /// `StartRun.retry_of`: the run this run retries as a new linked run (D1).
+    #[serde(with = "opt_run_id")]
+    pub retry_of: Option<RunId>,
+    /// `StartRun.continued_from`: the predecessor this run continues (D10).
+    #[serde(with = "opt_run_id")]
+    pub continued_from: Option<RunId>,
+    /// Reason of the first graceful cancel request (`RequestCancel` / inbound `CancelRun`).
+    pub cancel_reason: String,
+    /// Number of resume-in-place retries (D1).
+    pub resumed_count: u32,
+    /// Live waits of the run (`waits` rows of shape 0x01). Terminal cleanup skips both
+    /// `waits` prefix scans when it is 0.
+    pub open_waits: u32,
+    /// Due time of the pending `SCHEDULE_TO_START_OP` timer (0 = none), so the first grant
+    /// deletes it with one point delete (D2).
+    pub s2s_due_ms: u64,
+    /// Durable count of retryable attempt failures (pre-freeze F9; incremented on
+    /// `AttemptGranted.after_failure` by 05-22, reset by RetryRun in 05-09).
+    pub attempt_failures: u32,
+    /// Seq of the last `StatusPublished` journal event (pre-freeze F10; set by 05-22).
+    pub status_seq: Option<u64>,
+    /// The successor of a run that continued as new (Phase 9 PF-F2; set by 05-09).
+    #[serde(with = "opt_run_id")]
+    pub continued_to: Option<RunId>,
+    /// Pause marker (Phase 7 F1). Stored only; Phase 5 never sets it.
+    pub pause: Option<PauseMark>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Why and when a run was paused (Phase 7 F1, stored only in Phase 5).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PauseMark {
+    /// Pause reason code (Phase 7 assigns the values).
+    pub reason: u8,
+    /// Time the pause took effect (ms).
+    pub at_ms: u64,
+    /// Human-readable detail.
+    pub detail: String,
+}
+
+/// Value of a `ready` row. Derives `Default` (literal sites use `..Default::default()`);
+/// 05-22 appends the Phase 7 F3/F7 fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyValue {
     pub concurrency_key: String,
 }
 
+/// What a `waits` row waits for (mirrors `ostro_types::command::WaitKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaitKind {
+    /// A named signal.
+    Signal,
+    /// An await-token completion.
+    Token,
+}
+
+/// Value of a `waits` wait row (`wait_key(run, op)`, shape 0x01). The FIFO index row
+/// (`wait_name_key`, shape 0x02) has an empty value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitRow {
+    pub kind: WaitKind,
+    /// Signal name (empty for tokens).
+    pub name: String,
+    /// Due time of the wait-timeout timer `(timeout_due_ms, run, op)` (0 = none).
+    pub timeout_due_ms: u64,
+}
+
+/// Value of a signal inbox row (`signal_inbox_key(run, name, n)`): a buffered signal no wait
+/// has consumed yet (D21). Inbox rows never hold raw signal payload bytes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SignalSlot {
+    /// The signal's `SignalPayload` (kind 96) event is already journaled at `payload_seq`;
+    /// a later match journals `SignalMatched{op, payload_seq}`.
+    Journaled { payload_seq: u64, sent_at_ms: u64 },
+    /// The signal arrived before the run's seq 0 existed (B1): `event` holds the
+    /// submitter-encoded `SignalPayload` event bytes (inline or blob; stored as the prost
+    /// `PayloadRef` encoding, so a `BlobRef` here is covered by the BlobRef invariant). The
+    /// seq-0 batch journals it and converts the slot to `Journaled`.
+    Pending {
+        #[serde(with = "payload_ref_bytes")]
+        event: PayloadRef,
+        sent_at_ms: u64,
+    },
+}
+
+/// serde for `Option<RunId>` as `Option<[u8; 18]>`.
+mod opt_run_id {
+    use ostro_types::RunId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<RunId>, s: S) -> Result<S::Ok, S::Error> {
+        v.map(|r| *r.as_bytes()).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RunId>, D::Error> {
+        Option::<[u8; 18]>::deserialize(d)?
+            .map(|b| RunId::from_bytes(&b).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
+/// serde for a prost `PayloadRef` as its prost encoding (a byte string).
+mod payload_ref_bytes {
+    use ostro_types::PayloadRef;
+    use prost::Message;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &PayloadRef, s: S) -> Result<S::Ok, S::Error> {
+        v.encode_to_vec().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PayloadRef, D::Error> {
+        let b = <Vec<u8>>::deserialize(d)?;
+        PayloadRef::decode(b.as_slice()).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Value of a legacy inbox row (`inbox_key(run, n)`, name-length sentinel `0xFFFF`).
+///
+/// Signals move to [`SignalSlot`] rows keyed by name (05-08). Until 05-08 replaces the inbound
+/// paths, inbound `Signal` and `CancelRun` still write `Signal`/`CancelRequested` rows here
+/// (the Phase 2 shuffler exactly-once suites observe them), and inbound `ChildCompleted`
+/// keeps writing `ChildCompleted` until Phase 9 journals it as an input.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InboxMsg {
     Signal {

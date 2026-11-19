@@ -1,4 +1,4 @@
-# Ostro on-disk format (Phase 2, with Phase 4 additions in §12)
+# Ostro on-disk format (Phase 2, with Phase 4 additions in §12 and Phase 5 additions in §13)
 
 Status: fixed at the end of Phase 2 (plan 02-16). This document describes what the code writes today. Each section names the source file that defines the format, and the golden files and tests that pin it.
 
@@ -119,7 +119,7 @@ Inline payloads are limited to 256 KiB (`INLINE_PAYLOAD_LIMIT`). Apply rejects a
 
 ## 6. State keyspaces (`crates/ostro-partition/src/store/`)
 
-There are 14 fjall keyspaces per partition (13 in Phase 2; `running` added by 04-12, see §12). Their declaration order (`TABLES`) is the digest order. Keys use big-endian integers. A string inside a key is `u16 BE len ‖ utf8`. A run id inside a key is its 18 raw bytes. Values marked *postcard* are `VALUE_FORMAT (0x01) ‖ postcard(value)` (`values.rs`). Values marked *prost* are the protobuf bytes of the named message.
+There are 16 fjall keyspaces per partition (13 in Phase 2; `running` added by 04-12, see §12; `waits` and `signal_seen` added by 05-02, see §13). Keyspace ordinals and on-disk names are allocated only in `.planning/RESERVATIONS.md` §6. Their declaration order (`TABLES`) is the digest order. Keys use big-endian integers. A string inside a key is `u16 BE len ‖ utf8`. A run id inside a key is its 18 raw bytes. Values marked *postcard* are `VALUE_FORMAT (0x01) ‖ postcard(value)` (`values.rs`). Values marked *prost* are the protobuf bytes of the named message.
 
 | # | keyspace | key | value |
 |---|---|---|---|
@@ -129,7 +129,7 @@ There are 14 fjall keyspaces per partition (13 in Phase 2; `running` added by 04
 | 3 | `payloads` | run ‖ kind u8 (0 = input, 1 = result) | prost `PayloadRef` |
 | 4 | `ready` | str queue ‖ !(priority as u32 ^ 0x8000_0000) u32 (higher priority first) ‖ ready_at_ms u64 ‖ run | postcard `ReadyValue { concurrency_key }` |
 | 5 | `timers` | due_at_ms u64 ‖ run ‖ op u64 (op `u64::MAX` = delayed run start) | empty |
-| 6 | `inbox` | run ‖ n u64 | postcard `InboxMsg` (Signal / ChildCompleted / CancelRequested / TimerFired; the TimerFired variant is no longer written since plan 04-13, see §12) |
+| 6 | `inbox` | two shapes (§13): legacy run ‖ `0xFFFF` u16 ‖ n u64, and signal run ‖ str name ‖ n u64 | legacy: postcard `InboxMsg` (Signal / ChildCompleted / CancelRequested / TimerFired; TimerFired is no longer written since 04-13); signal: postcard `SignalSlot` |
 | 7 | `dedupe` | str workflow ‖ idempotency key (raw, rest of key); cron: str `"__cron/<schedule_id>"` ‖ fire_time_ms u64 | run id (18) |
 | 8 | `outbox` | target u16 ‖ seq u64 (seqs start at 1) | prost `OutboxMsg` |
 | 9 | `inbound_seen` | source partition u16 | highest applied seq u64 BE |
@@ -137,6 +137,8 @@ There are 14 fjall keyspaces per partition (13 in Phase 2; `running` added by 04
 | 11 | `dlq` | reserved (no rows written in Phase 2) | |
 | 12 | `effects` | reserved (no rows written in Phase 2) | |
 | 13 | `running` | run (18) | postcard `(epoch u32, n u32)`: the current attempt token (Phase 4, §12) |
+| 14 | `waits` | `0x01` ‖ run ‖ op u64, or `0x02` ‖ run ‖ str name ‖ op u64 (§13) | `0x01`: postcard `WaitRow`; `0x02`: empty |
+| 15 | `signal_seen` | run ‖ request_id (raw, rest of key) | empty (§13) |
 
 `RunRecord` (postcard, field order is the encoding): workflow String, workflow_version u32, queue String, status `RunStatus` (Scheduled, Ready, Running, Completed, Failed, Cancelled), current_attempt `Option<(u32, u32)>`, next_seq u64, ready `Option<ReadySlot{priority i32, ready_at_ms u64}>`, parent `Option<([u8;18], u64)>`, cancel_requested bool, concurrency_key String, priority i32, created_at_ms u64, rng_seed `Vec<u8>`, inbox_next u64, children u32, then the Phase 4 trailing fields (§12): module_sha `Option<[u8;32]>`, tags `Vec<String>`, tenant `Option<String>`, traceparent `Option<String>`, run_timeout_ms `Option<u64>`, completed_at_ms `Option<u64>`. Because postcard is positional, changing a stored struct means a new `VALUE_FORMAT` byte or a new key. After the Phase 5 freeze this is binding; the Phase 4 change in §12 is the one deliberate pre-freeze exception.
 
@@ -173,6 +175,7 @@ Folded into the rolling hash, so they are part of the format. New codes are appe
 | Rejected(PayloadTooLarge) | 24 |
 | Rejected(WrongPartition) | 25 |
 | Rejected(Invalid(_)) (any detail) | 26 |
+| Rejected(RunCompleted) | 27 (Phase 5, §13) |
 
 `InvalidCode` details (Decode, Empty, BadRunId, MissingToken, EventsNotContiguous, MissingField, NotImplemented, BadIntent, FieldTooLong, BadSource, TruncateBeyondEnd; Phase 4: BadLength, NotRunning) are not hashed separately, because the command bytes that determine them are hashed. They are append-only.
 
@@ -293,3 +296,90 @@ Tags still free: `Derived` oneof 7, `StartRun` 19 and `Command` 8. Phase 5 reser
 **Actions** (`apply/outcome.rs`, not persisted): `Action::InputAppended { run, seq }`. It means an input was journaled at `seq` for a `Running` run, so the dispatcher can forward it to the hot activation. The variant exists since 04-12; plan 04-13 emits it.
 
 **Outcome codes:** unchanged. New `InvalidCode` details `BadLength` and `NotRunning` fold as code 26, like every `Invalid`.
+
+## 13. Phase 5 additions (pre-freeze, plan 05-02)
+
+Plan 05-02 changed the state format before the Phase 5 freeze. The command-set and journal additions (Cmd 8..12, StartRun 19..23, Derived 7..8, statuses 3..5, outbox kind 6, journal kinds 70/71/96/97) are additive and pinned by the appended goldens of plan 05-01. The state changes below are **not** additive: this is a pre-freeze positional change with **no migration** and no `VALUE_FORMAT` bump. **Delete dev data dirs created before Phase 5**: an old `runs` row fails to decode (`StoreError::Codec`). Plan 05-20 marks this document FROZEN v0.1; until then this section may still change. Empty-log anchoring is documented by plan 05-21 in §10.
+
+Ordinals and names (keyspaces, outcome codes, `InvalidCode` details, commands, journal kinds) come only from `.planning/RESERVATIONS.md`. Its **placeholder rule** binds keyspaces: a phase that lands a keyspace above a reserved slot that does not exist yet also declares the lower slot as an empty keyspace with the name fixed there, so the digest order is the same whatever order the phases land in. An empty keyspace adds only `name + row_count 0` to the digest.
+
+### Keyspaces
+
+| # | keyspace | key | value |
+|---|---|---|---|
+| 14 | `waits` | wait row: `0x01` ‖ run ‖ op u64 BE | postcard `WaitRow { kind: WaitKind (Signal, Token), name String, timeout_due_ms u64 }` |
+| 14 | `waits` | FIFO index: `0x02` ‖ run ‖ name_len u16 BE ‖ name ‖ op u64 BE | empty |
+| 15 | `signal_seen` | run ‖ request_id (raw, rest of key; at most `MAX_REQUEST_ID_LEN` = 64 bytes) | empty |
+
+- `waits` uses **one keyspace with two key shapes**, told apart by the first byte. `wait_prefixes(run)` returns both run prefixes, and `wait_name_prefix(run, name)` scans one name's waits **oldest op first** (FIFO: one signal satisfies exactly one wait, the oldest). `RunRecord.open_waits` counts the live wait rows.
+- A wait with `timeout_due_ms > 0` also has the timer row `(timeout_due_ms, run, op)` in `timers`. When it fires while the wait row exists, apply journals `WaitTimedOut{op}` (kind 70, plan 05-08).
+- `signal_seen` holds D13 signal dedupe keys (`SignalRun.request_id`). Its rows are deleted with the run (prefix `run`).
+
+### Inbox re-key (signals) and `SignalSlot`
+
+The `inbox` keyspace now has two key shapes. Both use `RunRecord.inbox_next` for `n`.
+
+| shape | key | value |
+|---|---|---|
+| signal | run ‖ name_len u16 BE ‖ name ‖ n u64 BE (`signal_inbox_key`) | postcard `SignalSlot` |
+| legacy | run ‖ `0xFFFF` u16 ‖ n u64 BE (`inbox_key`) | postcard `InboxMsg` |
+
+- Signal names are at most `MAX_SIGNAL_NAME_LEN` (256) bytes, so a signal key never has the name length `0xFFFF`, and a `signal_inbox_prefix(run, name)` scan never sees a legacy row. The scan yields one name's buffered signals in **arrival order**.
+- `SignalSlot` (postcard enum, variant order is the encoding):
+  - `Journaled { payload_seq u64, sent_at_ms u64 }`: the signal's `SignalPayload{name, payload}` event (kind 96) is already journaled at `payload_seq`. A later match journals `SignalMatched{op, payload_seq}` (kind 97). The slot holds no payload bytes (D21).
+  - `Pending { event PayloadRef, sent_at_ms u64 }` (B1): the signal arrived while the run's journal was empty (`next_seq == 0`), so its submitter-encoded `SignalPayload` event bytes are kept here. `event` is the prost encoding of a `PayloadRef` (inline ≤ 256 KiB, or a blob), stored as a postcard byte string. The seq-0 batch (`EventsAppended` with `from_seq == 0`, or `StartRun.run_started` from 05-16) journals each pending event right after its own events and before its intents, and converts the slot to `Journaled`.
+- Legacy rows: inbound `ChildCompleted` keeps writing `InboxMsg::ChildCompleted` until Phase 9 journals it as an input. Until plan 05-08 replaces the inbound signal and cancel paths, inbound `Signal` and `CancelRun` keep their Phase 2 legacy rows (`InboxMsg::Signal`, `InboxMsg::CancelRequested`). `InboxMsg::TimerFired` has not been written since 04-13.
+
+### `RunRecord` trailing fields
+
+Appended after `completed_at_ms`, in this order (the encoding):
+
+| field | type | meaning |
+|---|---|---|
+| schedule_to_start_ms | u64 | `StartRun` 19 (0 = none; initial start only, D2) |
+| retention_ms | u64 | `StartRun` 20 (0 = keep forever; D9) |
+| idempotency_key | `Vec<u8>` | `StartRun` 6, so expiry can delete the `(workflow, key)` dedupe row |
+| terminal_reason | String | `run_timeout`, `schedule_to_start` or an operator's terminate reason; empty for executor completions |
+| resumable | bool | `CompleteRun.resumable` (resume-in-place retry, D1) |
+| retry_of | `Option<[u8;18]>` | `StartRun` 21 (empty = none, else an 18-byte run id, else `Invalid(BadRunId)`) |
+| continued_from | `Option<[u8;18]>` | `StartRun` 22 (same rule) |
+| cancel_reason | String | reason of the first graceful cancel request |
+| resumed_count | u32 | resume-in-place retries |
+| open_waits | u32 | live `waits` wait rows |
+| s2s_due_ms | u64 | due time of the pending `SCHEDULE_TO_START_OP` timer (0 = none) |
+| attempt_failures | u32 | durable retryable attempt failures (F9) |
+| status_seq | `Option<u64>` | seq of the last `StatusPublished` event (F10) |
+| continued_to | `Option<[u8;18]>` | successor of a continued-as-new run (PF-F2) |
+| pause | `Option<PauseMark { reason u8, at_ms u64, detail String }>` | Phase 7 F1; stored only, never set in Phase 5 |
+
+`RunStatus` gained `Terminated`, `TimedOut`, `ContinuedAsNew` (postcard indices 6, 7, 8; plan 05-01). `RunRecord`, `ReadyValue` and `PauseMark` derive `Default` so that code building records by hand keeps compiling when fields are appended.
+
+### Apply seams
+
+- **Journaling helpers** (`apply/inputs.rs`). `journal_input` encodes an apply-built event without user-sized data (TimerFired, WaitTimedOut, CancelRequested, RunTerminated, SignalMatched) at `next_seq`, with `ts_nanos = ts_ms * 1_000_000`. `journal_encoded` writes submitter-encoded event bytes **verbatim** (D21): the row is `JournalEvent{seq: next_seq, kind, payload}` with the command's `PayloadRef`, inline or blob, never decoded, re-encoded or fetched. Both move `next_seq` by one and wake the run: `Scheduled` → `Ready` + `EnqueueReady`, `Running` → `Action::InputAppended{run, seq}`, `Ready` → nothing. The 04-13 `TimerFired` path uses `journal_input` with unchanged behaviour.
+- **Terminal hook** (`apply/terminal.rs`). Every terminal transition calls `terminal::on_terminal`. When `open_waits > 0` it scans both `waits` prefixes, deletes every wait row, FIFO index row and pending wait-timeout timer row (emitting `Action::CancelTimer` for each timer), and sets `open_waits = 0`. With `open_waits == 0` it issues no read at all. So a stale wait timer can never surface after a resume (D4). `CompleteRun` sets `resumable` from the intent and clears `terminal_reason`.
+- **Reserved timer ops.** `TimerFired` for `RUN_TIMEOUT_OP` / `SCHEDULE_TO_START_OP` routes to `lifecycle::on_reserved_timer` and for `EXPIRE_OP` to `retention::on_expire` (05-09). These are routed before the terminal-run check, because expiry acts on terminal runs. `START_DELAY_OP` keeps its Phase 2 path. Any other op first tries `waits::try_wait_timeout` (05-08), then the ordinary `TimerFired` journal path. "Timer row absent = `Duplicate`" is unchanged.
+- **First seq-0 write** (B1). After an `EventsAppended` with `from_seq == 0` writes its events and before its intents are applied, apply calls `waits::on_first_events`, which journals pending signals (05-08).
+- **`CompleteRun.parent_event`**: an inline `PayloadRef` over 256 KiB is rejected `PayloadTooLarge`, like every other inline payload. A blob ref is accepted.
+- **New outcome code**: `RejectReason::RunCompleted` = index 11, code 27 (RESERVATIONS §7). `InvalidCode::NotImplemented` already existed at index 6 and is reused.
+
+### Read budget exceptions
+
+The hot path keeps at most one keyspace read per command (`range_prefix` counts as one). The exceptions below are documented here and asserted by tests (05-02, 05-08):
+
+| command / path | reads |
+|---|---|
+| `SignalRun` | run record + waits-by-name prefix + `signal_seen` point read when `request_id` is set |
+| `RegisterWait` intent | + one inbox-by-name prefix (buffered signal match) |
+| terminal `waits` cleanup | + the two `waits` prefixes, only when `open_waits > 0` |
+| first seq-0 write | + one inbox prefix scan, only when the run may hold pending slots (`inbox_next > 0`) |
+| `TimerFired` | timer row + run record (unchanged), plus the reserved-op handler's own reads |
+
+### On-disk freeze policy (amended D18)
+
+- **Frozen sources of truth:** the log (WAL frame, envelope, `Command` prost encoding, journal event codec, command hash), `node.toml`, the blob layout, and the meta Raft log and snapshot encoding.
+- **`node.toml`**: readers ignore unknown keys, and new keys are additive (Phase 8 F6, Phase 12 `node_id`/`cluster_id`). An existing key never changes meaning.
+- **Partition state-store values are derived** while the full log is retained: deleting `state/pNNNN` rebuilds them from the log. That is why pre-freeze value changes (this section, §12) need no migration.
+- **After Phase 8 enables log trimming**, snapshot rows become a source of truth. From then on every `STATE_FORMAT` / `VALUE_FORMAT` change ships a **row migrator** (vN → vN+1), applied at snapshot install and at store open. Snapshots carry `state_format`, and readers accept every older snapshot format (also for Phase 12 follower install and Phase 13 N/N-1 upgrades).
+- **BlobRef invariant** (Phase 8 F5): a `BlobRef` appears only in a `PayloadRef` field of a prost message (log commands included) or of a documented state value (postcard `SignalSlot::Pending.event`, the prost `PayloadRef` rows of `payloads`, the prost `JournalEvent` rows of `events`), **never inside opaque payload bytes**. Blob GC and backups can therefore find every reference without decoding journal payloads.
+- Node open, backup/restore and blob GC ignore unknown data-dir entries (Phase 14 F8, e.g. `<data>/audit/`).

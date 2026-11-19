@@ -36,7 +36,8 @@ use values::CursorMeta;
 /// Key/value rows in key order.
 pub type Rows = Vec<(Vec<u8>, Vec<u8>)>;
 
-/// The fixed keyspace set. Declaration order is the logical digest order.
+/// The fixed keyspace set. Declaration order is the logical digest order. Ordinals and
+/// on-disk names come only from `.planning/RESERVATIONS.md` §6 (placeholder rule included).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Table {
@@ -57,6 +58,12 @@ pub enum Table {
     /// attempt token (plan 04-12). Lets a new leader find in-flight runs without scanning
     /// `runs` (DISP-01).
     Running,
+    /// Waits of runs (plan 05-02; RESERVATIONS §6 ordinal 14, name `waits`). Two key shapes:
+    /// `0x01 ‖ run ‖ op` → `WaitRow` and the FIFO index `0x02 ‖ run ‖ name ‖ op` → `()`.
+    Waits,
+    /// Signal dedupe (D13; plan 05-02; RESERVATIONS §6 ordinal 15, name `signal_seen`):
+    /// `run ‖ request_id` → `()`, deleted with the run.
+    SignalSeen,
 }
 
 /// Every table, in fixed (declaration) order.
@@ -75,10 +82,12 @@ pub const TABLES: [Table; TABLE_COUNT] = [
     Table::Dlq,
     Table::Effects,
     Table::Running,
+    Table::Waits,
+    Table::SignalSeen,
 ];
 
 /// Number of keyspaces.
-pub const TABLE_COUNT: usize = 14;
+pub const TABLE_COUNT: usize = 16;
 
 impl Table {
     /// fjall keyspace name.
@@ -98,6 +107,8 @@ impl Table {
             Table::Dlq => "dlq",
             Table::Effects => "effects",
             Table::Running => "running",
+            Table::Waits => "waits",
+            Table::SignalSeen => "signal_seen",
         }
     }
 

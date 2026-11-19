@@ -109,6 +109,7 @@ mod tests {
             traceparent: None,
             run_timeout_ms: None,
             completed_at_ms: None,
+            ..Default::default()
         }
     }
 
