@@ -282,7 +282,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WIT-04 | Phase 3 | Complete |
 | WIT-05 | Phase 3 | Complete |
 | WIT-06 | Phase 3 | Complete |
-| WIT-07 | Phase 5 | Pending |
+| WIT-07 | Phase 5 | Pending (05-05 tooling + pins done; 05-20 freeze flip) |
 | WF-01 | Phase 4 | Complete |
 | WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Pending |
