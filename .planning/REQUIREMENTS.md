@@ -87,7 +87,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Control-Plane API
 
-- [ ] **API-01**: One client port serves HTTP/1.1, HTTP/2 and gRPC (tonic Routes into axum) with identical semantics; OpenAPI published [FR-0.3]
+- [x] **API-01**: One client port serves HTTP/1.1, HTTP/2 and gRPC (tonic Routes into axum) with identical semantics; OpenAPI published [FR-0.3]
 - [x] **API-02**: Client can upload a module by sha256 (idempotent) and activate a workflow version [FR-3.1]
 - [x] **API-03**: Client can start a run with queue, delay, priority, tags, version, traceparent, tenant and idempotency key with a conflict policy (return existing run or reject) [FR-3.2]
 - [x] **API-04**: Client can get run status (incl. published status), history, and list/filter runs [FR-3.3]
@@ -143,7 +143,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### SDKs & Conformance
 
-- [ ] **SDK-01**: Rust SDK: `#[workflow]`, `#[step]`, ctx, effects, `join!`/`select!`, built with `cargo build --target wasm32-wasip2` + wit-bindgen
+- [x] **SDK-01**: Rust SDK: `#[workflow]`, `#[step]`, ctx, effects, `join!`/`select!`, built with `cargo build --target wasm32-wasip2` + wit-bindgen
 - [ ] **SDK-02**: Python SDK: `@workflow`, `@step`, ctx, effects, SDK-owned asyncio loop with gather/race; built with pinned componentize-py (`--stub-wasi`)
 - [ ] **SDK-03**: TypeScript SDK: `workflow()`, `step()`, ctx, effects, SDK-owned job loop with Promise.all/race; built with pinned jco (no WASI imports)
 - [ ] **SDK-04**: SDKs reseed randomness after pre-init: two runs get different `ctx.random`, a replay reproduces the same values; builds are reproducible (same source → same sha)
@@ -300,7 +300,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | DISP-05 | Phase 7 | Pending |
 | DISP-06 | Phase 14 | Pending |
 | DISP-07 | Phase 4 | Complete |
-| API-01 | Phase 4 | Pending |
+| API-01 | Phase 4 | Complete |
 | API-02 | Phase 4 | Complete |
 | API-03 | Phase 4 | Complete |
 | API-04 | Phase 4 | Complete |
@@ -338,7 +338,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | OPS-05 | Phase 11 | Pending |
 | OPS-06 | Phase 5 | Pending |
 | OPS-07 | Phase 11 | Pending |
-| SDK-01 | Phase 4 | Pending |
+| SDK-01 | Phase 4 | Complete |
 | SDK-02 | Phase 9 | Pending |
 | SDK-03 | Phase 9 | Pending |
 | SDK-04 | Phase 9 | Pending |
