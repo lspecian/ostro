@@ -19,7 +19,7 @@ created: 2026-11-19
 | Property | Value |
 |----------|-------|
 | **Framework** | Rust built-in test harness and cargo-nextest (`.config/nextest.toml`: default, ci and crash profiles), proptest 1.12 + proptest-state-machine, insta, `fail` 0.5.1 failpoints (single-threaded suites), `ostro-crashtest` (kill -9 harness + the 05-19 sharded campaign), and the in-process OTLP collector (`ostro-testkit::otlp`, 08-04). |
-| **Config** | `scripts/ci-local.sh`. `FAILPOINT_CRATES` gains `ostro-backup` (08-01) and must equal the ci.yml "Failpoint suites" step. The forbidden-crate check lives in `scripts/forbidden-crates.sh`, which ci-local and ci.yml both call (08-01). The MinIO docker-run step is in ci.yml (shared with Phase 6 06-16; 08-03 reuses or adds it, 08-20 adds the bottomless leg). |
+| **Config** | `scripts/ci-local.sh`. `FAILPOINT_CRATES` gains `ostro-backup` (08-01) and must equal the ci.yml "Failpoint suites" step. The forbidden-crate check lives in `scripts/forbidden-crates.sh`, which ci-local and ci.yml both call (08-01). The MinIO docker-run step is in ci.yml (canonical spec: 06-DECISIONS § "Shared MinIO / S3 test spec"; 08-03 reuses or adds it, 08-20 adds the bottomless leg). |
 | **Guest build** | `guest_wasm(name)` builds `guests/` (`log-spammer` 08-17, `hook-order` 08-20). |
 | **Docker-only legs** | MinIO (S3 conformance, conditional PUT, fencing, `bottomless_s3`) runs only when `OSTRO_TEST_S3_URL`/`_ACCESS_KEY`/`_SECRET_KEY`/`_BUCKET` are set (Phase 6 convention). CI sets them after a `docker run` MinIO step (service containers cannot pass `server /data`). Locally (WSL, no Docker) the tests print `SKIP` and the item stays **human_needed**. |
 | **Quick run command** | `cargo test -p <crate> --test <suite> --locked` (each < 30–60 s) |
@@ -49,7 +49,7 @@ created: 2026-11-19
 | 3 | 08-09 snapshot service + trim, 08-10 API surface, 08-11 spans | 08-09: partition `leader/*`, `node.rs`, crashtest. 08-10: ostro-api, ostro-proto, server `server.rs` + `control/*` + `tests/common`. 08-11: engine telemetry/activation/journal, server `executor.rs`, `services/run_spans.rs`, `docs/observability.md`. |
 | 4 | 08-12 CLI verbs, 08-13 uploader, 08-14 cron driver + schedules, 08-15 webhooks, 08-16 metrics coverage, 08-17 guest logs | 08-12: ostro-cli, root Cargo.lock (only if the dev-dependency is missing). 08-13: ostro-backup uploader modules + tests, `services/uploader.rs`, `docs/bottomless.md`. 08-14: partition `leader/{cron,mod}.rs`, server `server.rs`. 08-16: engine `activation/runtime/replay`, `dispatcher.rs`, `apply/terminal.rs`, meta `handle.rs`, `services/{metrics_poll,run_spans}.rs`. 08-17: engine `host/log.rs` + `sink.rs`, server `sink.rs` + `executor.rs`, guests lock, `docs/observability.md`. |
 | 5 | 08-18 restore + backup, 08-19 blob GC | 08-18: ostro-meta, ostro-log import, ostro-cli, `crates/ostro/src/main.rs`, `docs/bottomless.md`. 08-19: ostro-blob. |
-| 6 | 08-20 SC1–SC4 proofs, 08-21 SC5 + outbound traceparent + OTLP canary | 08-20: guests lock, ostro-crashtest, ci.yml. 08-21: `crates/ostro-bridge/src/http/send.rs` (cross-phase, append-only), STATE.md. |
+| 6 | 08-20 SC1–SC4 proofs, 08-21 SC5 + outbound traceparent + OTLP canary | 08-20: guests lock, ostro-crashtest, ci.yml. 08-21: `crates/ostro-server/src/effect_trace.rs` (implements 06-14 `EffectHooks`), install line in `effects.rs` (cross-phase, append-only), `lib.rs`, STATE.md. |
 | 7 | 08-22 phase gate | docs, RESERVATIONS flip, VALIDATION, STATE |
 
 ---
@@ -99,7 +99,7 @@ created: 2026-11-19
 | 8-19-02 | 19 | 5 | BACK-01 (remote blobs) | integration | `cargo test -p ostro-backup --test remote_gc --locked && cargo test -p ostro-server --lib blob_gc --locked` | ❌ W0 | ⬜ pending |
 | 8-20-01 | 20 | 6 | TRIG-01/02/03 (SC1, SC2) | e2e (kill loop at plan level) | `cargo test -p ostro-server --test triggers_e2e --locked && cargo build -p ostro-crashtest --tests --locked` | ❌ W0 | ⬜ pending |
 | 8-20-02 | 20 | 6 | BACK-01/02/03/04 (SC3, SC4) | MinIO leg + crashtest unit (RPO loop and campaign smoke at plan level) | `cargo test -p ostro --test bottomless_s3 --locked && cargo test -p ostro-crashtest --locked` | ❌ W0 | ⬜ pending |
-| 8-21-01 | 21 | 6 | OBS-01 (outbound traceparent, B2) | integration (mock HTTP server) or helper-level + BLOCKING follow-up | `cargo test -p ostro-server --test outbound_traceparent --locked` | ❌ W0 | ⬜ pending |
+| 8-21-01 | 21 | 6 | OBS-01 (outbound traceparent via ServerEffectDriver hooks, B2; journal unchanged) | integration (mock HTTP server) or helper-level + BLOCKING follow-up | `cargo test -p ostro-server --test outbound_traceparent --locked` | ❌ W0 | ⬜ pending |
 | 8-21-02 | 21 | 6 | OBS-01/02/03 (SC5) | e2e | `cargo test -p ostro-server --test observability_e2e --locked` | ❌ W0 | ⬜ pending |
 | 8-21-03 | 21 | 6 | FX-06 OTLP leg (D-FX6) | e2e | `cargo test -p ostro-server --test otlp_canary --locked` | ❌ W0 | ⬜ pending |
 | 8-22-01 | 22 | 7 | all | gate (full ci-local + campaign + loops at plan level) | `cargo deny check && bash scripts/forbidden-crates.sh --self-test` + RESERVATIONS flip grep + campaign report file | n/a | ⬜ pending |
@@ -141,7 +141,7 @@ The task that first needs a test file creates it. TDD tasks write their tests fi
 | Span tree and metrics in a real backend (Jaeger/Tempo + Grafana/Prometheus) | OBS-01 / OBS-02 | Visual check. | Point `[telemetry] otlp_endpoint` at a collector, scrape `/metrics`, and check that the run → activation → step tree and the dashboards render. |
 | TLS roots in a `FROM scratch` image (webpki knob) | BACK-01 | Phase 14 image artefact. | Build the scratch image and restore from HTTPS S3 with `tls_roots = "webpki"`. |
 | Phase 6 fx-canary leg with the OTLP sink (if Phase 6 had not landed by 08-21) | FX-06 / D-FX6 | Cross-phase. | After Phase 6 lands: `cargo test -p ostro-server --test otlp_canary` prints no `PHASE6_CANARY_LEG: pending`. |
-| Outbound HTTP traceparent + effect span through the Phase 6 bridge (if the bridge HTTP path did not exist at 08-21) | OBS-01 (**blocking**) | Cross-phase (P8-D24) | After Phase 6 06-10 lands: re-run 08-21 Task 1; `cargo test -p ostro-server --test outbound_traceparent` without `BRIDGE_TRACEPARENT_LEG: pending`. OBS-01 stays incomplete until then. |
+| Outbound HTTP traceparent + effect span through ServerEffectDriver (if 06-14 had not landed at 08-21) | OBS-01 (**blocking**) | Cross-phase (P8-D24) | After Phase 6 06-14 lands: re-run 08-21 Task 1 (implement `EffectHooks` in effect_trace.rs and install it); `cargo test -p ostro-server --test outbound_traceparent` without `BRIDGE_TRACEPARENT_LEG: pending`. OBS-01 stays incomplete until then. |
 | Review of adopted P8-D3 (seal default/cost), P8-D9 (jiff 0.2 adapter), P8-D11 (Kafka out of scope), P8-D16 (in-memory log cap), P8-D21 (22 plans) | all | The user was unavailable (YOLO). | Read 08-DECISIONS.md. |
 
 ---
