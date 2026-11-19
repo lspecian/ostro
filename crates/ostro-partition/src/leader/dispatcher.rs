@@ -151,6 +151,18 @@ use crate::handle::{PartitionError, PartitionHandle};
 use crate::query;
 use crate::store::values::{RunRecord, RunStatus};
 
+/// Evaluate a failpoint: `failpoint!("name")` is a `Result<(), PartitionError>`. Without the
+/// feature `failpoints` it expands to `Ok(())` (no name, no call).
+macro_rules! failpoint {
+    ($name:literal) => {{
+        #[cfg(feature = "failpoints")]
+        let r = failpoint_eval($name);
+        #[cfg(not(feature = "failpoints"))]
+        let r = Ok::<(), PartitionError>(());
+        r
+    }};
+}
+
 /// Default lease TTL.
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 /// Default number of executor slots of [`DispatcherConfig::new`].
@@ -1111,7 +1123,7 @@ impl Dispatcher {
             .joins
             .spawn(async move {
                 let res = async {
-                    failpoint("dispatcher::before_ack")?;
+                    failpoint!("dispatcher::before_ack")?;
                     h.machine().wait_applied(offset).await?;
                     let accepted = h
                         .read_run(&run)?
@@ -1468,7 +1480,7 @@ async fn pipelined_grant(
         after_failure: false,
     });
     h.machine().check_healthy()?;
-    failpoint("dispatcher::before_grant")?;
+    failpoint!("dispatcher::before_grant")?;
     let receipt = h.log().append(epoch, vec![encode_command(&cmd)]).await?;
     rec.current_attempt = Some((epoch.0, n));
     rec.status = RunStatus::Running;
@@ -1483,7 +1495,7 @@ async fn pipelined_grant(
 /// A dispatcher failpoint (module docs): `Ok` unless it is configured with `return`, which
 /// yields an EIO (or, with `return(enospc)`, ENOSPC) log I/O error.
 #[cfg(feature = "failpoints")]
-fn failpoint(name: &str) -> Result<(), PartitionError> {
+fn failpoint_eval(name: &str) -> Result<(), PartitionError> {
     // POSIX errno values (identical on Linux and macOS).
     const EIO: i32 = 5;
     const ENOSPC: i32 = 28;
@@ -1500,12 +1512,6 @@ fn failpoint(name: &str) -> Result<(), PartitionError> {
             )))
         }
     }
-}
-
-#[cfg(not(feature = "failpoints"))]
-#[inline(always)]
-fn failpoint(_name: &str) -> Result<(), PartitionError> {
-    Ok(())
 }
 
 /// Read check for an `EnqueueReady` seen while `run`'s pipelined grant `token` is not yet

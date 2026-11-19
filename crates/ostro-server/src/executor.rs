@@ -134,6 +134,18 @@ use crate::journal_io;
 use crate::run_started::{first_events, input_payload};
 use crate::sink::{PartitionSink, RenewFn};
 
+/// Evaluate a failpoint: `failpoint!("name")` is a `Result<(), AppendError>`. Without the
+/// feature `failpoints` it expands to `Ok(())` (no name, no call).
+macro_rules! failpoint {
+    ($name:literal) => {{
+        #[cfg(feature = "failpoints")]
+        let r = failpoint_eval($name);
+        #[cfg(not(feature = "failpoints"))]
+        let r = Ok::<(), AppendError>(());
+        r
+    }};
+}
+
 /// Upper bound of the attempt retry delay.
 pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 /// Attempts to submit the failure `CompleteRun` when the journal end keeps moving.
@@ -541,11 +553,11 @@ impl ActivationSink for EngineSink {
         if self.cancel.is_cancelled() {
             return Err(AppendError::Fenced);
         }
-        failpoint("executor::before_append")?;
+        failpoint!("executor::before_append")?;
         let r = self.inner.append(run, attempt, from_seq, events).await;
         if let Ok(next) = r {
             self.engine_end.store(next, Ordering::Release);
-            failpoint("executor::after_append_before_done")?;
+            failpoint!("executor::after_append_before_done")?;
         }
         r
     }
@@ -564,7 +576,7 @@ impl ActivationSink for EngineSink {
 /// An executor failpoint (module docs): `Ok` unless it is configured with `return`, which
 /// yields `AppendError::Unavailable` naming EIO (or, with `return(enospc)`, ENOSPC).
 #[cfg(feature = "failpoints")]
-fn failpoint(name: &str) -> Result<(), AppendError> {
+fn failpoint_eval(name: &str) -> Result<(), AppendError> {
     // POSIX errno values (identical on Linux and macOS).
     const EIO: i32 = 5;
     const ENOSPC: i32 = 28;
@@ -584,12 +596,6 @@ fn failpoint(name: &str) -> Result<(), AppendError> {
     }
 }
 
-#[cfg(not(feature = "failpoints"))]
-#[inline(always)]
-fn failpoint(_name: &str) -> Result<(), AppendError> {
-    Ok(())
-}
-
 /// The `RunStarted` append (seq 0) through both executor failpoints.
 async fn failpointed_append(
     sink: &PartitionSink,
@@ -597,9 +603,9 @@ async fn failpointed_append(
     attempt: u32,
     events: Vec<Event>,
 ) -> Result<u64, AppendError> {
-    failpoint("executor::before_append")?;
+    failpoint!("executor::before_append")?;
     let next = sink.append(rref, attempt, 0, events).await?;
-    failpoint("executor::after_append_before_done")?;
+    failpoint!("executor::after_append_before_done")?;
     Ok(next)
 }
 
