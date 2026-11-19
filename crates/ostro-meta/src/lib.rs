@@ -18,7 +18,8 @@ mod validate;
 
 pub use command::{
     DecodeError, META_FORMAT, MetaCommand, MetaKey, MetaKind, MetaRecord, MetaResult,
-    decode_command, decode_result, encode_command, encode_result,
+    PRE_FREEZE_META_FORMAT, decode_command, decode_result, decode_snapshot, encode_command,
+    encode_result, encode_snapshot,
 };
 pub use ext::{
     EXT_TAG_TEST, ExtEntry, ExtError, ext_entries, ext_get, ext_get_value, ext_put, ext_put_value,

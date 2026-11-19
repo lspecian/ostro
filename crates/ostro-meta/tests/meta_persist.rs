@@ -152,3 +152,31 @@ async fn records_survive_restart_and_versions_never_regress() {
     );
     h.stop().await;
 }
+
+/// D20: a data dir whose Raft log holds a pre-Phase-5 (META_FORMAT 1) entry is
+/// refused at start with the "delete the dev data dir" message, instead of
+/// booting with that entry silently dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_freeze_log_entry_fails_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path()).await;
+    h.init_cluster("c1", 1, 4, 5, [7; 32]).await.expect("init");
+    // A Phase 4 dev build wrote this entry: [1] ‖ postcard(old command). The
+    // body does not matter; the format byte is rejected before decoding.
+    let applied = h
+        .raft()
+        .propose(vec![ostro_meta::PRE_FREEZE_META_FORMAT, 1, 2, 3])
+        .await
+        .expect("raw propose");
+    let r = ostro_meta::decode_result(&applied.result).unwrap();
+    assert!(matches!(r, MetaResult::Invalid(_)), "{r:?}");
+    h.stop().await;
+
+    match MetaHandle::start(dir.path(), 1).await {
+        Err(MetaError::Start(msg)) => {
+            assert!(msg.contains("delete the dev data dir"), "{msg}")
+        }
+        Err(e) => panic!("expected a start error, got {e:?}"),
+        Ok(_) => panic!("a pre-freeze data dir must not start"),
+    }
+}

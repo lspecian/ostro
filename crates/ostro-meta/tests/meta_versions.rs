@@ -293,8 +293,18 @@ fn encoding_round_trips_and_rejects_unknown_format() {
     assert_eq!(bytes[0], ostro_meta::META_FORMAT);
     assert_eq!(decode_command(&bytes).unwrap(), cmd);
     let mut bad = bytes.clone();
-    bad[0] = 2;
-    assert!(decode_command(&bad).is_err());
+    bad[0] = ostro_meta::META_FORMAT + 1;
+    assert_eq!(
+        decode_command(&bad),
+        Err(ostro_meta::DecodeError::UnknownFormat(
+            ostro_meta::META_FORMAT + 1
+        ))
+    );
+    bad[0] = ostro_meta::PRE_FREEZE_META_FORMAT;
+    assert_eq!(
+        decode_command(&bad),
+        Err(ostro_meta::DecodeError::PreFreezeFormat { found: 1 })
+    );
     assert!(decode_command(&[]).is_err());
     let mut trailing = bytes;
     trailing.push(0);

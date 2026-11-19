@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::command::{MetaCommand, MetaResult, decode_result, encode_command};
+use crate::command::{DecodeError, MetaCommand, MetaResult, decode_result, encode_command};
 use crate::records::ClusterInfo;
 use crate::sm::{MetaSm, MetaView};
 use crate::{DriverConfig, NullOutbox, ProposeError, RaftDriver, RaftHandle};
@@ -55,6 +55,11 @@ impl MetaHandle {
     /// out the randomized election timeout (~2-4 s with the default 100 ms tick
     /// and election_tick 20) instead of ~25-60 ms. The log store keeps its
     /// default `sync = true`, including for ephemeral data dirs.
+    ///
+    /// A data dir written in the pre-Phase-5 meta format fails with
+    /// [`MetaError::Start`] carrying [`DecodeError::PreFreezeFormat`]'s message
+    /// ("delete the dev data dir"), whether the old data is in the snapshot or
+    /// in the log.
     pub async fn start(dir: &Path, node_id: u64) -> Result<MetaHandle, MetaError> {
         let (sm, view) = MetaSm::new();
         let driver = RaftDriver::start(dir, DriverConfig::new(node_id), &[node_id], sm, NullOutbox)
@@ -67,7 +72,16 @@ impl MetaHandle {
             view,
         };
         match tokio::time::timeout(START_TIMEOUT, handle.wait_leader_caught_up()).await {
-            Ok(Ok(())) => Ok(handle),
+            Ok(Ok(())) => match handle.view.pre_freeze_format() {
+                // A replayed log entry predates the Phase 5 meta format (D20).
+                Some(found) => {
+                    handle.stop().await;
+                    Err(MetaError::Start(
+                        DecodeError::PreFreezeFormat { found }.to_string(),
+                    ))
+                }
+                None => Ok(handle),
+            },
             Ok(Err(e)) => {
                 handle.stop().await;
                 Err(e)

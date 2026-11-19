@@ -2,8 +2,18 @@
 //!
 //! Encoding: `[META_FORMAT] ‖ postcard(value)`. Decoders reject any other format
 //! byte, so a future format can be introduced without misreading old entries.
+//!
+//! Format history (RESERVATIONS §10):
+//! - `1`: Phase 4 dev format. Rejected with [`DecodeError::PreFreezeFormat`]
+//!   ("delete the dev data dir"); no decoder is kept. This pre-freeze bump is
+//!   the only one without a decoder (D20).
+//! - `2`: Phase 5 (05-07): run policies, Webhook, the Phase 8 Schedule fields,
+//!   the Phase 12/14 fields and a trailing `ext` on every record. Pinned by
+//!   `tests/golden/meta_v2.txt` and frozen at 05-20.
 
 use serde::{Deserialize, Serialize};
+
+use crate::state::MetaState;
 
 use crate::records::{
     ActiveVersion, ApiToken, ClusterInfo, Connection, EgressPolicy, Grant, Member, ModuleRecord,
@@ -12,7 +22,11 @@ use crate::records::{
 };
 
 /// Format byte prefixed to every encoded command, result and snapshot.
-pub const META_FORMAT: u8 = 1;
+pub const META_FORMAT: u8 = 2;
+
+/// The Phase 4 (pre-Phase-5 dev) format byte, rejected with
+/// [`DecodeError::PreFreezeFormat`].
+pub const PRE_FREEZE_META_FORMAT: u8 = 1;
 
 /// Every record kind. `MetaKind::ALL` lists them in a fixed order.
 ///
@@ -472,6 +486,12 @@ pub enum DecodeError {
     Empty,
     #[error("unknown metadata format byte {0} (expected {META_FORMAT})")]
     UnknownFormat(u8),
+    /// The payload was written by a pre-freeze dev build (Phase 4). Its
+    /// records have a different positional shape; there is no decoder.
+    #[error(
+        "pre-Phase-5 dev meta format; delete the dev data dir (pre-freeze meta format byte {found}, this build reads {META_FORMAT})"
+    )]
+    PreFreezeFormat { found: u8 },
     #[error("malformed metadata payload: {0}")]
     Malformed(String),
 }
@@ -485,6 +505,9 @@ pub(crate) fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 
 pub(crate) fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, DecodeError> {
     let (&format, body) = bytes.split_first().ok_or(DecodeError::Empty)?;
+    if format == PRE_FREEZE_META_FORMAT {
+        return Err(DecodeError::PreFreezeFormat { found: format });
+    }
     if format != META_FORMAT {
         return Err(DecodeError::UnknownFormat(format));
     }
@@ -504,6 +527,17 @@ pub fn encode_command(cmd: &MetaCommand) -> Vec<u8> {
 }
 
 pub fn decode_command(bytes: &[u8]) -> Result<MetaCommand, DecodeError> {
+    decode(bytes)
+}
+
+/// `[META_FORMAT] ‖ postcard(MetaState)`: the Raft snapshot encoding.
+pub fn encode_snapshot(state: &MetaState) -> Vec<u8> {
+    encode(state)
+}
+
+/// Decode a Raft snapshot; a pre-freeze snapshot is
+/// [`DecodeError::PreFreezeFormat`].
+pub fn decode_snapshot(bytes: &[u8]) -> Result<MetaState, DecodeError> {
     decode(bytes)
 }
 
