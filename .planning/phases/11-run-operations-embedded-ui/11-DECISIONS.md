@@ -84,6 +84,7 @@ Phase 11 runs in parallel with Phases 9 and 10 (Phases 7 and 8 are complete by D
 | `guests/*` | 11-04 (`p11-limits`), 11-05 (`p11-rerun`, `p11-rerun-v2`), 11-10 (`p11-hook`) | 09 (`child-*`, `conf-*`, `sdk-saga`, `exports-shape-*`) | Distinct names; `guests/Cargo.toml` uses `members = ["*"]`; `guests/Cargo.lock` is gitignored. |
 | `docs/limits.md` | 11-04 (create), 11-09 (API-cap rows only if the sync test shows a gap) | — | — |
 | `docs/operations.md`, `docs/ui.md` | 11-16 | — | New files. |
+| Mutual exclusion with Phase 10 | **11-02** (Cargo/deny/ci/server seam) vs **10-02** (Cargo/deny/ci); **11-07** (ostro-api/proto/OpenAPI) vs **10-03** (ostro-api/OpenAPI) | 10-02, 10-03 | The orchestrator never runs these pairs concurrently. An executor that finds the other plan in progress (its files dirty, or its commits present without its SUMMARY) STOPS and reports. |
 | `.planning/RESERVATIONS.md`, `.planning/STATE.md`, `.planning/REQUIREMENTS.md` | 11-01 (RESERVATIONS, STATE), 11-16 (all three; REQUIREMENTS ticks only with recorded evidence) | 09-01/20, 10-01/17 | Docs-only commits; named sections only. |
 | `.planning/ROADMAP.md` | none (the planner wrote the Phase 11 plan list) | — | Executors never edit it. |
 
