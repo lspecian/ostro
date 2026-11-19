@@ -197,7 +197,7 @@ Plans:
 - [ ] 05-19-PLAN.md — Whole-server kill campaign (sharded, every fault ends in kill -9) + CI smoke (wave 9; QA-01)
 - [ ] 05-20-PLAN.md — PHASE GATE + FREEZE FLIP: >= 10,000 kills, corpora, FROZEN.toml + golden/meta-golden re-pin + RESERVATIONS flip + local tag, full ci-local (wave 10)
 - [x] 05-21-PLAN.md — Empty-log anchoring at applied_offset (Phase 12 F3) in ostro-log recovery + partition startup (wave 2)
-- [ ] 05-22-PLAN.md — Ready entries (workflow/tenant/first), durable attempt_failures, status_seq, parent_event forwarding (wave 3)
+- [x] 05-22-PLAN.md — Ready entries (workflow/tenant/first), durable attempt_failures, status_seq, parent_event forwarding (wave 3)
 - [x] 05-23-PLAN.md — D22 retry logical clock + long_backoff expectation fixes (wave 3)
 - [x] 05-24-PLAN.md — D23 tenant-qualified names + upload tenant/name (WorkflowVersion.module) + two-tenant test (wave 3)
 
@@ -417,7 +417,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 20/20 | Complete | 2026-11-19 |
-| 5. Workflow Semantics & Core Hardening | 10/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-21 empty-log anchoring, 05-07 meta pre-freeze encoding, 05-05 WIT freeze tooling, 05-04 lifecycle API surface, 05-06 Rust SDK tokens/continue-as-new/D11, 05-02 partition store schema + apply seams, 05-23 D22 retry logical clock done) | - |
+| 5. Workflow Semantics & Core Hardening | 11/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-21 empty-log anchoring, 05-07 meta pre-freeze encoding, 05-05 WIT freeze tooling, 05-04 lifecycle API surface, 05-06 Rust SDK tokens/continue-as-new/D11, 05-02 partition store schema + apply seams, 05-23 D22 retry logical clock, 05-24 D23 tenancy/upload name, 05-22 ready entries + attempt_failures/status_seq + parent_event forwarding done) | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
