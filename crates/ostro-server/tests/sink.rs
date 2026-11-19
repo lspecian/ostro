@@ -58,7 +58,9 @@ async fn start(handle: &PartitionHandle<Rf1Log>) -> (RunId, AttemptToken) {
             queue: "default".into(),
             input: Some(PayloadRef::inline(Bytes::from_static(b"{\"n\":1}"))),
             conflict_policy: ConflictPolicy::ReturnExisting as i32,
-            requested_at_ms: 1_700_000_000_000,
+            // Far future: since 05-09 apply arms RUN_TIMEOUT_OP at requested_at + run_timeout,
+            // and the live timer service would fire a past deadline (TimedOut) at once.
+            requested_at_ms: 4_102_444_800_000,
             rng_seed: vec![0x5a; 32],
             module_sha: MODULE_SHA.to_vec(),
             run_timeout_ms: 60_000,
@@ -173,12 +175,18 @@ impl Fixture {
         self.handle.fetch_payload(&p).await.expect("bytes").to_vec()
     }
 
+    /// Guest timer rows (apply-owned reserved ops such as RUN_TIMEOUT_OP excluded).
     fn timers(&self) -> usize {
         self.handle
             .reader()
             .prefix(Table::Timers, &[], usize::MAX)
             .expect("timers")
-            .len()
+            .iter()
+            .filter(|(k, _)| {
+                ostro_partition::store::keys::decode_timer_key(k)
+                    .is_some_and(|(_, _, op)| !ostro_types::command::is_reserved_op(op))
+            })
+            .count()
     }
 }
 
