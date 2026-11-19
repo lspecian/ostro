@@ -44,7 +44,9 @@ Sources:
 | 41–42 | — (contingency, expected use 0) | reserved P12 |
 | 43 | RepinRun (`ostro migrate-runs`) | reserved P13 |
 | 44 | spare | reserved P13 |
-| 45–63 | — | unallocated |
+| 45 | DlqUpdate (research proposed 43, which is taken by P13 RepinRun) | reserved P11 |
+| 46–49 | spare | reserved P11 |
+| 50–63 | — | unallocated |
 
 ## 2. `StartRun` field numbers (prost)
 
@@ -61,7 +63,10 @@ Sources:
 | 28–31 | — | reserved P7 |
 | 32–35 | — (P8 declared 0 needs) | reserved P8 |
 | 36–39 | — | reserved P9 |
-| 40+ | — | unallocated |
+| 40 | rerun_prefix (repeated JournalEvent) | reserved P11 |
+| 41 | rerun_from_seq (uint64) | reserved P11 |
+| 42–43 | spare | reserved P11 |
+| 44+ | — | unallocated |
 
 Other message fields: each new field on any other message is owned by the plan that adds it, within its phase. Recorded allocations:
 
@@ -72,6 +77,7 @@ Other message fields: each new field on any other message is owned by the plan t
 | outbox ChildCompleted.6 | event (same bytes, forwarded verbatim) | planned P5 (05-01), Phase 9 PF-F1 |
 | AttemptGranted.3 | after_failure (durable attempt_failures, F9) | planned P5 (05-01) |
 | RegisterWait.5 | at_ms (D21) | planned P5 (05-01) |
+| JournalEvent.4 | attempt (fixed64, submitter-set; 0 = apply-originated; PF-11-5 apply stamping was NOT adopted) | reserved P11 |
 
 State value fields (positional postcard, pre-freeze only; listed for cross-phase visibility): RunRecord gains the Phase 5 fields in 05-02, plus `continued_to` (Phase 9 PF-F2), `attempt_failures`, `status_seq` and `pause` (Phase 7 F1). Parallel phases must not add fields to the same message without first recording the field number here.
 
@@ -163,6 +169,7 @@ Rules:
 | 17 | p7_a | reserved P7. **Not needed if 07-RESEARCH F1 lands** (05-02 adds `RunRecord.pause`). If F1 is rejected, rename to `run_pauses` in a docs-only commit before any placeholder is declared. |
 | 18 | p7_b | reserved P7. Not needed if F1 lands. |
 | 19 | p9_a | reserved P9 (placeholder rule applies) |
+| (none) | `x_*` derived keyspaces (PF-11-2): outside TABLES, the digest, OSNP and blob GC; rebuilt from digest state. Reserved name: `x_run_index` (P11) | rule frozen in 05-20 |
 | 20+ | — | unallocated |
 
 ## 7. Apply outcome `RejectReason` (outcome code = 16 + index; folded into the state hash)
@@ -192,7 +199,10 @@ Rules:
 | 22–23 | 1–2 schedule validation codes, names chosen by 08-01 | reserved P8 |
 | 24 | spare | reserved P8 |
 | 25–28 | — (P9 spare, incl. fallback) | reserved P9 |
-| 29+ | — | unallocated |
+| 29 | BadRerunPrefix | reserved P11 |
+| 30 | BadDlqUpdate | reserved P11 |
+| 31 | spare | reserved P11 |
+| 32+ | — | unallocated |
 
 ## 9. Outbox `outbox_msg::Kind` tags (prost)
 
@@ -271,7 +281,10 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 102 | `ModuleRecord` / `WorkflowVersion` Retired `{retired_at_ms}` | reserved P13 |
 | 103–111 | spare | reserved P13 |
 | 112–143 | reserved P14 (ApiToken name/description/created_by/rotation link, ModuleRecord signature evidence + uploader tenants, ClusterInfo security policy, SealedSecret created/rotated, further Tenant knobs) | — |
-| 144+ | unallocated | — |
+| 144 | `WorkflowPolicy` / `QueuePolicy` OnFailure | reserved P11 |
+| 145 | DlqPolicy `{enabled, hook_catchup_ms}` | reserved P11 |
+| 146–159 | spare | reserved P11 |
+| 160+ | unallocated | — |
 
 ---
 
@@ -315,3 +328,9 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Metric prefix | `ostro_repl_` | P12 |
 | node.toml keys | `node_id`, `cluster_id` (0 = no-leader sentinel; mismatch fatal), next to P8's `incarnation`/`restored_from` | P12 |
 | Data-dir temp prefix | `snapshots/pNNNN/.incoming-*` | P12 |
+| Crate / dirs | `ostro-ui` (`crates/ostro-ui/{templates,assets}`), `<data>/bulk/` | P11 |
+| REST | `/ui/*`, `GET /v1/dlq`, `POST /v1/dlq/{run}/requeue\|dismiss`, `POST /v1/runs/{id}/rerun`, `GET\|POST /v1/bulk`, `GET /v1/bulk/{id}`, `POST /v1/bulk/{id}/cancel`, list endpoints `GET /v1/modules`, `GET /v1/queues`, `GET /v1/partitions`, `GET /v1/limits` | P11 |
+| gRPC services | `ostro.api.v1.RunOps`, `ostro.api.v1.Inventory` | P11 |
+| Dedupe namespaces | `__rerun/`, `__onfail/`, `__bulk/`, `__dlq/` | P11 |
+| System run tag | `__ostro/rerun_from=<seq>` (zero-format rerun lineage, PF-11-4 fallback) | P11 |
+| Error kinds | `limit_exceeded`, `payload_too_large` (documented in WIT by 05-20) | P11 |
