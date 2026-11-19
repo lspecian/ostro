@@ -6,6 +6,7 @@
 //! verb and do not leak into `ostro dev`.
 
 pub mod deploy;
+pub mod lifecycle;
 pub mod runs;
 
 use std::path::PathBuf;
@@ -52,6 +53,21 @@ pub enum ClientCommand {
     Inspect(runs::InspectArgs),
     /// Show a run's history.
     History(runs::HistoryArgs),
+    /// Send a named signal to a run.
+    Signal(lifecycle::SignalArgs),
+    /// Request graceful cancellation of a run.
+    Cancel(lifecycle::StopArgs),
+    /// Hard-stop a run (no guest cleanup).
+    Terminate(lifecycle::StopArgs),
+    /// Retry a terminal run (resume in place or restart as a new linked run).
+    Retry(lifecycle::RetryArgs),
+    /// Show (or wait for) a run's result.
+    Result(lifecycle::ResultArgs),
+    /// Await tokens.
+    Token {
+        #[command(subcommand)]
+        command: lifecycle::TokenCommand,
+    },
     /// Upload a Wasm component (no build) and optionally activate its workflows.
     Deploy(deploy::DeployArgs),
 }
@@ -78,6 +94,13 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Ls(a) => &a.conn,
         ClientCommand::Inspect(a) => &a.conn,
         ClientCommand::History(a) => &a.conn,
+        ClientCommand::Signal(a) => &a.conn,
+        ClientCommand::Cancel(a) | ClientCommand::Terminate(a) => &a.conn,
+        ClientCommand::Retry(a) => &a.conn,
+        ClientCommand::Result(a) => &a.conn,
+        ClientCommand::Token {
+            command: lifecycle::TokenCommand::Complete(a),
+        } => &a.conn,
         ClientCommand::Deploy(a) => &a.conn,
     };
     let out = conn.out();
@@ -90,6 +113,14 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Ls(a) => runs::ls(&client, out, a).await,
         ClientCommand::Inspect(a) => runs::inspect(&client, out, a).await,
         ClientCommand::History(a) => runs::history(&client, out, a).await,
+        ClientCommand::Signal(a) => lifecycle::signal(&client, out, a).await,
+        ClientCommand::Cancel(a) => lifecycle::cancel(&client, out, a).await,
+        ClientCommand::Terminate(a) => lifecycle::terminate(&client, out, a).await,
+        ClientCommand::Retry(a) => lifecycle::retry(&client, out, a).await,
+        ClientCommand::Result(a) => lifecycle::result(&client, out, a).await,
+        ClientCommand::Token {
+            command: lifecycle::TokenCommand::Complete(a),
+        } => lifecycle::token_complete(&client, out, a).await,
         ClientCommand::Deploy(a) => deploy::deploy(&client, out, a).await,
     };
     match res {
@@ -292,5 +323,7 @@ pub(crate) mod tests {
     fn unknown_verbs_and_missing_args_are_usage_errors() {
         assert_eq!(parse(&["bogus"]).unwrap_err().exit_code(), 2);
         assert_eq!(parse(&["inspect"]).unwrap_err().exit_code(), 2);
+        assert_eq!(parse(&["signal", "r1"]).unwrap_err().exit_code(), 2);
+        assert_eq!(parse(&["token"]).unwrap_err().exit_code(), 2);
     }
 }
