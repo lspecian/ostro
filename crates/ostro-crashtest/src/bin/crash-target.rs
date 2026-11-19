@@ -239,6 +239,7 @@ async fn load(
                     requested_at_ms: now_ms(),
                     parent: None,
                     rng_seed: vec![7; 32],
+                    ..Default::default()
                 }));
                 ids.push(Some(id));
             }

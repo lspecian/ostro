@@ -174,6 +174,7 @@ pub fn start_run(run: &RunId) -> StartRun {
         requested_at_ms: 100,
         parent: None,
         rng_seed: vec![7; 32],
+        ..Default::default()
     }
 }
 

@@ -159,6 +159,7 @@ impl Gen {
             requested_at_ms: now_ms(),
             parent: None,
             rng_seed: vec![7; 32],
+            ..Default::default()
         });
         (self.runs.len() - 1, cmd)
     }

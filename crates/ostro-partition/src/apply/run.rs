@@ -291,6 +291,9 @@ fn check_intents(cur: &Cursor, e: &EventsAppended) -> Check<()> {
                 terminal_status(c.status).ok_or(invalid(InvalidCode::BadIntent))?;
                 completed = true;
             }
+            // Plan 04-09 added the intent; apply implements it in plan 04-12. Until then it is
+            // rejected deterministically.
+            Intent::Suspend(_) => return Err(invalid(InvalidCode::BadIntent)),
         }
     }
     Ok(())
@@ -395,6 +398,8 @@ pub(crate) fn apply_events_appended(
             Intent::EnqueueReady(er) => {
                 enqueue_ready(b, &run, &mut rec, er.ready_at_ms, actions);
             }
+            // Rejected by check_intents until plan 04-12 implements it.
+            Intent::Suspend(_) => {}
             Intent::CompleteRun(c) => {
                 let status = terminal_status(c.status)
                     .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;

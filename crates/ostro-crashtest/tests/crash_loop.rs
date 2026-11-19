@@ -155,6 +155,7 @@ fn start_cmd(p: u16) -> Command {
         requested_at_ms: 0,
         parent: None,
         rng_seed: vec![7; 32],
+        ..Default::default()
     })
 }
 
