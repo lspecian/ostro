@@ -14,6 +14,18 @@
 //! if the chain is not yet closed by a completion the step goes live at attempt `k + 1`,
 //! so the attempt count always comes from the journal and never resets on restart.
 //!
+//! Retry logical clock (D22, plan 05-23): an attempt that re-runs after a
+//! `StepAttemptFailed` observes `now = max(last journaled ts, retry_at_nanos)` of that
+//! failure. Live, [`ReplayState::record_attempt_failed`] raises the clock right after
+//! appending the failure (the host sleeps until `retry_at` before the next in-activation
+//! attempt). Resuming a requeued attempt, [`ReplayState::begin_step`] raises it after
+//! consuming the chain, but only once the attempt is due (`retry_at <= live now`); a
+//! not-yet-due attempt is handed back by the host without running, so the backoff stays
+//! visible. Every later live event is stamped at least the raised value, so the clock
+//! stays monotonic, and the value comes only from kind 29's `retry_at_nanos`, so record
+//! and replay agree. A fully recorded chain is consumed through its `StepCompleted`,
+//! whose ts then defines `now` exactly as it was recorded.
+//!
 //! Completion index (05-03): `completions` maps every op to the seq of the first event
 //! that completes it ([`completion_target`](super::wait::completion_target): an input
 //! with `completes_op`, or the guest's own `OpCancelled`). It is filled when the journal
@@ -133,7 +145,8 @@ pub struct ReplayState {
     pub(super) outer_rng: Option<RngStreams>,
     /// Seq reserved by a live `begin_step` that has not completed yet.
     pub(super) open_step: Option<u64>,
-    /// Ts of the most recent consumed/appended guest command (`accepted_at` before any).
+    /// Ts of the most recent consumed/appended guest command (`accepted_at` before any),
+    /// raised to `retry_at` for a re-run step attempt (D22, see the module doc).
     pub(super) last_cmd_ts: u64,
     /// Seq of the most recent consumed/appended guest command (0 before any).
     pub(super) last_cmd_seq: u64,
@@ -238,6 +251,8 @@ impl ReplayState {
     /// (`accepted_at` before the first). Input events never move it directly, but every
     /// live command is stamped at least the max ts of all journaled events (inputs
     /// included), so `now()` after the wait that consumed an input is >= that input's ts.
+    /// Inside a step attempt that re-runs after a `StepAttemptFailed` it is
+    /// `max(that ts, retry_at_nanos)` (D22).
     pub fn logical_now_nanos(&self) -> u64 {
         self.last_cmd_ts
     }
@@ -467,6 +482,14 @@ impl ReplayState {
                 _ => return Ok(StepBegin::Replayed(&self.journal[i])),
             }
         }
+        // D22: a due re-run attempt observes max(last ts, retry_at). A not-yet-due one
+        // is handed back by the host without running, so its clock is left alone (the
+        // host compares retry_at against `live_now_nanos`).
+        if let Some(at) = last_retry_at_nanos
+            && at <= self.live_now_nanos()
+        {
+            self.raise_to_retry_at(at);
+        }
         let seq = self.next_seq;
         self.open_live_step(seq);
         Ok(StepBegin::Live {
@@ -499,16 +522,25 @@ impl ReplayState {
                 "attempt-failed for step {seq} that is not open"
             )));
         }
-        if !matches!(body, EventBody::StepAttemptFailed(_)) {
+        let EventBody::StepAttemptFailed(f) = &body else {
             return Err(protocol(format!(
                 "attempt-failed with {} instead of a step attempt failure",
                 body.summary()
             )));
-        }
+        };
+        let retry_at = f.retry_at_nanos;
         self.append_live(seq, body);
+        // D22: the next attempt (in-activation after the host's sleep, or requeued and
+        // resumed through `begin_step`) observes max(this failure's ts, retry_at).
+        self.raise_to_retry_at(retry_at);
         let next = self.next_seq;
         self.open_live_step(next);
         Ok(next)
+    }
+
+    /// D22: raise logical time to a failed attempt's `retry_at` (never lowers it).
+    fn raise_to_retry_at(&mut self, retry_at_nanos: u64) {
+        self.last_cmd_ts = self.last_cmd_ts.max(retry_at_nanos);
     }
 
     /// Close the open step (if any) and restore the run-level random streams.

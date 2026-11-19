@@ -142,7 +142,11 @@ fn completion(journal: &[Event], name: &str) -> (u64, Result<Payload, Failure>) 
             _ => None,
         })
         .collect();
-    assert_eq!(done.len(), 1, "exactly one StepCompleted for {name}: {journal:#?}");
+    assert_eq!(
+        done.len(),
+        1,
+        "exactly one StepCompleted for {name}: {journal:#?}"
+    );
     let (ts, sc) = done[0];
     (ts, decode_result(&sc.outcome).expect("decode step outcome"))
 }
@@ -191,10 +195,17 @@ async fn long_backoff_fails_once_and_sees_retry_at() {
     let out = activate(&rt, &p, &sink, &s.run).await;
     assert_eq!(completed_text(&out), LONG_BACKOFF_RESULT);
     let j = sink.journal(&s.run);
-    assert_eq!(safs(&j, "slow").len(), 1, "exactly one failed attempt: {j:#?}");
+    assert_eq!(
+        safs(&j, "slow").len(),
+        1,
+        "exactly one failed attempt: {j:#?}"
+    );
     let (ts, outcome) = completion(&j, "slow");
     assert_eq!(outcome.expect("slow succeeded").data, b"3000");
-    assert!(ts >= T0 + 3 * SEC, "monotonic: completion stamped at or after retry_at");
+    assert!(
+        ts >= T0 + 3 * SEC,
+        "monotonic: completion stamped at or after retry_at"
+    );
     for w in j.windows(2) {
         assert!(w[0].ts_nanos <= w[1].ts_nanos, "journal ts never decrease");
     }
@@ -231,7 +242,10 @@ async fn hot_retries_are_stamped_at_retry_at() {
     assert_eq!(f.len(), 2, "{j:#?}");
     assert_eq!(f[0].0, T0);
     assert_eq!(f[0].1.retry_at_nanos, T0 + 50 * MS);
-    assert!(f.iter().all(|(_, s)| s.backoff == AttemptBackoff::InActivation));
+    assert!(
+        f.iter()
+            .all(|(_, s)| s.backoff == AttemptBackoff::InActivation)
+    );
     // Attempt 2 ran at max(T0, retry_at 1); its own retry_at is 100 ms after that.
     assert_eq!(f[1].0, T0 + 50 * MS);
     assert_eq!(f[1].1.retry_at_nanos, T0 + 150 * MS);

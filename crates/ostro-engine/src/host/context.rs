@@ -39,6 +39,10 @@ impl Host for HostState {
         })
     }
 
+    /// Logical time (`ReplayState::logical_now_nanos`): the last journaled command's ts,
+    /// and inside a step attempt that re-runs after a `StepAttemptFailed`,
+    /// `max(that ts, retry_at)` (D22; `begin-step` / the retry decision raise the clock
+    /// to the recorded `retry_at`). Never read from the node clock directly.
     async fn now(&mut self) -> wasmtime::Result<Datetime> {
         Ok(datetime(self.replay.logical_now_nanos()))
     }

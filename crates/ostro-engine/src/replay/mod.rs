@@ -7,6 +7,10 @@
 //! (plan 03-02). Callers pass precomputed `(CommandKind, CommandHash)` pairs and the
 //! core treats recorded results as opaque events. The host adapter (plan 03-07) is a
 //! thin layer over [`ReplayState`].
+//!
+//! Logical time is derived from the journal only: the ts of the last guest command,
+//! raised for a re-run step attempt to the failed attempt's `retry_at_nanos` (D22, the
+//! retry logical clock; see `cursor`), and never moving backwards.
 
 mod cursor;
 pub mod rng;
