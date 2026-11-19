@@ -196,7 +196,7 @@ Plans:
 - [ ] 05-18-PLAN.md — Failpoint feature chain + new sites + FAILPOINT_CRATES/ci.yml sync (wave 8; QA-01)
 - [ ] 05-19-PLAN.md — Whole-server kill campaign (sharded, every fault ends in kill -9) + CI smoke (wave 9; QA-01)
 - [ ] 05-20-PLAN.md — PHASE GATE + FREEZE FLIP: >= 10,000 kills, corpora, FROZEN.toml + golden/meta-golden re-pin + RESERVATIONS flip + local tag, full ci-local (wave 10)
-- [ ] 05-21-PLAN.md — Empty-log anchoring at applied_offset (Phase 12 F3) in ostro-log recovery + partition startup (wave 2)
+- [x] 05-21-PLAN.md — Empty-log anchoring at applied_offset (Phase 12 F3) in ostro-log recovery + partition startup (wave 2)
 - [ ] 05-22-PLAN.md — Ready entries (workflow/tenant/first), durable attempt_failures, status_seq, parent_event forwarding (wave 3)
 - [ ] 05-23-PLAN.md — D22 retry logical clock + long_backoff expectation fixes (wave 3)
 - [ ] 05-24-PLAN.md — D23 tenant-qualified names + upload tenant/name (WorkflowVersion.module) + two-tenant test (wave 3)
