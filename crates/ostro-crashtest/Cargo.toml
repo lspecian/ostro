@@ -24,6 +24,11 @@ blake3.workspace = true
 bytes.workspace = true
 tempfile.workspace = true
 fail = { workspace = true, optional = true }
+# Whole-server kill campaign (05-19): HTTP workload + checker against the spawned binary.
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 # apply_throughput.rs captures the machine's batch/checkpoint histograms with a test recorder.

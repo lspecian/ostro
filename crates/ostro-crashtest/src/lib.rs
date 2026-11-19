@@ -9,6 +9,15 @@
 //!
 //! `kill -9` never produces torn writes (the page cache survives a process kill), so torn
 //! tails and bit flips are injected offline between runs (02-RESEARCH Pitfall 2).
+//!
+//! Plan 05-19 (QA-01) adds the whole-server kill campaign against the real failpoint-enabled
+//! `ostro` binary: [`server_target`] (spawn / kill -9 / restart), [`workload`] (crash-saga
+//! load over HTTP + fsynced ack log), [`check`] (lost-ack / duplicate-journal / result
+//! checker, negative controls in `tests/check_controls.rs`).
+
+pub mod check;
+pub mod server_target;
+pub mod workload;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
