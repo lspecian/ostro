@@ -177,3 +177,43 @@ same machine measured 3.4 ms.
 
 **Gate status: human_needed.** Run the documented command on native Linux NVMe 8 vCPU and
 record the results in 05-VALIDATION.md.
+
+### D24: `StartRun.run_started` set by the API (plan 05-25)
+
+From 05-25 the API start and retry-restart paths set `StartRun.run_started` (D24, amends
+D3), so `RunStarted` is journaled at seq 0 inside the StartRun apply and the executor's own
+RunStarted append (one WAL commit in series before the first step) is gone. The paragraph
+above that says the switch is "not enabled" describes the state at 05-16.
+
+Same-session A/B on WSL2 (release, P=16, 12 logical CPUs, ext4 virtual disk), with
+interleaved runs of two perf binaries built from the same tree: **before** = the API leaves
+the field empty (05-16 state), **after** = 05-25. The virtual disk was slower than during
+05-16 (raw fsync p50 7.8-8.6 ms, other builds running on the machine), so compare rows
+within this table, not with the 05-16 tables.
+
+Command (idle): `OSTRO_BENCH_PROFILE=a OSTRO_BENCH_CONCURRENCY=1 OSTRO_BENCH_RUNS=300 cargo test --release -p ostro-server --test perf --locked -- --ignored --nocapture`
+(64 clients: `OSTRO_BENCH_CONCURRENCY=64 OSTRO_BENCH_RUNS=2000`).
+
+| profile | clients | variant | steps/s | runs/s | start→first step p50 / p99 | flushes/s | CPU (cores) | bytes on disk | raw fsync p50 |
+|---|---|---|---|---|---|---|---|---|---|
+| A | 1 (idle) | before | 315 / 273 / 315 | 27-32 | **24.10 / 28.2, 24.33 / 58.6, 23.89 / 33.3 ms** | 418-491 | 0.11-0.13 | 2.32 MB | 7.9-8.2 ms |
+| A | 1 (idle) | after | 386 / 420 / 408 | 39-42 | **8.53 / 13.3, 8.41 / 14.7, 8.51 / 14.6 ms** | 469-471 | 0.13-0.14 | 2.19 MB | 8.1-8.6 ms |
+| A | 64 | before | **12,592 / 11,907** | 1,191-1,259 | 33.6-34.6 / 48.7-64.2 ms | 448-463 | 1.2-1.3 | 8.97-8.99 MB | 7.8-8.1 ms |
+| A | 64 | after | **18,373 / 17,766** | 1,777-1,837 | 17.3-17.9 / 23.9-27.7 ms | 435-455 | 1.5 | 8.18-8.19 MB | 8.2-8.3 ms |
+
+A single "after" idle run earlier in the session, while the disk's fsync p50 was 3.3 ms,
+measured **5.71 / 23.9 ms** (450 steps/s, 2.19 MB). 05-16 measured 3.38 ms at 2.4-3.1 ms
+fsync with the same switch.
+
+- Idle start → first step p50: **~24 ms → ~8.5 ms** at ~8 ms fsync (-65%). The p50 now
+  tracks about one fsync instead of about three: StartRun (with RunStarted) commits, and
+  the pipelined grant and the first step's flush follow it.
+- Profile A, 64 clients: **~12.2k → ~18.1k steps/s** (+48%) at the same disk speed. 05-16
+  measured ~20k → ~30k at 2.4-3.1 ms fsync.
+- Bytes on disk drop by about 0.4 KB per run (one `EventsAppended` record fewer per run;
+  RunStarted moves into the StartRun record), so 2,000 × 10-step runs take 8.18 MB
+  instead of 8.97 MB.
+- Every run's steps were verified on disk after a restart (D16) in all rows.
+
+**Gate status: unchanged, human_needed.** NFR-2.4 (idle p50 < 5 ms) is judged on native
+Linux NVMe (D15). On WSL2 the idle figure is fsync-bound and moves with the virtual disk.
