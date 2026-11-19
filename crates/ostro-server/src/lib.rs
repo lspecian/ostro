@@ -31,7 +31,7 @@ pub mod run_started;
 pub mod server;
 pub mod sink;
 
-pub use server::{Server, ServerError, ServerHandle, StartupTimings, start};
+pub use server::{LOCK_FILE, Server, ServerError, ServerHandle, StartupTimings, start};
 
 #[cfg(test)]
 mod dev_dep_anchors {

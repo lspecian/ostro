@@ -6,7 +6,12 @@
 //! 0. Resolve the data directory. `node.ephemeral` uses a fresh `TempDir` on `/dev/shm`
 //!    when it is writable (tmpfs: fsync is nearly free), otherwise in the OS temp dir.
 //!    Everything below runs on the same code path either way (D5: no in-memory store).
-//!    The API listener is bound right away so a busy port fails before any disk work.
+//!    Then the exclusive data-dir lock is taken (`flock(LOCK_EX|LOCK_NB)` on
+//!    `<data>/LOCK`, plan 05-26) before any other disk work: a second `ostro` process on
+//!    the same directory fails with [`ServerError::DataDirInUse`]. The lock is held by the
+//!    open file description for the server's lifetime, so a `LOCK` file left behind by a
+//!    killed process never blocks the next start. The API listener is bound right after,
+//!    so a busy port fails before meta, node, blob or AOT cache work.
 //! 1. `MetaHandle::start(<data>/meta)`: single voter, campaigns immediately.
 //! 2. `InitCluster` (idempotent for the same partition count; a different count is a
 //!    fatal [`ServerError::PartitionCountMismatch`]). The first boot generates the cluster
@@ -30,8 +35,9 @@
 //!
 //! `/readyz` turns 503 -> the listener stops accepting and in-flight requests finish ->
 //! `Node::shutdown` (the dispatcher revokes leases, activations stop) -> meta stops ->
-//! the ephemeral directory is removed.
+//! the data-dir lock is released -> the ephemeral directory is removed.
 
+use std::fs::File;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -61,6 +67,9 @@ use crate::retention::MetaPolicies;
 const SERVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Preferred parent of ephemeral data directories (tmpfs on Linux).
 const SHM_DIR: &str = "/dev/shm";
+/// The data-dir lock file (`<data>/LOCK`, plan 05-26). Its content is unused; only the
+/// advisory lock on an open descriptor matters.
+pub const LOCK_FILE: &str = "LOCK";
 
 /// Why the server could not start (or stop cleanly).
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +79,12 @@ pub enum ServerError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error(
+        "data dir {} is in use by another ostro process (lock {})",
+        path.display(),
+        lock.display()
+    )]
+    DataDirInUse { path: PathBuf, lock: PathBuf },
     #[error("cannot listen on {addr}: {source}")]
     Bind {
         addr: SocketAddr,
@@ -140,6 +155,8 @@ pub async fn start_with_hooks(
         .ok_or_else(|| ServerError::Config("node.partitions must be at least 1".into()))?;
     let node_id = cfg.node.node_id;
     let (data_dir, tempdir) = resolve_data_dir(&cfg)?;
+    // Before any other disk work (meta, node, blobs, AOT cache): one process per data dir.
+    let data_lock = lock_data_dir(&data_dir)?;
     let listener = tokio::net::TcpListener::bind(cfg.api.listen)
         .await
         .map_err(|source| ServerError::Bind {
@@ -303,8 +320,39 @@ pub async fn start_with_hooks(
         stop_tx,
         serve: Some(serve),
         done_rx,
+        data_lock,
         tempdir,
     })
+}
+
+/// Take the exclusive advisory lock on `<data>/LOCK` (`flock(LOCK_EX|LOCK_NB)`); the
+/// returned file must stay open for as long as the directory is in use. The lock belongs
+/// to the open descriptor, so the OS drops it when the process dies (even on SIGKILL) and
+/// a stale `LOCK` file does not block the next start. Tooling that opens `Node` / meta
+/// directly (Inspect mode, `export_run`, the format-corpus generator, the crash checker)
+/// does not take this lock: it must run on a copy or on a stopped directory.
+fn lock_data_dir(data_dir: &Path) -> Result<File, ServerError> {
+    let lock = data_dir.join(LOCK_FILE);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock)
+        .map_err(|source| ServerError::DataDir {
+            path: lock.clone(),
+            source,
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(ServerError::DataDirInUse {
+            path: data_dir.to_path_buf(),
+            lock,
+        }),
+        Err(std::fs::TryLockError::Error(source)) => {
+            Err(ServerError::DataDir { path: lock, source })
+        }
+    }
 }
 
 /// Resolve (and create) the data directory; `Some(TempDir)` for ephemeral mode.
@@ -486,6 +534,8 @@ pub struct ServerHandle {
     stop_tx: watch::Sender<bool>,
     serve: Option<JoinHandle<std::io::Result<()>>>,
     done_rx: watch::Receiver<bool>,
+    /// The exclusive `<data>/LOCK` descriptor, held until shutdown finishes (or drop).
+    data_lock: File,
     tempdir: Option<TempDir>,
 }
 
@@ -577,6 +627,7 @@ impl ServerHandle {
             node,
             stop_tx,
             serve,
+            data_lock,
             tempdir,
             ..
         } = self;
@@ -612,6 +663,12 @@ impl ServerHandle {
                 let _ = tokio::task::spawn_blocking(move || drop(cp)).await;
             }
         }
+        // Meta and node are stopped: no writer is left, so another process may open the
+        // directory from here on.
+        if let Err(e) = data_lock.unlock() {
+            warn!(error = %e, "releasing the data-dir lock");
+        }
+        drop(data_lock);
         if let Some(dir) = tempdir {
             let path = dir.path().to_path_buf();
             if let Err(e) = dir.close() {
