@@ -93,7 +93,7 @@
 //! # Failpoints (plan 05-18, feature `failpoints`)
 //!
 //! Both sites are evaluated around every executor append: the `RunStarted` append and every
-//! engine append ([`EngineSink`]).
+//! engine append (`EngineSink`).
 //!
 //! - `executor::before_append`: before the append is submitted. `return` makes it fail with
 //!   `AppendError::Unavailable` naming EIO (`return(enospc)`: ENOSPC) and nothing is
