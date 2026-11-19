@@ -64,7 +64,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Workflow Semantics
 
-- [ ] **WF-01**: Developer can define a workflow with stable name + version and typed JSON input/output [FR-1.1]
+- [x] **WF-01**: Developer can define a workflow with stable name + version and typed JSON input/output [FR-1.1]
 - [x] **WF-02**: Developer can define steps with retry policy (max attempts, initial/max interval, backoff coefficient, non-retryable kinds), timeout and fuel budget; replay returns recorded results without re-executing [FR-1.2]
 - [ ] **WF-03**: Developer can await effects concurrently (gather/all/join) and race them, with completion order journaled and replayed identically [FR-1.3]
 - [ ] **WF-04**: Developer can sleep for a duration or until a time; a sleeping run holds no memory [FR-1.4]
@@ -89,8 +89,8 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 - [ ] **API-01**: One client port serves HTTP/1.1, HTTP/2 and gRPC (tonic Routes into axum) with identical semantics; OpenAPI published [FR-0.3]
 - [x] **API-02**: Client can upload a module by sha256 (idempotent) and activate a workflow version [FR-3.1]
-- [ ] **API-03**: Client can start a run with queue, delay, priority, tags, version, traceparent, tenant and idempotency key with a conflict policy (return existing run or reject) [FR-3.2]
-- [ ] **API-04**: Client can get run status (incl. published status), history, and list/filter runs [FR-3.3]
+- [x] **API-03**: Client can start a run with queue, delay, priority, tags, version, traceparent, tenant and idempotency key with a conflict policy (return existing run or reject) [FR-3.2]
+- [x] **API-04**: Client can get run status (incl. published status), history, and list/filter runs [FR-3.3]
 - [ ] **API-05**: Client can signal, cancel (graceful), terminate, and retry runs [FR-3.4]
 - [ ] **API-06**: Client can long-poll a run result [FR-3.5]
 - [ ] **API-07**: Client can complete a callback/await token [WIT-04]
@@ -283,7 +283,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WIT-05 | Phase 3 | Complete |
 | WIT-06 | Phase 3 | Complete |
 | WIT-07 | Phase 5 | Pending |
-| WF-01 | Phase 4 | Pending |
+| WF-01 | Phase 4 | Complete |
 | WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Pending |
 | WF-04 | Phase 5 | Pending |
@@ -302,8 +302,8 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | DISP-07 | Phase 4 | Complete |
 | API-01 | Phase 4 | Pending |
 | API-02 | Phase 4 | Complete |
-| API-03 | Phase 4 | Pending |
-| API-04 | Phase 4 | Pending |
+| API-03 | Phase 4 | Complete |
+| API-04 | Phase 4 | Complete |
 | API-05 | Phase 5 | Pending |
 | API-06 | Phase 5 | Pending |
 | API-07 | Phase 5 | Pending |
