@@ -39,6 +39,12 @@ pub struct GenRun {
 /// Generous timeout for anything that should happen "soon".
 pub const T: Duration = Duration::from_secs(10);
 
+/// Timeout for `Node::open` in the harness. An open takes about 1.2 s fresh and about 0.1 s
+/// warm (16 partitions, debug). It is above `T` because parallel test binaries on a loaded box
+/// (load average > 15) pushed opens past 10 s, and plan 05-02 measured no change in open
+/// time from its commits. 30 s still catches a real hang.
+pub const OPEN_T: Duration = Duration::from_secs(30);
+
 /// Partition count used by the single-partition helpers.
 pub fn pc() -> PartitionCount {
     PartitionCount::new(1).expect("non-zero")
@@ -214,7 +220,7 @@ pub async fn open_node(
         PartitionCount::new(p).expect("non-zero"),
     );
     cfg.mode = mode;
-    timeout(T, ostro_partition::Node::open(cfg))
+    timeout(OPEN_T, ostro_partition::Node::open(cfg))
         .await
         .expect("node open timed out")
         .expect("node open")
@@ -254,7 +260,7 @@ pub async fn open_node_cfg(
         PartitionCount::new(p).expect("non-zero"),
     );
     f(&mut cfg);
-    timeout(T, ostro_partition::Node::open(cfg))
+    timeout(OPEN_T, ostro_partition::Node::open(cfg))
         .await
         .expect("node open timed out")
         .expect("node open")

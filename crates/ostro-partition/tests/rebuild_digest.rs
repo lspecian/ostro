@@ -16,7 +16,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use common::gen_lifecycle::LifecycleOp;
 use common::gen_waits::WaitOp;
-use common::{GenRun, T, copy_dir, run_on, start_run};
+use common::{GenRun, OPEN_T, T, copy_dir, run_on, start_run};
 use ostro_log::ReplicatedLog;
 use ostro_partition::{ApplyOutcome, MachineConfig, Node, NodeConfig, PartitionSlot, StartMode};
 use ostro_types::command::{
@@ -197,7 +197,7 @@ async fn open(dir: &Path, cfg: &Cfg, mode: StartMode) -> Node {
     nc.machine = cfg.machine();
     nc.mode = mode;
     nc.leader.shuffler.idle_poll = Duration::from_millis(20);
-    timeout(T, Node::open(nc))
+    timeout(OPEN_T, Node::open(nc))
         .await
         .expect("node open timed out")
         .expect("node open")
