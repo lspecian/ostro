@@ -68,7 +68,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **WF-02**: Developer can define steps with retry policy (max attempts, initial/max interval, backoff coefficient, non-retryable kinds), timeout and fuel budget; replay returns recorded results without re-executing [FR-1.2]
 - [ ] **WF-03**: Developer can await effects concurrently (gather/all/join) and race them, with completion order journaled and replayed identically [FR-1.3]
 - [ ] **WF-04**: Developer can sleep for a duration or until a time; a sleeping run holds no memory [FR-1.4]
-- [ ] **WF-05**: Developer can wait for a named signal with timeout; callers can send signals via API [FR-1.5]
+- [x] **WF-05**: Developer can wait for a named signal with timeout; callers can send signals via API [FR-1.5]
 - [ ] **WF-06**: Developer can start, await or detach child workflows in any language; cancellation propagates [FR-1.6]
 - [ ] **WF-07**: Native time/random APIs (`time.time()`, `Date.now()`, `Math.random()`, `HashMap`) behave deterministically under replay [FR-1.7]
 - [ ] **WF-08**: Developer can evolve in-flight code with `patched(id)` markers; runs stay pinned to their module sha [FR-1.8]
@@ -91,9 +91,9 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **API-02**: Client can upload a module by sha256 (idempotent) and activate a workflow version [FR-3.1]
 - [x] **API-03**: Client can start a run with queue, delay, priority, tags, version, traceparent, tenant and idempotency key with a conflict policy (return existing run or reject) [FR-3.2]
 - [x] **API-04**: Client can get run status (incl. published status), history, and list/filter runs [FR-3.3]
-- [ ] **API-05**: Client can signal, cancel (graceful), terminate, and retry runs [FR-3.4]
-- [ ] **API-06**: Client can long-poll a run result [FR-3.5]
-- [ ] **API-07**: Client can complete a callback/await token [WIT-04]
+- [x] **API-05**: Client can signal, cancel (graceful), terminate, and retry runs [FR-3.4]
+- [x] **API-06**: Client can long-poll a run result [FR-3.5]
+- [x] **API-07**: Client can complete a callback/await token [WIT-04]
 - [ ] **API-08**: Any node forwards requests to the owning partition leader; reads observe the caller's prior writes
 
 ### Triggers
@@ -287,11 +287,11 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Pending |
 | WF-04 | Phase 5 | Pending (derive CancelWait for cancel-op on waits: 05-11) |
-| WF-05 | Phase 5 | Pending (apply: waits/signals/timeouts 05-08; derive RegisterWait/CancelWait + resume re-arm: 05-11) |
+| WF-05 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
 | WF-06 | Phase 9 | Pending |
 | WF-07 | Phase 4 (Rust) / Phase 9 (Py, TS) | Pending |
 | WF-08 | Phase 5 | Pending (server module_override hook + nondeterminism/patch tests: 05-11) |
-| WF-09 | Phase 5 | Pending (apply timeouts: 05-09; derive/executor: 05-11; e2e: 05-15) |
+| WF-09 | Phase 5 | Pending (apply timeouts: 05-09; derive/executor: 05-11; API start schedule_to_start + policies: 05-13 done; e2e: 05-15) |
 | WF-10 | Phase 9 | Pending |
 | DISP-01 | Phase 4 | Complete |
 | DISP-02 | Phase 4 | Complete |
@@ -304,9 +304,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | API-02 | Phase 4 | Complete |
 | API-03 | Phase 4 | Complete |
 | API-04 | Phase 4 | Complete |
-| API-05 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply signal/cancel: 05-08; apply terminate/retry: 05-09; server: 05-13) |
-| API-06 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
-| API-07 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply CompleteToken: 05-08; server: 05-13; derive token waits (no more unsupported failure): 05-11) |
+| API-05 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
+| API-06 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
+| API-07 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
 | API-08 | Phase 13 | Pending |
 | TRIG-01 | Phase 8 | Pending |
 | TRIG-02 | Phase 8 | Pending |
@@ -336,7 +336,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | OPS-03 | Phase 11 | Pending |
 | OPS-04 | Phase 11 | Pending |
 | OPS-05 | Phase 11 | Pending |
-| OPS-06 | Phase 5 | Pending (apply expiry incl. dedupe: 05-09; policy resolution + [runs] config: 05-11; API: 05-13) |
+| OPS-06 | Phase 5 | Pending (apply expiry incl. dedupe: 05-09; policy resolution + [runs] config: 05-11; API policies + start resolution: 05-13 done; e2e expiry through the server: 05-15) |
 | OPS-07 | Phase 11 | Pending |
 | SDK-01 | Phase 4 | Complete |
 | SDK-02 | Phase 9 | Pending |
