@@ -417,7 +417,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 20/20 | Complete | 2026-11-19 |
-| 5. Workflow Semantics & Core Hardening | 3/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-21 empty-log anchoring done) | - |
+| 5. Workflow Semantics & Core Hardening | 3/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-07 meta pre-freeze encoding done) | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
