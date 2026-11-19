@@ -653,3 +653,49 @@ pub fn redact(v: &Value, subst: &[(&str, &str)]) -> Value {
 pub fn redacted(v: &Value, subst: &[(&str, &str)]) -> String {
     serde_json::to_string_pretty(&redact(v, subst)).expect("json")
 }
+
+// ---------------------------------------------------------------------------------
+// order-saga helpers (plan 05-17): build the examples/order-saga component once per
+// process, for the CLI-driven success-criterion-1 suite.
+// ---------------------------------------------------------------------------------
+
+/// Build `examples/order-saga` once per process (release, wasm32-wasip2, into
+/// `target/order-saga` like the ci-local "order-saga example" step) and return the path
+/// of `order_saga.wasm`.
+pub fn order_saga_wasm() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let root = repo_root();
+            let target_dir = root.join("target/order-saga");
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let out = Command::new(cargo)
+                .args([
+                    "build",
+                    "--release",
+                    "--target",
+                    "wasm32-wasip2",
+                    "--manifest-path",
+                ])
+                .arg(root.join("examples/order-saga/Cargo.toml"))
+                .arg("--target-dir")
+                .arg(&target_dir)
+                .env_remove("RUSTFLAGS")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env_remove("CARGO_BUILD_TARGET")
+                .env_remove("CARGO_TARGET_DIR")
+                .env_remove("RUSTC_WRAPPER")
+                .output()
+                .expect("failed to spawn cargo for the order-saga build");
+            if !out.status.success() {
+                panic!(
+                    "order-saga build failed:\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            let p = target_dir.join("wasm32-wasip2/release/order_saga.wasm");
+            assert!(p.is_file(), "missing {}", p.display());
+            p
+        })
+        .clone()
+}
