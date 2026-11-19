@@ -485,7 +485,36 @@ Plans:
   3. A Jepsen-style run on 3 nodes (partitions, clock skew, `kill -9`, disk stalls) shows 0 lost acknowledged runs, 0 duplicate journal entries, and fencing holding. A 7-day soak at 70% rated load is stable.
   4. Benchmarks verify acknowledged work and bytes on disk: single node ≥ 10,000 steps/s, and 3-node RF=3 ≥ 5,000 steps/s with p99 commit < 20 ms on LAN.
   5. Users can install from static linux x86_64/aarch64 binaries, signed and notarized macOS binaries, a `FROM scratch` image, the install script, or the Helm chart (with KEDA examples and NetworkPolicies). Docs cover getting started per language, determinism, connectors, operations/sizing, and migrations from cron/queue tables, Temporal and Restate.
-**Plans**: TBD
+**Plans**: 27 plans (6 waves; 14-01 is the PHASE-14 GATE requiring Phase 13 complete (all 13-*-SUMMARY + 13-VERIFICATION passed, or human_needed with by-design items only) and Phases 5-12 complete; decisions D-P14-1..D-P14-36 adopted in 14-DECISIONS.md, user reviews D-P14-3/4 (scopes admin/deploy/operate/trigger/read without implication except admin; bearer `ostro_otk_<16 base32>_<52 base32>`), D-P14-12 (secret-access audit coalesced per run/module/secret/origin per 60 s) and D-P14-10 (signed modules off by default, minisign primary + cosign keyed, cluster-wide policy in meta); ordinals only from the P14 block (ext tags 112-117; no partition/meta variants); authorization, tenant scoping and audit in one guard at the ingress node, quotas on per-node leadership shares; human acceptance paths for the external security review, macOS notarization, image/chart pushes, the 7-day soak, LAN/native benchmarks, remote CI and publishing; 1.0.0-rc.1 tagged locally at the gate)
+
+Plans:
+- [ ] 14-01-PLAN.md — PHASE-14 GATE (Phase 13 + 5-12 complete, seams, method inventory, reservations) + decisions/USER REVIEW/HUMAN to STATE + contracts (auth Principal/scopes/Method, phase14 traits, ext 112-117, audit sink) + p14 seam with call sites + config + CLI/client stubs + ostro-fuzz-targets/fuzz/ostro-jepsen skeletons + deps + tool pins (all)
+- [ ] 14-02-PLAN.md — API wire surface: Tenants/ApiTokens/Audit/Security protos + adapters, bearer authentication layer/interceptor, signature carriage, tenant webhooks, OpenAPI + parity (wave 2; SEC-02..04, DISP-06)
+- [ ] 14-03-PLAN.md — Token codec, meta-backed authenticator, admin bootstrap (online + offline), guard decorator over every API trait (wave 2; SEC-02)
+- [ ] 14-04-PLAN.md — Hash-chained node-local audit journal (TDD): group commit, fail-closed permits, torn-tail recovery, retention, verify, OTLP export (wave 2; SEC-04)
+- [ ] 14-05-PLAN.md — Signature verifiers (TDD): minisign via minisign-verify, cosign keyed via aws-lc-rs, rsign2 interop vectors (wave 2; SEC-03)
+- [ ] 14-06-PLAN.md — Dispatch-side quotas: tenant level in fair.rs, per-tenant concurrency/memory/fuel debt on leadership shares, fairness evidence (wave 2; DISP-06)
+- [ ] 14-07-PLAN.md — Fuzzing infrastructure + 13 codec/apply/storage/parser targets, stable corpus replay, fuzz-smoke, scheduled fuzz workflow (wave 2; SEC-05)
+- [ ] 14-08-PLAN.md — Wasm fuzz targets: evil_guest (malformed WIT values) and wasm-smith components (wave 2; SEC-05)
+- [ ] 14-09-PLAN.md — Jepsen-style harness core: workload with consistency tokens, partition/kill nemeses, lost/duplicate/fencing checkers with self-tests (wave 2; QA-05)
+- [ ] 14-10-PLAN.md — Fault knobs: failpoints-only skewable clock + runtime failpoints endpoint, clock and disk-stall nemeses (wave 3; QA-05)
+- [ ] 14-11-PLAN.md — Release dry run (static musl, reproducible tarballs, SHA256SUMS + minisign), verified install.sh with local tests, release.yml with macOS notarized pkg (wave 2; DIST-01)
+- [ ] 14-12-PLAN.md — FROM scratch image without Docker (crane + loopback registry), verified contents (wave 2; DIST-01)
+- [ ] 14-13-PLAN.md — Helm chart (StatefulSet, workers, KEDA 2.21, NetworkPolicies) validated offline with helm lint + kubeconform (wave 2; DIST-02)
+- [ ] 14-14-PLAN.md — Migration guides: cron/queue tables, Temporal, Restate (wave 2; DIST-03)
+- [ ] 14-15-PLAN.md — Scope enforcement with route x scope matrix + export, join-token separation, principal propagation over forwarding (wave 3; SEC-02)
+- [ ] 14-16-PLAN.md — Tenant scoping (qualify/strip, 404 on foreign runs, filtered lists), tenant run index, per-tenant module registration, tenant-correct triggers (wave 3; SEC-02)
+- [ ] 14-17-PLAN.md — Tenant and API-token admin services + ostro-client + CLI verbs (wave 3; SEC-02, DISP-06)
+- [ ] 14-18-PLAN.md — Audit capture through the guard (fail closed), coalesced secret-access audit, cluster audit query + CLI (wave 3; SEC-04)
+- [ ] 14-19-PLAN.md — Signed-module enforcement at upload + activation with cluster-wide policy, security API/CLI, deploy --signature, system-secret reseal (wave 3; SEC-03)
+- [ ] 14-20-PLAN.md — Ingress quotas: per-tenant event-rate GCRA and suspension at start/signal/token/webhook/cron (wave 3; DISP-06)
+- [ ] 14-21-PLAN.md — UI auth: token login, signed cluster-wide session cookie, scope gating, tenant-filtered views (wave 4; SEC-02)
+- [ ] 14-22-PLAN.md — Jepsen-style 3-node loopback runs with all fault classes, auth + audit on (smoke + 2 x 30 min gate) (wave 4; QA-05)
+- [ ] 14-23-PLAN.md — Bytes-on-disk verified benchmarks (single + RF=3) + pre-registered soak criteria, ostro-soak driver, soak smoke (wave 4; QA-04, QA-05)
+- [ ] 14-24-PLAN.md — Threat model, security model, generated auth matrix, review packet + findings tracker (wave 4; SEC-05)
+- [ ] 14-25-PLAN.md — Docs set (getting started x3, determinism, connectors, tenancy/auth, audit, signed modules, operations/sizing, install, Kubernetes, README) + docs-check (wave 4; DIST-03)
+- [ ] 14-26-PLAN.md — Cross-feature tier-B integration + races, full suite x3, full-tree docs-check, fixes with regression tests (wave 5; SEC-02..04, DISP-06)
+- [ ] 14-27-PLAN.md — PHASE GATE: Phase 14 checks required in CI, final measurements, 1.0.0-rc.1 + local tag, release checklist, RESERVATIONS flip, REQUIREMENTS, VALIDATION (wave 6; all)
 
 ## Progress
 
