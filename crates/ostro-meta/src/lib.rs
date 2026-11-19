@@ -34,6 +34,8 @@ pub use records::{
 };
 pub use sm::{MetaSm, MetaView};
 pub use state::MetaState;
+/// D23 name grammar (the single source the API layer validates against).
+pub use validate::{is_qualified_name, is_resource_name, is_tenant_id};
 
 pub use ostro_raft_driver::{
     Applied, DriverConfig, Outbox, ProposeError, RaftDriver, RaftHandle, RaftStatus, StateMachine,

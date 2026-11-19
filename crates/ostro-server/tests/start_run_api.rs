@@ -138,7 +138,9 @@ async fn rest_start_get_typed_result_and_options() {
     assert!(completed >= created, "{run}");
     assert!(run["created_at"].as_str().expect("rfc3339").ends_with('Z'));
 
-    // Every option is persisted and returned exactly as sent.
+    // Every option is persisted and returned exactly as sent. (The tenant is D23-qualified
+    // since 05-24: a tenant run resolves `<tenant>/<workflow>`, which needs a tenant
+    // upload and, to complete, 05-11's journal-name stripping; tenancy_api.rs covers it.)
     let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     let (st, body) = start(
         &s,
@@ -149,7 +151,6 @@ async fn rest_start_get_typed_result_and_options() {
             "priority": 7,
             "tags": ["t1", "team:a"],
             "traceparent": tp,
-            "tenant": "acme",
             "concurrency_key": "ck-1",
             "version": 1,
         }),
@@ -163,7 +164,7 @@ async fn rest_start_get_typed_result_and_options() {
     assert_eq!(run["priority"], 7);
     assert_eq!(run["tags"], json!(["t1", "team:a"]));
     assert_eq!(run["traceparent"], tp);
-    assert_eq!(run["tenant"], "acme");
+    assert_eq!(run["tenant"], Value::Null);
     assert_eq!(run["concurrency_key"], "ck-1");
     assert_eq!(run["result"], basic_result("opts", 4));
 
@@ -377,7 +378,6 @@ async fn grpc_start_get_and_errors() {
             workflow: "sdk-basic".into(),
             input_json: br#"{"name":"g","n":5}"#.to_vec(),
             tags: vec!["grpc".into()],
-            tenant: Some("t-g".into()),
             priority: Some(-3),
             idempotency_key: Some("g-key".into()),
             ..Default::default()
@@ -409,7 +409,7 @@ async fn grpc_start_get_and_errors() {
     assert_eq!(info.queue, "default");
     assert!(info.attempt.is_some_and(|n| n >= 1), "{info:?}");
     assert_eq!(info.tags, vec!["grpc".to_owned()]);
-    assert_eq!(info.tenant.as_deref(), Some("t-g"));
+    assert_eq!(info.tenant, None);
     assert_eq!(info.priority, -3);
     let result: Value =
         serde_json::from_slice(info.result_json.as_deref().expect("result")).expect("result json");

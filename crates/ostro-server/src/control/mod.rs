@@ -7,6 +7,8 @@
 //! - [`runs`]: start (API-03) and get (API-04 / WF-01) (04-18).
 //! - [`history`]: a run's decoded journal (API-04) (04-18).
 //! - [`list`]: filtered, paginated run listing across partitions (API-04) (04-18).
+//! - [`names`]: the D23 tenant-id and resource-name grammar and tenant qualification
+//!   (05-24).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,6 +31,7 @@ use crate::config::ServerConfig;
 pub mod history;
 pub mod list;
 pub mod modules;
+pub mod names;
 pub mod runs;
 
 /// Shared state behind every API call.

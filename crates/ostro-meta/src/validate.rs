@@ -127,7 +127,7 @@ fn tenant(t: &Tenant) -> Check {
 
 /// D23 resource-name grammar: `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` (so no
 /// `/`, no `:`, no leading `__`).
-pub(crate) fn is_resource_name(s: &str) -> bool {
+pub fn is_resource_name(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
         && b.len() <= 128
@@ -139,7 +139,7 @@ pub(crate) fn is_resource_name(s: &str) -> bool {
 
 /// D23 tenant-id grammar: `^[a-z0-9][a-z0-9-]{0,62}$` (`_`, the default
 /// tenant's spelling, never matches).
-pub(crate) fn is_tenant_id(s: &str) -> bool {
+pub fn is_tenant_id(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
         && b.len() <= 63
@@ -150,7 +150,7 @@ pub(crate) fn is_tenant_id(s: &str) -> bool {
 }
 
 /// A D23 qualified name: `<name>` (default tenant) or `<tenant>/<name>`.
-pub(crate) fn is_qualified_name(s: &str) -> bool {
+pub fn is_qualified_name(s: &str) -> bool {
     match s.split_once('/') {
         None => is_resource_name(s),
         Some((t, n)) => is_tenant_id(t) && is_resource_name(n),

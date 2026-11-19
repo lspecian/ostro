@@ -3,6 +3,15 @@
 //!
 //! # Start
 //!
+//! 0. D23 names ([`super::names`]): the tenant must be absent/empty (the default tenant)
+//!    or a valid tenant id (`_` is reserved: 400). The workflow and an explicit queue may
+//!    be bare or qualified with the request's own tenant (a different prefix is 400), and
+//!    their module-local parts must match the resource grammar (400). Both are submitted
+//!    in storage form (`<tenant>/<name>`, bare for the default tenant), so the dedupe row,
+//!    the partition and the meta lookup are tenant-scoped with no format change, and
+//!    `tenant(StartRun.workflow) == StartRun.tenant` holds by construction. A queue taken
+//!    from the version's `describe()` default (or [`DEFAULT_QUEUE`]) is qualified the same
+//!    way.
 //! 1. Resolve the version: the explicit one, else the active one. An unknown workflow or
 //!    version is 404; a workflow with versions but no active one is 412.
 //! 2. Validate the input JSON (400) and the option sizes ([`MAX_RUN_TAGS`] etc., 400).
@@ -47,6 +56,7 @@ use ostro_types::routing::{partition_for_key, partition_for_new_run};
 use ostro_types::{PayloadRef, RunId};
 
 use super::ServerControlPlane;
+use super::names;
 
 /// Queue of runs whose request and workflow name none.
 pub const DEFAULT_QUEUE: &str = "default";
@@ -219,7 +229,20 @@ pub(crate) async fn start_run(
     req: StartRunRequest,
 ) -> Result<StartRunResult, ApiError> {
     check_options(&req)?;
-    let wf = resolve_version(cp, &req.workflow, req.version)?;
+    // D23: validate and qualify before anything is resolved, routed or stored.
+    let tenant = names::request_tenant(req.tenant.as_deref())?.map(str::to_owned);
+    let workflow = names::qualify_request_name("workflow", tenant.as_deref(), &req.workflow)?;
+    let req_queue = non_empty(req.queue)
+        .map(|q| names::qualify_request_name("queue", tenant.as_deref(), &q))
+        .transpose()?;
+    let wf = resolve_version(cp, &workflow, req.version)?;
+    let queue = match req_queue {
+        Some(q) => q,
+        None => {
+            let local = wf.default_queue.as_deref().unwrap_or(DEFAULT_QUEUE);
+            names::qualify_request_name("queue", tenant.as_deref(), local)?
+        }
+    };
     serde_json::from_slice::<serde::de::IgnoredAny>(&req.input_json)
         .map_err(|e| ApiError::invalid_argument(format!("input: not valid JSON ({e})")))?;
 
@@ -227,7 +250,7 @@ pub(crate) async fn start_run(
     let uuid = uuid::Uuid::now_v7();
     let idem = non_empty(req.idempotency_key);
     let p = match &idem {
-        Some(k) => partition_for_key(&req.workflow, k.as_bytes(), count),
+        Some(k) => partition_for_key(&workflow, k.as_bytes(), count),
         None => partition_for_new_run(&uuid, count),
     };
     let run = RunId::new(p, uuid);
@@ -242,16 +265,13 @@ pub(crate) async fn start_run(
         .map_err(partition_error)?;
 
     let now = cp.now_ms();
-    let queue = non_empty(req.queue)
-        .or(wf.default_queue.clone())
-        .unwrap_or_else(|| DEFAULT_QUEUE.to_owned());
     let policy = match req.conflict_policy {
         ConflictPolicy::ReturnExisting => cmd::ConflictPolicy::ReturnExisting,
         ConflictPolicy::Reject => cmd::ConflictPolicy::Reject,
     };
     let start = StartRun {
         run_id: run.as_bytes().to_vec(),
-        workflow: req.workflow,
+        workflow,
         workflow_version: wf.version,
         queue,
         input: Some(input),
@@ -265,7 +285,7 @@ pub(crate) async fn start_run(
         rng_seed: seed.to_vec(),
         module_sha: wf.module_sha256.to_vec(),
         tags: req.tags,
-        tenant: req.tenant.unwrap_or_default(),
+        tenant: tenant.unwrap_or_default(),
         traceparent: req.traceparent.unwrap_or_default(),
         run_timeout_ms: wf.run_timeout_ms.unwrap_or(0),
         // Phase 5 fields (05-01 contract): schedule-to-start comes with the start request in
