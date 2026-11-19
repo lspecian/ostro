@@ -325,12 +325,11 @@ async fn kill9_mid_run_restart_completes_and_metadata_persists() {
     let h = api.history(&run).await;
     assert_eq!(step_completions(&h, "before"), 1, "{h:?}");
     assert_eq!(step_completions(&h, "slow"), 1, "{h:?}");
-    // `slow` measures `ctx.now() - t0`. Logical time inside a step is the timestamp of
-    // the last journaled command, so requeued attempt 2 still sees the time of attempt
-    // 1's failure (elapsed ~0) and fails again; attempt 3 sees attempt 2's failure time
-    // (~3 s later) and succeeds. Two requeued failures, deterministically.
+    // `slow` measures `ctx.now() - t0`. D22 (05-23): a re-run attempt sees
+    // max(last journaled ts, retry_at), so requeued attempt 2 sees elapsed >= 3 s and
+    // succeeds. Exactly one requeued failure, deterministically (before D22 it was two).
     let saf = events_of(&h, "step_attempt_failed");
-    assert_eq!(saf.len(), 2, "{h:?}");
+    assert_eq!(saf.len(), 1, "{h:?}");
     for (i, e) in saf.iter().enumerate() {
         assert_eq!(e["details"]["name"], "slow");
         assert_eq!(e["details"]["attempt"], i as u64 + 1);

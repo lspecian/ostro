@@ -5,7 +5,9 @@
 //! JSON output. `sdk-native` (std time / HashMap / rand, WF-07) replays byte-identically.
 //!
 //! Retry behaviour of `sdk-retry` is exercised end to end by the server tests (04-07);
-//! here it only has to validate, describe and run its non-retrying modes.
+//! here it only has to validate, describe and run its non-retrying modes. Its
+//! `long_backoff` (exactly one requeued failure under the D22 retry clock) and
+//! `recover_hot` modes run on the engine testkit in `step_retry_clock.rs` (05-23).
 //!
 //! D11 (05-06): SDK waits now include the cancellation op (`wait([op, CANCELLATION],
 //! any)`, and `join!` waits `any` in rounds), which changes every SDK wait's command hash
