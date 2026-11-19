@@ -77,8 +77,8 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Dispatch & Flow Control
 
-- [ ] **DISP-01**: Per-partition leader dispatcher with in-memory ready queues rebuilt from state on leadership; no polling
-- [ ] **DISP-02**: Ready-queue entries carry a concurrency key from day one
+- [x] **DISP-01**: Per-partition leader dispatcher with in-memory ready queues rebuilt from state on leadership; no polling
+- [x] **DISP-02**: Ready-queue entries carry a concurrency key from day one
 - [ ] **DISP-03**: Operator can configure per-queue concurrency, priority and rate limits [FR-3.8]
 - [ ] **DISP-04**: Operator can configure keyed concurrency (e.g. per customer) with fair scheduling across keys
 - [ ] **DISP-05**: Throttle (queue the excess) and rate limit (reject the excess) are distinct policies
@@ -293,8 +293,8 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-08 | Phase 5 | Pending |
 | WF-09 | Phase 5 | Pending |
 | WF-10 | Phase 9 | Pending |
-| DISP-01 | Phase 4 | Pending |
-| DISP-02 | Phase 4 | Pending |
+| DISP-01 | Phase 4 | Complete |
+| DISP-02 | Phase 4 | Complete |
 | DISP-03 | Phase 7 | Pending |
 | DISP-04 | Phase 7 | Pending |
 | DISP-05 | Phase 7 | Pending |
