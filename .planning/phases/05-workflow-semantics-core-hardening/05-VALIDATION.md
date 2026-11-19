@@ -10,7 +10,7 @@ created: 2026-11-19
 # Phase 5 — Validation Strategy
 
 > Per-phase validation contract for feedback sampling during execution.
-> Source: 05-RESEARCH.md § Validation Architecture, mapped onto plans 05-01..05-20. The plans were revised after the plan check, with 2 blockers and 15 warnings addressed. Adopted decisions: 05-DECISIONS.md.
+> Source: 05-RESEARCH.md § Validation Architecture, mapped onto plans 05-01..05-24 (05-21..05-24 split off by the final plan check, without renumbering). The plans were revised after the plan check, with 2 blockers and 15 warnings addressed. Adopted decisions: 05-DECISIONS.md.
 
 ---
 
@@ -45,15 +45,15 @@ created: 2026-11-19
 
 | Wave | Plans | Exclusive shared files |
 |------|-------|------------------------|
-| 1 | 05-01 | Gate. Phase 4 must be complete and verified (`passed`, or `human_needed` with by-design items only). |
-| 2 | 05-02 store/apply seams, 05-03 engine, 05-04 API surface, 05-05 WIT tooling (+ W1–W8 doc comments), 05-06 SDK + D11, 05-07 meta pre-freeze encoding | Only 05-05 edits Cargo.toml, Cargo.lock and deny.toml. Only 05-07 edits ostro-meta. |
-| 3 | 05-08 apply waits, 05-09 apply lifecycle/retention, 05-10 guests + order-saga | Only 05-10 edits ci-local.sh and ci.yml. |
-| 4 | 05-11 server seam (+ resume re-arm, pause hook), 05-12 replay corpus | Only 05-12 edits Cargo.lock. |
+| 1 | 05-01 | Gate (executing). |
+| 2 | 05-02 store/apply seams, 05-03 engine, 05-04 API surface, 05-05 WIT tooling + doc comments, 05-06 SDK + D11, 05-07 meta pre-freeze encoding, **05-21** empty-log anchoring | Only 05-05 edits Cargo.toml, Cargo.lock and deny.toml. Only 05-07 edits ostro-meta and STATE.md. Only 05-21 edits ostro-log and partition node.rs. B2 carve-out: 05-06 and 05-07 share `ostro-server/tests/sdk_e2e.rs` (05-07 owns exactly the two ActiveVersion literals) and commit their own hunks through private indexes. |
+| 3 | 05-08 apply waits, 05-09 apply lifecycle/retention, 05-10 guests + order-saga, **05-22** ready/attempt apply, **05-23** D22 clock, **05-24** D23 tenancy + upload | Only 05-10 edits ci-local.sh/ci.yml. 05-22 owns run.rs/values.rs/outcome.rs/query.rs/dispatcher.rs. 05-23 owns the engine replay sources and the three e2e test files. 05-24 owns ostro-api, modules.proto and control/{modules,runs,names}.rs. |
+| 4 | 05-11 server seam, 05-12 replay corpus | Only 05-12 edits Cargo.lock. |
 | 5 | 05-13 ControlPlane lifecycle + start fields + long-poll | — |
 | 6 | 05-14 CLI, 05-15 semantics e2e | 05-14 owns Cargo.lock, Cargo.toml and crates/ostro. 05-15 owns ostro-server tests/common, ci-local.sh and ci.yml (serial sleepers step). |
 | 7 | 05-16 perf + start-path optimisations | — |
-| 8 | 05-17 order-saga CLI + quickstart + docs (after 05-16), 05-18 failpoint chain + sites | 05-18 owns crates/ostro Cargo/main, ci-local.sh, ci.yml and Cargo.lock. 05-17 edits only crates/ostro/tests, examples/order-saga and docs, so there is no overlap. |
-| 9 | 05-19 whole-server kill campaign | Owns ostro-crashtest, ci-local.sh, ci.yml and Cargo.lock. |
+| 8 | 05-17 order-saga CLI + quickstart + docs, 05-18 failpoint chain + sites | disjoint |
+| 9 | 05-19 whole-server kill campaign | — |
 | 10 | 05-20 phase gate + freeze flip | — |
 
 ---
@@ -80,7 +80,7 @@ created: 2026-11-19
 | 5-06-02 | 06 | 2 | D11 journal shape | integration | `cargo test -p ostro-engine --test sdk_cancellation --test sdk_guests --test step_retry && cargo test -p ostro-server --test sdk_e2e && cargo test -p ostro --test e2e_dev` | ❌ W0 | ⬜ pending |
 | 5-07-01 | 07 | 2 | OPS-06, WF-09 (meta run policies; P8 Schedule fields + Webhook per D20) | unit (CAS) | `cargo test -p ostro-meta --locked && cargo build --workspace --all-targets` | ❌ W0 (meta_policies) | ⬜ pending |
 | 5-07-02 | 07 | 2 | D20 (META_FORMAT bump, golden) | golden + negative | `cargo test -p ostro-meta --test meta_golden` | ❌ W0 | ⬜ pending |
-| 5-08-01/02 | 08 | 3 | WF-05, API-05 (signal/cancel), API-07 | integration (apply; idempotent RegisterWait, open_waits, asserted read counts, D21 verbatim events + 1 MiB signal/token) | `cargo test -p ostro-partition --test apply_waits --test apply_cross` | ❌ W0 | ⬜ pending |
+| 5-08-01/02 | 08 | 3 | WF-05, API-05 (signal/cancel), API-07 | integration (apply; idempotent RegisterWait, open_waits, asserted read counts, D21 verbatim events + 1 MiB signal/token, B1 signal-before-first-activation, W5 size limits) | `cargo test -p ostro-partition --test apply_waits --test apply_cross` | ❌ W0 | ⬜ pending |
 | 5-08-03 | 08 | 3 | WF-05 | proptest | `cargo test -p ostro-partition --test rebuild_digest` + failpoint suite | ✅ (extended) | ⬜ pending |
 | 5-09-01/02 | 09 | 3 | WF-09, API-05 (terminate/retry), OPS-06 | integration (apply; RunCompleted actions, resumed_count, s2s_due_ms) | `cargo test -p ostro-partition --test apply_lifecycle --test apply_retention` | ❌ W0 | ⬜ pending |
 | 5-09-03 | 09 | 3 | OPS-06, WF-09 | proptest | `cargo test -p ostro-partition --test rebuild_digest` + failpoint suite | ✅ (extended) | ⬜ pending |
@@ -112,6 +112,10 @@ created: 2026-11-19
 | 5-20-02 | 20 | 10 | WIT-07, QA-02 (+ meta golden pinned, RESERVATIONS rows flipped to exists) | gate | `cargo test -p ostro-witcheck && cargo test -p ostro-types --test golden_frozen && cargo test -p ostro-engine --test replay_corpus && cargo test -p ostro-partition --test format_corpus` + local tag, no remote | n/a | ⬜ pending |
 | 5-20-03 | 20 | 10 | all | gate | `bash scripts/ci-local.sh` | n/a | ⬜ pending |
 
+| 5-21-01/02 | 21 | 2 | QA-01 (P12 F3 empty-log anchoring) | integration | `cargo test -p ostro-log --test recovery_empty_anchor && cargo test -p ostro-partition --test startup_order` + both failpoint suites | ❌ W0 | ⬜ pending |
+| 5-22-01/02 | 22 | 3 | API-05, WF-09 (P7 F3/F7, F9/F10, PF-F1) | integration | `cargo test -p ostro-partition --test apply_ready_attempts --test dispatcher --test apply_phase4` | ❌ W0 | ⬜ pending |
+| 5-23-01/02 | 23 | 3 | WF-03 (D22 retry clock) | integration + e2e | `cargo test -p ostro-engine --test step_retry_clock --test sdk_guests && cargo test -p ostro-server --test sdk_e2e && cargo test -p ostro --test e2e_dev` | ❌ W0 | ⬜ pending |
+| 5-24-01/02 | 24 | 3 | API-05 (D23 tenancy, P14 F4 upload name) | integration | `cargo test -p ostro-server --test tenancy_api --test modules_api --test start_run_api && cargo test -p ostro-api` | ❌ W0 | ⬜ pending |
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠ flaky / human_needed*
 
 ---

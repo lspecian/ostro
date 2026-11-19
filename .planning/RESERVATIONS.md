@@ -9,7 +9,7 @@
 4. Each phase's gate plan (Phase 5: 05-01 and 05-20) verifies the code against this file. Every ordinal present in code must appear here as `exists`, or as allocated to the phase that added it.
 5. Status values:
    - `exists`: in code today.
-   - `planned P5 (05-NN)`: allocated to a Phase 5 plan.
+   - `planned` followed by the phase tag and owning plan (e.g. for Phase 5: "planned", then "P5", then the plan id): allocated to that phase's plan. 05-20 flips its rows to `exists`.
    - `reserved P6/P7/P8`: block held for that phase.
    - `unallocated`: free for a later phase to claim per rule 2.
 
@@ -250,7 +250,8 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Tags | Owner | Registered |
 |------|-------|-----------|
 | 0 | invalid | — |
-| 1–15 | reserved P5 (none used yet) | — |
+| 1–14 | reserved P5 (none used yet) | — |
+| 15 | **golden/test only**: used by the 05-07 meta golden fixtures and codec tests; never read by production code, never assigned to a feature | P5 (05-07), permanent |
 | 16–31 | reserved P6 | — |
 | 32–47 | reserved P7 | — |
 | 48–63 | reserved P8 | — |
