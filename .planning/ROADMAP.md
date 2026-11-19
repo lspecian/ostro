@@ -178,7 +178,7 @@ Plans:
 Plans:
 - [ ] 05-01-PLAN.md — PHASE-5 GATE (Phase 4 complete, code vs RESERVATIONS.md) + adopted decisions to STATE + ostro-types contract (Cmd 8..12, StartRun 19..23, intents, statuses, kinds 70/71/96/97, message fields) + status parity (wave 1)
 - [ ] 05-02-PLAN.md — Partition store schema (waits, signal_seen, SignalSlot inbox, RunRecord fields, Default) + apply seams/stubs/hooks + journal_input/journal_encoded + storage-format doc (wave 2; WF-05, WF-09, OPS-06)
-- [ ] 05-03-PLAN.md — Engine semantics: cancel-op completion, WaitTimedOut, SignalMatched, patched memo/skip, op index, live_activations, gather/race proptest (wave 2; WF-03, WF-04, WF-08)
+- [x] 05-03-PLAN.md — Engine semantics: cancel-op completion, WaitTimedOut, SignalMatched, patched memo/skip, op index, live_activations, gather/race proptest (wave 2; WF-03, WF-04, WF-08)
 - [ ] 05-04-PLAN.md — API surface: signal/cancel/terminate/retry/result/tokens/policies over REST + gRPC against FakeControlPlane (wave 2; API-05..07)
 - [ ] 05-05-PLAN.md — WIT freeze tooling + pins + pre-freeze WIT review and doc comments (Phase 6/7/9/14 findings) (wave 2; WIT-07)
 - [ ] 05-06-PLAN.md — Rust SDK: await tokens, continue-as-new, D11 cancellation + shielded (wave 2; WF-03, WF-05, API-07)
@@ -417,7 +417,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 20/20 | Complete | 2026-11-19 |
-| 5. Workflow Semantics & Core Hardening | 1/20 | In progress (05-01 gate + contract done) | - |
+| 5. Workflow Semantics & Core Hardening | 2/24 | In progress (05-01 gate + contract, 05-03 engine semantics done) | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
