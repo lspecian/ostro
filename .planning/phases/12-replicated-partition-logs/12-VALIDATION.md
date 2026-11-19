@@ -33,7 +33,7 @@ created: 2026-11-19
 - **After every task commit:** the task's `<automated>` command, plus `cargo clippy -p <crate> --all-targets --locked -- -D warnings` for touched crates (with `--features failpoints` where failpoint tests exist).
   - Tasks touching `ostro-log` also run `cargo test -p ostro-log --features failpoints --locked -- --test-threads=1`.
   - Tasks touching `ostro-partition` also run `PROPTEST_CASES=128 cargo test -p ostro-partition --locked --test rebuild_digest`.
-- **After every plan / wave:** `bash scripts/ci-local.sh --no-musl` in a detached `/tmp` worktree at the plan's last commit (Worktree procedure); from wave 6 on also the tier-B suite via `red_run`.
+- **After every plan / wave:** `bash scripts/ci-local.sh --no-musl` in a detached `/tmp` worktree at the plan's last commit (Worktree procedure); 12-06/12-07 take their red-run evidence there (uniform `cluster_formed` reason expected before integration; oracle-specific proof = mutant matrix); from wave 6 on also the tier-B suite via `red_run`.
 - **Before `/gsd:verify-work`:** the 12-18 gate.
 - **Max feedback latency:** 60 s for task-level checks; tier-C and measurements are gate level.
 - Piped verify commands use `set -euo pipefail`; cargo test filters go after `--`; no `|| true` masking; filtered runs must report ≥ 1 passed test (`test result: ok\. [1-9][0-9]* passed`).
@@ -72,9 +72,9 @@ created: 2026-11-19
 | 12-05-02 | 05 | 3 | CLUS-03 | Multi-voter MetaHandle with live transport in every mode + Propose forwarding | `cargo test -p ostro-meta --test multi_voter --test single_voter` | ⬜ pending |
 | 12-05-03 | 05 | 3 | CLUS-03 | MetaPeer service, per-peer outbox, production mTLS transport, node-identity authz | `cargo test -p ostro-cluster --test meta_peer` | ⬜ pending |
 | 12-06-01 | 06 | 4 | CLUS-01 | Placement, ISR honesty, HW, stale-epoch scenarios | `cargo test -p ostro-repl-conformance --test placement --test isr_honesty --test hw --test stale_epoch` | ⬜ pending |
-| 12-06-02 | 06 | 4 | CLUS-01 | Divergence, failover/offline, min_insync scenarios + core red run | `cargo test -p ostro-repl-conformance --test divergence --test failover --test min_insync`; `OSTRO_REPL_RED_RUN=1 cargo test -p ostro-repl-conformance --test red_run -- --ignored` | ⬜ pending |
+| 12-06-02 | 06 | 4 | CLUS-01 | Divergence, failover/offline, min_insync scenarios (red run in the worktree gate) | `cargo test -p ostro-repl-conformance --test divergence --test failover --test min_insync` | ⬜ pending |
 | 12-07-01 | 07 | 4 | CLUS-01 | Standby, bootstrap, fetch path, blobs, one path, zombie, object storage scenarios | `cargo test -p ostro-repl-conformance --test standby --test bootstrap --test fetch_path --test blobs --test one_path --test zombie --test object_storage` | ⬜ pending |
-| 12-07-02 | 07 | 4 | CLUS-01 | Mutant matrix + remaining red-run evidence | `cargo test -p ostro-repl-conformance`; `cargo test -p ostro-repl-conformance --features failpoints --test mutants`; `OSTRO_REPL_RED_RUN=1 cargo test -p ostro-repl-conformance --test red_run -- --ignored` | ⬜ pending |
+| 12-07-02 | 07 | 4 | CLUS-01 | Mutant matrix (red run in the worktree gate) | `cargo test -p ostro-repl-conformance --lib -- mutants`; `cargo test -p ostro-repl-conformance --features failpoints --test mutants` | ⬜ pending |
 | 12-08-01 | 08 | 4 | CLUS-02, CLUS-04 | Tracker-driven HW through the single publish_hw point (RF=1 included), F4 HW at open, min_insync gate, roles | `cargo test -p ostro-log`; `cargo test -p ostro-log --features failpoints`; `cargo test -p ostro-log --features failpoints --test partition_log_mutants` | ⬜ pending |
 | 12-08-02 | 08 | 4 | CLUS-02, CLUS-04 | Follower and install primitives — read_replica, append_replica, set_follower_hw, reset_to, replica_status | `cargo test -p ostro-log --test partition_log_follower` | ⬜ pending |
 | 12-08-03 | 08 | 4 | CLUS-02, CLUS-04 | Parsed-base torn-first-record rule, rename ripple across crates, Rf1Log grep gate | `cargo test -p ostro-log --test recovery_empty_anchor`; `cargo test -p ostro-partition`; `cargo test -p ostro-crashtest --features failpoints` | ⬜ pending |
