@@ -22,6 +22,9 @@
 //!    a newer one).
 //! 5. `ostro_api::router(ServerControlPlane)` served with graceful shutdown. `/readyz`
 //!    is 200 only while meta has a leader and every partition slot is ready.
+//!    Building the control plane starts the long-poll hub ([`crate::control::RunWatchers`]):
+//!    one task per started partition subscribed to its apply machine's action broadcast
+//!    (05-13).
 //!
 //! # Shutdown ([`ServerHandle::shutdown`])
 //!
@@ -594,6 +597,9 @@ impl ServerHandle {
             Some(node) => node.shutdown().await,
             None => Ok(()),
         };
+        // The action broadcasts closed with the node (the forwarding tasks woke every
+        // long-poll waiter and exited); abort any that are still running.
+        control.stop_watchers();
         if let Err(e) = &node_res {
             warn!(error = %e, "node shutdown");
         }

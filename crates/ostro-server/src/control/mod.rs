@@ -10,15 +10,20 @@
 //! - [`names`]: the D23 tenant-id and resource-name grammar and tenant qualification
 //!   (05-24).
 //! - [`policy`]: workflow / queue run policies in meta (D9, 05-13).
+//! - [`lifecycle`]: signal, cancel, terminate, retry and await-token completion, each with
+//!   a no-effect `dry_run` (API-05/06/07, 05-13).
+//! - [`watch`]: the long-poll [`RunWatchers`] hub and `await_result` (05-13).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ostro_api::ApiError;
 use ostro_api::domain::{
-    ActivateWorkflow, ControlPlane, HistoryPage, HistoryRequest, ListRunsRequest, ModuleInfo,
-    RunInfo, RunPage, RunPolicy, StartRunRequest, StartRunResult, UploadModule, UploadModuleResult,
-    WorkflowInfo,
+    ActivateWorkflow, AwaitResultRequest, AwaitResultResponse, CancelRequest, CancelResponse,
+    CompleteTokenRequest, CompleteTokenResponse, ControlPlane, HistoryPage, HistoryRequest,
+    ListRunsRequest, ModuleInfo, RetryRequest, RetryResponse, RunInfo, RunPage, RunPolicy,
+    SignalRequest, SignalResponse, StartRunRequest, StartRunResult, TerminateRequest,
+    TerminateResponse, UploadModule, UploadModuleResult, WorkflowInfo,
 };
 use ostro_blob::BlobStore;
 use ostro_engine::runtime::Runtime;
@@ -28,13 +33,16 @@ use ostro_partition::{PartitionHandle, PartitionHealth};
 use ostro_types::{PartitionCount, PartitionId};
 
 use crate::config::ServerConfig;
+pub use watch::RunWatchers;
 
 pub mod history;
+pub mod lifecycle;
 pub mod list;
 pub mod modules;
 pub mod names;
 pub mod policy;
 pub mod runs;
+pub mod watch;
 
 /// Shared state behind every API call.
 pub struct ServerControlPlane {
@@ -50,6 +58,8 @@ pub struct ServerControlPlane {
     pub(crate) serving: AtomicBool,
     /// Journal rows GET run read for the published status (F10 test probe).
     pub(crate) status_rows_read: Arc<AtomicU64>,
+    /// Long-poll waiters (05-13); fed by every started partition's action broadcast.
+    pub(crate) watchers: RunWatchers,
 }
 
 impl std::fmt::Debug for ServerControlPlane {
@@ -74,6 +84,10 @@ impl ServerControlPlane {
             .flatten()
             .next()
             .map(|h| Arc::clone(h.blobs()));
+        let watchers = RunWatchers::new(usize::from(count.get()));
+        for h in partitions.iter().flatten() {
+            watchers.watch_partition(h.partition(), h.machine().subscribe_actions());
+        }
         Self {
             meta,
             partitions,
@@ -83,7 +97,13 @@ impl ServerControlPlane {
             cfg,
             serving: AtomicBool::new(true),
             status_rows_read: Arc::new(AtomicU64::new(0)),
+            watchers,
         }
+    }
+
+    /// The long-poll waiter hub.
+    pub fn watchers(&self) -> &RunWatchers {
+        &self.watchers
     }
 
     /// Journal rows GET run has read to find published statuses (F10: one per GET of a run
@@ -136,6 +156,11 @@ impl ServerControlPlane {
     pub(crate) fn stop_serving(&self) {
         self.serving.store(false, Ordering::SeqCst);
     }
+
+    /// Stop the waiter forwarding tasks (after the node shut down).
+    pub(crate) fn stop_watchers(&self) {
+        self.watchers.stop();
+    }
 }
 
 #[async_trait::async_trait]
@@ -170,6 +195,33 @@ impl ControlPlane for ServerControlPlane {
 
     async fn list_runs(&self, req: ListRunsRequest) -> Result<RunPage, ApiError> {
         list::list_runs(self, req).await
+    }
+
+    async fn signal_run(&self, r: SignalRequest) -> Result<SignalResponse, ApiError> {
+        lifecycle::signal_run(self, r).await
+    }
+
+    async fn cancel_run(&self, r: CancelRequest) -> Result<CancelResponse, ApiError> {
+        lifecycle::cancel_run(self, r).await
+    }
+
+    async fn terminate_run(&self, r: TerminateRequest) -> Result<TerminateResponse, ApiError> {
+        lifecycle::terminate_run(self, r).await
+    }
+
+    async fn retry_run(&self, r: RetryRequest) -> Result<RetryResponse, ApiError> {
+        lifecycle::retry_run(self, r).await
+    }
+
+    async fn await_result(&self, r: AwaitResultRequest) -> Result<AwaitResultResponse, ApiError> {
+        watch::await_result(self, r).await
+    }
+
+    async fn complete_token(
+        &self,
+        r: CompleteTokenRequest,
+    ) -> Result<CompleteTokenResponse, ApiError> {
+        lifecycle::complete_token(self, r).await
     }
 
     async fn set_workflow_policy(

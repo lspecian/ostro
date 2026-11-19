@@ -291,6 +291,14 @@ impl FakeControlPlane {
         }
         let next = st.clone_run(run_id, ("continued_from", run_id));
         st.continued_to.insert(run_id.to_owned(), next.clone());
+        // Like the real server (05-11): the predecessor's result is `{"next_run_id"}`.
+        if let Some(r) = st.runs.get_mut(run_id) {
+            r.result_json = Some(
+                serde_json::json!({ "next_run_id": next })
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
         drop(st);
         self.changed.notify_waiters();
         Ok(next)
@@ -835,12 +843,18 @@ impl ControlPlane for FakeControlPlane {
         let Some(&completed) = st.tokens.get(&(run_id.clone(), op)) else {
             return Err(ApiError::token_invalid("unknown token"));
         };
-        if completed {
-            return Err(ApiError::token_already_completed(&run_id));
-        }
+        // Same order as the real server (05-13): a terminal run first, then a duplicate,
+        // whose details carry the run's current status.
         let run = st.run(&run_id)?;
         if run.status.is_terminal() {
             return Err(ApiError::run_terminal(&run_id, run.status));
+        }
+        if completed {
+            let mut e = ApiError::token_already_completed(&run_id);
+            if let Some(serde_json::Value::Object(d)) = e.details.as_mut() {
+                d.insert("status".into(), run.status.as_str().into());
+            }
+            return Err(e);
         }
         if !r.dry_run {
             let now = st.tick();

@@ -435,7 +435,8 @@ pub(crate) async fn get_run(cp: &ServerControlPlane, run_id: String) -> Result<R
     let (result_json, failure) = match result {
         Some(r) => {
             let bytes = handle.fetch_payload(&r).await.map_err(partition_error)?;
-            if st == RunStatus::Completed {
+            // A continued-as-new run's payload is `{"next_run_id"}` (05-11): a result.
+            if matches!(st, RunStatus::Completed | RunStatus::ContinuedAsNew) {
                 (Some(bytes.to_vec()), None)
             } else {
                 (None, Some(String::from_utf8_lossy(&bytes).into_owned()))

@@ -605,3 +605,81 @@ impl TestServer {
             .collect()
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Lifecycle helpers (plan 05-13): records, status waits, history and the token a run
+// published through `set_status`.
+// ---------------------------------------------------------------------------------
+
+impl TestServer {
+    /// The run's record, read straight from the partition.
+    pub fn run_record(&self, run: &RunId) -> RunRecord {
+        self.handle_of(run)
+            .read_run(run)
+            .expect("read run")
+            .expect("run exists")
+    }
+
+    /// Poll the record until `f` holds.
+    pub async fn wait_record(
+        &self,
+        run: &RunId,
+        limit: Duration,
+        f: impl Fn(&RunRecord) -> bool,
+    ) -> RunRecord {
+        let deadline = Instant::now() + limit;
+        loop {
+            let r = self.run_record(run);
+            if f(&r) {
+                return r;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting on run {run}: status {:?}, next_seq {}, open_waits {}",
+                r.status,
+                r.next_seq,
+                r.open_waits
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Poll until the run's status is `status`.
+    pub async fn wait_status(&self, run: &RunId, status: RunStatus, limit: Duration) -> RunRecord {
+        self.wait_record(run, limit, |r| r.status == status).await
+    }
+
+    /// The kinds of the run's journal events, in seq order.
+    pub async fn history_kinds(&self, run: &RunId) -> Vec<EventKind> {
+        self.journal(run)
+            .await
+            .iter()
+            .map(|e| e.body.kind())
+            .collect()
+    }
+
+    /// Poll `GET /v1/runs/{id}` until its published status carries `"token"` (the `tokens`
+    /// guest publishes it with `set_status`) and return it.
+    pub async fn published_token(&self, run_id: &str, limit: Duration) -> String {
+        let deadline = Instant::now() + limit;
+        loop {
+            let body: serde_json::Value = self
+                .http
+                .get(self.url(&format!("/v1/runs/{run_id}")))
+                .send()
+                .await
+                .expect("GET run")
+                .json()
+                .await
+                .expect("json");
+            if let Some(t) = body["published_status"]["token"].as_str() {
+                return t.to_owned();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "run {run_id} published no token: {body}"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
