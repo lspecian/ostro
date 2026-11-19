@@ -56,26 +56,37 @@ struct Status {
     role: watch::Sender<Role>,
     /// Bumped on every truncation, so waiters for truncated offsets wake up.
     truncations: watch::Sender<u64>,
+    /// Serializes [`Status::fail`] and [`Status::set_role`], so a role update cannot slip in
+    /// between the health check and the fail-stop (which would leave a failed partition
+    /// `Leader`). Never held across an await.
+    transition: std::sync::Mutex<()>,
 }
 
 impl Status {
-    /// Health → `Failed`, role → `Offline`, exactly once.
+    /// Role → `Offline`, then health → `Failed`, exactly once.
+    ///
+    /// Role goes first: anyone woken by health `Failed` must already observe role `Offline`
+    /// (publishing health first let a health waiter read a stale `Leader`).
     fn fail(&self, reason: &str) {
-        let changed = self.health.send_if_modified(|h| match h {
-            LogHealth::Healthy => {
-                *h = LogHealth::Failed {
-                    reason: reason.to_string(),
-                };
-                true
-            }
-            LogHealth::Failed { .. } => false,
+        let _t = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+        if self.check().is_err() {
+            return;
+        }
+        self.role.send_replace(Role::Offline);
+        self.health.send_replace(LogHealth::Failed {
+            reason: reason.to_string(),
         });
-        if changed {
-            self.role.send_replace(Role::Offline);
-            error!(
-                partition = self.pid.0,
-                reason, "partition log failed (fail-stop until restart)"
-            );
+        error!(
+            partition = self.pid.0,
+            reason, "partition log failed (fail-stop until restart)"
+        );
+    }
+
+    /// Set the role unless the partition has failed (it then stays `Offline`).
+    fn set_role(&self, role: Role) {
+        let _t = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+        if self.check().is_ok() {
+            self.role.send_replace(role);
         }
     }
 
@@ -160,6 +171,7 @@ impl Rf1Log {
                 health: watch::channel(LogHealth::Healthy).0,
                 role: watch::channel(Role::Offline).0,
                 truncations: watch::channel(0).0,
+                transition: std::sync::Mutex::new(()),
             }),
             layout: RwLock::new(()),
             index: Mutex::new(None),
@@ -220,9 +232,7 @@ impl Rf1Log {
 
     /// Set the role (ignored once the partition has failed: it stays `Offline`).
     pub fn set_role(&self, role: Role) {
-        if self.status.check().is_ok() {
-            self.status.role.send_replace(role);
-        }
+        self.status.set_role(role);
     }
 
     fn hw_now(&self) -> Offset {

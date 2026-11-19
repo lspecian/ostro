@@ -814,11 +814,15 @@ mod tests {
         }
     }
 
+    // Ostro: election_tick 10 -> 50 (election timeout 100-200 ms -> 500-1000 ms). Under
+    // heavy machine load a driver thread stalled on fsync for >200 ms let followers depose
+    // a healthy leader mid-test, failing an `unwrap()` with OutcomeUnknown. Heartbeats
+    // stay at 20 ms. Test-only timeout; see VENDORED.md.
     fn config(id: u64) -> DriverConfig {
         DriverConfig {
             id,
             tick_interval: Duration::from_millis(10),
-            election_tick: 10,
+            election_tick: 50,
             heartbeat_tick: 2,
             snapshot_every: 10_000,
             log_store: LogStoreOptions::default(),
@@ -877,7 +881,8 @@ mod tests {
         }
 
         async fn leader(&self) -> u64 {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            // Ostro: 10 s -> 30 s hang guard (slower elections, loaded machines).
+            let deadline = Instant::now() + Duration::from_secs(30);
             loop {
                 let leaders: Vec<u64> =
                     self.drivers.iter().filter(|(_, d)| d.handle().status().is_leader).map(|(&i, _)| i).collect();
@@ -892,7 +897,8 @@ mod tests {
         /// Wait until every running node has applied `index`.
         async fn settle(&self, index: u64) {
             for d in self.drivers.values() {
-                tokio::time::timeout(Duration::from_secs(10), d.handle().wait_applied(index))
+                // Ostro: 10 s -> 30 s hang guard (loaded machines).
+                tokio::time::timeout(Duration::from_secs(30), d.handle().wait_applied(index))
                     .await
                     .expect("node did not catch up")
                     .unwrap();

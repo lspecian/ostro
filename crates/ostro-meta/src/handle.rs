@@ -9,8 +9,11 @@ use crate::records::ClusterInfo;
 use crate::sm::{MetaSm, MetaView};
 use crate::{DriverConfig, NullOutbox, ProposeError, RaftDriver, RaftHandle};
 
-/// How long `start` waits for this node to become leader and catch up.
-const START_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long `start` waits for this node to become leader and catch up. A hang guard, not a
+/// latency target (a lone voter campaigns at once and normally leads in tens of ms): 5 s
+/// fired spuriously on a heavily loaded machine (load average 15-30, fsync stalls of
+/// seconds), failing an otherwise healthy start, so it is 30 s. A real hang still fails.
+const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// Retries of a proposal whose outcome is unknown (leadership lost mid-flight).
 const OUTCOME_UNKNOWN_RETRIES: u32 = 5;
 const OUTCOME_UNKNOWN_BACKOFF: Duration = Duration::from_millis(50);

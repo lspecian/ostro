@@ -2878,8 +2878,11 @@ mod queue_creation_tests {
         for partition in 0..400 {
             let wal = StdArcT::clone(&wal);
             writes.spawn(async move {
+                // Ostro: 20 s -> 60 s. A hang guard for the lost-worker bug (that write
+                // waited forever); 400 first writes each fsync a new segment and its dirs,
+                // which took over 20 s under heavy machine load. See VENDORED.md.
                 let r = tokio::time::timeout(
-                    Duration::from_secs(20),
+                    Duration::from_secs(60),
                     wal.append("fresh".to_string(), partition, record("fresh", partition, 0), 1),
                 )
                 .await;

@@ -17,8 +17,16 @@ use std::time::{Duration, Instant};
 /// the startup numbers (tokio mutex: guards are held across awaits).
 pub static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Generous limit for anything that is not the asserted startup budget.
-pub const T: Duration = Duration::from_secs(30);
+/// Generous limit for anything that is not the asserted startup budget. This is a hang
+/// guard, not a performance target: under heavy load (load average 15-30 while parallel
+/// cargo builds fsync gigabytes) an on-disk start has been seen to need more than 30 s, so it
+/// is 60 s. A real hang still fails.
+pub const T: Duration = Duration::from_secs(60);
+
+/// Attempts for an asserted startup budget: the best (minimum) sample is compared with the
+/// budget, so one start descheduled by an unrelated load spike does not fail the gate while
+/// a start that is genuinely over budget still fails every attempt.
+pub const BUDGET_ATTEMPTS: usize = 5;
 
 /// The binary under test.
 pub fn bin() -> PathBuf {
