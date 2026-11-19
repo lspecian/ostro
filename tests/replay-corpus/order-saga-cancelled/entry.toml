@@ -1,0 +1,21 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+# Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
+name = "order-saga-cancelled"
+workflow = "order-saga"
+input_json = "{\"amount\":4999,\"order_id\":\"o-cancel\",\"qty\":1,\"settle_ms\":200,\"sku\":\"BOOK-42\"}"
+expected = "cancelled"
+partition = 2
+run_id = "001038fmzwt6axcanmbv1jbhdj2g4"
+token_key_hex = "0394f95111b29efefedd1f88ebfb43587513cc49bd49e8888ae3b015645e4de6"
+terminal_payload_sha256 = "084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5"
+journal_events = 13
+module_sha256 = "681640ff3b3de2d2a37cf960b89b2668d7da7aeb87cdb6568817a8ef64855510"
+journal_sha256 = "aade6225de5a1361f70ea2df8ace1a32c325205d79223bdf2120f96e9c4673bc"
+
+[recorded_with]
+ostro = "8d6562f68549-dirty"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "export_run"
+command = "export_run --run 001038fmzwt6axcanmbv1jbhdj2g4 --entry order-saga-cancelled"

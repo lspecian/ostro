@@ -142,5 +142,11 @@ re-run it over an existing entry.
 | `crash-saga-completed` | crash-saga | timers, signal with timeout, join over timers + signal, retries | completed |
 | `crash-saga-compensated` | crash-saga | step failure, reverse compensations | completed |
 | `crash-saga-cancelled` | crash-saga | cancel during sleep, shielded undo steps | cancelled |
+| `order-saga-happy` | examples/order-saga (server export, 05-20) | `ostro dev` + CLI: 5 SDK steps, durable timer, `approve`=true raced with cancellation | completed |
+| `order-saga-compensated` | examples/order-saga (server export, 05-20) | `approve`=false: shielded reverse compensations (`refund_payment`, `release_inventory`) | completed |
+| `order-saga-cancelled` | examples/order-saga (server export, 05-20) | graceful cancel during the settle timer / approval wait, shielded compensations | cancelled |
+| `crash-campaign-s00-a` | crash-saga (server export from the 05-20 10k-kill gate, shard 00, seed 0x0520) | completed run whose start and completion are 8 leader epochs apart (it lived through repeated kill -9 + restart), 5 grants | completed |
+| `crash-campaign-s00-b` | crash-saga (same gate, shard 00) | 7 epochs apart, 7 grants (re-dispatch after kills) | completed |
+| `crash-campaign-s00-c` | crash-saga (same gate, shard 00, late in the shard) | 8 epochs apart, 5 grants | completed |
 
 05-20 adds the final entries (order-saga and crash-campaign samples) at the freeze.

@@ -1,0 +1,21 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+# Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
+name = "order-saga-happy"
+workflow = "order-saga"
+input_json = "{\"amount\":4999,\"order_id\":\"o-happy\",\"qty\":1,\"settle_ms\":200,\"sku\":\"BOOK-42\"}"
+expected = "completed"
+partition = 15
+run_id = "007g38fmzwstgw5zhc99z1brjvpj8"
+token_key_hex = "0394f95111b29efefedd1f88ebfb43587513cc49bd49e8888ae3b015645e4de6"
+terminal_payload_sha256 = "50db71b1d6bcb53d6714c70bf758ba1dafe7691da9aa8f5f39ece1e870cbe128"
+journal_events = 14
+module_sha256 = "681640ff3b3de2d2a37cf960b89b2668d7da7aeb87cdb6568817a8ef64855510"
+journal_sha256 = "42eb6a066f55b811f03810cda00b559d835e15534ec7033a3a5ed2bb45819883"
+
+[recorded_with]
+ostro = "8d6562f68549-dirty"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "export_run"
+command = "export_run --run 007g38fmzwstgw5zhc99z1brjvpj8 --entry order-saga-happy"

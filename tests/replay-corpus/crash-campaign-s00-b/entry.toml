@@ -1,0 +1,21 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+# Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
+name = "crash-campaign-s00-b"
+workflow = "crash-saga"
+input_json = "{\"fail_pattern\":\"00010100\",\"id\":\"s00-641\",\"plan\":{\"b1\":false,\"dup\":false,\"signals\":true,\"stop\":null},\"signal_timeout_ms\":600000,\"sleep_ms\":249,\"steps\":8}"
+expected = "completed"
+partition = 15
+run_id = "007g38fmzm738xcejrxv6gntshxm4"
+token_key_hex = "1e3ec72960dd61401aae6ffa83d9c9c0e2a5f2977a9677468206233d769bebb0"
+terminal_payload_sha256 = "a76bce829336f7a416410ff9687a7d972c70c7e2f092c3d766b37bab52784b1f"
+journal_events = 29
+module_sha256 = "9bf235e724e877b394b9d76e6ada657a4669c84aa19aa84767a69fd801002d6a"
+journal_sha256 = "8f416a32b68d3ecadbf54a7c72cf13b10360c8e8ccf149281d3e5492afc3592d"
+
+[recorded_with]
+ostro = "8d6562f68549-dirty"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "export_run"
+command = "export_run --run 007g38fmzm738xcejrxv6gntshxm4 --entry crash-campaign-s00-b"

@@ -10,7 +10,8 @@
 //! command kind**:
 //! - `LeaderAnnounced` (two terms: the node restarts mid-way);
 //! - `StartRun` with every field (tags, tenant Some/None, traceparent, module sha, run
-//!   timeout, schedule-to-start, retention, retry_of, run_started, idempotency key,
+//!   timeout, schedule-to-start, retention, retry_of, run_started (inline and blob, D24),
+//!   idempotency key,
 //!   concurrency key, priority, delayed start);
 //! - `AttemptGranted`, with and without `after_failure` (`attempt_failures` > 0);
 //! - `EventsAppended` with every `Derived` intent: ScheduleTimer, CancelTimer,
@@ -641,6 +642,16 @@ async fn drive(data: &Path) -> Result<(usize, Stats), String> {
     soon.ready_at_ms = 150;
     soon.requested_at_ms = 120;
     g.start(soon).await?;
+    // D24 blob variant (05-20): `StartRun.run_started` (tag 23) whose RunStarted bytes sit in
+    // the blob store, as the API produces for an input over the inline limit.
+    let blob = g.blob().await?;
+    let mut big = g.rich_start(1, true, true);
+    if let Some(ev) = big.run_started.as_mut() {
+        ev.payload = Some(blob);
+    }
+    if g.start(big).await?.is_none() {
+        return Err("run_started blob start was not accepted".into());
+    }
 
     // 2. Grants (first = false ready rows after EnqueueReady), after-failure re-grants.
     let mut running: Vec<R> = Vec::new();

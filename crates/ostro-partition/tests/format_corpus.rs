@@ -259,3 +259,67 @@ async fn format_corpus_opens_rebuilds_and_matches_format_toml() {
         .expect_err("unrecorded non-empty table");
     assert!(err.contains("not in format.toml"), "{err}");
 }
+
+/// Phase 14 F8 (FROZEN v0.1 data-dir rule): node open ignores unknown top-level data-dir
+/// entries. A copy of the corpus with `<data>/audit/x` and an empty `<data>/unknown_dir/`
+/// opens in Inspect mode with the recorded state, rebuilds from the log to the same state
+/// (`verify` deletes `state/` on a second copy, also carrying the entries), and starts a
+/// full Leader node with every partition Ready. The entries are left untouched throughout.
+/// Backup/restore and blob GC are Phase 8; their obligation is in docs/storage-format.md.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_data_dir_entries_ignored() {
+    let committed = committed_dir();
+    let tmp = ostro_testkit::fs::tempdir();
+    let src = if committed.join("format.toml").is_file() {
+        committed
+    } else {
+        let out = tmp.path().join("generated");
+        corpus::generate(&out).await.expect("generate");
+        out
+    };
+    let fmt = read_format(&src);
+
+    // A source tree whose data dir carries the unknown entries.
+    let with = tmp.path().join("with-unknown");
+    copy_dir(&src.join("data"), &with.join("data"));
+    std::fs::copy(src.join("format.toml"), with.join("format.toml")).expect("copy toml");
+    let audit = with.join("data/audit");
+    std::fs::create_dir_all(&audit).expect("mkdir audit");
+    std::fs::write(audit.join("x"), b"audit record\n").expect("write audit/x");
+    std::fs::create_dir_all(with.join("data/unknown_dir")).expect("mkdir unknown_dir");
+
+    // Inspect open + rebuild-from-log comparison (both copies carry the entries).
+    verify(&with, &fmt)
+        .await
+        .expect("corpus with unknown data-dir entries verifies");
+
+    // Full Leader start on another copy.
+    let leader_dir = tmp.path().join("leader");
+    copy_dir(&with.join("data"), &leader_dir);
+    let node = corpus::open(&leader_dir, StartMode::Leader)
+        .await
+        .expect("leader open with unknown entries");
+    let failed: Vec<String> = node
+        .slots()
+        .iter()
+        .filter_map(|s| match s {
+            ostro_partition::PartitionSlot::Failed { partition, reason } => {
+                Some(format!("{partition:?}: {reason}"))
+            }
+            ostro_partition::PartitionSlot::Ready(_) => None,
+        })
+        .collect();
+    node.shutdown().await.expect("shutdown");
+    assert!(failed.is_empty(), "partitions failed: {failed:?}");
+
+    for d in [&with.join("data"), &leader_dir] {
+        assert_eq!(
+            std::fs::read(d.join("audit/x")).expect("audit/x kept"),
+            b"audit record\n"
+        );
+        let entries = std::fs::read_dir(d.join("unknown_dir"))
+            .expect("unknown_dir kept")
+            .count();
+        assert_eq!(entries, 0, "unknown_dir untouched");
+    }
+}
