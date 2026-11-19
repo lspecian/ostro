@@ -24,11 +24,13 @@ pub enum ErrorCode {
     Unavailable,
     /// Unexpected server failure.
     Internal,
+    /// The operation is not implemented by this control plane (yet).
+    Unimplemented,
 }
 
 impl ErrorCode {
     /// Every code, in declaration order.
-    pub const ALL: [ErrorCode; 7] = [
+    pub const ALL: [ErrorCode; 8] = [
         ErrorCode::InvalidArgument,
         ErrorCode::NotFound,
         ErrorCode::Conflict,
@@ -36,6 +38,7 @@ impl ErrorCode {
         ErrorCode::PayloadTooLarge,
         ErrorCode::Unavailable,
         ErrorCode::Internal,
+        ErrorCode::Unimplemented,
     ];
 
     /// snake_case wire name (REST `error.code`).
@@ -48,6 +51,7 @@ impl ErrorCode {
             ErrorCode::PayloadTooLarge => "payload_too_large",
             ErrorCode::Unavailable => "unavailable",
             ErrorCode::Internal => "internal",
+            ErrorCode::Unimplemented => "unimplemented",
         }
     }
 
@@ -61,6 +65,7 @@ impl ErrorCode {
             ErrorCode::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Unimplemented => StatusCode::NOT_IMPLEMENTED,
         }
     }
 
@@ -74,6 +79,7 @@ impl ErrorCode {
             ErrorCode::PayloadTooLarge => tonic::Code::ResourceExhausted,
             ErrorCode::Unavailable => tonic::Code::Unavailable,
             ErrorCode::Internal => tonic::Code::Internal,
+            ErrorCode::Unimplemented => tonic::Code::Unimplemented,
         }
     }
 
@@ -92,6 +98,24 @@ impl ErrorCode {
             .find(|c| c.http_status() == status)
             .unwrap_or(ErrorCode::Internal)
     }
+}
+
+/// Machine-readable `details.reason` values that refine an [`ErrorCode`].
+///
+/// Several conditions share one transport status (e.g. every 409), so the HTTP and
+/// gRPC tables stay bijective and the specific condition travels in the details as
+/// `{"reason": "<value>", ...}` on both transports.
+pub mod reason {
+    /// The run is already terminal (signal, cancel, terminate, token completion). 409.
+    pub const RUN_TERMINAL: &str = "run_terminal";
+    /// Retry of a run that completed successfully. 409.
+    pub const RUN_COMPLETED: &str = "run_completed";
+    /// Retry of a run that is not terminal yet. 409.
+    pub const RUN_NOT_TERMINAL: &str = "run_not_terminal";
+    /// The await token was already completed (or its op timed out / was cancelled). 409.
+    pub const TOKEN_ALREADY_COMPLETED: &str = "token_already_completed";
+    /// The await token is malformed or fails verification. 400.
+    pub const TOKEN_INVALID: &str = "token_invalid";
 }
 
 /// Control-plane error: code, human message and optional structured details.
@@ -156,6 +180,61 @@ impl ApiError {
         Self::new(ErrorCode::Internal, message)
     }
 
+    /// Unimplemented (HTTP 501, gRPC UNIMPLEMENTED): the default body of every
+    /// [`crate::ControlPlane`] method a control plane does not provide yet.
+    pub fn unimplemented(method: &str) -> Self {
+        Self::new(
+            ErrorCode::Unimplemented,
+            format!("{method} is not implemented by this server"),
+        )
+        .with_details(serde_json::json!({ "method": method }))
+    }
+
+    /// Conflict, `details.reason = "run_terminal"`, with the run's current status.
+    pub fn run_terminal(run_id: &str, status: crate::domain::RunStatus) -> Self {
+        Self::conflict(format!("run {run_id} is already {}", status.as_str())).with_details(
+            serde_json::json!({ "reason": reason::RUN_TERMINAL, "status": status.as_str() }),
+        )
+    }
+
+    /// Conflict, `details.reason = "run_completed"` (retry of a Completed run).
+    pub fn run_completed(run_id: &str) -> Self {
+        Self::conflict(format!(
+            "run {run_id} completed successfully and cannot be retried"
+        ))
+        .with_details(serde_json::json!({ "reason": reason::RUN_COMPLETED }))
+    }
+
+    /// Conflict, `details.reason = "run_not_terminal"` (retry of a live run).
+    pub fn run_not_terminal(run_id: &str, status: crate::domain::RunStatus) -> Self {
+        Self::conflict(format!(
+            "run {run_id} is {} and cannot be retried until it is terminal",
+            status.as_str()
+        ))
+        .with_details(
+            serde_json::json!({ "reason": reason::RUN_NOT_TERMINAL, "status": status.as_str() }),
+        )
+    }
+
+    /// Conflict, `details.reason = "token_already_completed"`.
+    pub fn token_already_completed(run_id: &str) -> Self {
+        Self::conflict("await token was already completed").with_details(
+            serde_json::json!({ "reason": reason::TOKEN_ALREADY_COMPLETED, "run_id": run_id }),
+        )
+    }
+
+    /// InvalidArgument, `details.reason = "token_invalid"`. The message never echoes
+    /// the token.
+    pub fn token_invalid(why: &str) -> Self {
+        Self::invalid_argument(format!("invalid await token: {why}"))
+            .with_details(serde_json::json!({ "reason": reason::TOKEN_INVALID }))
+    }
+
+    /// `details.reason`, when present.
+    pub fn reason(&self) -> Option<&str> {
+        self.details.as_ref()?.get("reason")?.as_str()
+    }
+
     /// HTTP status for this error.
     pub fn http_status(&self) -> StatusCode {
         self.code.http_status()
@@ -197,7 +276,7 @@ pub struct ErrorBody {
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorDetail {
     /// snake_case code: invalid_argument, not_found, conflict, precondition_failed,
-    /// payload_too_large, unavailable, internal.
+    /// payload_too_large, unavailable, internal, unimplemented.
     pub code: String,
     /// Human-readable message.
     pub message: String,
@@ -216,7 +295,7 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
 
-    const TABLE: [(ErrorCode, u16, tonic::Code); 7] = [
+    const TABLE: [(ErrorCode, u16, tonic::Code); 8] = [
         (
             ErrorCode::InvalidArgument,
             400,
@@ -236,6 +315,7 @@ mod tests {
         ),
         (ErrorCode::Unavailable, 503, tonic::Code::Unavailable),
         (ErrorCode::Internal, 500, tonic::Code::Internal),
+        (ErrorCode::Unimplemented, 501, tonic::Code::Unimplemented),
     ];
 
     #[test]
@@ -255,6 +335,42 @@ mod tests {
             ErrorCode::from_grpc_code(tonic::Code::DataLoss),
             ErrorCode::Internal
         );
+    }
+
+    #[test]
+    fn lifecycle_reasons() {
+        use crate::domain::RunStatus;
+        let e = ApiError::run_terminal("r", RunStatus::Completed);
+        assert_eq!(
+            (e.code, e.reason()),
+            (ErrorCode::Conflict, Some("run_terminal"))
+        );
+        assert_eq!(e.details.as_ref().unwrap()["status"], "completed");
+        let e = ApiError::run_completed("r");
+        assert_eq!(
+            (e.code, e.reason()),
+            (ErrorCode::Conflict, Some("run_completed"))
+        );
+        let e = ApiError::run_not_terminal("r", RunStatus::Running);
+        assert_eq!(
+            (e.code, e.reason()),
+            (ErrorCode::Conflict, Some("run_not_terminal"))
+        );
+        let e = ApiError::token_already_completed("r");
+        assert_eq!(
+            (e.code, e.reason()),
+            (ErrorCode::Conflict, Some("token_already_completed"))
+        );
+        let e = ApiError::token_invalid("bad prefix");
+        assert_eq!(
+            (e.code, e.reason()),
+            (ErrorCode::InvalidArgument, Some("token_invalid"))
+        );
+        let e = ApiError::unimplemented("signal_run");
+        assert_eq!(e.http_status().as_u16(), 501);
+        assert_eq!(e.grpc_code(), tonic::Code::Unimplemented);
+        assert_eq!(e.reason(), None);
+        assert_eq!(ApiError::not_found("x").reason(), None);
     }
 
     #[test]

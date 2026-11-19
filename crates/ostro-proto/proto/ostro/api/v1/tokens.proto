@@ -1,0 +1,29 @@
+// Await-token completion (REST: POST /v1/tokens/complete; Phase 5, API-07).
+//
+// The token travels only in the request body, never in a path or query
+// string, so it cannot leak into access logs. API-token management is a
+// different service (ostro.api.v1.ApiTokens, Phase 14).
+syntax = "proto3";
+
+package ostro.api.v1;
+
+service Tokens {
+  // Complete the await-token op a token names, with a JSON payload.
+  rpc Complete(CompleteTokenRequest) returns (CompleteTokenResponse);
+}
+
+message CompleteTokenRequest {
+  // The `ot1_...` token minted by the workflow.
+  string token = 1;
+  // UTF-8 JSON payload; empty = JSON null.
+  bytes payload_json = 2;
+  // Validate only; nothing is submitted.
+  bool dry_run = 3;
+}
+
+message CompleteTokenResponse {
+  // The run the token belongs to.
+  string run_id = 1;
+  bool accepted = 2;
+  bool dry_run = 3;
+}

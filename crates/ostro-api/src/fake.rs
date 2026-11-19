@@ -8,8 +8,14 @@
 //! UTF-8 `ostro-fake:<name>@<version>[,<name>@<version>...]` registers those workflow
 //! versions; any other bytes register none. The first version registered for a
 //! workflow becomes active.
+//!
+//! Phase 5 lifecycle (signal, cancel, terminate, retry, long-poll, await tokens,
+//! policies) follows D1/D3/D13 in-memory. Fake await tokens are
+//! `ot1_<run_id>.<op>` and exist only after [`FakeControlPlane::mint_token`]; any
+//! other text is `token_invalid`. Every mutating call advances the fake clock, so
+//! [`FakeControlPlane::clock_ticks`] staying put proves a `dry_run` mutated nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -51,6 +57,17 @@ struct State {
     runs: BTreeMap<String, RunInfo>,
     history: BTreeMap<String, Vec<HistoryEvent>>,
     idempotency: BTreeMap<(Option<String>, String, String), String>,
+    /// Retry-mode override per run (default: Terminated/TimedOut resume, D1).
+    resumable: BTreeMap<String, bool>,
+    cancel_requested: BTreeMap<String, Option<String>>,
+    /// (run, request_id) of delivered signals (D13 dedupe).
+    signals_seen: BTreeSet<(String, String)>,
+    signals: BTreeMap<String, Vec<(String, serde_json::Value)>>,
+    /// (run, op) -> completed?
+    tokens: BTreeMap<(String, u64), bool>,
+    continued_to: BTreeMap<String, String>,
+    workflow_policies: BTreeMap<String, RunPolicy>,
+    queue_policies: BTreeMap<String, RunPolicy>,
 }
 
 impl State {
@@ -58,12 +75,90 @@ impl State {
         self.clock += 1;
         FAKE_EPOCH_MS + self.clock * FAKE_TICK_MS
     }
+
+    fn run(&self, run_id: &str) -> Result<&RunInfo, ApiError> {
+        self.runs
+            .get(run_id)
+            .ok_or_else(|| ApiError::not_found(format!("run {run_id} not found")))
+    }
+
+    fn push_event(&mut self, run_id: &str, ts_ms: u64, kind: &str, details: serde_json::Value) {
+        let events = self.history.entry(run_id.to_owned()).or_default();
+        let seq = events.len() as u64 + 1;
+        events.push(HistoryEvent {
+            seq,
+            kind: kind.to_owned(),
+            ts_ms,
+            summary: kind.to_owned(),
+            details_json: details.to_string().into_bytes(),
+        });
+    }
+
+    /// Copy `src` into a fresh Ready run with a new id and a RunStarted event.
+    fn clone_run(&mut self, src: &str, link: (&str, &str)) -> String {
+        let now = self.tick();
+        self.next_run += 1;
+        let run_id = format!("run-{:06}", self.next_run);
+        let mut run = self.runs[src].clone();
+        run.run_id = run_id.clone();
+        run.status = RunStatus::Ready;
+        run.attempt = None;
+        run.created_at_ms = now;
+        run.completed_at_ms = None;
+        run.published_status_json = None;
+        run.result_json = None;
+        run.failure = None;
+        self.runs.insert(run_id.clone(), run);
+        self.push_event(
+            &run_id,
+            now,
+            "RunStarted",
+            serde_json::json!({ link.0: link.1 }),
+        );
+        run_id
+    }
+
+    fn outcome(&self, run_id: &str) -> AwaitResultResponse {
+        let r = &self.runs[run_id];
+        AwaitResultResponse {
+            run_id: run_id.to_owned(),
+            status: r.status,
+            completed: r.status.is_terminal(),
+            result: r.result_json.as_deref().map(json_or_string),
+            failure: r.failure.as_deref().map(|f| json_or_string(f.as_bytes())),
+        }
+    }
+}
+
+/// JSON value of `bytes`, or the text as a JSON string when it is not JSON.
+fn json_or_string(bytes: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(bytes)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(bytes).into_owned()))
+}
+
+/// `ot1_<run_id>.<op>` -> (run_id, op).
+fn parse_fake_token(token: &str) -> Result<(String, u64), ApiError> {
+    let body = token
+        .strip_prefix(TOKEN_PREFIX)
+        .ok_or_else(|| ApiError::token_invalid("missing ot1_ prefix"))?;
+    let (run, op) = body
+        .rsplit_once('.')
+        .ok_or_else(|| ApiError::token_invalid("malformed token body"))?;
+    let op = op
+        .parse::<u64>()
+        .map_err(|_| ApiError::token_invalid("malformed token body"))?;
+    if run.is_empty() {
+        return Err(ApiError::token_invalid("malformed token body"));
+    }
+    Ok((run.to_owned(), op))
 }
 
 /// In-memory control plane.
 pub struct FakeControlPlane {
     state: Mutex<State>,
     ready: AtomicBool,
+    /// Woken on every run status change (long-poll).
+    changed: tokio::sync::Notify,
 }
 
 impl Default for FakeControlPlane {
@@ -78,6 +173,7 @@ impl FakeControlPlane {
         FakeControlPlane {
             state: Mutex::new(State::default()),
             ready: AtomicBool::new(true),
+            changed: tokio::sync::Notify::new(),
         }
     }
 
@@ -129,7 +225,81 @@ impl FakeControlPlane {
             summary: format!("status -> {}", status.as_str()),
             details_json: format!("{{\"status\":\"{}\"}}", status.as_str()).into_bytes(),
         });
+        drop(st);
+        self.changed.notify_waiters();
         Ok(())
+    }
+
+    /// Mutating calls so far (the fake clock). A `dry_run` never advances it.
+    pub fn clock_ticks(&self) -> u64 {
+        self.lock().clock
+    }
+
+    /// Test helper: override whether `retry_run` resumes (`true`) or restarts
+    /// (`false`) this run. Default: Terminated and TimedOut resume, everything else
+    /// restarts (D1).
+    pub fn set_resumable(&self, run_id: &str, resumable: bool) {
+        self.lock().resumable.insert(run_id.to_owned(), resumable);
+    }
+
+    /// Test helper: mint the await token of op `op` of `run_id` (the guest's
+    /// `await-token` call). Returns `ot1_<run_id>.<op>`.
+    pub fn mint_token(&self, run_id: &str, op: u64) -> String {
+        self.lock().tokens.insert((run_id.to_owned(), op), false);
+        format!("{TOKEN_PREFIX}{run_id}.{op}")
+    }
+
+    /// Test helper: has the token of (`run_id`, `op`) been completed?
+    pub fn token_completed(&self, run_id: &str, op: u64) -> Option<bool> {
+        self.lock().tokens.get(&(run_id.to_owned(), op)).copied()
+    }
+
+    /// Test helper: signals delivered to a run, in order.
+    pub fn signals(&self, run_id: &str) -> Vec<(String, serde_json::Value)> {
+        self.lock().signals.get(run_id).cloned().unwrap_or_default()
+    }
+
+    /// Test helper: the reason of a requested cancellation (`Some(None)` = requested
+    /// without a reason).
+    pub fn cancel_requested(&self, run_id: &str) -> Option<Option<String>> {
+        self.lock().cancel_requested.get(run_id).cloned()
+    }
+
+    /// Test helper: continue `run_id` as a new run (status ContinuedAsNew, linked
+    /// successor in Ready). Returns the successor's id.
+    pub fn continue_as_new(&self, run_id: &str) -> Result<String, ApiError> {
+        let mut st = self.lock();
+        st.run(run_id)?;
+        let now = st.tick();
+        if let Some(r) = st.runs.get_mut(run_id) {
+            r.status = RunStatus::ContinuedAsNew;
+            r.attempt = None;
+            r.completed_at_ms = Some(now);
+        }
+        let next = st.clone_run(run_id, ("continued_from", run_id));
+        st.continued_to.insert(run_id.to_owned(), next.clone());
+        drop(st);
+        self.changed.notify_waiters();
+        Ok(next)
+    }
+
+    /// The run `run_id` resolves to: itself, or the last successor of its
+    /// continue-as-new chain when `follow`.
+    fn resolve(st: &State, run_id: &str, follow: bool) -> Result<String, ApiError> {
+        st.run(run_id)?;
+        let mut cur = run_id.to_owned();
+        if follow {
+            // Bounded: the fake never builds cycles, but stay total anyway.
+            for _ in 0..st.continued_to.len() {
+                match st.continued_to.get(&cur) {
+                    Some(next) if st.runs[&cur].status == RunStatus::ContinuedAsNew => {
+                        cur = next.clone();
+                    }
+                    _ => break,
+                }
+            }
+        }
+        Ok(cur)
     }
 }
 
@@ -449,6 +619,255 @@ impl ControlPlane for FakeControlPlane {
     fn ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
     }
+
+    async fn signal_run(&self, r: SignalRequest) -> Result<SignalResponse, ApiError> {
+        r.validate()?;
+        let mut st = self.lock();
+        let run = st.run(&r.run_id)?;
+        if run.status.is_terminal() {
+            return Err(ApiError::run_terminal(&r.run_id, run.status));
+        }
+        let seen_key = r.request_id.clone().map(|id| (r.run_id.clone(), id));
+        if let Some(k) = &seen_key
+            && st.signals_seen.contains(k)
+        {
+            return Ok(SignalResponse {
+                accepted: true,
+                duplicate: true,
+                dry_run: r.dry_run,
+            });
+        }
+        if !r.dry_run {
+            let now = st.tick();
+            if let Some(k) = seen_key {
+                st.signals_seen.insert(k);
+            }
+            st.push_event(
+                &r.run_id,
+                now,
+                "SignalPayload",
+                serde_json::json!({ "name": r.name, "payload": r.payload }),
+            );
+            st.signals
+                .entry(r.run_id)
+                .or_default()
+                .push((r.name, r.payload));
+        }
+        Ok(SignalResponse {
+            accepted: true,
+            duplicate: false,
+            dry_run: r.dry_run,
+        })
+    }
+
+    async fn cancel_run(&self, r: CancelRequest) -> Result<CancelResponse, ApiError> {
+        r.validate()?;
+        let mut st = self.lock();
+        let run = st.run(&r.run_id)?;
+        if run.status.is_terminal() {
+            return Err(ApiError::run_terminal(&r.run_id, run.status));
+        }
+        let already_requested = st.cancel_requested.contains_key(&r.run_id);
+        if !already_requested && !r.dry_run {
+            let now = st.tick();
+            st.push_event(
+                &r.run_id,
+                now,
+                "CancelRequested",
+                serde_json::json!({ "reason": r.reason }),
+            );
+            st.cancel_requested.insert(r.run_id, r.reason);
+        }
+        Ok(CancelResponse {
+            already_requested,
+            dry_run: r.dry_run,
+        })
+    }
+
+    async fn terminate_run(&self, r: TerminateRequest) -> Result<TerminateResponse, ApiError> {
+        r.validate()?;
+        let mut st = self.lock();
+        let run = st.run(&r.run_id)?;
+        if run.status.is_terminal() {
+            return Err(ApiError::run_terminal(&r.run_id, run.status));
+        }
+        if !r.dry_run {
+            let now = st.tick();
+            if let Some(run) = st.runs.get_mut(&r.run_id) {
+                run.status = RunStatus::Terminated;
+                run.attempt = None;
+                run.completed_at_ms = Some(now);
+            }
+            st.push_event(
+                &r.run_id,
+                now,
+                "RunTerminated",
+                serde_json::json!({ "reason": r.reason }),
+            );
+            drop(st);
+            self.changed.notify_waiters();
+        }
+        Ok(TerminateResponse {
+            status: RunStatus::Terminated,
+            dry_run: r.dry_run,
+        })
+    }
+
+    async fn retry_run(&self, r: RetryRequest) -> Result<RetryResponse, ApiError> {
+        let mut st = self.lock();
+        let status = st.run(&r.run_id)?.status;
+        match status {
+            s if !s.is_terminal() => return Err(ApiError::run_not_terminal(&r.run_id, s)),
+            RunStatus::Completed | RunStatus::ContinuedAsNew => {
+                return Err(ApiError::run_completed(&r.run_id));
+            }
+            _ => {}
+        }
+        let resumable = st.resumable.get(&r.run_id).copied().unwrap_or(matches!(
+            status,
+            RunStatus::Terminated | RunStatus::TimedOut
+        ));
+        let mode = if resumable {
+            RetryMode::Resumed
+        } else {
+            RetryMode::Restarted
+        };
+        if r.dry_run {
+            return Ok(RetryResponse {
+                mode,
+                run_id: r.run_id,
+                dry_run: true,
+            });
+        }
+        let run_id = match mode {
+            RetryMode::Resumed => {
+                let now = st.tick();
+                if let Some(run) = st.runs.get_mut(&r.run_id) {
+                    run.status = RunStatus::Ready;
+                    run.completed_at_ms = None;
+                    run.failure = None;
+                    run.result_json = None;
+                }
+                st.cancel_requested.remove(&r.run_id);
+                st.push_event(&r.run_id, now, "RunResumed", serde_json::json!({}));
+                r.run_id
+            }
+            RetryMode::Restarted => st.clone_run(&r.run_id, ("retry_of", &r.run_id)),
+        };
+        drop(st);
+        self.changed.notify_waiters();
+        Ok(RetryResponse {
+            mode,
+            run_id,
+            dry_run: false,
+        })
+    }
+
+    async fn await_result(&self, r: AwaitResultRequest) -> Result<AwaitResultResponse, ApiError> {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(effective_wait_ms(r.wait_ms));
+        loop {
+            // Subscribe before reading so a change between the read and the wait is
+            // never lost.
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let st = self.lock();
+                let id = Self::resolve(&st, &r.run_id, r.follow_continuations)?;
+                let out = st.outcome(&id);
+                if out.completed || tokio::time::Instant::now() >= deadline {
+                    return Ok(out);
+                }
+            }
+            let _ = tokio::time::timeout_at(deadline, notified).await;
+        }
+    }
+
+    async fn complete_token(
+        &self,
+        r: CompleteTokenRequest,
+    ) -> Result<CompleteTokenResponse, ApiError> {
+        let (run_id, op) = parse_fake_token(&r.token)?;
+        let mut st = self.lock();
+        let Some(&completed) = st.tokens.get(&(run_id.clone(), op)) else {
+            return Err(ApiError::token_invalid("unknown token"));
+        };
+        if completed {
+            return Err(ApiError::token_already_completed(&run_id));
+        }
+        let run = st.run(&run_id)?;
+        if run.status.is_terminal() {
+            return Err(ApiError::run_terminal(&run_id, run.status));
+        }
+        if !r.dry_run {
+            let now = st.tick();
+            st.tokens.insert((run_id.clone(), op), true);
+            st.push_event(
+                &run_id,
+                now,
+                "TokenCompleted",
+                serde_json::json!({ "op": op, "payload": r.payload }),
+            );
+        }
+        Ok(CompleteTokenResponse {
+            run_id,
+            accepted: true,
+            dry_run: r.dry_run,
+        })
+    }
+
+    async fn set_workflow_policy(
+        &self,
+        workflow: String,
+        p: RunPolicy,
+    ) -> Result<RunPolicy, ApiError> {
+        let mut st = self.lock();
+        if !st.workflows.contains_key(&workflow) {
+            return Err(ApiError::not_found(format!(
+                "workflow {workflow} not found"
+            )));
+        }
+        st.tick();
+        st.workflow_policies.insert(workflow, p);
+        Ok(p)
+    }
+
+    async fn get_workflow_policy(&self, workflow: String) -> Result<RunPolicy, ApiError> {
+        let st = self.lock();
+        if !st.workflows.contains_key(&workflow) {
+            return Err(ApiError::not_found(format!(
+                "workflow {workflow} not found"
+            )));
+        }
+        Ok(st
+            .workflow_policies
+            .get(&workflow)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    async fn set_queue_policy(&self, queue: String, p: RunPolicy) -> Result<RunPolicy, ApiError> {
+        if queue.is_empty() {
+            return Err(ApiError::invalid_argument("queue name must not be empty"));
+        }
+        let mut st = self.lock();
+        st.tick();
+        st.queue_policies.insert(queue, p);
+        Ok(p)
+    }
+
+    async fn get_queue_policy(&self, queue: String) -> Result<RunPolicy, ApiError> {
+        if queue.is_empty() {
+            return Err(ApiError::invalid_argument("queue name must not be empty"));
+        }
+        Ok(self
+            .lock()
+            .queue_policies
+            .get(&queue)
+            .copied()
+            .unwrap_or_default())
+    }
 }
 
 #[cfg(test)]
@@ -754,6 +1173,368 @@ mod tests {
             .await
             .unwrap_err()
             .code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    fn signal(run_id: &str, name: &str, request_id: Option<&str>, dry_run: bool) -> SignalRequest {
+        SignalRequest {
+            run_id: run_id.into(),
+            name: name.into(),
+            payload: serde_json::json!({ "v": name }),
+            request_id: request_id.map(Into::into),
+            dry_run,
+        }
+    }
+
+    async fn started() -> (FakeControlPlane, String) {
+        let cp = with_greet().await;
+        let r = cp.start_run(start("greet")).await.unwrap();
+        (cp, r.run_id)
+    }
+
+    #[tokio::test]
+    async fn signal_semantics() {
+        let (cp, run) = started().await;
+        let t0 = cp.clock_ticks();
+        let dry = cp
+            .signal_run(signal(&run, "go", Some("a"), true))
+            .await
+            .unwrap();
+        assert_eq!(
+            (dry.accepted, dry.duplicate, dry.dry_run),
+            (true, false, true)
+        );
+        assert_eq!(cp.clock_ticks(), t0, "dry_run mutated");
+        assert!(cp.signals(&run).is_empty());
+
+        let a = cp
+            .signal_run(signal(&run, "go", Some("a"), false))
+            .await
+            .unwrap();
+        assert_eq!((a.accepted, a.duplicate), (true, false));
+        let dup = cp
+            .signal_run(signal(&run, "go", Some("a"), false))
+            .await
+            .unwrap();
+        assert_eq!((dup.accepted, dup.duplicate), (true, true));
+        cp.signal_run(signal(&run, "go", None, false))
+            .await
+            .unwrap();
+        assert_eq!(cp.signals(&run).len(), 2);
+
+        assert_eq!(
+            cp.signal_run(signal("run-999999", "go", None, false))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            cp.signal_run(signal(&run, "", None, false))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        cp.set_run_outcome(&run, RunStatus::Completed, None, None, None)
+            .unwrap();
+        let e = cp
+            .signal_run(signal(&run, "go", None, false))
+            .await
+            .unwrap_err();
+        assert_eq!(e.reason(), Some("run_terminal"));
+        assert_eq!(e.code, ErrorCode::Conflict);
+    }
+
+    #[tokio::test]
+    async fn cancel_and_terminate_semantics() {
+        let (cp, run) = started().await;
+        let c = |dry_run| CancelRequest {
+            run_id: run.clone(),
+            reason: Some("user".into()),
+            dry_run,
+        };
+        let t0 = cp.clock_ticks();
+        assert!(!cp.cancel_run(c(true)).await.unwrap().already_requested);
+        assert_eq!(cp.clock_ticks(), t0);
+        assert_eq!(cp.cancel_requested(&run), None);
+        assert!(!cp.cancel_run(c(false)).await.unwrap().already_requested);
+        assert!(cp.cancel_run(c(false)).await.unwrap().already_requested);
+        assert!(cp.cancel_run(c(true)).await.unwrap().already_requested);
+        assert_eq!(cp.cancel_requested(&run), Some(Some("user".into())));
+
+        let t = |dry_run| TerminateRequest {
+            run_id: run.clone(),
+            reason: None,
+            dry_run,
+        };
+        let t1 = cp.clock_ticks();
+        let dry = cp.terminate_run(t(true)).await.unwrap();
+        assert_eq!((dry.status, dry.dry_run), (RunStatus::Terminated, true));
+        assert_eq!(cp.clock_ticks(), t1);
+        assert_eq!(
+            cp.get_run(run.clone()).await.unwrap().status,
+            RunStatus::Ready
+        );
+        cp.terminate_run(t(false)).await.unwrap();
+        let info = cp.get_run(run.clone()).await.unwrap();
+        assert_eq!(info.status, RunStatus::Terminated);
+        assert!(info.completed_at_ms.is_some());
+        let e = cp.terminate_run(t(false)).await.unwrap_err();
+        assert_eq!(e.reason(), Some("run_terminal"));
+        assert_eq!(e.details.unwrap()["status"], "terminated");
+        assert_eq!(
+            cp.cancel_run(c(false)).await.unwrap_err().reason(),
+            Some("run_terminal")
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_semantics() {
+        let (cp, run) = started().await;
+        let r = |run_id: &str, dry_run| RetryRequest {
+            run_id: run_id.into(),
+            dry_run,
+        };
+        assert_eq!(
+            cp.retry_run(r(&run, false)).await.unwrap_err().reason(),
+            Some("run_not_terminal")
+        );
+        // Terminated -> resume in place (D1).
+        cp.terminate_run(TerminateRequest {
+            run_id: run.clone(),
+            reason: None,
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+        let t0 = cp.clock_ticks();
+        let dry = cp.retry_run(r(&run, true)).await.unwrap();
+        assert_eq!(
+            (dry.mode, dry.run_id.as_str()),
+            (RetryMode::Resumed, run.as_str())
+        );
+        assert_eq!(cp.clock_ticks(), t0);
+        let res = cp.retry_run(r(&run, false)).await.unwrap();
+        assert_eq!(
+            (res.mode, res.run_id.as_str()),
+            (RetryMode::Resumed, run.as_str())
+        );
+        let info = cp.get_run(run.clone()).await.unwrap();
+        assert_eq!(
+            (info.status, info.completed_at_ms),
+            (RunStatus::Ready, None)
+        );
+
+        // Guest failure -> restart as a new run.
+        cp.set_run_outcome(&run, RunStatus::Failed, None, Some("boom".into()), None)
+            .unwrap();
+        let res = cp.retry_run(r(&run, false)).await.unwrap();
+        assert_eq!(res.mode, RetryMode::Restarted);
+        assert_ne!(res.run_id, run);
+        let new = cp.get_run(res.run_id.clone()).await.unwrap();
+        assert_eq!(
+            (new.status, new.workflow.as_str()),
+            (RunStatus::Ready, "greet")
+        );
+        assert_eq!(
+            cp.get_run(run.clone()).await.unwrap().status,
+            RunStatus::Failed
+        );
+
+        // Override: an executor-level failure resumes.
+        cp.set_resumable(&run, true);
+        assert_eq!(
+            cp.retry_run(r(&run, true)).await.unwrap().mode,
+            RetryMode::Resumed
+        );
+
+        cp.set_run_outcome(&res.run_id, RunStatus::Completed, None, None, None)
+            .unwrap();
+        let e = cp.retry_run(r(&res.run_id, false)).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.reason()),
+            (ErrorCode::Conflict, Some("run_completed"))
+        );
+        assert_eq!(
+            cp.retry_run(r("run-999999", false)).await.unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn await_result_waits_and_follows() {
+        let (cp, run) = started().await;
+        let cp = std::sync::Arc::new(cp);
+        let req = |wait_ms, follow| AwaitResultRequest {
+            run_id: run.clone(),
+            wait_ms,
+            follow_continuations: follow,
+        };
+        let now = cp.await_result(req(0, false)).await.unwrap();
+        assert_eq!((now.status, now.completed), (RunStatus::Ready, false));
+        assert_eq!(now.result, None);
+
+        // Not terminal within the wait: still Ok, completed = false.
+        let t = std::time::Instant::now();
+        let out = cp.await_result(req(50, false)).await.unwrap();
+        assert!(!out.completed);
+        assert!(t.elapsed() >= std::time::Duration::from_millis(45));
+
+        // Completes while waiting.
+        let cp2 = cp.clone();
+        let run2 = run.clone();
+        let waker = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            cp2.set_run_outcome(&run2, RunStatus::Completed, Some(b"7".to_vec()), None, None)
+                .unwrap();
+        });
+        let t = std::time::Instant::now();
+        let out = cp.await_result(req(10_000, false)).await.unwrap();
+        waker.await.unwrap();
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!((out.status, out.completed), (RunStatus::Completed, true));
+        assert_eq!(out.result, Some(serde_json::json!(7)));
+
+        // Continue-as-new chain.
+        let r = cp.start_run(start("greet")).await.unwrap().run_id;
+        let next = cp.continue_as_new(&r).unwrap();
+        let next2 = cp.continue_as_new(&next).unwrap();
+        cp.set_run_outcome(&next2, RunStatus::Failed, None, Some("boom".into()), None)
+            .unwrap();
+        let req2 = |follow| AwaitResultRequest {
+            run_id: r.clone(),
+            wait_ms: 0,
+            follow_continuations: follow,
+        };
+        let own = cp.await_result(req2(false)).await.unwrap();
+        assert_eq!(
+            (own.run_id.as_str(), own.status),
+            (r.as_str(), RunStatus::ContinuedAsNew)
+        );
+        let last = cp.await_result(req2(true)).await.unwrap();
+        assert_eq!(last.run_id, next2);
+        assert_eq!(last.failure, Some(serde_json::json!("boom")));
+        assert_eq!(
+            cp.await_result(AwaitResultRequest {
+                run_id: "run-999999".into(),
+                wait_ms: 0,
+                follow_continuations: true,
+            })
+            .await
+            .unwrap_err()
+            .code,
+            ErrorCode::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn token_semantics() {
+        let (cp, run) = started().await;
+        let token = cp.mint_token(&run, 4);
+        assert!(token.starts_with(TOKEN_PREFIX));
+        let req = |token: &str, dry_run| CompleteTokenRequest {
+            token: token.into(),
+            payload: serde_json::json!({ "ok": true }),
+            dry_run,
+        };
+        for bad in [
+            "",
+            "garbage",
+            "ot1_",
+            "ot1_run.x",
+            "ot2_run-000001.4",
+            "ot1_run-000001.5",
+        ] {
+            let e = cp.complete_token(req(bad, false)).await.unwrap_err();
+            assert_eq!(
+                (e.code, e.reason()),
+                (ErrorCode::InvalidArgument, Some("token_invalid")),
+                "{bad}"
+            );
+            assert!(
+                bad.is_empty() || !e.message.contains(bad),
+                "message echoes the token"
+            );
+        }
+        let t0 = cp.clock_ticks();
+        let dry = cp.complete_token(req(&token, true)).await.unwrap();
+        assert_eq!(
+            (dry.run_id.as_str(), dry.accepted, dry.dry_run),
+            (run.as_str(), true, true)
+        );
+        assert_eq!(cp.clock_ticks(), t0);
+        assert_eq!(cp.token_completed(&run, 4), Some(false));
+        let ok = cp.complete_token(req(&token, false)).await.unwrap();
+        assert_eq!((ok.accepted, ok.dry_run), (true, false));
+        assert_eq!(cp.token_completed(&run, 4), Some(true));
+        let e = cp.complete_token(req(&token, false)).await.unwrap_err();
+        assert_eq!(
+            (e.code, e.reason()),
+            (ErrorCode::Conflict, Some("token_already_completed"))
+        );
+
+        let t2 = cp.mint_token(&run, 9);
+        cp.set_run_outcome(&run, RunStatus::Cancelled, None, None, None)
+            .unwrap();
+        assert_eq!(
+            cp.complete_token(req(&t2, false))
+                .await
+                .unwrap_err()
+                .reason(),
+            Some("run_terminal")
+        );
+    }
+
+    #[tokio::test]
+    async fn policies_round_trip() {
+        let cp = with_greet().await;
+        assert_eq!(
+            cp.get_workflow_policy("greet".into()).await.unwrap(),
+            RunPolicy::default()
+        );
+        let p = RunPolicy {
+            retention_ms: Some(168 * 3_600_000),
+            schedule_to_start_ms: Some(30_000),
+        };
+        assert_eq!(cp.set_workflow_policy("greet".into(), p).await.unwrap(), p);
+        assert_eq!(cp.get_workflow_policy("greet".into()).await.unwrap(), p);
+        assert_eq!(
+            cp.set_workflow_policy("nope".into(), p)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            cp.get_workflow_policy("nope".into())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        // Queues are implicit: any name works.
+        assert_eq!(
+            cp.get_queue_policy("q".into()).await.unwrap(),
+            RunPolicy::default()
+        );
+        let q = RunPolicy {
+            retention_ms: None,
+            schedule_to_start_ms: Some(0),
+        };
+        cp.set_queue_policy("q".into(), q).await.unwrap();
+        assert_eq!(cp.get_queue_policy("q".into()).await.unwrap(), q);
+        // Replace, not merge.
+        cp.set_queue_policy("q".into(), RunPolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            cp.get_queue_policy("q".into()).await.unwrap(),
+            RunPolicy::default()
+        );
+        assert_eq!(
+            cp.get_queue_policy(String::new()).await.unwrap_err().code,
             ErrorCode::InvalidArgument
         );
     }

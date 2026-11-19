@@ -10,8 +10,8 @@ pub mod health {
 
 /// `ostro.api.v1` control-plane protocol (gRPC half of API-01).
 ///
-/// Services `Modules`, `Workflows` and `Runs` mirror the REST operations
-/// one-to-one. JSON payloads travel as UTF-8 JSON in `bytes` fields named
+/// Services `Modules`, `Workflows`, `Runs` and `Tokens` (await-token
+/// completion, Phase 5) mirror the REST operations one-to-one. JSON payloads travel as UTF-8 JSON in `bytes` fields named
 /// `*_json`; timestamps are Unix milliseconds in `*_at_ms` fields.
 pub mod api {
     /// Version 1 of the control-plane API.
@@ -23,10 +23,11 @@ pub mod api {
 #[cfg(test)]
 mod tests {
     use super::api::v1::{
-        ConflictPolicy, ListRunsRequest, RunInfo, RunStatus, StartRunRequest,
+        AwaitResultResponse, CompleteTokenRequest, ConflictPolicy, ListRunsRequest, RetryMode,
+        RunInfo, RunPolicy, RunStatus, SignalRunRequest, StartRunRequest,
         modules_client::ModulesClient, modules_server::ModulesServer, runs_client::RunsClient,
-        runs_server::RunsServer, workflows_client::WorkflowsClient,
-        workflows_server::WorkflowsServer,
+        runs_server::RunsServer, tokens_client::TokensClient, tokens_server::TokensServer,
+        workflows_client::WorkflowsClient, workflows_server::WorkflowsServer,
     };
     use super::health::v1::CheckRequest;
     use prost::Message;
@@ -119,5 +120,56 @@ mod tests {
         assert!(name::<ModulesServer<()>>().contains("ModulesServer"));
         assert!(name::<RunsServer<()>>().contains("RunsServer"));
         assert!(name::<WorkflowsServer<()>>().contains("WorkflowsServer"));
+        assert!(name::<TokensClient<tonic::transport::Channel>>().contains("TokensClient"));
+        assert!(name::<TokensServer<()>>().contains("TokensServer"));
+    }
+
+    #[test]
+    fn phase5_lifecycle_messages_roundtrip() {
+        let sig = SignalRunRequest {
+            run_id: "r1".into(),
+            name: "approve".into(),
+            payload_json: b"{}".to_vec(),
+            request_id: Some(String::new()),
+            dry_run: true,
+        };
+        let back = SignalRunRequest::decode(sig.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(back, sig);
+        assert_eq!(back.request_id.as_deref(), Some(""));
+
+        let tok = CompleteTokenRequest {
+            token: "ot1_abc".into(),
+            payload_json: b"1".to_vec(),
+            dry_run: false,
+        };
+        assert_eq!(
+            CompleteTokenRequest::decode(tok.encode_to_vec().as_slice()).expect("decode"),
+            tok
+        );
+
+        let res = AwaitResultResponse {
+            run_id: "r1".into(),
+            status: RunStatus::TimedOut as i32,
+            completed: true,
+            result_json: None,
+            failure_json: Some(b"\"x\"".to_vec()),
+        };
+        assert_eq!(
+            AwaitResultResponse::decode(res.encode_to_vec().as_slice()).expect("decode"),
+            res
+        );
+
+        // Presence of zero durations survives.
+        let p = RunPolicy {
+            retention_ms: Some(0),
+            schedule_to_start_ms: None,
+        };
+        let back = RunPolicy::decode(p.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(back.retention_ms, Some(0));
+        assert_eq!(back.schedule_to_start_ms, None);
+
+        assert_eq!(RetryMode::Unspecified as i32, 0);
+        assert_eq!(RetryMode::Resumed as i32, 1);
+        assert_eq!(RetryMode::Restarted as i32, 2);
     }
 }

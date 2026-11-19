@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/ostro/api/v1/modules.proto",
         "proto/ostro/api/v1/workflows.proto",
         "proto/ostro/api/v1/runs.proto",
+        "proto/ostro/api/v1/tokens.proto",
     ];
     for proto in PROTOS {
         println!("cargo:rerun-if-changed={proto}");

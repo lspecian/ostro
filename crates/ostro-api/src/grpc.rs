@@ -1,6 +1,7 @@
 //! gRPC adapter: `ostro.api.v1` services over [`ControlPlane`].
 //!
-//! [`GrpcModules`], [`GrpcWorkflows`] and [`GrpcRuns`] are thin translators, like the
+//! [`GrpcModules`], [`GrpcWorkflows`], [`GrpcRuns`] and [`GrpcTokens`] are thin
+//! translators, like the
 //! REST handlers: proto request -> domain request -> `ControlPlane` -> proto response.
 //! Errors go through [`to_status`], which takes the code from the shared
 //! [`ApiError::grpc_code`] table. Every proto <-> domain conversion lives in this file.
@@ -8,7 +9,7 @@
 use std::sync::Arc;
 
 use ostro_proto::api::v1 as pb;
-use ostro_proto::api::v1::{modules_server, runs_server, workflows_server};
+use ostro_proto::api::v1::{modules_server, runs_server, tokens_server, workflows_server};
 use tonic::{Request, Response, Status};
 
 use crate::domain::{self, ControlPlane};
@@ -274,6 +275,83 @@ impl From<pb::RunHistoryRequest> for domain::HistoryRequest {
     }
 }
 
+/// Optional JSON payload bytes -> value: empty = JSON null (like `input_json`).
+fn payload_from_proto(field: &str, bytes: &[u8]) -> Result<serde_json::Value, ApiError> {
+    if bytes.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_slice(bytes).map_err(|e| ApiError::invalid_argument(format!("{field}: {e}")))
+}
+
+fn json_bytes(v: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(v).unwrap_or_default()
+}
+
+impl TryFrom<pb::SignalRunRequest> for domain::SignalRequest {
+    type Error = ApiError;
+
+    fn try_from(r: pb::SignalRunRequest) -> Result<Self, ApiError> {
+        Ok(domain::SignalRequest {
+            payload: payload_from_proto("payload_json", &r.payload_json)?,
+            run_id: r.run_id,
+            name: r.name,
+            request_id: r.request_id,
+            dry_run: r.dry_run,
+        })
+    }
+}
+
+impl TryFrom<pb::CompleteTokenRequest> for domain::CompleteTokenRequest {
+    type Error = ApiError;
+
+    fn try_from(r: pb::CompleteTokenRequest) -> Result<Self, ApiError> {
+        Ok(domain::CompleteTokenRequest {
+            payload: payload_from_proto("payload_json", &r.payload_json)?,
+            token: r.token,
+            dry_run: r.dry_run,
+        })
+    }
+}
+
+impl From<domain::RetryMode> for pb::RetryMode {
+    fn from(m: domain::RetryMode) -> Self {
+        match m {
+            domain::RetryMode::Resumed => pb::RetryMode::Resumed,
+            domain::RetryMode::Restarted => pb::RetryMode::Restarted,
+        }
+    }
+}
+
+impl From<domain::AwaitResultResponse> for pb::AwaitResultResponse {
+    fn from(r: domain::AwaitResultResponse) -> Self {
+        pb::AwaitResultResponse {
+            run_id: r.run_id,
+            status: pb::RunStatus::from(r.status) as i32,
+            completed: r.completed,
+            result_json: r.result.as_ref().map(json_bytes),
+            failure_json: r.failure.as_ref().map(json_bytes),
+        }
+    }
+}
+
+impl From<pb::RunPolicy> for domain::RunPolicy {
+    fn from(p: pb::RunPolicy) -> Self {
+        domain::RunPolicy {
+            retention_ms: p.retention_ms,
+            schedule_to_start_ms: p.schedule_to_start_ms,
+        }
+    }
+}
+
+impl From<domain::RunPolicy> for pb::RunPolicy {
+    fn from(p: domain::RunPolicy) -> Self {
+        pb::RunPolicy {
+            retention_ms: p.retention_ms,
+            schedule_to_start_ms: p.schedule_to_start_ms,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------------
@@ -306,6 +384,10 @@ pub struct GrpcWorkflows(pub Arc<dyn ControlPlane>);
 /// `ostro.api.v1.Runs` over a [`ControlPlane`].
 #[derive(Clone)]
 pub struct GrpcRuns(pub Arc<dyn ControlPlane>);
+
+/// `ostro.api.v1.Tokens` (await-token completion) over a [`ControlPlane`].
+#[derive(Clone)]
+pub struct GrpcTokens(pub Arc<dyn ControlPlane>);
 
 #[tonic::async_trait]
 impl modules_server::Modules for GrpcModules {
@@ -377,6 +459,56 @@ impl workflows_server::Workflows for GrpcWorkflows {
             .map_err(to_status)?;
         Ok(Response::new(wf.into()))
     }
+
+    async fn set_policy(
+        &self,
+        request: Request<pb::SetWorkflowPolicyRequest>,
+    ) -> Result<Response<pb::RunPolicy>, Status> {
+        let r = request.into_inner();
+        let p = self
+            .0
+            .set_workflow_policy(r.name, r.policy.unwrap_or_default().into())
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(p.into()))
+    }
+
+    async fn get_policy(
+        &self,
+        request: Request<pb::GetWorkflowPolicyRequest>,
+    ) -> Result<Response<pb::RunPolicy>, Status> {
+        let p = self
+            .0
+            .get_workflow_policy(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(p.into()))
+    }
+
+    async fn set_queue_policy(
+        &self,
+        request: Request<pb::SetQueuePolicyRequest>,
+    ) -> Result<Response<pb::RunPolicy>, Status> {
+        let r = request.into_inner();
+        let p = self
+            .0
+            .set_queue_policy(r.name, r.policy.unwrap_or_default().into())
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(p.into()))
+    }
+
+    async fn get_queue_policy(
+        &self,
+        request: Request<pb::GetQueuePolicyRequest>,
+    ) -> Result<Response<pb::RunPolicy>, Status> {
+        let p = self
+            .0
+            .get_queue_policy(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(p.into()))
+    }
 }
 
 #[tonic::async_trait]
@@ -424,6 +556,113 @@ impl runs_server::Runs for GrpcRuns {
         let req = domain::ListRunsRequest::try_from(request.into_inner()).map_err(to_status)?;
         let page = self.0.list_runs(req).await.map_err(to_status)?;
         Ok(Response::new(page.into()))
+    }
+
+    async fn signal(
+        &self,
+        request: Request<pb::SignalRunRequest>,
+    ) -> Result<Response<pb::SignalRunResponse>, Status> {
+        let req = domain::SignalRequest::try_from(request.into_inner()).map_err(to_status)?;
+        let r = self.0.signal_run(req).await.map_err(to_status)?;
+        Ok(Response::new(pb::SignalRunResponse {
+            accepted: r.accepted,
+            duplicate: r.duplicate,
+            dry_run: r.dry_run,
+        }))
+    }
+
+    async fn cancel(
+        &self,
+        request: Request<pb::CancelRunRequest>,
+    ) -> Result<Response<pb::CancelRunResponse>, Status> {
+        let r = request.into_inner();
+        let res = self
+            .0
+            .cancel_run(domain::CancelRequest {
+                run_id: r.run_id,
+                reason: r.reason,
+                dry_run: r.dry_run,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::CancelRunResponse {
+            already_requested: res.already_requested,
+            dry_run: res.dry_run,
+        }))
+    }
+
+    async fn terminate(
+        &self,
+        request: Request<pb::TerminateRunRequest>,
+    ) -> Result<Response<pb::TerminateRunResponse>, Status> {
+        let r = request.into_inner();
+        let res = self
+            .0
+            .terminate_run(domain::TerminateRequest {
+                run_id: r.run_id,
+                reason: r.reason,
+                dry_run: r.dry_run,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::TerminateRunResponse {
+            status: pb::RunStatus::from(res.status) as i32,
+            dry_run: res.dry_run,
+        }))
+    }
+
+    async fn retry(
+        &self,
+        request: Request<pb::RetryRunRequest>,
+    ) -> Result<Response<pb::RetryRunResponse>, Status> {
+        let r = request.into_inner();
+        let res = self
+            .0
+            .retry_run(domain::RetryRequest {
+                run_id: r.run_id,
+                dry_run: r.dry_run,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RetryRunResponse {
+            mode: pb::RetryMode::from(res.mode) as i32,
+            run_id: res.run_id,
+            dry_run: res.dry_run,
+        }))
+    }
+
+    async fn await_result(
+        &self,
+        request: Request<pb::AwaitResultRequest>,
+    ) -> Result<Response<pb::AwaitResultResponse>, Status> {
+        let r = request.into_inner();
+        let res = self
+            .0
+            .await_result(domain::AwaitResultRequest {
+                run_id: r.run_id,
+                wait_ms: domain::effective_wait_ms(r.wait_ms),
+                follow_continuations: r.follow_continuations,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(res.into()))
+    }
+}
+
+#[tonic::async_trait]
+impl tokens_server::Tokens for GrpcTokens {
+    async fn complete(
+        &self,
+        request: Request<pb::CompleteTokenRequest>,
+    ) -> Result<Response<pb::CompleteTokenResponse>, Status> {
+        let req =
+            domain::CompleteTokenRequest::try_from(request.into_inner()).map_err(to_status)?;
+        let r = self.0.complete_token(req).await.map_err(to_status)?;
+        Ok(Response::new(pb::CompleteTokenResponse {
+            run_id: r.run_id,
+            accepted: r.accepted,
+            dry_run: r.dry_run,
+        }))
     }
 }
 
@@ -475,6 +714,51 @@ mod tests {
         };
         let e = domain::StartRunRequest::try_from(bad_policy).expect_err("bad enum");
         assert_eq!(e.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn lifecycle_conversions() {
+        let sig = pb::SignalRunRequest {
+            run_id: "r".into(),
+            name: "go".into(),
+            ..Default::default()
+        };
+        let d = domain::SignalRequest::try_from(sig.clone()).expect("ok");
+        assert_eq!(d.payload, serde_json::Value::Null);
+        let bad = pb::SignalRunRequest {
+            payload_json: b"{nope".to_vec(),
+            ..sig
+        };
+        assert_eq!(
+            domain::SignalRequest::try_from(bad).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        let tok = pb::CompleteTokenRequest {
+            token: "ot1_x".into(),
+            payload_json: br#"{"a":1}"#.to_vec(),
+            dry_run: true,
+        };
+        let d = domain::CompleteTokenRequest::try_from(tok).expect("ok");
+        assert_eq!(d.payload, serde_json::json!({ "a": 1 }));
+        assert!(d.dry_run);
+        let p = domain::RunPolicy {
+            retention_ms: Some(0),
+            schedule_to_start_ms: None,
+        };
+        assert_eq!(domain::RunPolicy::from(pb::RunPolicy::from(p)), p);
+        let out = pb::AwaitResultResponse::from(domain::AwaitResultResponse {
+            run_id: "r".into(),
+            status: domain::RunStatus::Completed,
+            completed: true,
+            result: Some(serde_json::Value::Null),
+            failure: None,
+        });
+        assert_eq!(out.result_json.as_deref(), Some(&b"null"[..]));
+        assert_eq!(out.failure_json, None);
+        assert_eq!(
+            pb::RetryMode::from(domain::RetryMode::Resumed),
+            pb::RetryMode::Resumed
+        );
     }
 
     #[test]

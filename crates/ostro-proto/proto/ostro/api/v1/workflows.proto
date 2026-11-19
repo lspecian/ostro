@@ -1,5 +1,7 @@
 // Workflow listing and activation
-// (REST: GET /v1/workflows, POST /v1/workflows/{name}/activate).
+// (REST: GET /v1/workflows, POST /v1/workflows/{name}/activate), plus the
+// Phase 5 run policies (REST: PUT/GET /v1/workflows/{name}/policy and
+// PUT/GET /v1/queues/{name}/policy).
 syntax = "proto3";
 
 package ostro.api.v1;
@@ -9,6 +11,14 @@ service Workflows {
   rpc List(ListWorkflowsRequest) returns (ListWorkflowsResponse);
   // Make a version the active one for new runs.
   rpc Activate(ActivateWorkflowRequest) returns (WorkflowInfo);
+  // Replace a workflow's run policy (affects future runs only).
+  rpc SetPolicy(SetWorkflowPolicyRequest) returns (RunPolicy);
+  // A workflow's run policy (unset fields = no override).
+  rpc GetPolicy(GetWorkflowPolicyRequest) returns (RunPolicy);
+  // Replace a queue's run policy (affects future runs only).
+  rpc SetQueuePolicy(SetQueuePolicyRequest) returns (RunPolicy);
+  // A queue's run policy (unset fields = no override).
+  rpc GetQueuePolicy(GetQueuePolicyRequest) returns (RunPolicy);
 }
 
 message ListWorkflowsRequest {}
@@ -37,4 +47,33 @@ message ActivateWorkflowRequest {
   uint32 version = 2;
   // When set, the activation fails unless record_version matches.
   optional uint64 expected_version = 3;
+}
+
+// --- Phase 5 run policies (OPS-06 / WF-09) -------------------------------
+
+// Per-workflow or per-queue defaults resolved at run start
+// (request > workflow policy > queue policy > server config).
+message RunPolicy {
+  // How long a terminal run and its journal are kept.
+  optional uint64 retention_ms = 1;
+  // Schedule-to-start timeout for the initial start.
+  optional uint64 schedule_to_start_ms = 2;
+}
+
+message SetWorkflowPolicyRequest {
+  string name = 1;
+  RunPolicy policy = 2;
+}
+
+message GetWorkflowPolicyRequest {
+  string name = 1;
+}
+
+message SetQueuePolicyRequest {
+  string name = 1;
+  RunPolicy policy = 2;
+}
+
+message GetQueuePolicyRequest {
+  string name = 1;
 }

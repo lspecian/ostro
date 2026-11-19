@@ -1,6 +1,8 @@
 // Run start, inspection, history and listing
 // (REST: POST /v1/runs, GET /v1/runs/{id}, GET /v1/runs/{id}/history,
-// GET /v1/runs).
+// GET /v1/runs), plus the Phase 5 lifecycle calls (REST:
+// POST /v1/runs/{id}/signals/{name}, /cancel, /terminate, /retry and
+// GET /v1/runs/{id}/result).
 syntax = "proto3";
 
 package ostro.api.v1;
@@ -12,6 +14,17 @@ service Runs {
   rpc Get(GetRunRequest) returns (RunInfo);
   rpc History(RunHistoryRequest) returns (RunHistoryResponse);
   rpc List(ListRunsRequest) returns (ListRunsResponse);
+  // Deliver a named signal to a run (Phase 5, API-05).
+  rpc Signal(SignalRunRequest) returns (SignalRunResponse);
+  // Request graceful cancellation (idempotent).
+  rpc Cancel(CancelRunRequest) returns (CancelRunResponse);
+  // Hard-stop a run (status TERMINATED).
+  rpc Terminate(TerminateRunRequest) returns (TerminateRunResponse);
+  // Resume a resumable terminal run in place, or restart it as a new run.
+  rpc Retry(RetryRunRequest) returns (RetryRunResponse);
+  // Long-poll a run's outcome (Phase 5, API-06). Not-terminal-yet is not an
+  // error: the response has completed = false.
+  rpc AwaitResult(AwaitResultRequest) returns (AwaitResultResponse);
 }
 
 message StartRunRequest {
@@ -109,4 +122,89 @@ message RunSummary {
 message ListRunsResponse {
   repeated RunSummary runs = 1;
   optional string next_page_token = 2;
+}
+
+// --- Phase 5 lifecycle (API-05 / API-06) ---------------------------------
+
+message SignalRunRequest {
+  string run_id = 1;
+  string name = 2;
+  // UTF-8 JSON payload; empty = JSON null.
+  bytes payload_json = 3;
+  // Optional dedupe id: a repeated request_id is acknowledged, not re-delivered.
+  optional string request_id = 4;
+  // Validate only; nothing is submitted.
+  bool dry_run = 5;
+}
+
+message SignalRunResponse {
+  bool accepted = 1;
+  // True when request_id was already seen for this run.
+  bool duplicate = 2;
+  bool dry_run = 3;
+}
+
+message CancelRunRequest {
+  string run_id = 1;
+  optional string reason = 2;
+  bool dry_run = 3;
+}
+
+message CancelRunResponse {
+  // True when cancellation had already been requested.
+  bool already_requested = 1;
+  bool dry_run = 2;
+}
+
+message TerminateRunRequest {
+  string run_id = 1;
+  optional string reason = 2;
+  bool dry_run = 3;
+}
+
+message TerminateRunResponse {
+  // TERMINATED (or what it would be, for dry_run).
+  RunStatus status = 1;
+  bool dry_run = 2;
+}
+
+message RetryRunRequest {
+  string run_id = 1;
+  bool dry_run = 2;
+}
+
+// How a retry was carried out.
+enum RetryMode {
+  RETRY_MODE_UNSPECIFIED = 0;
+  // The same run resumes from its journal.
+  RETRY_MODE_RESUMED = 1;
+  // A new run linked to the old one was started.
+  RETRY_MODE_RESTARTED = 2;
+}
+
+message RetryRunResponse {
+  RetryMode mode = 1;
+  // The resumed run, or the new run for RESTARTED.
+  string run_id = 2;
+  bool dry_run = 3;
+}
+
+message AwaitResultRequest {
+  string run_id = 1;
+  // Maximum wait; 0 = answer immediately. Capped at 60 000 by the server.
+  uint64 wait_ms = 2;
+  // Follow CONTINUED_AS_NEW successors to the final run of the chain.
+  bool follow_continuations = 3;
+}
+
+message AwaitResultResponse {
+  // The run the answer is about (the last successor when following).
+  string run_id = 1;
+  RunStatus status = 2;
+  // True when status is terminal.
+  bool completed = 3;
+  // UTF-8 JSON result of a completed run.
+  optional bytes result_json = 4;
+  // UTF-8 JSON failure of a failed run.
+  optional bytes failure_json = 5;
 }
