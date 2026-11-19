@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{T, open_node, run_on, start_cmd};
+use common::{OPEN_T, T, open_node, run_on, start_cmd};
 use ostro_log::ReplicatedLog;
 use ostro_partition::{
     ApplyOutcome, LeadershipSource, Node, NodeConfig, PartitionError, RejectReason, StartMode,
@@ -168,7 +168,7 @@ async fn leadership_floor_raises_epoch() {
     }
     let mut cfg = NodeConfig::new(d.path().to_path_buf(), PartitionCount::new(1).unwrap());
     cfg.leadership = Arc::new(Floor(10));
-    let node = timeout(T, Node::open(cfg)).await.unwrap().unwrap();
+    let node = timeout(OPEN_T, Node::open(cfg)).await.unwrap().unwrap();
     assert_eq!(node.handle(P0).unwrap().log().epochs().0.len(), 3);
     assert_eq!(term_of(&node), (10, 2));
     assert_eq!(

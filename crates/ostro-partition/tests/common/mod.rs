@@ -39,11 +39,23 @@ pub struct GenRun {
 /// Generous timeout for anything that should happen "soon".
 pub const T: Duration = Duration::from_secs(10);
 
-/// Timeout for `Node::open` in the harness. An open takes about 1.2 s fresh and about 0.1 s
-/// warm (16 partitions, debug). It is above `T` because parallel test binaries on a loaded box
-/// (load average > 15) pushed opens past 10 s, and plan 05-02 measured no change in open
-/// time from its commits. 30 s still catches a real hang.
-pub const OPEN_T: Duration = Duration::from_secs(30);
+/// Timeout for `Node::open` in the harness.
+///
+/// Nearly all of a fresh open is spent creating the fjall state stores. Creating one issues about
+/// 295 fsyncs, one after another on that partition's open thread, because fjall rewrites its meta
+/// keyspace for every keyspace it creates. Partitions open in parallel, so a fresh open takes about
+/// 295 fsync latencies. Reopening an existing store takes 10-60 ms. Log recovery, catch-up and
+/// `LeaderAnnounced` stay well under a second even under load.
+///
+/// Measured on WSL2 ext4 (debug, 2026-11-19): fresh opens took 1.1-2.6 s at load average 7-13 with
+/// no added I/O. At load average 30-58 (dd writers plus parallel test binaries) they took 6-11 s,
+/// and strace showed 6.7 s of an 8.4 s state stage spent in fsync (about 23 ms each). One open took
+/// 10.3 s during an I/O burst at load 10. ci-local runs alongside other cargo builds pushed opens
+/// past 30 s.
+///
+/// The test runs saw no hang: 678 traced opens under a 300 s limit all finished. So the limit only
+/// has to absorb fsync latency. 120 s allows a 400 ms mean fsync, and a real hang still fails.
+pub const OPEN_T: Duration = Duration::from_secs(120);
 
 /// Partition count used by the single-partition helpers.
 pub fn pc() -> PartitionCount {

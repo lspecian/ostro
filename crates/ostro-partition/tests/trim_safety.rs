@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use common::{T, run_on, start_run};
+use common::{OPEN_T, T, run_on, start_run};
 use ostro_log::recovery::{list_segments, segment_dir};
 use ostro_log::{LogError, ReplicatedLog};
 use ostro_partition::leader::retention::{RetentionConfig, RetentionStats};
@@ -26,7 +26,7 @@ async fn open(dir: &Path, mode: StartMode, retention: RetentionConfig) -> Node {
     let mut cfg = NodeConfig::new(dir.to_path_buf(), PartitionCount::new(1).expect("non-zero"));
     cfg.mode = mode;
     cfg.leader.retention = retention;
-    timeout(T, Node::open(cfg))
+    timeout(OPEN_T, Node::open(cfg))
         .await
         .expect("node open timed out")
         .expect("node open")

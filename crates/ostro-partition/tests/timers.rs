@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
-use common::{T, run_on, start_run};
+use common::{OPEN_T, T, run_on, start_run};
 use ostro_partition::leader::timers::{TimerConfig, TimerStats};
 use ostro_partition::query::journal_rows;
 use ostro_partition::store::keys::{ready_prefix, run_key};
@@ -36,7 +36,7 @@ async fn open(dir: &Path, clock: &ManualClock, timers: TimerConfig) -> Node {
     let mut cfg = NodeConfig::new(dir.to_path_buf(), PartitionCount::new(1).expect("non-zero"));
     cfg.clock = Arc::new(clock.clone());
     cfg.leader.timers = timers;
-    timeout(T, Node::open(cfg))
+    timeout(OPEN_T, Node::open(cfg))
         .await
         .expect("node open timed out")
         .expect("node open")
