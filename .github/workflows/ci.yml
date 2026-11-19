@@ -132,6 +132,11 @@ jobs:
       - if: ${{ !matrix.zig }}
         name: cargo test
         run: cargo test --workspace --locked
+      - if: ${{ !matrix.zig }}
+        name: semantics sleepers (serial)
+        # WF-04 1,000-sleeper test: #[ignore]d in the parallel run, own process, one
+        # thread (process RSS). Keep in sync with check_sleepers in scripts/ci-local.sh.
+        run: cargo test -p ostro-server --test semantics_sleepers --locked -- --ignored --test-threads=1
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Rust SDK workspace test + wasm32-wasip2 build
         # keep in sync with check_sdk_test / check_guests in scripts/ci-local.sh

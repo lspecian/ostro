@@ -683,3 +683,220 @@ impl TestServer {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Semantics e2e helpers (plan 05-15): raw starts with fields the API does not expose
+// (per-run `run_timeout_ms`), WF-04 probes (in-flight jobs, durable running/timer rows)
+// and process RSS.
+// ---------------------------------------------------------------------------------
+
+impl TestServer {
+    /// Submit a `StartRun` straight to the owning partition of a fresh run id (default
+    /// tenant, queue `default`, return-existing), with `tweak` applied last. Used for the
+    /// fields the API derives from workflow metadata only (`run_timeout_ms`): the run is
+    /// then executed, timed out and driven through the API like any other.
+    pub async fn start_raw(
+        &self,
+        workflow: &str,
+        version: u32,
+        input: &[u8],
+        module_sha: &[u8; 32],
+        tweak: impl FnOnce(&mut StartRun),
+    ) -> RunId {
+        let count = PartitionCount::new(self.cfg.node.partitions).expect("non-zero");
+        let uuid = RunId::new_v7(PartitionId(0)).uuid();
+        let run = RunId::new(partition_for_new_run(&uuid, count), uuid);
+        let now = now_ms();
+        let mut start = StartRun {
+            run_id: run.as_bytes().to_vec(),
+            workflow: workflow.into(),
+            workflow_version: version,
+            queue: "default".into(),
+            input: Some(PayloadRef::inline(Bytes::copy_from_slice(input))),
+            conflict_policy: ConflictPolicy::ReturnExisting as i32,
+            ready_at_ms: now,
+            requested_at_ms: now,
+            rng_seed: uuid.as_bytes().repeat(2),
+            module_sha: module_sha.to_vec(),
+            ..Default::default()
+        };
+        tweak(&mut start);
+        let o = timeout(
+            T,
+            self.handle_of(&run).submit_one(Command::start_run(start)),
+        )
+        .await
+        .expect("raw start timed out")
+        .expect("raw start");
+        assert_eq!(o, ApplyOutcome::Accepted);
+        run
+    }
+
+    /// Every partition handle of the running server.
+    pub fn partitions(&self) -> Vec<PartitionHandle<Rf1Log>> {
+        (0..self.cfg.node.partitions)
+            .map(|p| {
+                self.h()
+                    .node()
+                    .handle(PartitionId(p))
+                    .expect("partition ready")
+                    .clone()
+            })
+            .collect()
+    }
+
+    /// Jobs handed to the executor and not finished yet (dispatcher leases in phase
+    /// *Executing*): `dispatched + reactivated - finished job records`. Retries regranted
+    /// after a failure are not counted, so this is exact only for runs without retries.
+    pub fn in_flight_jobs(&self) -> i64 {
+        let st = self.h().dispatcher_stats();
+        let started =
+            st.dispatched.load(Ordering::Relaxed) + st.reactivated.load(Ordering::Relaxed);
+        i64::try_from(started).expect("count")
+            - i64::try_from(self.hooks.jobs().len()).expect("count")
+    }
+
+    /// Rows of the durable `running` keyspace over all partitions (granted attempts).
+    pub fn running_rows(&self) -> usize {
+        self.partitions()
+            .iter()
+            .map(|h| query::running_runs(&h.reader()).expect("running").len())
+            .sum()
+    }
+
+    /// `(total, due at or before due_ms)` durable timer rows over all partitions.
+    pub fn timer_rows(&self, due_ms: u64) -> (usize, usize) {
+        use ostro_partition::store::Table;
+        use ostro_partition::store::keys::decode_timer_key;
+        let mut total = 0;
+        let mut near = 0;
+        for h in self.partitions() {
+            let rows = h
+                .reader()
+                .prefix(Table::Timers, &[], usize::MAX)
+                .expect("timers");
+            for (k, _) in rows {
+                total += 1;
+                if decode_timer_key(&k).is_some_and(|(due, _, _)| due <= due_ms) {
+                    near += 1;
+                }
+            }
+        }
+        (total, near)
+    }
+}
+
+/// Resident set size of this process in bytes (`VmRSS` of `/proc/self/status`); `None`
+/// off Linux.
+pub fn rss_bytes() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = s.lines().find(|l| l.starts_with("VmRSS:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
+impl TestServer {
+    /// `PUT /v1/modules/{sha}` (optionally `?tenant=`); returns the module sha.
+    pub async fn deploy_guest(&self, guest: &str, tenant: Option<&str>) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let wasm = guest_wasm(guest);
+        let sha: [u8; 32] = Sha256::digest(&wasm).into();
+        let hex: String = sha.iter().map(|x| format!("{x:02x}")).collect();
+        let q = tenant.map(|t| format!("?tenant={t}")).unwrap_or_default();
+        let r = self
+            .http
+            .put(self.url(&format!("/v1/modules/{hex}{q}")))
+            .header("content-type", "application/wasm")
+            .body(wasm)
+            .send()
+            .await
+            .expect("PUT module");
+        assert!(r.status().is_success(), "deploy {guest}: {}", r.status());
+        sha
+    }
+
+    /// `POST /v1/workflows/{workflow}/runs`: `(status, body)`.
+    pub async fn post_start(
+        &self,
+        workflow: &str,
+        body: &serde_json::Value,
+    ) -> (reqwest::StatusCode, serde_json::Value) {
+        let r = self
+            .http
+            .post(self.url(&format!("/v1/workflows/{workflow}/runs")))
+            .json(body)
+            .send()
+            .await
+            .expect("POST run");
+        let st = r.status();
+        (st, r.json().await.expect("json"))
+    }
+
+    /// REST start expecting a new run (201); returns its id.
+    pub async fn start_rest(&self, workflow: &str, body: serde_json::Value) -> RunId {
+        let (st, v) = self.post_start(workflow, &body).await;
+        assert_eq!(st, reqwest::StatusCode::CREATED, "start {workflow}: {v}");
+        v["run_id"]
+            .as_str()
+            .expect("run_id")
+            .parse()
+            .expect("run id")
+    }
+
+    /// `GET path`: `(status, body)` (`Null` for an empty body).
+    pub async fn get_json(&self, path: &str) -> (reqwest::StatusCode, serde_json::Value) {
+        let r = self.http.get(self.url(path)).send().await.expect("GET");
+        let st = r.status();
+        let b = r.bytes().await.expect("body");
+        let v = if b.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&b).expect("json")
+        };
+        (st, v)
+    }
+
+    /// `POST path` with a JSON body: `(status, body)`.
+    pub async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> (reqwest::StatusCode, serde_json::Value) {
+        let r = self
+            .http
+            .post(self.url(path))
+            .json(body)
+            .send()
+            .await
+            .expect("POST");
+        let st = r.status();
+        let b = r.bytes().await.expect("body");
+        let v = if b.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&b).expect("json")
+        };
+        (st, v)
+    }
+
+    /// Every run id listed by `GET /v1/runs?{filter}` (all pages, 1000 per page).
+    pub async fn list_all(&self, filter: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut path = format!("/v1/runs?limit=1000&{filter}");
+            if let Some(t) = &token {
+                path.push_str(&format!("&page_token={t}"));
+            }
+            let (st, v) = self.get_json(&path).await;
+            assert_eq!(st, reqwest::StatusCode::OK, "list {path}: {v}");
+            for r in v["runs"].as_array().expect("runs") {
+                out.push(r["run_id"].as_str().expect("id").to_owned());
+            }
+            match v["next_page_token"].as_str() {
+                Some(t) => token = Some(t.to_owned()),
+                None => return out,
+            }
+        }
+    }
+}

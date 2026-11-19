@@ -134,6 +134,12 @@ check_guests() {
 # sync with the "order-saga example" step of .github/workflows/ci.yml.
 ORDER_SAGA_MANIFEST="examples/order-saga/Cargo.toml"
 
+# WF-04 1,000-sleeper suite (plan 05-15): #[ignore]d in the parallel workspace run, own
+# process, one thread (it measures process RSS). Keep in sync with ci.yml.
+check_sleepers() {
+  cargo test -p ostro-server --test semantics_sleepers --locked -- --ignored --test-threads=1 || return 1
+}
+
 check_order_saga() {
   cargo fmt --manifest-path "$ORDER_SAGA_MANIFEST" --check || return 1
   cargo build --release --target wasm32-wasip2 \
@@ -226,6 +232,7 @@ step "sdk workspace test + wasm build" check_sdk_test
 step "guests build (wasm32-wasip2)" check_guests
 step "order-saga example" check_order_saga
 step "cargo test" cargo test --workspace --locked
+step "semantics sleepers (serial)" check_sleepers
 step "failpoint suites" check_failpoints
 step "cargo deny check" cargo deny check
 step "check-vendored.sh" bash scripts/check-vendored.sh
