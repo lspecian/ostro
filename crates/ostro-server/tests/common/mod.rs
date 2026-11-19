@@ -561,3 +561,47 @@ impl TestServer {
         self.handle = Some(handle);
     }
 }
+
+impl TestServer {
+    /// Start on a fresh tmpfs dir with `tweak` applied to the config (plan 04-20:
+    /// engine hot_wait, executor lease/heartbeat/slots/backoff).
+    pub async fn start_with(opts: ServerOpts, tweak: impl FnOnce(&mut ServerConfig)) -> Self {
+        let dir = tmpfs_dir();
+        let mut cfg = server_config(dir.path(), &opts);
+        tweak(&mut cfg);
+        Self::start_cfg(cfg, Some(dir)).await
+    }
+
+    /// The partition handle owning `run`.
+    pub fn handle_of(&self, run: &RunId) -> PartitionHandle<Rf1Log> {
+        self.h()
+            .node()
+            .handle(run.partition())
+            .expect("partition ready")
+            .clone()
+    }
+
+    /// The run's journal, read straight from the partition.
+    pub async fn journal(&self, run: &RunId) -> Vec<Event> {
+        read_journal(&self.handle_of(run), run)
+            .await
+            .expect("read journal")
+    }
+
+    /// The stored result payload bytes of a completed run.
+    pub async fn result_bytes(&self, run: &RunId) -> Option<Vec<u8>> {
+        let h = self.handle_of(run);
+        let p = query::run_payload(&h.reader(), run, query::PAYLOAD_RESULT).expect("payload")?;
+        Some(h.fetch_payload(&p).await.expect("fetch result").to_vec())
+    }
+
+    /// Finished-job records of `run` (executor hooks).
+    pub fn jobs_of(&self, run: &RunId) -> Vec<JobRecord> {
+        self.hooks
+            .jobs()
+            .iter()
+            .filter(|j| j.run == *run)
+            .cloned()
+            .collect()
+    }
+}
