@@ -185,7 +185,7 @@ Plans:
 - [x] 05-07-PLAN.md — Meta pre-freeze encoding: policies, Schedule/Webhook, ext TLV on every record, Tenant quotas, WorkflowVersion.module, P12 replica fields, META_FORMAT bump, golden (wave 2; OPS-06, WF-09)
 - [ ] 05-08-PLAN.md — Apply: waits registry, signals (incl. pending-before-start), wait timeouts, await tokens, graceful cancel, CAN cancel forwarding (wave 3; WF-05, API-05, API-07)
 - [ ] 05-09-PLAN.md — Apply: terminate, retry-resume, timeouts, continue-as-new, retention expiry (wave 3; WF-09, API-05, OPS-06)
-- [ ] 05-10-PLAN.md — Test guests + examples/order-saga (wave 3; WF-03, WF-05, WF-08, WF-09)
+- [x] 05-10-PLAN.md — Test guests + examples/order-saga (wave 3; WF-03, WF-05, WF-08, WF-09)
 - [ ] 05-11-PLAN.md — Server seam: derive mappings, resume re-arm, executor lifecycle, pause hook, module_override, policy resolution + [runs] config (wave 4)
 - [ ] 05-12-PLAN.md — Replay corpus tooling + seed entries + format corpus tooling (wave 4; QA-02)
 - [ ] 05-13-PLAN.md — Server ControlPlane: lifecycle ops, dry_run, token verify, start fields + policies, long-poll (wave 5; API-05..07)
@@ -417,7 +417,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
 | 4. Single-Node Server & Rust MVP | 20/20 | Complete | 2026-11-19 |
-| 5. Workflow Semantics & Core Hardening | 11/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-21 empty-log anchoring, 05-07 meta pre-freeze encoding, 05-05 WIT freeze tooling, 05-04 lifecycle API surface, 05-06 Rust SDK tokens/continue-as-new/D11, 05-02 partition store schema + apply seams, 05-23 D22 retry logical clock, 05-24 D23 tenancy/upload name, 05-22 ready entries + attempt_failures/status_seq + parent_event forwarding done) | - |
+| 5. Workflow Semantics & Core Hardening | 12/24 | In progress (05-01 gate + contract, 05-03 engine semantics, 05-21 empty-log anchoring, 05-07 meta pre-freeze encoding, 05-05 WIT freeze tooling, 05-04 lifecycle API surface, 05-06 Rust SDK tokens/continue-as-new/D11, 05-02 partition store schema + apply seams, 05-23 D22 retry logical clock, 05-24 D23 tenancy/upload name, 05-22 ready entries + attempt_failures/status_seq + parent_event forwarding, 05-10 phase-5 test guests + order-saga example done) | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
