@@ -104,9 +104,14 @@ fn undecodable_command_is_invalid_and_bad_snapshot_is_rejected() {
 
 fn arb_command() -> impl Strategy<Value = MetaCommand> {
     prop_oneof![
-        (0usize..14, 0u8..3, 1u32..5, prop::option::of(0u64..5))
+        (
+            0usize..MetaKind::ALL.len(),
+            0u8..3,
+            1u32..5,
+            prop::option::of(0u64..5)
+        )
             .prop_map(|(k, id, g, e)| put(MetaRecord::sample(MetaKind::ALL[k], id, g), e)),
-        (0usize..14, 0u8..3, 0u64..5).prop_map(|(k, id, e)| MetaCommand::Delete {
+        (0usize..MetaKind::ALL.len(), 0u8..3, 0u64..5).prop_map(|(k, id, e)| MetaCommand::Delete {
             key: MetaRecord::sample(MetaKind::ALL[k], id, 1).key(),
             expected_version: e,
         }),

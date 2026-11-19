@@ -12,6 +12,7 @@ pub mod handle;
 pub mod records;
 pub mod sm;
 pub mod state;
+mod validate;
 
 pub use command::{
     DecodeError, META_FORMAT, MetaCommand, MetaKey, MetaKind, MetaRecord, MetaResult,
@@ -20,8 +21,9 @@ pub use command::{
 pub use handle::{MetaError, MetaHandle};
 pub use records::{
     ActiveVersion, ApiToken, CLUSTER_FORMAT, ClusterInfo, Connection, EgressPolicy, Grant, Member,
-    ModuleRecord, PartitionAssignment, QueueConfig, Schedule, SealedSecret, TOKEN_KEY_PLAINTEXT_ID,
-    TOKEN_KEY_SECRET, Tenant, Versioned, WorkflowVersion,
+    ModuleRecord, PartitionAssignment, QueueConfig, QueuePolicy, RateSpec, Schedule, SealedSecret,
+    SpillPolicy, TOKEN_KEY_PLAINTEXT_ID, TOKEN_KEY_SECRET, Tenant, Versioned, Webhook,
+    WorkflowPolicy, WorkflowVersion,
 };
 pub use sm::{MetaSm, MetaView};
 pub use state::MetaState;

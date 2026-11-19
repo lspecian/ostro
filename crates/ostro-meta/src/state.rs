@@ -10,12 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::command::{MetaCommand, MetaKey, MetaRecord, MetaResult};
 use crate::records::{
     ActiveVersion, ApiToken, CLUSTER_FORMAT, ClusterInfo, Connection, EgressPolicy, Grant, Member,
-    ModuleRecord, PartitionAssignment, QueueConfig, Schedule, SealedSecret, TOKEN_KEY_PLAINTEXT_ID,
-    TOKEN_KEY_SECRET, Tenant, Versioned, WorkflowVersion,
+    ModuleRecord, PartitionAssignment, QueueConfig, QueuePolicy, Schedule, SealedSecret,
+    TOKEN_KEY_PLAINTEXT_ID, TOKEN_KEY_SECRET, Tenant, Versioned, Webhook, WorkflowPolicy,
+    WorkflowVersion,
 };
+use crate::validate::validate_record;
 
 /// All metadata records. One map per kind; `BTreeMap` keeps iteration (and so
 /// snapshots) deterministic.
+///
+/// Field order is the positional snapshot encoding: maps follow
+/// [`crate::MetaKind`] order and new maps are appended last (D20).
 #[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetaState {
     cluster: Option<Versioned<ClusterInfo>>,
@@ -32,6 +37,9 @@ pub struct MetaState {
     grants: BTreeMap<String, Versioned<Grant>>,
     connections: BTreeMap<String, Versioned<Connection>>,
     egress: BTreeMap<String, Versioned<EgressPolicy>>,
+    workflow_policies: BTreeMap<String, Versioned<WorkflowPolicy>>,
+    queue_policies: BTreeMap<String, Versioned<QueuePolicy>>,
+    webhooks: BTreeMap<String, Versioned<Webhook>>,
 }
 
 fn wrap<T: Clone>(v: &Versioned<T>, f: impl FnOnce(T) -> MetaRecord) -> Versioned<MetaRecord> {
@@ -170,6 +178,9 @@ impl MetaState {
                 "key {key:?} does not match record key {natural:?}"
             ));
         }
+        if let Err(msg) = validate_record(&record) {
+            return MetaResult::Invalid(format!("{:?}: {msg}", key.kind()));
+        }
         let current = self.get(&key);
         let version = match (expected, &current) {
             (None, Some(cur)) => {
@@ -290,6 +301,15 @@ impl MetaState {
                 .get(k)
                 .map(|v| wrap(v, MetaRecord::Connection)),
             MetaKey::Egress(k) => self.egress.get(k).map(|v| wrap(v, MetaRecord::Egress)),
+            MetaKey::WorkflowPolicy(k) => self
+                .workflow_policies
+                .get(k)
+                .map(|v| wrap(v, MetaRecord::WorkflowPolicy)),
+            MetaKey::QueuePolicy(k) => self
+                .queue_policies
+                .get(k)
+                .map(|v| wrap(v, MetaRecord::QueuePolicy)),
+            MetaKey::Webhook(k) => self.webhooks.get(k).map(|v| wrap(v, MetaRecord::Webhook)),
         }
     }
 
@@ -350,6 +370,15 @@ impl MetaState {
             MetaRecord::Egress(r) => {
                 self.egress.insert(r.name.clone(), v!(r));
             }
+            MetaRecord::WorkflowPolicy(r) => {
+                self.workflow_policies.insert(r.workflow.clone(), v!(r));
+            }
+            MetaRecord::QueuePolicy(r) => {
+                self.queue_policies.insert(r.queue.clone(), v!(r));
+            }
+            MetaRecord::Webhook(r) => {
+                self.webhooks.insert(r.name.clone(), v!(r));
+            }
         }
     }
 
@@ -394,6 +423,15 @@ impl MetaState {
             }
             MetaKey::Egress(k) => {
                 self.egress.remove(k);
+            }
+            MetaKey::WorkflowPolicy(k) => {
+                self.workflow_policies.remove(k);
+            }
+            MetaKey::QueuePolicy(k) => {
+                self.queue_policies.remove(k);
+            }
+            MetaKey::Webhook(k) => {
+                self.webhooks.remove(k);
             }
         }
     }
@@ -451,6 +489,40 @@ impl MetaState {
 
     pub fn token(&self, id: &str) -> Option<&Versioned<ApiToken>> {
         self.tokens.get(id)
+    }
+
+    pub fn schedule(&self, name: &str) -> Option<&Versioned<Schedule>> {
+        self.schedules.get(name)
+    }
+
+    /// Every schedule, ordered by name.
+    pub fn schedules(&self) -> impl Iterator<Item = &Versioned<Schedule>> {
+        self.schedules.values()
+    }
+
+    pub fn tenant(&self, id: &str) -> Option<&Versioned<Tenant>> {
+        self.tenants.get(id)
+    }
+
+    pub fn tenants(&self) -> impl Iterator<Item = &Versioned<Tenant>> {
+        self.tenants.values()
+    }
+
+    pub fn workflow_policy(&self, workflow: &str) -> Option<&Versioned<WorkflowPolicy>> {
+        self.workflow_policies.get(workflow)
+    }
+
+    pub fn queue_policy(&self, queue: &str) -> Option<&Versioned<QueuePolicy>> {
+        self.queue_policies.get(queue)
+    }
+
+    pub fn webhook(&self, name: &str) -> Option<&Versioned<Webhook>> {
+        self.webhooks.get(name)
+    }
+
+    /// Every webhook, ordered by name.
+    pub fn webhooks(&self) -> impl Iterator<Item = &Versioned<Webhook>> {
+        self.webhooks.values()
     }
 
     /// The await-token HMAC key written by `InitCluster` (Phase 4: stored as

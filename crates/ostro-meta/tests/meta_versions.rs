@@ -314,7 +314,7 @@ proptest! {
     /// kinds: final version == number of successful puts, and each key's
     /// successful versions form the chain 1, 2, 3, ...
     #[test]
-    fn random_cas_interleavings(ops in prop::collection::vec((0usize..14, 0u8..3, prop::option::of(0u64..6)), 1..120)) {
+    fn random_cas_interleavings(ops in prop::collection::vec((0usize..MetaKind::ALL.len(), 0u8..3, prop::option::of(0u64..6)), 1..120)) {
         let mut s = MetaState::default();
         let mut successes: BTreeMap<MetaKey, Vec<u64>> = BTreeMap::new();
         for (i, (k, id, expected)) in ops.into_iter().enumerate() {

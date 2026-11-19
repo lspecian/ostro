@@ -7,13 +7,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::{
     ActiveVersion, ApiToken, ClusterInfo, Connection, EgressPolicy, Grant, Member, ModuleRecord,
-    PartitionAssignment, QueueConfig, Schedule, SealedSecret, Tenant, WorkflowVersion,
+    PartitionAssignment, QueueConfig, QueuePolicy, RateSpec, Schedule, SealedSecret, SpillPolicy,
+    Tenant, Webhook, WorkflowPolicy, WorkflowVersion,
 };
 
 /// Format byte prefixed to every encoded command, result and snapshot.
 pub const META_FORMAT: u8 = 1;
 
 /// Every record kind. `MetaKind::ALL` lists them in a fixed order.
+///
+/// Variant order is positional postcard and fixed by `.planning/RESERVATIONS.md`
+/// §10: new kinds are appended last, never inserted (D20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum MetaKind {
     Cluster,
@@ -30,10 +34,13 @@ pub enum MetaKind {
     Grant,
     Connection,
     Egress,
+    WorkflowPolicy,
+    QueuePolicy,
+    Webhook,
 }
 
 impl MetaKind {
-    pub const ALL: [MetaKind; 14] = [
+    pub const ALL: [MetaKind; 17] = [
         MetaKind::Cluster,
         MetaKind::Member,
         MetaKind::Partition,
@@ -48,6 +55,9 @@ impl MetaKind {
         MetaKind::Grant,
         MetaKind::Connection,
         MetaKind::Egress,
+        MetaKind::WorkflowPolicy,
+        MetaKind::QueuePolicy,
+        MetaKind::Webhook,
     ];
 }
 
@@ -68,12 +78,15 @@ pub enum MetaKey {
     Grant(String),
     Connection(String),
     Egress(String),
+    WorkflowPolicy(String),
+    QueuePolicy(String),
+    Webhook(String),
 }
 
 impl MetaKey {
     /// One key constructor per kind (`MetaKind::ALL` order). Handy for
     /// table-driven tests that must cover every kind.
-    pub const ALL_KINDS: [MetaKind; 14] = MetaKind::ALL;
+    pub const ALL_KINDS: [MetaKind; 17] = MetaKind::ALL;
 
     pub fn kind(&self) -> MetaKind {
         match self {
@@ -91,11 +104,14 @@ impl MetaKey {
             MetaKey::Grant(_) => MetaKind::Grant,
             MetaKey::Connection(_) => MetaKind::Connection,
             MetaKey::Egress(_) => MetaKind::Egress,
+            MetaKey::WorkflowPolicy(_) => MetaKind::WorkflowPolicy,
+            MetaKey::QueuePolicy(_) => MetaKind::QueuePolicy,
+            MetaKey::Webhook(_) => MetaKind::Webhook,
         }
     }
 }
 
-/// One record of any kind.
+/// One record of any kind. Variant order = [`MetaKind`] order (positional).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetaRecord {
     Cluster(ClusterInfo),
@@ -112,6 +128,9 @@ pub enum MetaRecord {
     Grant(Grant),
     Connection(Connection),
     Egress(EgressPolicy),
+    WorkflowPolicy(WorkflowPolicy),
+    QueuePolicy(QueuePolicy),
+    Webhook(Webhook),
 }
 
 impl MetaRecord {
@@ -137,6 +156,9 @@ impl MetaRecord {
             MetaRecord::Grant(g) => MetaKey::Grant(g.id.clone()),
             MetaRecord::Connection(c) => MetaKey::Connection(c.name.clone()),
             MetaRecord::Egress(e) => MetaKey::Egress(e.name.clone()),
+            MetaRecord::WorkflowPolicy(p) => MetaKey::WorkflowPolicy(p.workflow.clone()),
+            MetaRecord::QueuePolicy(p) => MetaKey::QueuePolicy(p.queue.clone()),
+            MetaRecord::Webhook(w) => MetaKey::Webhook(w.name.clone()),
         }
     }
 
@@ -195,6 +217,14 @@ impl MetaRecord {
                 cron: "*/5 * * * *".into(),
                 input: vec![id, g as u8],
                 paused: g.is_multiple_of(2),
+                timezone: "Europe/Lisbon".into(),
+                overlap: (g % 5) as u8,
+                catchup: (g % 3) as u8,
+                catchup_window_ms: ms,
+                start_at_ms: Some(ms),
+                end_at_ms: None,
+                created_at_ms: ms,
+                ext: Vec::new(),
             }),
             MetaKind::Token => MetaRecord::Token(ApiToken {
                 id: name,
@@ -226,12 +256,72 @@ impl MetaRecord {
                 name,
                 allow: vec![format!("example{g}.com")],
             }),
+            MetaKind::WorkflowPolicy => MetaRecord::WorkflowPolicy(WorkflowPolicy {
+                workflow: name,
+                retention_ms: Some(ms),
+                schedule_to_start_ms: Some(u64::from(g)),
+                paused: g.is_multiple_of(2),
+                on_retries_exhausted: Some((g % 2) as u8),
+                ext: Vec::new(),
+            }),
+            MetaKind::QueuePolicy => {
+                let rate = RateSpec {
+                    limit: g,
+                    period_ms: 1000,
+                    burst: 1,
+                };
+                MetaRecord::QueuePolicy(QueuePolicy {
+                    queue: name,
+                    retention_ms: Some(ms),
+                    schedule_to_start_ms: None,
+                    placement: Some((g % 3) as u8),
+                    selector: vec![format!("zone=z{g}")],
+                    spill: Some(SpillPolicy {
+                        cpu_pct: 80,
+                        slots_pct: 90,
+                        mem_pct: 70,
+                        lag_ms: ms,
+                        sustain_ms: 5000,
+                        cooldown_ms: 30_000,
+                        hysteresis_pct: 10,
+                    }),
+                    concurrency: Some(g),
+                    weight: Some(1),
+                    key_concurrency: None,
+                    throttle: Some(rate.clone()),
+                    key_throttle: None,
+                    rate_limit: Some(rate),
+                    key_rate_limit: None,
+                    on_retries_exhausted: Some(0),
+                    paused: false,
+                    ext: Vec::new(),
+                })
+            }
+            MetaKind::Webhook => MetaRecord::Webhook(Webhook {
+                name,
+                action: (g % 3) as u8,
+                workflow: "wf".into(),
+                version: Some(g),
+                signal_name: "paid".into(),
+                run_ref: "/data/run".into(),
+                input_ref: String::new(),
+                verifier: (g % 6) as u8,
+                verifier_config: vec![g as u8],
+                secret_ref: "stripe".into(),
+                idempotency: "header:Idempotency-Key".into(),
+                tolerance_s: 300,
+                ext: Vec::new(),
+            }),
         }
     }
 }
 
 /// A metadata state-machine command. Validation happens at apply, so every
 /// node reaches the same verdict.
+// `Put` carries a whole MetaRecord (QueuePolicy is the largest). Commands are
+// short-lived values proposed one at a time, so boxing buys nothing and would
+// change the public construction syntax.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetaCommand {
     /// Create the cluster record, the founding member, one partition
