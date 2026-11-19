@@ -154,13 +154,17 @@ jobs:
           cargo clippy --target wasm32-wasip2 --manifest-path examples/order-saga/Cargo.toml --target-dir target/order-saga -- -D warnings
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Failpoint suites
-        # keep in sync with FAILPOINT_CRATES in scripts/ci-local.sh
+        # keep in sync with FAILPOINT_CRATES in scripts/ci-local.sh (same commands, same
+        # order; ci-local's "failpoint list sync" step checks it)
         run: |
           cargo test -p ostro-wal --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-blob --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-log --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-partition --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-crashtest --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro-meta --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro-engine --features failpoints --test aot_failpoints --locked -- --test-threads=1
+          cargo test -p ostro-server --features failpoints --test failpoints_phase5 --locked -- --test-threads=1
       - if: matrix.os == 'macos-15'
         name: cargo build --release (ostro) + build-info
         run: |

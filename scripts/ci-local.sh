@@ -26,8 +26,15 @@ done
 MUSL_TARGET="x86_64-unknown-linux-musl"
 # Crates with a `failpoints` feature whose fault-injection suites run in the
 # "failpoint suites" step (single-threaded: the fail registry is global).
-# Keep in sync with the "Failpoint suites" step of .github/workflows/ci.yml.
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest)
+# Keep in sync with the "Failpoint suites" step of .github/workflows/ci.yml (the
+# "failpoint list sync" step checks it): each entry runs
+#   cargo test -p <crate> --features failpoints [--test <target>] --locked -- --test-threads=1
+# `<crate>:<target>` restricts a crate whose full suite would take over 5 min single-threaded
+# to its failpoint test target (plan 05-18); the whole crate is still linted with the feature.
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5)
+# Crates linted with `--features failpoints` that have no failpoint suite of their own
+# (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
+FAILPOINT_LINT_ONLY=(ostro)
 # ostro-crashtest's crash loops are #[ignore] (slow, spawn processes), so this gate only
 # lints them and runs the crate's unit tests. Run them explicitly (02-VALIDATION.md):
 #   OSTRO_CRASH_ITERS=50 cargo test --release -p ostro-crashtest --test crash_loop \
@@ -41,6 +48,13 @@ FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest
 #     --test-threads=1
 #   cargo test --release -p ostro-crashtest --test apply_throughput -- --ignored --nocapture \
 #     --test-threads=1
+# Whole-server crash campaign (plan 05-19, QA-01): it drives the real binary built with
+# every failpoint compiled in (meta::, aot::, executor::, dispatcher:: from plan 05-18, plus
+# wal::, state::, blob::), configured through the FAILPOINTS env var. Build it out of the
+# way of target/release:
+#   cargo build --release -p ostro --features failpoints --target-dir target/failpoints
+# (`target/failpoints/release/ostro build-info` then ends in `failpoints=on`). The campaign's
+# own run command lives with its test (05-19).
 WORKFLOW=".github/workflows/ci.yml"
 
 declare -a NAMES=() RESULTS=() TIMES=()
@@ -92,14 +106,45 @@ check_build() {
   fi
 }
 
+# The failpoint test command of one FAILPOINT_CRATES entry (`crate` or `crate:target`),
+# word per line; the "Failpoint suites" step of ci.yml must run exactly these.
+failpoint_test_cmd() {
+  local crate="${1%%:*}" target=""
+  [[ "$1" == *:* ]] && target="${1#*:}"
+  printf '%s\n' cargo test -p "$crate" --features failpoints
+  [[ -n "$target" ]] && printf '%s\n' --test "$target"
+  printf '%s\n' --locked -- --test-threads=1
+}
+
+# FAILPOINT_CRATES and the ci.yml "Failpoint suites" step list the same commands, in order.
+check_failpoint_sync() {
+  local want got c
+  want="$(for c in "${FAILPOINT_CRATES[@]}"; do failpoint_test_cmd "$c" | paste -sd' '; done)"
+  got="$(awk '
+    /name: Failpoint suites/ { in_step = 1; next }
+    in_step && /^ *- / { exit }
+    in_step && /^ *cargo test / { sub(/^ +/, ""); print }
+  ' "$WORKFLOW")"
+  if [[ "$want" != "$got" ]]; then
+    echo "FAILPOINT_CRATES and the ci.yml Failpoint suites step differ:"
+    diff <(echo "$want") <(echo "$got") || true
+    return 1
+  fi
+  echo "$want"
+}
+
 check_failpoints() {
-  local c
-  for c in "${FAILPOINT_CRATES[@]}"; do
+  local c crate cmd
+  for c in "${FAILPOINT_CRATES[@]}" "${FAILPOINT_LINT_ONLY[@]}"; do
+    crate="${c%%:*}"
     # ostro-wal is vendored and excluded from workspace clippy; lint the rest.
-    if [[ "$c" != "ostro-wal" ]]; then
-      cargo clippy -p "$c" --features failpoints --all-targets --locked -- -D warnings || return 1
+    if [[ "$crate" != "ostro-wal" ]]; then
+      cargo clippy -p "$crate" --features failpoints --all-targets --locked -- -D warnings || return 1
     fi
-    cargo test -p "$c" --features failpoints --locked -- --test-threads=1 || return 1
+  done
+  for c in "${FAILPOINT_CRATES[@]}"; do
+    mapfile -t cmd < <(failpoint_test_cmd "$c")
+    "${cmd[@]}" || return 1
   done
 }
 
@@ -233,6 +278,7 @@ step "guests build (wasm32-wasip2)" check_guests
 step "order-saga example" check_order_saga
 step "cargo test" cargo test --workspace --locked
 step "semantics sleepers (serial)" check_sleepers
+step "failpoint list sync (ci.yml)" check_failpoint_sync
 step "failpoint suites" check_failpoints
 step "cargo deny check" cargo deny check
 step "check-vendored.sh" bash scripts/check-vendored.sh
