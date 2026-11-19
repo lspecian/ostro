@@ -66,13 +66,13 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 - [x] **WF-01**: Developer can define a workflow with stable name + version and typed JSON input/output [FR-1.1]
 - [x] **WF-02**: Developer can define steps with retry policy (max attempts, initial/max interval, backoff coefficient, non-retryable kinds), timeout and fuel budget; replay returns recorded results without re-executing [FR-1.2]
-- [ ] **WF-03**: Developer can await effects concurrently (gather/all/join) and race them, with completion order journaled and replayed identically [FR-1.3]
-- [ ] **WF-04**: Developer can sleep for a duration or until a time; a sleeping run holds no memory [FR-1.4]
+- [x] **WF-03**: Developer can await effects concurrently (gather/all/join) and race them, with completion order journaled and replayed identically [FR-1.3]
+- [x] **WF-04**: Developer can sleep for a duration or until a time; a sleeping run holds no memory [FR-1.4]
 - [x] **WF-05**: Developer can wait for a named signal with timeout; callers can send signals via API [FR-1.5]
 - [ ] **WF-06**: Developer can start, await or detach child workflows in any language; cancellation propagates [FR-1.6]
 - [ ] **WF-07**: Native time/random APIs (`time.time()`, `Date.now()`, `Math.random()`, `HashMap`) behave deterministically under replay [FR-1.7]
-- [ ] **WF-08**: Developer can evolve in-flight code with `patched(id)` markers; runs stay pinned to their module sha [FR-1.8]
-- [ ] **WF-09**: Run timeout and schedule-to-start (max queue wait) timeout are enforced
+- [x] **WF-08**: Developer can evolve in-flight code with `patched(id)` markers; runs stay pinned to their module sha [FR-1.8]
+- [x] **WF-09**: Run timeout and schedule-to-start (max queue wait) timeout are enforced
 - [ ] **WF-10**: Saga/compensation helper runs registered compensations in reverse on failure [FR-1.11]
 
 ### Dispatch & Flow Control
@@ -138,7 +138,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **OPS-03**: Operator can bulk cancel/retry/rerun runs matching a filter, rate-spread
 - [ ] **OPS-04**: Failed runs land in a DLQ with reason; an optional `on_failure` workflow hook runs; DLQ entries can be requeued
 - [ ] **OPS-05**: Runs carry tags with bounded indexed search
-- [ ] **OPS-06**: Terminal runs and journals are deleted after a per-workflow/queue TTL; dedupe entries have retention [FR-6.3]
+- [x] **OPS-06**: Terminal runs and journals are deleted after a per-workflow/queue TTL; dedupe entries have retention [FR-6.3]
 - [ ] **OPS-07**: Published limits (payload sizes, history length, children per run) are documented and enforced with clear errors
 
 ### SDKs & Conformance
@@ -285,13 +285,13 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WIT-07 | Phase 5 | Pending (05-05 tooling + pins done; 05-20 freeze flip) |
 | WF-01 | Phase 4 | Complete |
 | WF-02 | Phase 4 | Complete |
-| WF-03 | Phase 5 | Pending |
-| WF-04 | Phase 5 | Pending (derive CancelWait for cancel-op on waits: 05-11) |
+| WF-03 | Phase 5 | Complete (server e2e: race-fuzz x 5 seeds, concurrent signals + restart, fresh-Runtime replay identical: 05-15 semantics_e2e gather_race) |
+| WF-04 | Phase 5 | Complete (1,000 sleepers hold no activation/parked/budget/lease, 11.4 KiB RSS each: 05-15 semantics_sleepers, serial CI step) |
 | WF-05 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
 | WF-06 | Phase 9 | Pending |
 | WF-07 | Phase 4 (Rust) / Phase 9 (Py, TS) | Pending |
-| WF-08 | Phase 5 | Pending (server module_override hook + nondeterminism/patch tests: 05-11) |
-| WF-09 | Phase 5 | Pending (apply timeouts: 05-09; derive/executor: 05-11; API start schedule_to_start + policies: 05-13 done; e2e: 05-15) |
+| WF-08 | Phase 5 | Complete (in-flight v1 run re-pinned to v2 keeps the old path, fresh v2 run one PatchMarker, v3 control diverges: 05-15 patched_in_flight) |
+| WF-09 | Phase 5 | Complete (run timeout sleeping + running, schedule-to-start via the API with no capacity, never with capacity/delayed start: 05-15 semantics_e2e) |
 | WF-10 | Phase 9 | Pending |
 | DISP-01 | Phase 4 | Complete |
 | DISP-02 | Phase 4 | Complete |
@@ -336,7 +336,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | OPS-03 | Phase 11 | Pending |
 | OPS-04 | Phase 11 | Pending |
 | OPS-05 | Phase 11 | Pending |
-| OPS-06 | Phase 5 | Pending (apply expiry incl. dedupe: 05-09; policy resolution + [runs] config: 05-11; API policies + start resolution: 05-13 done; e2e expiry through the server: 05-15) |
+| OPS-06 | Phase 5 | Complete (1 s policy retention: GET/history/list gone, idempotency key reused, resumed run survives the old timer, expiry after restart: 05-15 retention) |
 | OPS-07 | Phase 11 | Pending |
 | SDK-01 | Phase 4 | Complete |
 | SDK-02 | Phase 9 | Pending |
