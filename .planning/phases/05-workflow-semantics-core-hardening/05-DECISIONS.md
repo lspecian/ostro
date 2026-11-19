@@ -54,6 +54,11 @@ An override that lands before 05-20 can be folded in. An override after 05-20 is
   - `apply/lifecycle.rs` and `apply/retention.rs` belong to 05-09.
   - `apply/inputs.rs`, `apply/terminal.rs` and `apply/outcome.rs` belong to 05-02. 05-02 also appends `RejectReason::RunCompleted` and `InvalidCode::NotImplemented`.
 - **rebuild_digest generators.** `tests/common/gen_waits.rs` (05-08) and `tests/common/gen_lifecycle.rs` (05-09). Both are stubbed by 05-02.
+- **Phase 7 pre-freeze findings (07-RESEARCH F1–F4, adopted 2026-11-19).** These land before the freeze so that Phase 7 needs **0 keyspaces and 0 meta variants**:
+  - F1: `RunRecord.pause: Option<PauseMark{reason, at_ms, detail}>` (05-02; stored, never set in Phase 5).
+  - F3: `ReadyValue{concurrency_key, workflow, tenant}`, carried on `ReadyEntryRow` and `Action::EnqueueReady` (05-02).
+  - F2: Phase 7 flow/placement/pause/auto-pause fields in `QueuePolicy` and `WorkflowPolicy`, placed before the trailing `ext` (05-07). No D20 bump is needed for Phase 7.
+  - F4: the `run-info.attempt` doc comment corrected to say it is not replay-stable and is for logging only (05-05, mirrored in the SDK README in 05-06). D14 holds.
 - **Bench harness.** `crates/ostro-server/tests/perf.rs` (`#[ignore]`), with no new crate.
 - **WIT tooling.** A new dev-tool crate, `crates/ostro-witcheck`, using `wit-component =0.261.0` (feature `semver-check`) and `wit-parser =0.261.0`.
 - **CLI transport.** REST via `reqwest =0.13.5`, promoted to a normal dependency of `ostro-cli`.

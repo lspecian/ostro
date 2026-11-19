@@ -142,8 +142,8 @@ Rules:
 | 14 | waits | planned P5 (05-02) |
 | 15 | signal_seen | planned P5 (05-02) |
 | 16 | schedule_state | reserved P8 (ScheduleState) |
-| 17 | p7_a | reserved P7 |
-| 18 | p7_b | reserved P7 |
+| 17 | p7_a | reserved P7. **Not needed if 07-RESEARCH F1 lands** (05-02 adds `RunRecord.pause`). If F1 is rejected, rename to `run_pauses` in a docs-only commit before any placeholder is declared. |
+| 18 | p7_b | reserved P7. Not needed if F1 lands. |
 | 19+ | — | unallocated |
 
 ## 7. Apply outcome `RejectReason` (outcome code = 16 + index; folded into the state hash)
@@ -197,7 +197,7 @@ Rules (D20):
 | 15 | QueuePolicy (`queue_policies`) | planned P5 (05-07) |
 | 16 | Webhook (`webhooks`) | planned P5 (05-07), pre-freeze, for P8 F3 |
 | 17–18 | — (P6 uses existing Secret/Grant/Connection/Egress by convention: 0 needed) | reserved P6 |
-| 19–20 | — | reserved P7 |
+| 19–20 | — (QueueFlow / WorkflowFlow only if F2 is rejected) | reserved P7. **Not needed if 07-RESEARCH F2 lands** (05-07 puts the Phase 7 fields in QueuePolicy/WorkflowPolicy pre-freeze) |
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
 | 22+ | — | unallocated |
 
