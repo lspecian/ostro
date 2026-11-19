@@ -15,7 +15,8 @@
 //!   while the run sleeps, restart on the same data dir, approve: completes with exactly
 //!   one `step_completed` per step (no step re-executed).
 //!
-//! Exit codes are the 05-14 ones: 0 ok, 1 API error, 2 usage, 3 wait ended not completed.
+//! Every call goes through the 05-14 `run_cli` helper (`cli_json` wraps it). Exit codes are
+//! the 05-14 ones: 0 ok, 1 API error, 2 usage, 3 wait ended not completed.
 
 mod common;
 
@@ -210,6 +211,14 @@ async fn happy_path() {
             .iter()
             .any(|x| x["run_id"] == run.as_str()),
         "{ls}"
+    );
+    // Human output (what the README quickstart shows): `run <id> completed: {...}`.
+    let (code, out, err) = run_cli(d.addr, &["result", &run, "--wait"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(
+        out.starts_with(&format!("run {run} completed: "))
+            && out.contains("\"shipment_id\":\"ship-o1\""),
+        "{out}"
     );
 }
 
