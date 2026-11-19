@@ -240,6 +240,7 @@ Recent decisions affecting current work:
   - P12 F8: MetaCommand ordinals registered in RESERVATIONS §10a (0–3 exist, 4–7 P12); appending a command variant needs no META_FORMAT bump.
   - P12 F9: Phase 12 RESERVATIONS block: no keyspaces, no journal kinds, Cmd 41–42 contingency, meta fallback variant 26, name reservations.
   - P12 F11: the BlobRef invariant covers log commands (doc rule, 05-20).
+- [Phase 05 / 05-07]: Meta pre-freeze encoding landed (75ff202, a82df07, 6e59a2e). META_FORMAT = 2; format 1 -> DecodeError::PreFreezeFormat ("pre-Phase-5 dev meta format; delete the dev data dir"), fatal at snapshot restore and, via MetaView::pre_freeze_format, at MetaHandle::start for replayed log entries. MetaRecord 14 WorkflowPolicy / 15 QueuePolicy (Phase 7 F2 fields) / 16 Webhook; Schedule P8 F2(a) fields; every record ends with ext (crates/ostro-meta/src/ext.rs: varint(tag) ‖ varint(len) ‖ value, canonical LEB128, tags strictly increasing, 0 invalid, unknown preserved; ext_put/ext_remove return Result); apply rejects a malformed ext, out-of-range enums, Tenant quota Some(0) and a non-D23 WorkflowVersion.module. SetPartitionLeader carries replicas/isr_version/min_insync over unchanged. All meta records derive Default (external literals: ..Default::default()). Golden crates/ostro-meta/tests/golden/meta_v2.txt is append-only (05-20 pins it).
 
 ### Pending Todos
 
