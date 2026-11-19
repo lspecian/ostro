@@ -173,7 +173,28 @@ Plans:
   3. The crash-injection harness runs ≥ 10,000 faults (`kill -9`, failpoints, EIO/ENOSPC) under load. Result: 0 lost accepted runs, 0 duplicate journal entries, and every run is terminal or correctly resumed.
   4. The replay corpus is green in CI on x86_64 and aarch64. Terminal runs and journals are deleted after their TTL. A single node sustains ≥ 5,000 trivial Rust steps/s with fsync on, and start → first step is < 5 ms p50.
   5. WIT `ostro:runtime@0.1.0` is tagged frozen. A CI check fails any non-additive change to it.
-**Plans**: TBD
+**Plans**: 19 plans (10 waves; 05-01 is the PHASE-5 GATE requiring Phase 4 complete (all 04-*-SUMMARY + 04-VERIFICATION passed, or human_needed with by-design items only); decisions D1–D18 adopted as research defaults in 05-DECISIONS.md, user may override; 05-19 runs the sharded >= 10,000-kill campaign and flips the WIT/command/on-disk freeze)
+
+Plans:
+- [ ] 05-01-PLAN.md — PHASE-5 GATE (Phase 4 complete) + adopted decisions to STATE + ostro-types contract (Cmd 8..12, StartRun 19..23, intents, statuses, kinds 70/71) + status parity (WIT-07 prep, all contracts)
+- [ ] 05-02-PLAN.md — Partition store schema (Waits, SignalSeen, inbox re-key, RunRecord fields incl. resumed_count/open_waits/s2s_due_ms) + apply seams/stubs + outcome codes + storage-format D18 policy (WF-05, WF-09, OPS-06)
+- [ ] 05-03-PLAN.md — Engine semantics: cancel-op completion, WaitTimedOut, patched memo/skip, op index, live_activations, gather/race proptest, patch-v1/v2/v3 (WF-03, WF-04, WF-08)
+- [ ] 05-04-PLAN.md — API surface: signal/cancel/terminate/retry/result/tokens/policies over REST + gRPC against FakeControlPlane (API-05, API-06, API-07)
+- [ ] 05-05-PLAN.md — WIT freeze tooling (ostro-witcheck semver_check + fixtures), byte-identity + golden prefix pins, pre-freeze WIT review (WIT-07)
+- [ ] 05-06-PLAN.md — Rust SDK: await tokens, continue-as-new, D11 cancellation surfacing + shielded, deliberate journal-shape updates (WF-03, WF-05, API-07)
+- [ ] 05-07-PLAN.md — Apply: waits registry (idempotent RegisterWait), signals FIFO, wait timeouts, await tokens, graceful cancel (WF-05, API-05, API-07)
+- [ ] 05-08-PLAN.md — Apply: terminate, retry-resume, run/schedule-to-start timeouts, continue-as-new, retention expiry (WF-09, API-05, OPS-06)
+- [ ] 05-09-PLAN.md — Test guests (race-fuzz, signals, timeouts, tokens, can-chain, crash-saga, trivial-steps) + examples/order-saga (WF-03, WF-05, WF-08, WF-09)
+- [ ] 05-10-PLAN.md — Server seam: derive mappings, resume re-arm, executor/dispatcher revoke + resumable, pause hook, module_override, meta run policies (WF-04/05/08/09, OPS-06, API-07)
+- [ ] 05-11-PLAN.md — Replay corpus tooling + seed entries + on-disk format corpus tooling (QA-02)
+- [ ] 05-12-PLAN.md — Server ControlPlane: lifecycle ops, dry_run, token verify, start fields (s2s/retention/dry_run) + policies, long-poll RunWatchers (API-05, API-06, API-07)
+- [ ] 05-13-PLAN.md — CLI verbs run/ls/inspect/history/signal/cancel/terminate/retry/result/token/deploy with --json/--dry-run (CLI-06)
+- [ ] 05-14-PLAN.md — Workflow semantics e2e: gather/race + restart replay identity, 1,000 sleepers (serial CI step), timeouts, resume after timeout, patched in-flight, tokens, CAN, TTL (WF-03/04/05/08/09, API-05/06/07, OPS-06)
+- [ ] 05-15-PLAN.md — Perf harness (acknowledged-on-disk, profiles A/B, expiry cost) + start-path optimisations after e2e; WSL2 advisory, native NVMe human_needed (SC-4, OPS-06)
+- [ ] 05-16-PLAN.md — order-saga via CLI (happy/compensated/cancelled) on the final start path (after 05-15), clean-machine quickstart timing, workflow-semantics docs (SC-1, CLI-06)
+- [ ] 05-17-PLAN.md — Failpoint feature chain on `ostro` + new sites (meta/aot/executor/dispatcher) + FAILPOINT_CRATES/ci.yml sync (QA-01)
+- [ ] 05-18-PLAN.md — Whole-server kill campaign: workload, checker + negative controls, sharded resumable runner (every fault ends in kill -9; separate smoke/timing/gate state dirs), CI smoke (QA-01)
+- [ ] 05-19-PLAN.md — PHASE GATE + FREEZE FLIP: >= 10,000-kill sharded campaign, final corpus + format corpus, FROZEN.toml + golden re-pin + local tag, full ci-local, VALIDATION (QA-01, QA-02, WIT-07, all)
 
 ### Phase 6: Effects Bridge, Connectors & Secrets
 **Goal**: Workflows safely call the outside world. HTTP effects are idempotent and never blindly resent. SQL effects are exactly-once. Secrets never enter guests, and egress cannot reach internal networks.
