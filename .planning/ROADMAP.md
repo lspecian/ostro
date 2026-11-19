@@ -353,7 +353,26 @@ Plans:
   2. `ostro deploy` builds when needed, validates imports, and uploads idempotently. `ostro dev --watch` rebuilds and redeploys on save.
   3. `ostro replay <run|--sample N> --module new.wasm` catches a deliberate non-deterministic change in each language and exits non-zero for use as a CI gate.
   4. Each language's test harness runs a workflow with a multi-day sleep against `ostro dev --ephemeral` in seconds using time skipping. TS, Python, Go and Rust client libraries can start, query and signal runs.
-**Plans**: TBD
+**Plans**: 17 plans (8 waves; 10-01 is the PHASE-10 GATE requiring Phase 9 complete (all 09-*-SUMMARY + 09-VERIFICATION passed, or human_needed with by-design items only) and the Phase 8 injected clock seam (F5); Phase 10 claims no ordinal (F7), only RESERVATIONS §11 name rows (F1); decisions D-P10-1..D-P10-21 adopted in 10-DECISIONS.md (pinned sha256 toolchain downloads into a cache + --docker fallback; uv 0.7.15 + uv-managed CPython + the released componentize-py 0.25.1 wheel; Node 24 + embedded lockfile; rustup-init + zig cc fallback; server-side DevClock time skipping (--ephemeral --time-skipping, auto-skip + manual endpoint); server-side replay + offline --corpus, exit 4; hand-written zero-dependency Python/TS/Go clients + extracted ostro-client crate; clap_complete; build output in target/ostro/); notify CC0-1.0 deny exception and the auto-skip trigger flagged USER REVIEW; runs alongside Phase 11 under the 10-DECISIONS shared-file rules: Cargo/deny only 10-02, ostro-api + OpenAPI snapshot only 10-03 (never concurrently with 11-02 / 11-07), main.rs 10-07/10-13/10-15, one shared replay checker; clean-machine Docker runs, macOS run and publishing human_needed)
+
+Plans:
+- [ ] 10-01-PLAN.md — PHASE-10 GATE (Phase 9 complete, Phase 9 outputs incl. D-P9-28/29/30, Phase 8 clock seam, code vs RESERVATIONS) + Phase 10 name rows + decisions D-P10-1..21 and coordination rules to STATE (all) (W1)
+- [ ] 10-02-PLAN.md — Contract + Wave 0: every Phase 10 dep + notify CC0 deny exception, ostro-build/ostro-client skeletons, CLI verb stubs, exit code 4, local JSON envelope, p10 spawn helper, Python/TS/Go client scaffolds, ci-local/ci.yml client steps (all) (W2)
+- [ ] 10-03-PLAN.md — API contract: GET /v1/dev/time, POST /v1/dev/time/skip, POST /v1/modules/{sha}/replay (trait defaults, REST, OpenAPI, fake, REST-only parity exclusion), server delegation stubs, client methods (SDK-06, SDK-07, CLI-07) (W2)
+- [ ] 10-04-PLAN.md — Hermetic toolchain cache: pinned toolchains.toml (uv 0.7.15, componentize-py wheel, Node, rustup-init, zig), verified fetch, safe extraction, lock, offline/mirror, ostro toolchain/doctor (CLI-04) (W3)
+- [ ] 10-05-PLAN.md — Deterministic embedded SDK bundle, ostro.toml project model, rust/python/ts templates, ostro init (CLI-03) (W3)
+- [ ] 10-06-PLAN.md — ostro-client crate (client moved from ostro-cli, typed surface) + four-client OpenAPI route-coverage contract test (SDK-07) (W3)
+- [ ] 10-07-PLAN.md — DevClock through the clock seam, dispatcher clock-change wake, manual skip, ostro dev --time-skipping (ephemeral only), p10-time guest (SDK-06) (W3)
+- [ ] 10-08-PLAN.md — Replay: ostro_engine::replay_check, server replay endpoint (token key stays server-side), ostro replay remote + --corpus with exit 4, SC3 gate in Rust/Python/TS, docs/replay.md (CLI-07) (W3)
+- [ ] 10-09-PLAN.md — Build pipeline (input-hash cache, staging, env scrub, local validate + describe, manifest.json) + Rust builder (system/hermetic, zig cc fallback) + ostro build (CLI-04) (W4)
+- [ ] 10-10-PLAN.md — Auto time skipping: idle detector, pending-result trigger with quiescence, lease-safe manual skip, 100/1000-iteration race suite (SDK-06) (W4)
+- [ ] 10-11-PLAN.md — Python/TS/Go zero-dependency clients with route tables, shared e2e scenario, packaging dry runs (SDK-07) (W4)
+- [ ] 10-12-PLAN.md — Python (uv + wheel) and TS (Node + npm ci + jco) builders, --docker runner + build image, parity with build-guest.sh + conformance on ostro-built artefacts, template builds, docs/toolchains.md (CLI-04) (W5)
+- [ ] 10-13-PLAN.md — ostro deploy builds if needed and activates idempotently (D12 .wasm form kept) + ostro dev --watch (CLI-05, CLI-08) (W5)
+- [ ] 10-14-PLAN.md — Test kits: Rust (ostro-client testing), Python pytest plugin, TS ostro-client/testing, Go ostrotest; frozen ready line; template tests pass; docs/testing.md (SDK-06, SDK-07) (W6)
+- [ ] 10-15-PLAN.md — ostro completions (clap_complete) + local-verb JSON envelope snapshots + docs/cli-json.md exit-code table (CLI-03..08) (W6)
+- [ ] 10-16-PLAN.md — SC1 clean-machine e2e (container + local no-toolchain modes), ci.yml clean-machine job, musl < 60 MB gate, docs/getting-started.md (CLI-03/04/05) (W7)
+- [ ] 10-17-PLAN.md — PHASE-10 GATE: full gate + gate-only suites, SC evidence, RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION, DECISIONS fold-in, STATE + human_needed list (all) (W8)
 
 ### Phase 11: Run Operations & Embedded UI
 **Goal**: Operators triage and repair runs from the CLI/API or from an embedded UI that has real actions, within documented and enforced limits.
