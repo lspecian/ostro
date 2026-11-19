@@ -83,7 +83,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **DISP-04**: Operator can configure keyed concurrency (e.g. per customer) with fair scheduling across keys
 - [ ] **DISP-05**: Throttle (queue the excess) and rate limit (reject the excess) are distinct policies
 - [ ] **DISP-06**: Per-tenant concurrency, fuel/s, memory and event-rate quotas with weighted fair dispatch
-- [ ] **DISP-07**: Soft leases with re-dispatch after `lease_ttl`; zombie executors are fenced by `(epoch, attempt)` and self-fence after losing their lease
+- [x] **DISP-07**: Soft leases with re-dispatch after `lease_ttl`; zombie executors are fenced by `(epoch, attempt)` and self-fence after losing their lease
 
 ### Control-Plane API
 
@@ -299,7 +299,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | DISP-04 | Phase 7 | Pending |
 | DISP-05 | Phase 7 | Pending |
 | DISP-06 | Phase 14 | Pending |
-| DISP-07 | Phase 4 | Pending |
+| DISP-07 | Phase 4 | Complete |
 | API-01 | Phase 4 | Pending |
 | API-02 | Phase 4 | Pending |
 | API-03 | Phase 4 | Pending |
