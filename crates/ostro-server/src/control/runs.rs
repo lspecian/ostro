@@ -34,10 +34,7 @@
 
 use bytes::Bytes;
 use ostro_api::ApiError;
-use ostro_api::domain::{
-    ConflictPolicy, HistoryPage, HistoryRequest, ListRunsRequest, RunInfo, RunPage, RunStatus,
-    StartRunRequest, StartRunResult,
-};
+use ostro_api::domain::{ConflictPolicy, RunInfo, RunStatus, StartRunRequest, StartRunResult};
 use ostro_meta::WorkflowVersion;
 use ostro_partition::store::values::{self, RunRecord};
 use ostro_partition::{ApplyOutcome, PartitionError, RejectReason, query};
@@ -56,8 +53,6 @@ pub const DEFAULT_QUEUE: &str = "default";
 
 /// Journal rows read per page when looking for the latest `StatusPublished`.
 const STATUS_SCAN_PAGE: u64 = 64;
-
-const PENDING: &str = "runs API lands in 04-18";
 
 // ---------------------------------------------------------------------------------
 // Shared helpers (also used by history / list)
@@ -378,24 +373,6 @@ pub(crate) async fn get_run(cp: &ServerControlPlane, run_id: String) -> Result<R
         result_json,
         failure,
     })
-}
-
-// ---------------------------------------------------------------------------------
-// History / list (Task 2)
-// ---------------------------------------------------------------------------------
-
-pub(crate) async fn run_history(
-    _cp: &ServerControlPlane,
-    _req: HistoryRequest,
-) -> Result<HistoryPage, ApiError> {
-    Err(ApiError::unavailable(PENDING))
-}
-
-pub(crate) async fn list_runs(
-    _cp: &ServerControlPlane,
-    _req: ListRunsRequest,
-) -> Result<RunPage, ApiError> {
-    Err(ApiError::unavailable(PENDING))
 }
 
 #[cfg(test)]

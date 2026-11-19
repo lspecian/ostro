@@ -4,7 +4,9 @@
 //!
 //! - [`modules`]: module upload (validate + AOT + register workflows), module lookup,
 //!   workflow listing and activation (API-02).
-//! - [`runs`]: run operations (04-18).
+//! - [`runs`]: start (API-03) and get (API-04 / WF-01) (04-18).
+//! - [`history`]: a run's decoded journal (API-04) (04-18).
+//! - [`list`]: filtered, paginated run listing across partitions (API-04) (04-18).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +26,8 @@ use ostro_types::{PartitionCount, PartitionId};
 
 use crate::config::ServerConfig;
 
+pub mod history;
+pub mod list;
 pub mod modules;
 pub mod runs;
 
@@ -146,11 +150,11 @@ impl ControlPlane for ServerControlPlane {
     }
 
     async fn run_history(&self, req: HistoryRequest) -> Result<HistoryPage, ApiError> {
-        runs::run_history(self, req).await
+        history::run_history(self, req).await
     }
 
     async fn list_runs(&self, req: ListRunsRequest) -> Result<RunPage, ApiError> {
-        runs::list_runs(self, req).await
+        list::list_runs(self, req).await
     }
 
     /// Serving, meta has a leader, and every partition slot is `Ready` and not failed.
