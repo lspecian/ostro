@@ -510,3 +510,89 @@ async fn can_chain_keeps_the_parent_and_reports_once_pf_f2() {
     assert_eq!(n.record(&parent).inbox_next, 1);
     n.stop().await;
 }
+
+// ------------------------------------------------------------------- full server (D9 wiring)
+
+/// The server wires the meta-backed resolvers: a continue-as-new successor gets its
+/// module from the workflow version in meta and its retention from the `WorkflowPolicy`
+/// (request > workflow policy > queue policy > `[runs]` config), keyed by the qualified
+/// name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn server_resolves_successor_module_and_policy_through_meta() {
+    use ostro_meta::{MetaCommand, MetaRecord, WorkflowPolicy};
+    use sha2::{Digest, Sha256};
+
+    let s = common::TestServer::start(common::ServerOpts::default()).await;
+    let wasm = guest_wasm("can-chain");
+    let sha: [u8; 32] = Sha256::digest(&wasm).into();
+    let r = s
+        .http
+        .put(s.url(&format!("/v1/modules/{}", ostro_blob::hex(&sha))))
+        .header("content-type", "application/wasm")
+        .body(wasm)
+        .send()
+        .await
+        .expect("PUT module");
+    assert!(r.status().is_success(), "deploy: {}", r.status());
+    let policy = MetaRecord::WorkflowPolicy(WorkflowPolicy {
+        workflow: "can-chain".into(),
+        retention_ms: Some(5 * 3_600_000),
+        ..Default::default()
+    });
+    s.h()
+        .control()
+        .meta()
+        .propose(MetaCommand::Put {
+            key: policy.key(),
+            expected_version: None,
+            record: policy,
+        })
+        .await
+        .expect("policy");
+    let r = s
+        .http
+        .post(s.url("/v1/workflows/can-chain/runs"))
+        .json(&serde_json::json!({"input": {"n": 0, "max": 2}}))
+        .send()
+        .await
+        .expect("POST run");
+    assert!(r.status().is_success(), "start: {}", r.status());
+    let body: serde_json::Value = r.json().await.expect("json");
+    let first: RunId = body["run_id"]
+        .as_str()
+        .expect("run_id")
+        .parse()
+        .expect("id");
+    let mut cur = first;
+    let mut successors = Vec::new();
+    loop {
+        let deadline = Instant::now() + T;
+        let rec = loop {
+            if let Ok(Some(r)) = s.handle_of(&cur).read_run(&cur)
+                && r.status.is_terminal()
+            {
+                break r;
+            }
+            assert!(Instant::now() < deadline, "run {cur} never ended");
+            sleep(Duration::from_millis(20)).await;
+        };
+        if cur != first {
+            successors.push(rec.clone());
+        }
+        match rec.continued_to {
+            Some(n) => cur = n,
+            None => {
+                assert_eq!(rec.status, RunStatus::Completed);
+                break;
+            }
+        }
+    }
+    assert_eq!(successors.len(), 2);
+    for r in &successors {
+        assert_eq!(r.module_sha, Some(sha), "module resolved from meta");
+        assert_eq!(r.retention_ms, 5 * 3_600_000, "WorkflowPolicy retention");
+        assert_eq!(r.schedule_to_start_ms, 0);
+    }
+    let mut s = s;
+    s.shutdown().await;
+}

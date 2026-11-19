@@ -8,7 +8,8 @@
 //!
 //! Phase 5 (05-11): [`derive`] maps waits, tokens, cancel-op, the Cancelled status and
 //! continue-as-new (successor `StartRun` via a [`derive::ModuleResolver`]) and re-arms
-//! unresolved ops after a resume.
+//! unresolved ops after a resume; [`retention`] resolves retention / schedule-to-start
+//! (request > `WorkflowPolicy` > `QueuePolicy` > `[runs]` config).
 //!
 //! Execution (04-16): [`executor::EngineExecutor`], the dispatcher's `Executor` running
 //! activations on the engine (lease heartbeat, self-fence, outcome state machine).
@@ -25,6 +26,7 @@ pub mod executor;
 pub mod journal_io;
 pub mod leadership;
 pub mod logging;
+pub mod retention;
 pub mod run_started;
 pub mod server;
 pub mod sink;

@@ -35,7 +35,7 @@ pub const ENV_PREFIX: &str = "OSTRO";
 /// Nesting separator inside environment variable names.
 pub const ENV_SEPARATOR: &str = "__";
 /// Top-level sections; only `OSTRO_<SECTION>__*` variables are read.
-pub const SECTIONS: &[&str] = &["node", "api", "engine", "executor", "log"];
+pub const SECTIONS: &[&str] = &["node", "api", "engine", "executor", "log", "runs"];
 
 static PARSER: SpanParser = SpanParser::new();
 static PRINTER: SpanPrinter = SpanPrinter::new();
@@ -246,6 +246,35 @@ impl ExecutorSection {
     }
 }
 
+/// Default `[runs] retention` of the `ostro server` profile (D9: 7 days, written in hours
+/// because jiff's friendly parser rejects `7d` for unsigned durations).
+pub const SERVER_RETENTION: FriendlyDuration = FriendlyDuration::from_secs(168 * 3600);
+/// Default `[runs] retention` of the `ostro dev` profile (D9: 24 h).
+pub const DEV_RETENTION: FriendlyDuration = FriendlyDuration::from_secs(24 * 3600);
+
+/// `[runs]`: defaults of the per-run policies (D9). A start request, then the
+/// `WorkflowPolicy`, then the `QueuePolicy` meta records override them
+/// ([`crate::retention`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunsSection {
+    /// How long a terminal run is kept before expiry deletes it (default `168h` for the
+    /// server profile, `24h` for dev). Must be non-zero.
+    pub retention: FriendlyDuration,
+    /// Optional cap on every resolved retention (request and policies included).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retention: Option<FriendlyDuration>,
+}
+
+impl Default for RunsSection {
+    fn default() -> Self {
+        Self {
+            retention: SERVER_RETENTION,
+            max_retention: None,
+        }
+    }
+}
+
 /// Log output format.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -286,19 +315,21 @@ pub struct ServerConfig {
     pub engine: EngineSection,
     pub executor: ExecutorSection,
     pub log: LogSection,
+    pub runs: RunsSection,
 }
 
 impl ServerConfig {
-    /// `ostro dev` profile: loopback, `./.ostro`, pretty logs.
+    /// `ostro dev` profile: loopback, `./.ostro`, pretty logs, 24 h retention.
     pub fn dev_defaults() -> Self {
         let mut c = Self::default();
         c.api.listen = SocketAddr::from(([127, 0, 0, 1], 7700));
         c.node.data_dir = PathBuf::from("./.ostro");
         c.log.format = LogFormat::Pretty;
+        c.runs.retention = DEV_RETENTION;
         c
     }
 
-    /// `ostro server` profile: all interfaces, `./ostro-data`, compact logs.
+    /// `ostro server` profile: all interfaces, `./ostro-data`, compact logs, 168 h retention.
     pub fn server_defaults() -> Self {
         Self::default()
     }
@@ -396,6 +427,11 @@ pub fn load_layered(
             .source(Some(env.sectioned())),
     );
     let mut cfg: ServerConfig = b.build()?.try_deserialize()?;
+    if cfg.runs.retention.get().is_zero() {
+        return Err(ConfigError::Invalid(
+            "runs.retention must be non-zero (terminal runs always expire, D9)".into(),
+        ));
+    }
     if let Some(listen) = overrides.listen {
         cfg.api.listen = listen;
     }

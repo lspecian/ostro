@@ -14,7 +14,10 @@
 //! 3. `Runtime::new` with the cluster token key and the AOT cache under
 //!    `<data>/cache/aot`.
 //! 4. `Node::open` with [`MetaLeadership`] as the epoch floor and the dispatcher running
-//!    [`EngineExecutor`]; then every started partition's term is recorded in meta with
+//!    [`EngineExecutor`] (continue-as-new successors resolve their module through meta,
+//!    [`MetaModules`], and their retention / schedule-to-start through
+//!    [`MetaPolicies`] over the `[runs]` defaults, D9); then every started partition's term
+//!    is recorded in meta with
 //!    `SetPartitionLeader` (meta rejects a lower epoch, so a stale term never overwrites
 //!    a newer one).
 //! 5. `ostro_api::router(ServerControlPlane)` served with graceful shutdown. `/readyz`
@@ -46,8 +49,10 @@ use tracing::{error, info, warn};
 
 use crate::config::ServerConfig;
 use crate::control::ServerControlPlane;
+use crate::derive::MetaModules;
 use crate::executor::{EngineExecutor, ExecutorConfig, ExecutorHooks};
 use crate::leadership::MetaLeadership;
+use crate::retention::MetaPolicies;
 
 /// How long shutdown waits for in-flight HTTP/gRPC requests before closing them.
 const SERVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -191,8 +196,17 @@ pub async fn start_with_hooks(
         max_attempt_failures: cfg.executor.max_attempt_failures,
         retry_backoff: cfg.executor.retry_backoff.get(),
     };
-    let executor: Arc<dyn Executor> =
-        Arc::new(EngineExecutor::new(Arc::clone(&runtime), exec_cfg).with_hooks(hooks));
+    let executor: Arc<dyn Executor> = Arc::new(
+        EngineExecutor::new(Arc::clone(&runtime), exec_cfg)
+            .with_hooks(hooks)
+            .with_resolvers(
+                Arc::new(MetaModules(meta.view().clone())),
+                Arc::new(MetaPolicies {
+                    meta: meta.view().clone(),
+                    defaults: cfg.runs.clone(),
+                }),
+            ),
+    );
     let stats = Arc::new(DispatcherStats::default());
     let mut node_cfg = NodeConfig::new(data_dir.clone(), count);
     node_cfg.node_id = node_id;
