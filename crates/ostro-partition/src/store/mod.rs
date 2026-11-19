@@ -26,7 +26,7 @@ pub mod values;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
 use ostro_types::{Offset, PartitionCount, PartitionId};
 
 pub use batch::{ApplyBatch, MetaUpdate};
@@ -245,6 +245,7 @@ impl PartitionStore {
     /// Read handle for leader services and tests.
     pub fn reader(&self) -> StoreReader {
         StoreReader {
+            db: self.db.clone(),
             ks: self.ks.clone(),
         }
     }
@@ -258,20 +259,32 @@ impl PartitionStore {
     }
 }
 
-/// Cheap-to-clone read handle (cloned fjall keyspace handles).
+/// Cheap-to-clone read handle (cloned fjall database and keyspace handles).
+///
+/// Every read goes through a fresh fjall [`Snapshot`](fjall::Snapshot), i.e. at the
+/// **published** sequence number, never at `SeqNo::MAX` (what a plain `Keyspace::get`
+/// does). fjall's batch commit inserts the items into the memtables one by one and
+/// publishes the batch seqno after the last one, so an unsnapshotted read can see a
+/// prefix of a batch the apply thread is still committing: for example the terminal
+/// `runs` row of a `CompleteRun` without its `payloads` result row (a long poll then
+/// answered `completed: true, result: null`). Through a snapshot a batch becomes
+/// visible all at once, and because published seqnos only grow, a later read sees at
+/// least everything an earlier one saw. Snapshots are dropped at the end of each call.
 #[derive(Clone)]
 pub struct StoreReader {
+    db: Database,
     ks: [Keyspace; TABLE_COUNT],
 }
 
 impl StoreReader {
     pub fn get(&self, t: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        Ok(self.ks[t.idx()].get(key)?.map(|v| v.to_vec()))
+        let snap = self.db.snapshot();
+        Ok(snap.get(&self.ks[t.idx()], key)?.map(|v| v.to_vec()))
     }
 
     /// Up to `limit` rows whose key starts with `prefix`, in key order.
     pub fn prefix(&self, t: Table, prefix: &[u8], limit: usize) -> Result<Rows, StoreError> {
-        collect(self.ks[t.idx()].prefix(prefix), limit)
+        collect(self.db.snapshot().prefix(&self.ks[t.idx()], prefix), limit)
     }
 
     /// Up to `limit` rows with `from <= key < to`, in key order.
@@ -282,7 +295,7 @@ impl StoreReader {
         to: &[u8],
         limit: usize,
     ) -> Result<Rows, StoreError> {
-        collect(self.ks[t.idx()].range(from..to), limit)
+        collect(self.db.snapshot().range(&self.ks[t.idx()], from..to), limit)
     }
 }
 

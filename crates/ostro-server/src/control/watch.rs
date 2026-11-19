@@ -18,7 +18,10 @@
 //! Callers **register first, then read the run record** ([`await_result`]). A completion
 //! applied before the read is seen by the read; one applied after the registration fires
 //! the waiter. Actions are broadcast after the chunk is committed, so a woken waiter's
-//! re-read sees the terminal record.
+//! re-read sees the terminal record. The read itself may race the commit (the
+//! register-then-read case): it relies on `StoreReader` reading at fjall's published
+//! seqno, so a `CompleteRun` batch is seen whole (terminal record **and** result payload)
+//! or not at all, never as a terminal record without its result.
 //!
 //! # Leadership
 //!

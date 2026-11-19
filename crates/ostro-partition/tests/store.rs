@@ -259,6 +259,68 @@ fn commit_is_atomic_with_meta() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Regression: a `StoreReader` must never see half of a committed batch. fjall's batch
+/// commit inserts items into the memtables one by one (table order: `runs` before
+/// `events` before `payloads`) and publishes the batch seqno only after the last one; a
+/// plain `Keyspace::get` reads at `SeqNo::MAX` and sees the unpublished prefix. That is how
+/// a long poll answered `completed: true, result: null`: it read the terminal run record
+/// of a `CompleteRun` batch still being applied, then found no result payload row.
+/// Thousands of `events` rows between the two widen the window from microseconds to
+/// milliseconds, so a spinning reader lands inside it on every batch.
+#[test]
+fn reader_never_sees_a_partial_batch() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    const BATCHES: u8 = 6;
+    let dir = ostro_testkit::fs::tempdir();
+    let (store, _) = open(dir.path(), 0, 16)?;
+    let reader = store.reader();
+    let done = Arc::new(AtomicBool::new(false));
+    let torn = Arc::new(AtomicU64::new(0));
+    let probes = Arc::new(AtomicU64::new(0));
+    let spin = {
+        let (done, torn, probes) = (Arc::clone(&done), Arc::clone(&torn), Arc::clone(&probes));
+        std::thread::spawn(move || -> Result<(), StoreError> {
+            while !done.load(Ordering::Acquire) {
+                for n in 0..BATCHES {
+                    let r = run(0, n);
+                    if reader.get(Table::Runs, &run_key(&r))?.is_some() {
+                        probes.fetch_add(1, Ordering::Relaxed);
+                        if reader.get(Table::Payloads, &payload_key(&r, 1))?.is_none() {
+                            torn.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+    };
+    for n in 0..BATCHES {
+        let r = run(0, n);
+        let mut b = store.batch();
+        b.insert(Table::Runs, run_key(&r), b"terminal".to_vec());
+        for seq in 0..20_000u64 {
+            b.insert(Table::Events, event_key(&r, seq), vec![0u8; 16]);
+        }
+        b.insert(Table::Payloads, payload_key(&r, 1), b"result".to_vec());
+        b.commit(&meta_update(u64::from(n) + 1))?;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    done.store(true, Ordering::Release);
+    spin.join().expect("reader thread")?;
+    assert!(
+        probes.load(Ordering::Relaxed) > 0,
+        "the reader saw the runs"
+    );
+    assert_eq!(
+        torn.load(Ordering::Relaxed),
+        0,
+        "a reader saw a run row of a batch whose payload row was not visible yet"
+    );
+    Ok(())
+}
+
 #[test]
 fn checkpoint_survives_reopen() -> Result<(), Box<dyn std::error::Error>> {
     let dir = ostro_testkit::fs::tempdir();
