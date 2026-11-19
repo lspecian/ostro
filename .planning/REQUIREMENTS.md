@@ -375,7 +375,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | DIST-02 | Phase 14 | Pending |
 | DIST-03 | Phase 14 | Pending |
 | QA-01 | Phase 5 | Pending |
-| QA-02 | Phase 5 | Pending |
+| QA-02 | Phase 5 | Partial (05-12: 24-entry corpus replayed by the default suite, green on x86_64 gnu locally; aarch64/macOS replay runs on the CI legs, remote run human_needed; final entries at 05-20) |
 | QA-03 | Phase 7 | Pending |
 | QA-04 | Phase 14 | Pending |
 | QA-05 | Phase 14 | Pending |
