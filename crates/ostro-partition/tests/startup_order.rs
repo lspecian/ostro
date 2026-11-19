@@ -265,3 +265,177 @@ async fn state_ahead_of_log_fails_partition() {
     assert_eq!(submit_start(&node, 0).await, ApplyOutcome::Accepted);
     node.shutdown().await.expect("shutdown");
 }
+
+// ------------------------------------------------- empty-log anchoring (Phase 12 F3, 05-21)
+
+/// `(applied, state_hash, digest)` of partition `p`'s state store, read with the node closed.
+fn state_of(dir: &std::path::Path, count: u16, p: u16) -> (Offset, [u8; 32], [u8; 32]) {
+    let (store, meta) = PartitionStore::open(
+        dir,
+        PartitionId(p),
+        PartitionCount::new(count).unwrap(),
+        &StoreConfig::default(),
+    )
+    .unwrap();
+    (meta.applied, meta.state_hash, store.digest().unwrap())
+}
+
+fn wal_partition_dir(dir: &std::path::Path, p: u16) -> std::path::PathBuf {
+    segment_dir(&dir.join("wal"), PartitionId(p))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_wal_anchors_at_applied_and_rebuild_matches() {
+    let d = ostro_testkit::fs::tempdir();
+    let node = open_node(d.path(), 2, StartMode::Leader).await;
+    for _ in 0..5 {
+        assert_eq!(submit_start(&node, 0).await, ApplyOutcome::Accepted);
+    }
+    assert_eq!(submit_start(&node, 1).await, ApplyOutcome::Accepted);
+    node.shutdown().await.expect("shutdown");
+    let (n, _, _) = state_of(d.path(), 2, 0);
+    assert_eq!(n, Offset(6)); // LeaderAnnounced + 5 starts
+
+    // the WAL of partition 0 is lost after a clean stop (Phase 8 idle restore and Phase 12
+    // install leave the same shape); keep a copy of the state at applied = N
+    std::fs::remove_dir_all(wal_partition_dir(d.path(), 0)).unwrap();
+    let state_at_n = ostro_testkit::fs::tempdir();
+    common::copy_dir(
+        &d.path().join("state/p0000"),
+        &state_at_n.path().join("p0000"),
+    );
+
+    let node = open_node(d.path(), 2, StartMode::Leader).await;
+    let ev = node.startup_events();
+    assert_eq!(kinds_of(&ev, 0), vec![1, 2, 3, 4, 5, 6, 7], "{ev:?}");
+    assert!(
+        ev.contains(&StartupEvent::LogRecovered {
+            p: 0,
+            leo: n.0,
+            torn: false
+        }),
+        "{ev:?}"
+    );
+    // the epoch history was seeded from the cursor, so the new term is epoch 2, at N
+    assert!(
+        ev.contains(&StartupEvent::TermStarted {
+            p: 0,
+            epoch: 2,
+            offset: n.0
+        }),
+        "{ev:?}"
+    );
+    let h = node.handle(PartitionId(0)).expect("partition 0 healthy");
+    assert_eq!(h.log().log_start(), n);
+    assert_eq!(
+        h.log().epochs().0,
+        vec![
+            (ostro_types::Epoch(1), Offset(0)),
+            (ostro_types::Epoch(2), n)
+        ]
+    );
+    // the next command applies right after the LeaderAnnounced at N
+    assert_eq!(submit_start(&node, 0).await, ApplyOutcome::Accepted);
+    assert_eq!(h.log().log_end(), Offset(n.0 + 2));
+    assert_eq!(*h.machine().applied().borrow(), Offset(n.0 + 2));
+    // partition 1 is untouched
+    assert!(ev.contains(&StartupEvent::TermStarted {
+        p: 1,
+        epoch: 2,
+        offset: 2
+    }));
+    node.shutdown().await.expect("shutdown");
+    let after = state_of(d.path(), 2, 0);
+    assert_eq!(after.0, Offset(n.0 + 2));
+
+    // rebuild: put the state back at applied = N and replay the anchored log [N, N + 2)
+    std::fs::remove_dir_all(d.path().join("state/p0000")).unwrap();
+    common::copy_dir(
+        &state_at_n.path().join("p0000"),
+        &d.path().join("state/p0000"),
+    );
+    let node = open_node(d.path(), 2, StartMode::Inspect).await;
+    let ev = node.startup_events();
+    assert_eq!(kinds_of(&ev, 0), vec![1, 2, 3, 4], "{ev:?}");
+    assert!(ev.contains(&StartupEvent::CaughtUp {
+        p: 0,
+        applied: n.0 + 2
+    }));
+    node.shutdown().await.expect("shutdown");
+    assert_eq!(state_of(d.path(), 2, 0), after, "rebuilt state differs");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn anchored_log_keeps_the_fatal_cases() {
+    let d = ostro_testkit::fs::tempdir();
+    let node = open_node(d.path(), 1, StartMode::Leader).await;
+    assert_eq!(submit_start(&node, 0).await, ApplyOutcome::Accepted);
+    node.shutdown().await.expect("shutdown");
+    // state at applied = 2, kept for the "snapshot required" case below
+    let early = ostro_testkit::fs::tempdir();
+    common::copy_dir(&d.path().join("state/p0000"), &early.path().join("p0000"));
+
+    let node = open_node(d.path(), 1, StartMode::Leader).await;
+    for _ in 0..3 {
+        assert_eq!(submit_start(&node, 0).await, ApplyOutcome::Accepted);
+    }
+    node.shutdown().await.expect("shutdown");
+    let (n, _, _) = state_of(d.path(), 1, 0);
+    assert_eq!(n, Offset(6));
+
+    // anchor at N, then append: the log is [N, N + 2)
+    std::fs::remove_dir_all(wal_partition_dir(d.path(), 0)).unwrap();
+    let node = open_node(d.path(), 1, StartMode::Leader).await;
+    assert_eq!(submit_start(&node, 0).await, ApplyOutcome::Accepted);
+    node.shutdown().await.expect("shutdown");
+
+    // applied below the anchored log's start: snapshot required
+    let current = ostro_testkit::fs::tempdir();
+    common::copy_dir(&d.path().join("state/p0000"), &current.path().join("p0000"));
+    std::fs::remove_dir_all(d.path().join("state/p0000")).unwrap();
+    common::copy_dir(&early.path().join("p0000"), &d.path().join("state/p0000"));
+    let node = open_node(d.path(), 1, StartMode::Leader).await;
+    let reason = failed_reason(&node, 0);
+    assert!(reason.contains("snapshot required"), "{reason}");
+    node.shutdown().await.expect("shutdown");
+
+    // a non-empty log with applied > LEO: still state ahead of log
+    std::fs::remove_dir_all(d.path().join("state/p0000")).unwrap();
+    common::copy_dir(&current.path().join("p0000"), &d.path().join("state/p0000"));
+    {
+        let (store, meta) = PartitionStore::open(
+            d.path(),
+            PartitionId(0),
+            PartitionCount::new(1).unwrap(),
+            &StoreConfig::default(),
+        )
+        .unwrap();
+        let mut cur = Cursor::from_meta(&meta);
+        cur.next = Offset(1_000);
+        let mu = cur.meta_update();
+        store.batch().commit(&mu).unwrap();
+        store.checkpoint(Offset(1_000)).unwrap();
+    }
+    let node = open_node(d.path(), 1, StartMode::Leader).await;
+    let reason = failed_reason(&node, 0);
+    assert!(reason.contains("state ahead of log"), "{reason}");
+    node.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_wal_and_fresh_state_start_at_zero() {
+    // floor 0: unchanged behaviour (both the state and the WAL are gone)
+    let d = ostro_testkit::fs::tempdir();
+    let node = open_node(d.path(), 1, StartMode::Leader).await;
+    assert_eq!(submit_start(&node, 0).await, ApplyOutcome::Accepted);
+    node.shutdown().await.expect("shutdown");
+    std::fs::remove_dir_all(wal_partition_dir(d.path(), 0)).unwrap();
+    std::fs::remove_dir_all(d.path().join("state/p0000")).unwrap();
+    let node = open_node(d.path(), 1, StartMode::Leader).await;
+    assert!(node.startup_events().contains(&StartupEvent::TermStarted {
+        p: 0,
+        epoch: 1,
+        offset: 0
+    }));
+    node.shutdown().await.expect("shutdown");
+}

@@ -14,9 +14,9 @@ use std::sync::Arc;
 use ostro_blob::BlobStore;
 use ostro_log::ostro_wal::GroupCommitConfig;
 use ostro_log::{LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicatedLog, Rf1Log, Role};
-use ostro_types::{Command, Offset, PartitionCount, PartitionId};
+use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId};
 use tokio::sync::watch;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::acks::PendingAcks;
 use crate::apply::{ApplyOutcome, Cursor};
@@ -183,7 +183,9 @@ impl Node {
 
         // 2. log recovery with those floors (torn tails cut before the WAL opens). A
         //    partition whose state could not be read gets floor = MAX: nothing counts as a
-        //    torn tail, so its files are never cut on behalf of an unknown state.
+        //    torn tail, so its files are never cut on behalf of an unknown state. A log with
+        //    no records is anchored at its floor (log_start = LEO = applied, Phase 12 F3);
+        //    its epoch history is seeded from the cursor in step 4.
         let floors: Vec<Offset> = stages
             .iter()
             .map(|s| s.as_ref().map_or(Offset(u64::MAX), |(_, m)| m.applied))
@@ -382,6 +384,9 @@ impl Node {
 }
 
 /// Step 3: the state must lie inside the log.
+///
+/// A log with no records was anchored at the floor (`log_start = LEO = applied`, Phase 12
+/// F3), so it always passes; "state ahead of log" is raised only for a non-empty log.
 fn validate(meta: &StoreMeta, log: &Rf1Log) -> Result<(), String> {
     let leo = log.log_end();
     if meta.applied > leo {
@@ -417,6 +422,7 @@ struct PartitionStart {
 
 impl PartitionStart {
     async fn run(self) -> Result<PartitionHandle<Rf1Log>, String> {
+        self.seed_anchored_epochs().await?;
         let acks = Arc::new(PendingAcks::new());
         let machine = MachineHandle::spawn(
             Arc::clone(&self.store),
@@ -444,6 +450,36 @@ impl PartitionStart {
                 Err(reason)
             }
         }
+    }
+
+    /// Empty-log anchoring (Phase 12 F3, plan 05-21): a log with no records recovered at
+    /// `log_start = LEO = applied_offset` and carries no epoch history, so seed it from the
+    /// state's applied `LeaderAnnounced` history. The next term then picks an epoch above
+    /// the cursor's (an unseeded log would pick epoch 1 and its `LeaderAnnounced` would be
+    /// rejected as stale), and Phase 12 divergence queries see the history below the start.
+    async fn seed_anchored_epochs(&self) -> Result<(), String> {
+        let empty = self.rf1.log_end() == self.rf1.log_start() && self.rf1.epochs().0.is_empty();
+        if !empty || self.meta.cursor.epoch_history.is_empty() {
+            return Ok(());
+        }
+        let history: Vec<(Epoch, Offset)> = self
+            .meta
+            .cursor
+            .epoch_history
+            .iter()
+            .map(|&(e, o)| (Epoch(e), Offset(o)))
+            .collect();
+        self.rf1
+            .seed_epochs(&history)
+            .await
+            .map_err(|e| format!("seed epoch history from the cursor: {e}"))?;
+        info!(
+            partition = self.p.0,
+            anchor = %self.rf1.log_start(),
+            epochs = history.len(),
+            "empty log anchored at applied offset; epoch history seeded from the cursor"
+        );
+        Ok(())
     }
 
     async fn catch_up_and_announce(&self, handle: &PartitionHandle<Rf1Log>) -> Result<(), String> {
