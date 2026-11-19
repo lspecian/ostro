@@ -336,7 +336,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | OPS-03 | Phase 11 | Pending |
 | OPS-04 | Phase 11 | Pending |
 | OPS-05 | Phase 11 | Pending |
-| OPS-06 | Phase 5 | Complete (1 s policy retention: GET/history/list gone, idempotency key reused, resumed run survives the old timer, expiry after restart: 05-15 retention) |
+| OPS-06 | Phase 5 | Complete (1 s policy retention: GET/history/list gone, idempotency key reused, resumed run survives the old timer, expiry after restart: 05-15 retention; 50,000-event expiry blocks apply 34-45 ms in release: 05-16 perf expiry) |
 | OPS-07 | Phase 11 | Pending |
 | SDK-01 | Phase 4 | Complete |
 | SDK-02 | Phase 9 | Pending |
