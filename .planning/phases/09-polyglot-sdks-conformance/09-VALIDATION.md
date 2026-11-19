@@ -10,7 +10,7 @@ created: 2026-11-19
 # Phase 9: Validation Strategy
 
 > This is the per-phase validation contract for feedback sampling during execution.
-> Source: 09-RESEARCH.md § Validation Architecture, mapped onto plans 09-01..09-20 (revised after the plan check: 3 blockers, 9 warnings; WF-07 remapped to Phase 9). Adopted decisions: 09-DECISIONS.md (D-P9-1..D-P9-27).
+> Source: 09-RESEARCH.md § Validation Architecture, mapped onto plans 09-01..09-20 (revised after the plan check: 3 blockers, 9 warnings; WF-07 remapped to Phase 9). Adopted decisions: 09-DECISIONS.md (D-P9-1..D-P9-30).
 
 ---
 
