@@ -404,34 +404,64 @@ async fn record_partition_leaders(
     node: &Node,
     node_id: u64,
 ) -> Result<(), ServerError> {
+    // All proposals are submitted concurrently so the meta driver can group-commit them
+    // (one log append for P partitions instead of P sequential round trips); each result
+    // is still checked per partition, in partition order.
+    let mut pending = Vec::new();
     for slot in node.slots() {
         match slot {
             PartitionSlot::Ready(h) => {
-                let p = h.partition();
+                let p = h.partition().0;
                 let epoch = h.epoch().0;
-                let res = meta
-                    .propose(MetaCommand::SetPartitionLeader {
-                        partition: p.0,
-                        epoch,
-                        leader: node_id,
-                        isr: vec![node_id],
-                    })
-                    .await?;
-                if !matches!(res, MetaResult::Ok { .. }) {
-                    let msg = format!(
-                        "SetPartitionLeader(p{}, epoch {epoch}) rejected: {res:?}",
-                        p.0
-                    );
-                    error!(partition = p.0, epoch, result = ?res, "{msg}");
-                    return Err(ServerError::Invariant(msg));
-                }
+                let fut = meta.propose(MetaCommand::SetPartitionLeader {
+                    partition: p,
+                    epoch,
+                    leader: node_id,
+                    isr: vec![node_id],
+                });
+                pending.push((p, epoch, Box::pin(fut)));
             }
             PartitionSlot::Failed { partition, reason } => {
                 error!(partition = partition.0, %reason, "partition failed to start");
             }
         }
     }
+    let results = join_all(pending.iter_mut().map(|(_, _, f)| f.as_mut())).await;
+    for ((p, epoch, _), res) in pending.iter().zip(results) {
+        let res = res?;
+        if !matches!(res, MetaResult::Ok { .. }) {
+            let msg = format!("SetPartitionLeader(p{p}, epoch {epoch}) rejected: {res:?}");
+            error!(partition = p, epoch, result = ?res, "{msg}");
+            return Err(ServerError::Invariant(msg));
+        }
+    }
     Ok(())
+}
+
+/// Poll every future to completion concurrently (no `futures` dependency); results in input
+/// order.
+async fn join_all<F: std::future::Future + Unpin>(
+    futs: impl IntoIterator<Item = F>,
+) -> Vec<F::Output> {
+    let mut slots: Vec<(F, Option<F::Output>)> = futs.into_iter().map(|f| (f, None)).collect();
+    std::future::poll_fn(|cx| {
+        let mut done = true;
+        for (f, out) in slots.iter_mut() {
+            if out.is_none() {
+                match std::pin::Pin::new(f).poll(cx) {
+                    std::task::Poll::Ready(v) => *out = Some(v),
+                    std::task::Poll::Pending => done = false,
+                }
+            }
+        }
+        if done {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    slots.into_iter().filter_map(|(_, o)| o).collect()
 }
 
 async fn shutdown_node(node: Node) {
