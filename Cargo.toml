@@ -66,6 +66,10 @@ tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 getrandom = "0.4.3"
 # test HTTP client only; no TLS (no native-tls/openssl)
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "http2"] }
+# WIT freeze tooling (05-05, ostro-witcheck). Exact: these are the versions wasmtime 50.0.2
+# pulls (one copy in Cargo.lock). Bump only together with wasmtime (D17).
+wit-component = { version = "=0.261.0", default-features = false, features = ["semver-check"] }
+wit-parser = "=0.261.0"
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

@@ -18,7 +18,8 @@ allow = ["Apache-2.0", "Apache-2.0 WITH LLVM-exception", "MIT", "BSD-2-Clause", 
 confidence-threshold = 0.9
 
 [bans]
-multiple-versions = "warn"      # unavoidable dupes today: hashbrown, syn, itertools, getrandom, foldhash, cpufeatures
+multiple-versions = "warn"      # unavoidable dupes today: hashbrown, syn, itertools, getrandom, foldhash, cpufeatures,
+                                # unicode-width (0.1 via protox, 0.2 via wat/wast for ostro-witcheck, 05-05)
 wildcards = "deny"
 allow-wildcard-paths = true
 deny = [
@@ -32,6 +33,13 @@ deny = [
   { crate = "opentelemetry",     deny-multiple-versions = true },
   { crate = "opentelemetry_sdk", deny-multiple-versions = true },
   { crate = "wasmtime",          deny-multiple-versions = true },
+  # WIT-07 (05-05): ostro-witcheck must check WIT with the same wit-parser/wit-component the
+  # engine's bindgen uses (wasmtime 50.0.2 => 0.261.0). wat/wast are lock-pinned to 1.261/261
+  # so wasm-encoder/wasmparser stay single-version; a `cargo update` that splits them fails here.
+  { crate = "wit-component",     deny-multiple-versions = true },
+  { crate = "wit-parser",        deny-multiple-versions = true },
+  { crate = "wasmparser",        deny-multiple-versions = true },
+  { crate = "wasm-encoder",      deny-multiple-versions = true },
   { crate = "openssl-sys",  reason = "rustls + aws-lc-rs only" },
   { crate = "native-tls",   reason = "rustls only" },
   { crate = "tokio-uring",  reason = "io_uring removed from vendored WAL" },

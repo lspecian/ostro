@@ -1,0 +1,18 @@
+[package]
+name = "ostro-witcheck"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "WIT-07 freeze tooling: proves an ostro:runtime 0.1.N package is additive over 0.1.0"
+
+[dependencies]
+wit-component.workspace = true
+wit-parser.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true
