@@ -124,6 +124,8 @@ impl std::fmt::Debug for Rf1Log {
 impl Rf1Log {
     /// Build from a successful recovery. `hw` is the sender the node's commit callback
     /// advances; it starts at `recovery.leo` (recovery left every retained segment durable).
+    /// The sequencer starts at `recovery.leo` too, so an empty log anchored at the floor
+    /// (Phase 12 F3) assigns its first append exactly that offset.
     pub(crate) fn new(
         pid: PartitionId,
         cfg: &LogNodeConfig,
@@ -168,6 +170,52 @@ impl Rf1Log {
     /// What recovery found at open.
     pub fn recovery(&self) -> &RecoveryReport {
         &self.recovery
+    }
+
+    /// Seed the epoch history of a log with **no records** (Phase 12 F3, plan 05-21).
+    ///
+    /// An empty log recovers anchored at the floor (`log_start = leo = applied_offset`) with
+    /// no epoch history, because the history is derived from envelopes and there are none.
+    /// The caller passes the state's applied `LeaderAnnounced` history
+    /// (`CursorMeta.epoch_history`, `(epoch, first offset)` ascending), so that
+    /// [`epochs`](ReplicatedLog::epochs) answers as if the log still held those epochs, the
+    /// next term picks an epoch above them, and appends with an older epoch are refused
+    /// ([`LogError::StaleEpoch`]). Pairs are kept verbatim (their offsets lie at or below
+    /// `log_start`; Phase 12 divergence checks need the history below the start).
+    ///
+    /// Refused with [`LogError::Failed`] once the log holds records (its own envelopes are
+    /// then the history) or when the history is not strictly ascending in epoch and
+    /// non-decreasing in offset. An empty `history` is a no-op.
+    pub async fn seed_epochs(&self, history: &[(Epoch, Offset)]) -> Result<(), LogError> {
+        if history.is_empty() {
+            return Ok(());
+        }
+        let ascending = history
+            .windows(2)
+            .all(|w| w[0].0 < w[1].0 && w[0].1 <= w[1].1);
+        if !ascending {
+            return Err(LogError::Failed(format!(
+                "partition {}: epoch history to seed is not ascending: {history:?}",
+                self.pid
+            )));
+        }
+        let mut seq = self.seq.lock().await;
+        let mut epochs = self.epochs_lock();
+        if seq.next != self.log_start() || !epochs.is_empty() {
+            return Err(LogError::Failed(format!(
+                "partition {}: cannot seed epochs of a non-empty log (log start {}, end {})",
+                self.pid,
+                self.log_start(),
+                seq.next
+            )));
+        }
+        *epochs = EpochCache::from_pairs(history);
+        if let Some(latest) = epochs.latest_epoch()
+            && latest > seq.current_epoch
+        {
+            seq.current_epoch = latest;
+        }
+        Ok(())
     }
 
     /// Set the role (ignored once the partition has failed: it stays `Offline`).

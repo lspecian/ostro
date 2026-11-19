@@ -80,6 +80,11 @@ impl LogNode {
     /// `floors[p]` is partition `p`'s durable floor (the state store's `applied_offset`, or
     /// `Offset(0)` when the state is being rebuilt); `floors.len()` must equal the partition
     /// count. Must be called inside a Tokio runtime.
+    ///
+    /// A partition whose log has no records opens **anchored at its floor** (Phase 12 F3):
+    /// `log_start = LEO = HW = floor`, and its first append is assigned offset `floor`. Seed
+    /// its epoch history afterwards with [`Rf1Log::seed_epochs`]. A floor above `i64::MAX`
+    /// (the "state unreadable" sentinel) anchors at 0.
     pub async fn open(
         cfg: LogNodeConfig,
         floors: &[Offset],

@@ -10,7 +10,8 @@
 //! 4. make every retained segment durable (after a crash, readable is not durable) by
 //!    fsyncing the last non-empty one (earlier segments are already durable, see
 //!    [`recover_partition`]), rebuild the epoch history, `leo = last + 1`,
-//!    `log_start = first base`.
+//!    `log_start = first base`; a log with no records is anchored at the floor
+//!    (`log_start = leo = floor`, Phase 12 F3).
 //!
 //! Records are parsed with [`declared_record_size`] + [`WalRecord::from_bytes`] over the
 //! whole file read into memory. This module never calls the vendored `WalManager` segment
@@ -38,7 +39,9 @@ pub struct RecoveryReport {
     /// Every segment file found, sorted by segment id (empty files included; they are not
     /// deleted in Phase 2).
     pub segments: Vec<PathBuf>,
-    /// First offset in the log (`Offset(0)` for an empty log).
+    /// First offset in the log. A log with no records is **anchored at the floor**
+    /// (`log_start = leo = floor`, Phase 12 F3; `Offset(0)` when the floor is 0 or is the
+    /// "state unreadable" sentinel above `i64::MAX`).
     pub log_start: Offset,
     /// Log end offset: last offset + 1 (`log_start` for an empty log).
     pub leo: Offset,
@@ -242,6 +245,19 @@ fn cut(segment: &Path, dir: &Path, len: usize) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
+/// Where a log with no records starts (empty-log anchoring, Phase 12 F3): at `floor`, the
+/// state's `applied_offset`, so the next append is assigned exactly the offset the state
+/// machine applies next. A floor above `i64::MAX` (the vendored WAL's offset range) is the
+/// "state unreadable" sentinel (`Offset(u64::MAX)`, see `ostro-partition` `Node::open`):
+/// nothing is known, so the log anchors at 0 as before.
+fn anchor(floor: Offset) -> Offset {
+    if i64::try_from(floor.0).is_ok() {
+        floor
+    } else {
+        Offset::ZERO
+    }
+}
+
 fn corrupt(pid: PartitionId, segment: &Path, pos: usize, bad: Bad) -> LogError {
     LogError::Corrupt {
         partition: pid.0,
@@ -275,6 +291,23 @@ fn corrupt(pid: PartitionId, segment: &Path, pos: usize, bad: Bad) -> LogError {
 ///    frame header is unreadable and everything up to EOF is zero.
 ///
 /// Everything else fails with [`LogError::Corrupt`]; nothing is skipped.
+///
+/// # Empty-log anchoring (Phase 12 F3)
+///
+/// When no record survives (no segments, only empty segments, or nothing verified), the log
+/// is anchored at the floor: `log_start = leo = floor`, `epochs` empty. The caller seeds the
+/// epoch history from its cursor ([`Rf1Log::seed_epochs`](crate::Rf1Log::seed_epochs)).
+/// Phase 8 restore of an idle partition and Phase 12 follower snapshot install both leave an
+/// empty log under a state with `applied_offset > 0`; without the anchor that state would be
+/// "ahead of the log". A non-empty log is unaffected: its start and end come from its
+/// records, and a floor above its end stays the caller's "state ahead of log" error.
+///
+/// The torn-tail rule is unchanged by anchoring: with no verified record before it, a bad
+/// first record counts as above the floor only when `floor == 0`. So an anchored log
+/// (`floor > 0`) whose very first record is torn by power loss before its first fsync fails
+/// with [`LogError::Corrupt`] (conservative: the offsets of an unparseable first record are
+/// unknown, and if it held offsets below the floor it was fsynced and the damage is real).
+/// `kill -9` cannot produce this shape. Phase 12 decides whether install needs more.
 ///
 /// Records after a cut are discarded even when they parse: they were in the same un-fsynced
 /// window and cannot have been acknowledged, because an fsync covering them would have made
@@ -366,7 +399,9 @@ pub fn recover_partition(
         File::open(path)?.sync_all()?;
     }
 
-    let log_start = scan.log_start.unwrap_or(Offset::ZERO);
+    // Empty-log anchoring (Phase 12 F3, plan 05-21): a log with no records starts at the
+    // floor. Records are never invented; this only fixes where the next append lands.
+    let log_start = scan.log_start.unwrap_or_else(|| anchor(floor));
     Ok(RecoveryReport {
         segments: segs.into_iter().map(|(_, p)| p).collect(),
         log_start,
