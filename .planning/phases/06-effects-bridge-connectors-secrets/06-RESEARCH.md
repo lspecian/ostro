@@ -18,14 +18,14 @@ Phase 6 therefore needs **no WIT record changes**. It does need **doc-comment cl
 The central design rule: **an effect is re-driven only inside a replaying activation, never from the journal alone.** The journal's `HttpRequest` mirror deliberately omits the retry policy, and redacted header values are not journaled. The full request (retry policy, real header values) is available only when the guest re-issues the call during replay. The command hash matches because header values and retry are not hashed. Effect I/O runs in a node-owned task (an `EffectRegistry` keyed by `(run, op)`), so it survives activation eviction. Its result is committed through a new attempt-independent command, `CompleteEffect`, which journals `EffectCompleted` once (first completion wins, like `CompleteToken` in 05-07). After a crash, the leader wakes every run that has open `effects` rows so that replay re-drives them. Suspended runs would otherwise sleep forever, which contradicts the "no sweeper" claim in docs/03 §5.2.
 
 Two dependency findings change the stack in `.planning/research/STACK.md`:
-1. **`object_store` 0.14.2 has a non-optional `chrono` dependency.** Chrono is banned in deny.toml (RUSTSEC-2026-0543, published 2026-09-14), and object_store also brings in `humantime` (RUSTSEC-2026-0542). Upstream issue apache/arrow-rs-object-store#909, opened 2026-11-17, notes that removal needs a breaking release because `ObjectMeta::last_modified: DateTime<Utc>` is public API. Verified: `cargo deny` fails with `banned chrono` plus two `unmaintained` errors. It passes with a scoped exception: `wrappers = ["object_store"]` plus two advisory ignores.
+1. **`object_store` 0.14.2 has a non-optional `chrono` dependency.** Chrono is banned in deny.toml (RUSTSEC-2026-0543, published 2026-09-14), and object_store also brings in `humantime` (RUSTSEC-2026-0542). Upstream issue apache/arrow-rs-object-store#909, opened 2026-11-17, notes that removal needs a breaking release because `ObjectMeta::last_modified: DateTime<Utc>` is public API. Verified: `cargo deny` fails with `banned chrono` plus two `unmaintained` errors. Phase 8 research (08-RESEARCH.md, commit e757400) found the same thing independently. **Aligned decision:** Phases 6 and 8 share one in-house crate, **`ostro-objstore`**, with a local-fs backend and an S3-compatible backend on **rusty-s3 0.12.0** (BSD-2-Clause, sans-IO SigV4, jiff 1.0 / hmac 0.13 / sha2 0.11, all already pinned) over the existing reqwest 0.13.5 + rustls. Whichever phase runs first creates the crate. Presign fits rusty-s3 natively (verified in source; see §Object store). With rusty-s3 instead of object_store, the full Phase 6 stack passes the **stock** deny.toml, with no exception and no chrono in the graph (verified).
 2. **sqlx `tls-rustls-aws-lc-rs` pulls `webpki-roots`, licensed `CDLA-Permissive-2.0`.** That licence is not in the allow-list, so `cargo deny` fails. `tls-rustls-aws-lc-rs-native-roots` passes. mysql_async's rustls feature always pulls webpki-roots too, which is another reason to choose sqlx.
 
-The full candidate stack passes bans, licences and advisories against the real workspace with the object_store exception, with exactly one version each of hyper, http, tonic, prost, axum, reqwest, rustls and wasmtime. The stack is sqlx 0.9.1, object_store 0.14.2 (aws+gcp+azure), hickory-resolver 0.26.3, vaultrs 0.8.0, kube 5.1.0, k8s-openapi 0.29.0, zeroize, secrecy, governor, ipnet and aho-corasick.
+The full candidate stack passes bans, licences and advisories against the real workspace and the **unmodified** deny.toml, with exactly one version each of hyper, http, tonic, prost, axum, reqwest, rustls and wasmtime. The stack is sqlx 0.9.1, rusty-s3 0.12.0 (via `ostro-objstore`), hickory-resolver 0.26.3, vaultrs 0.8.0, kube 5.1.0, k8s-openapi 0.29.0, zeroize, secrecy, governor, ipnet and aho-corasick.
 
 **Primary recommendation:** Build `ostro-bridge` as three layers:
 - an egress core: a `url`-normalised gate, a resolver-level IP classifier with pinned connect, and a reqwest client with `no_proxy`, no auto-redirect, no referer and no gzip;
-- connectors: HTTP, SQL (sqlx 0.9.1 native-roots) and object (object_store 0.14.2 under a scoped deny exception);
+- connectors: HTTP, SQL (sqlx 0.9.1 native-roots) and object (a thin adapter over the shared `ostro-objstore` crate: rusty-s3 S3-compatible + local fs);
 - secrets: a sealed store on aws-lc-rs AEAD (already in the tree), env/file/Vault/K8s providers, origin-bound grants and a response scrubber.
 
 Wire it through an `EffectDriver` hook in the engine and an `EffectRegistry` + `CompleteEffect` command in the server.
@@ -67,7 +67,7 @@ There is no CONTEXT.md for Phase 6: discuss-phase was not run, and the project r
 | FX-02 | Stable idempotency key (run, op, name), user-overridable | §Idempotency key: `ostro-` + 32 hex of sha256("ostro/idem/v1"‖run_id‖op). WIT has no `name` field; the op seq is the stable name. The `idempotency-key` field overrides it. |
 | FX-03 | Replay re-drives in-flight effects with the same key; past the provider window → `effect_outcome_unknown` | §Re-drive rule + §Unknown-outcome window (window measured from the `EffectScheduled` journal ts; idempotent methods exempt; per-destination `idempotency_window`, default 24h) |
 | FX-04 | SQL connector (PG, MySQL), named connections; exactly-once via `ostro_effects` token | §SQL exactly-once protocol, MySQL implicit-commit list, PG no-transaction-block list, statement allow-list, sqlx 0.9.1 |
-| FX-05 | Object store (S3/GCS/Azure/local via `object_store`) get/put/presign | §Object store (object_store 0.14.2 + scoped chrono exception; `Signer` for S3/GCS/Azure; HMAC Ostro-served presign for local) |
+| FX-05 | Object store (S3/GCS/Azure/local via `object_store`) get/put/presign. **Wording update proposed**, see §Object store | §Object store (shared `ostro-objstore`: rusty-s3 S3-compatible incl. GCS via HMAC interop + local fs; rusty-s3 `S3Action::sign` presign; HMAC Ostro-served presign for local; Azure deferred) |
 | FX-06 | `{{secret:name}}` resolved only in the bridge, zeroized, never journaled or logged, never visible to guests | §Secrets: template grammar, resolution point, `Zeroizing`/`SecretString`, `HeaderValue::set_sensitive`, canary harness |
 | FX-07 | Grants bound to (module, secret, origins); no redirects on templated requests; responses scrubbed | §Grants, §Redirect rules (reqwest strips only Authorization/Cookie/Proxy-Authorization cross-host, verified in source), §Scrubber |
 | FX-08 | Per-module allow-lists; SSRF guard (private, link-local, metadata, mapped IPv6, NAT64, decimal/octal, `fd00:ec2::254`, redirects, env proxies) | §SSRF: bypass table, url-crate normalisation probe, the hyper-util IP-literal resolver bypass (verified), `no_proxy` (reqwest reads env proxies by default, verified) |
@@ -111,8 +111,42 @@ There is no CONTEXT.md for Phase 6: discuss-phase was not run, and the project r
 Non-WIT items (format, also frozen at 05-19):
 - **F1 (no change needed, architecture lock).** The journal `HttpRequest` mirror omits `retry`, and its struct shape freezes with `EVENT_CODEC_VER` 1. This is acceptable **only because** re-drive happens inside the replaying activation, where the guest re-supplies the full WIT request. Phase 6 must never build a leader-side sweeper that re-sends from the journal.
 - **F2 (no change needed).** Phase 6 changes *what string* is journaled for redacted header values (`"[redacted]"`), not the codec. Existing golden and corpus journals stay valid.
-- **F3 (optional, 05-01).** Reserve `Cmd` tag 13 = `CompleteEffect`, `Intent` 9/10 = `RegisterEffect`/`CancelEffect`, and journal kind 72+ for Phase 6 in the 05-01 contract comments, so no other pre-freeze addition takes them.
+- **F3 (coordination, now concrete).** Phases 6, 7 and 8 append to the same ordinal spaces in parallel. Phase 6's exact needs are in §Ordinal Reservations below, for the coordinator's reservation table (Phase 8 finding F4).
 - **F4 (no change recommended).** Phase 6 can use the thin meta records through documented conventions; see §Meta record conventions. If the Phase 5 planner prefers typed shapes, the only pre-freeze alternative is to reshape `Grant`/`EgressPolicy` now. After the freeze, Phase 6 can only append new `MetaRecord` variants: postcard structs cannot gain fields.
+
+## Ordinal Reservations Phase 6 Needs (for the cross-phase reservation table)
+
+Phases 6, 7 and 8 run in parallel after the 05-19 freeze, and all append to ordinal-encoded spaces (08-RESEARCH F4). Phase 6's exact needs, assuming Phase 5's numbering (Cmd 8–12 used; Intent 7–8 used; journal kinds 70–71 used; TerminalStatus 3–5 used; outbox Kind 6 used):
+
+| Space | Encoding (why it collides) | Phase 6 needs | Items | Notes |
+|---|---|---|---|---|
+| `Cmd` oneof tags (`ostro_types::command`) | prost tag | **1** (Phase 8 proposes blocks of 7; Phase 6 uses 1) | `CompleteEffect{run_id, op u64, outcome PayloadRef (inline or blob), completed_at_ms}` | Attempt-independent. Apply: effects row present → journal `EffectCompleted`, delete row, wake; absent with op < next_seq → `Duplicate` (existing code 1); run terminal → existing `RunTerminal` reject. |
+| `Derived` intent oneof tags (submitter-derived, inside `EventsAppended`) | prost tag | **2** | `RegisterEffect{op, kind u8 (http/sql/object), scheduled_at_ms}`, `CancelEffect{op}` | **This space is missing from Phase 8's F4 list; add it to the table.** Phase 7 may need intents too. |
+| State keyspaces (`TABLES`, digest order) | declaration order = digest order | **0 new** | Uses the **already-reserved `effects` keyspace (#12)**. Key `run(18 bytes) ‖ op BE u64` → `VALUE_FORMAT ‖ postcard EffectRow{kind u8, scheduled_at_ms u64}` | Digest order is unchanged. The first rows appear in Phase 6, which is additive (D18: derived values). No new `RunRecord` field: an `open_effects` counter would be a VALUE_FORMAT change, so the terminal cleanup prefix-scans `effects` by run instead. |
+| Journal `EventBody` kinds | u32 kind + enum position (postcard) | **0** | none (`EffectScheduled` 18 / `EffectCompleted` 65 exist) | An optional observability `EffectAttempt` kind is not needed for FX-*, so nothing is reserved. |
+| Apply outcome codes / `RejectReason` | 16 + index, folded into the state hash | **0** | reuse `Duplicate`, `RunTerminal` | |
+| `InvalidCode` | appended index | **1** | `BadEffectCompletion` (CompleteEffect for an op ≥ next_seq or an op that is not an effect) | Bad `RegisterEffect`/`CancelEffect` intents reuse the existing `BadIntent`. |
+| `MetaRecord` variants / `MetaKind` / `MetaKey` | postcard variant index | **0** | Uses the existing `Secret(SealedSecret)`, `Grant`, `Connection` (opaque `config` bytes = versioned JSON) and `Egress(EgressPolicy)` through the conventions below | Deliberately avoids new variants, so `MetaState` gains no map (Phase 8 F3: a new map changes the snapshot struct). |
+| `MetaState` fields | positional postcard | **0** | none | |
+| Outbox `Kind` / `TerminalStatus` | prost tags / enum values | **0** | none | |
+| WIT packages `0.1.N` | directory/package version | **0** | no 0.1.1 in Phase 6 (D-FX8) | |
+| Golden files (append-only) | line order | `commands.txt` +1 Cmd and +2 intent lines; `journal_v1.txt` +0 | | |
+
+Non-ordinal names to reserve (they can only collide by name):
+- Config sections `[secrets]`, `[egress]`, `[connectors]`.
+- Failpoint prefix `bridge::`.
+- REST prefixes `/v1/secrets`, `/v1/grants`, `/v1/connections`, `/v1/egress`, `/v1/objects/{connection}/{key}` (local presign).
+- Sealed-secret prefix `__ostro/` (exists: `__ostro/token-key`; Phase 6 adds `__ostro/presign/<connection>`).
+- Grant id prefix `secret:`.
+- The crate `ostro-objstore` (shared with Phase 8; first runner creates it).
+
+**Cross-phase coupling:** Phase 8 webhook verifiers carry a "secret ref". They should resolve it through Phase 6's `SecretProvider` chain and sealed store, not a second mechanism. If Phase 8 lands first, it reads `SealedSecret` using the `key_id` convention below (`plaintext-v0` | `aes256gcm:<kid>`).
+
+### Meta record conventions (no format change)
+- `SealedSecret{name: "<tenant|_>/<name>", ciphertext: [ver][nonce 12][ct+tag], key_id: "aes256gcm:<kid>" | "plaintext-v0"}`.
+- `Grant{id: "secret:<module>:<secret>", subject: "module:<module>", scopes: ["origin:https://api.stripe.com", …, "body"]}`.
+- `Connection{name, kind: "sql-postgres" | "sql-mysql" | "object" | "http-target", config: JSON {"v":1, …}}`.
+- `EgressPolicy{name: <module>, allow: ["https://api.stripe.com", "https://*.example.com:8443", …]}`.
 
 ## Standard Stack
 
@@ -126,7 +160,7 @@ Versions were verified against crates.io on 2026-11-19. Deny results come from a
 | url | 2.5.8 (already in lock) | WHATWG URL parsing and host normalisation | Probe: decimal, octal, hex, short and percent-encoded IPv4 forms normalise to `Host::Ipv4`. See the SSRF section. |
 | ipnet | 2.12.2 (already in lock) | CIDR tables | |
 | sqlx | **=0.9.1** (`default-features=false`; `runtime-tokio`, `tls-rustls-aws-lc-rs-native-roots`, `postgres`, `mysql`, `json`, `time`, `bigdecimal`, `uuid`) | PG and MySQL connector with pooling | One API for both databases, pure Rust. **Deny-clean only with `-native-roots`.** `tls-rustls-aws-lc-rs` pulls webpki-roots (CDLA-Permissive-2.0, rejected). No `macros`/`migrate`/`any`/`sqlite` (no libsqlite3-sys in the graph; verified). No `chrono`: `time` 0.3.55 is used for DATETIME/TIMESTAMPTZ decoding and `bigdecimal` for NUMERIC/DECIMAL. 0.9.0 shipped 2026-05-21, 0.9.1 on 2026-11-18. |
-| object_store | **=0.14.2** (`aws`, `gcp`, `azure`; default `fs`) | Object-store effect (and Phase 8 bottomless) | Apache Arrow crate. Provides `Signer::signed_url(method, path, expires_in)` for AmazonS3/GCS/Azure (docs.rs). LocalFileSystem has **no** Signer. **Requires a deny.toml exception (Decision D-FX1).** |
+| rusty-s3 (via the shared **`ostro-objstore`** crate, created by Phase 6 or Phase 8, whichever runs first) | 0.12.0 | S3-compatible object effect (and Phase 8 bottomless) | Sans-IO SigV4 with first-class presign: `bucket.get_object(Some(&creds), key).sign(Duration)` / `put_object(..)` → `Url` (verified in 0.12.0 source: `S3Action::sign`, 1 s–7 d validity, `query_mut` for e.g. `response-content-type`, `headers_mut` for signed headers such as `content-type`, `Credentials::new_with_token` for session tokens). BSD-2-Clause. Deny-clean with the stock deny.toml. Transport = reqwest 0.13.5 (`rustls`, `stream`). |
 | aws-lc-rs | 1.19.0 (already in tree via rustls) | Sealed-store AEAD (AES-256-GCM, `RandomizedNonceKey`) | No new crypto crate. FIPS-capable provider already linked. |
 | zeroize | 1.9.2 (already in lock; add the `derive` feature) | Wipe Ostro-owned secret buffers | |
 | secrecy | 0.10.3 | `SecretString`/`SecretBox` with redacted Debug and explicit `expose_secret()` | Deny-clean. kube already depends on it. |
@@ -150,17 +184,17 @@ Versions were verified against crates.io on 2026-11-19. Deny results come from a
 | Instead of | Could Use | Tradeoff |
 |------------|-----------|----------|
 | sqlx | tokio-postgres 0.7.18 + tokio-postgres-rustls 0.14.0 + mysql_async 0.37.1 | Two APIs and two pools (PG needs deadpool/bb8). mysql_async `rustls-tls` **always** pulls webpki-roots, so it fails the licence check (verified). It adds no capability that matters here. |
-| object_store (+ chrono exception) | rusty-s3 0.12.0 (sans-IO SigV4 + presign; deps jiff 1, sha2 0.11, hmac 0.13, all aligned) + an Ostro-owned local backend | Fully deny-clean with no exception. But it is S3-only (GCS works only through S3-interop HMAC keys, Azure not at all), and Ostro would hand-roll the HTTP transport, multipart, retries, list and conditional put that Phase 8 bottomless also needs. Use it as the fallback if D-FX1 is rejected. |
+| `ostro-objstore` (rusty-s3 + local fs) | object_store 0.14.2 + a scoped deny exception (`wrappers = ["object_store"]` plus ignores for RUSTSEC-2026-0543/-0542) | Verified to pass with the exception, and it brings GCS/Azure/multipart for free. **Rejected** (aligned with Phase 8) while chrono and humantime are required: it relaxes a standing rule, and chrono would sit in public API types. Re-evaluate when arrow-rs-object-store #909/#908 ship. The `ostro-objstore` trait keeps a later swap cheap. |
 | aws-lc-rs AEAD | chacha20poly1305 0.11.0 | It is deny-clean but adds a crate for no gain. |
 | vaultrs | hand-rolled KV v2 GET with reqwest | Smaller, but re-implements AppRole/K8s login and token renewal. |
 | kube | hand-rolled in-cluster GET with the SA token + CA | ~80 lines, but loses kubeconfig/out-of-cluster support and token refresh. The **file provider already covers mounted secrets**. |
 | native roots for SQL TLS | allow `CDLA-Permissive-2.0` in deny.toml (webpki-roots) | Bundled roots work in scratch containers. This is a licence-policy decision (D-FX2). Native roots plus a per-connection `ca_file` covers managed databases (RDS/Cloud SQL ship their own CA bundles). |
 
-**Workspace pins (06-01 adds all of them; later plans never touch Cargo.toml):**
+**Workspace pins (06-01 adds all of them, skipping any Phase 8 already pinned; later plans never touch Cargo.toml):**
 ```toml
 # Phase 6 effects bridge (versions verified 2026-11-19)
 sqlx = { version = "=0.9.1", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs-native-roots", "postgres", "mysql", "json", "time", "bigdecimal", "uuid"] }
-object_store = { version = "=0.14.2", features = ["aws", "gcp", "azure"] }
+rusty-s3 = "0.12.0"   # shared with Phase 8 (ostro-objstore); add only if Phase 8's 08-01 has not already pinned it
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
 url = "2.5.8"
 ipnet = "2.12.2"
@@ -173,19 +207,7 @@ vaultrs = { version = "0.8.0", default-features = false, features = ["rustls"] }
 kube = { version = "5.1.0", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs"] }
 k8s-openapi = { version = "0.29.0", features = ["v1_33"] }
 ```
-**deny.toml change (only if D-FX1 is accepted):**
-```toml
-[advisories]
-ignore = [
-  { id = "RUSTSEC-2026-0543", reason = "chrono via object_store only (public API); remove when apache/arrow-rs-object-store#909 ships" },
-  { id = "RUSTSEC-2026-0542", reason = "humantime via object_store only; remove when arrow-rs-object-store#908 ships" },
-]
-[bans]
-deny = [ # replace the chrono line:
-  { crate = "chrono", wrappers = ["object_store"], reason = "RUSTSEC-2026-0543; allowed only as object_store's dependency (no Ostro code may name chrono)" },
-]
-```
-Verified: with exactly these two edits, `cargo deny check bans licenses advisories` reports "advisories ok, bans ok, licenses ok" for the full candidate stack. Add a negative fixture under `ci/deny-fixtures/` proving that a direct `chrono` dependency of an Ostro crate is still rejected.
+**deny.toml:** no change. The full Phase 6 stack, including rusty-s3, sqlx native-roots, hickory, vaultrs, kube, governor, secrecy, zeroize and aho-corasick, passes `cargo deny check bans licenses advisories` against the stock deny.toml (verified 2026-11-19; only warn-level duplicates such as thiserror 1/2, jiff 0.2/1.0 via kube, tower-http 0.6/0.7 via reqwest).
 
 ## Architecture Patterns
 
@@ -201,7 +223,7 @@ crates/ostro-bridge/src/
 │   └── client.rs       # reqwest ClientBuilder: no_proxy, redirect none/custom, referer(false), no gzip, timeouts
 ├── http.rs             # HTTP effect: key, window, retry classification, templating, size cap, scrub
 ├── sql/{mod,pg,mysql,classify,value}.rs   # pools, exactly-once protocol, statement allow-list, value mapping
-├── object.rs           # object_store adapters (S3-compatible, GCS, Azure, local) + presign (Signer / HMAC)
+├── object.rs           # effect adapter over ostro-objstore: op dispatch, JSON encodings, caps, presign (rusty-s3 sign / local HMAC route)
 ├── ratelimit.rs        # governor keyed limiter per target
 └── secrets/
     ├── value.rs        # SecretValue (SecretBox<[u8]>), Zeroizing
@@ -351,20 +373,34 @@ submit CompleteEffect(result bytes)
 - date/time/interval/arrays/other → `text` via a server-side cast is impossible after the fact. Return `NonRetryable{kind:"sql_unsupported_type", details: column/type}` and document "cast in SQL (`::text`)".
 - Params map the reverse way. `Timestamptz` binds as `OffsetDateTime`.
 
-### Object store (FX-05)
-- `Connection{kind: "object", config}` holds JSON `{"v":1,"backend":"s3"|"gcs"|"azure"|"local", "bucket", "endpoint"?, "region"?, "allow_http"?, "virtual_hosted"?, "root"? (local), "prefix"?, "credentials": {"access_key_id": "{{secret:x}}", "secret_access_key": "{{secret:y}}"}, "presign_expiry": "15m", "max_get_bytes": 16777216}`.
-  - Credentials are templated and resolved when the store is built.
-  - Stores are rebuilt when secrets change, using a TTL (default 5 min).
-- Build with `AmazonS3Builder::new().with_bucket_name().with_endpoint().with_allow_http().with_virtual_hosted_style_request(false)` (MinIO/R2/Ceph), `GoogleCloudStorageBuilder`, `MicrosoftAzureBuilder`, and `LocalFileSystem::new_with_prefix(root)`. Wrap them in `PrefixStore` for per-connection prefixes. `PrefixStore<T: Signer>` is itself a Signer (docs.rs).
+### Object store (FX-05): the shared `ostro-objstore` crate
+**Alignment with Phase 8.** There is one crate, `crates/ostro-objstore`, and **whichever of Phase 6 / Phase 8 runs first creates it**. Phase 8's 08-03 defines the trait: `put`, `put_if_absent`, `put_if_match`, `get`, `get_range`, `head`, `list(prefix, start_after)`, `delete`, multipart ≥ 64 MiB; LocalFs uses tmp + fsync + rename; S3 uses rusty-s3 + reqwest with retries, path- or virtual-host style, region and endpoint. Phase 6 adds only what FX-05 needs on top:
+- `async fn presign(&self, method: PresignMethod /* Get | Put */, key: &str, expires: Duration, opts: &PresignOpts /* content_type, response_content_type */) -> Result<Option<Url>>`.
+  - S3: `bucket.get_object(Some(&creds), key)` or `put_object(..)`, then `query_mut()` (`response-content-type`) / `headers_mut()` (`content-type`, which the uploader must then send), then `.sign(expires)`. All verified in rusty-s3 0.12.0 source. S3 accepts 1 s–7 d. URLs signed with session tokens (`Credentials::new_with_token`) expire with the token.
+  - LocalFs: returns `None`, and the bridge uses the Ostro-served HMAC route below.
+- A `PutOpts { content_type: Option<String> }` on `put` (S3: `headers_mut().insert("content-type", ..)`; LocalFs: stored in a sidecar or ignored, documented).
+- `ObjectMeta { size, last_modified: jiff::Timestamp, e_tag: Option<String>, version: Option<String> }`. jiff only, no chrono anywhere.
+
+If Phase 6 creates the crate first, it builds the full Phase 8 trait surface minus multipart and conditional puts (stubs returning `Unsupported`), so 08-03 only fills in methods. If Phase 8 created it first, 06-08 adds `presign` + `PutOpts` additively. Either way, document the ownership in both phases' SUMMARYs.
+
+**Effect adapter (`ostro-bridge/src/object.rs`).**
+- `Connection{kind: "object", config}` holds JSON `{"v":1, "backend":"s3"|"local", "endpoint", "bucket", "region", "url_style":"path"|"virtual", "allow_http"?, "root"? (local), "prefix"?, "credentials": {"access_key_id": "{{secret:x}}", "secret_access_key": "{{secret:y}}", "session_token"?}, "presign_expiry": "15m", "max_get_bytes": 16777216}`.
+  - Credentials are templated and resolved when the backend is built; rebuilt on a TTL (default 5 min).
+  - **GCS** works as `backend = "s3"` with `endpoint = "https://storage.googleapis.com"`, `region = "auto"` and GCS HMAC keys, through the GCS XML API's S3 interoperability. This is training data plus a GCS interop claim: **MEDIUM**, so it needs an integration check before docs promise it.
+  - **Azure Blob is deferred.** It has no S3 API, so it needs its own backend in `ostro-objstore` later.
 - Ops:
   - `get` → bytes, capped;
-  - `put` → `PutPayload`, returns JSON `{"e_tag":…, "version":…}`;
-  - `head` → JSON `{size, last_modified (RFC 3339 via jiff, converted from chrono at the adapter boundary), e_tag}`;
+  - `put` → returns JSON `{"e_tag":…, "version":…}`;
+  - `head` → JSON `{size, last_modified (RFC 3339 via jiff), e_tag}`;
   - `delete` → empty;
-  - `presign-get`/`presign-put` → `Signer::signed_url(Method::GET|PUT, &path, expiry)` → URL bytes.
-- **Local backend presign:** LocalFileSystem has no Signer, so Ostro serves `GET|PUT /v1/objects/{connection}/{key}?exp=<unix>&sig=<hmac-sha256>` from ostro-api. It uses `hmac 0.13`/`sha2 0.11` (already pinned), with a per-connection key stored as a sealed secret `__ostro/presign/<connection>`. Constant-time compare. The route is unauthenticated, but the signature check is the authentication.
-- **chrono containment:** only `ostro-bridge/src/object.rs` touches `object_store::ObjectMeta`; it converts `last_modified.timestamp()`/`timestamp_subsec_nanos()` to `jiff::Timestamp`, never naming chrono. A grep check in ci-local enforces that no `use chrono` / `chrono::` appears outside that file.
-- Object-store endpoints are **operator-configured** (trusted). They are exempt from guest egress allow-lists and the private-range block, since MinIO on localhost is legitimate. Module access is governed by connection grants.
+  - `presign-get`/`presign-put` → URL bytes.
+- **Local backend presign:** Ostro serves `GET|PUT /v1/objects/{connection}/{key}?exp=<unix>&sig=<hmac-sha256>` from ostro-api. It uses `hmac 0.13`/`sha2 0.11` (already pinned), with a per-connection key stored as a sealed secret `__ostro/presign/<connection>`. Constant-time compare. The route is unauthenticated, but the signature check is the authentication.
+- Object-store endpoints are **operator-configured** (trusted). They use a separate reqwest client (still `.no_proxy()` unless an operator proxy is configured) and are exempt from guest egress allow-lists and the private-range block, since MinIO on localhost is legitimate. Module access is governed by connection grants.
+
+**Proposed FX-05 wording (REQUIREMENTS.md):**
+> - [ ] **FX-05**: Object store connector through the shared `ostro-objstore` crate: S3-compatible backends (AWS S3, MinIO, R2, Ceph; GCS via S3-interoperability HMAC keys) and the local filesystem, with get/put/delete/head/presign. Azure Blob is deferred until a native backend exists [FR-4.3]
+
+ROADMAP Phase 6 success criterion 5 ("S3-compatible and local backends") already matches and needs no change. PRD FR-4.3 ("S3/GCS/Azure/local") should get a footnote saying Azure is deferred. docs/03 §3/§11's `chronik-object-store` / `object_store` references are superseded, as Phase 8 also notes.
 
 ### Secrets (FX-06/07/10)
 - **Template grammar:** `\{\{secret:([a-z0-9][a-z0-9_.\-/]{0,127})\}\}`, case-sensitive. `__ostro/` is a reserved prefix that guests can never reference. Escaping: not supported. A literal `{{secret:` in a header value is always treated as a placeholder, and unknown names fail.
@@ -460,7 +496,7 @@ Optional defence in depth: a `connector_layer` that checks `peer_addr()` against
 - **Applying scrub/redact only to the journaled copy:** the guest would see different bytes live and on replay. Completions must reach the guest only from the journal.
 - **Creating `ostro_effects` inside the effect transaction on MySQL:** DDL commits the transaction implicitly.
 - **`raw_sql` / multi-statement strings:** this defeats the single-statement guarantee of the extended or prepared protocol.
-- **Naming `chrono` in Ostro code:** keep it inside object_store (the wrapper exception).
+- **Adding `object_store` (or anything that pulls chrono/humantime):** use `ostro-objstore`. The deny ban stays absolute.
 
 ## Don't Hand-Roll
 
@@ -469,7 +505,7 @@ Optional defence in depth: a `connector_layer` that checks `peer_addr()` against
 | URL host normalisation (octal/hex/decimal/IDNA/percent) | regexes over URL strings | `url` 2.5.8 (WHATWG) | Proven by the probe. Every inet_aton form normalises to `Host::Ipv4`. |
 | DNS | getaddrinfo via `tokio::net::lookup_host` | hickory-resolver 0.26.3 | No libc quirks, async, all records visible. |
 | CIDR math | bit twiddling | `ipnet` + std `to_ipv4_mapped()` | |
-| SigV4, presign, multipart, retries for S3/GCS/Azure | your own signer | object_store 0.14.2 (`Signer`) | Edge cases: clock skew, path encoding, region, session tokens. |
+| SigV4 signing and presign for S3-compatible stores | your own canonical-request/signing code | rusty-s3 0.12.0 inside `ostro-objstore` | Edge cases: URI encoding, payload hash modes, session tokens, clock handling. |
 | PG/MySQL wire protocol, pooling, TLS | — | sqlx 0.9.1 | |
 | AEAD | your own crypto | aws-lc-rs `RandomizedNonceKey` (AES_256_GCM) | Already linked. Nonce misuse is impossible by construction. |
 | Vault auth and renewal | raw HTTP | vaultrs 0.8.0 | |
@@ -516,8 +552,9 @@ Optional defence in depth: a `connector_layer` that checks `peer_addr()` against
 **What goes wrong:** every e2e test needs `allow_private = ["127.0.0.0/8"]`, and someone ships that default.
 **How to avoid:** the default is empty. Tests set it explicitly. The bypass-table test asserts the default config blocks loopback.
 
-### Pitfall 9: The chrono exception spreads
-**How to avoid:** deny `wrappers = ["object_store"]`, a negative deny fixture (an Ostro crate depending on chrono must fail), and a ci-local grep for `chrono` outside `object.rs`.
+### Pitfall 9: Two object-store layers
+**What goes wrong:** Phase 6 and Phase 8 run in parallel and each builds its own S3 client.
+**How to avoid:** there is one `ostro-objstore` crate, and the first phase to run creates it with the agreed trait surface (§Object store). The other phase extends it additively. A STATE.md decision records the owner.
 
 ### Pitfall 10: Large request bodies or responses bloat the journal
 **What goes wrong:** `EffectScheduled` journals the request body, and responses up to the cap go into `EffectCompleted`.
@@ -604,16 +641,16 @@ if !resend { return Outcome::unknown(op, key, elapsed); }   // NonRetryable effe
 
 | Old Approach | Current Approach | When Changed | Impact |
 |--------------|------------------|--------------|--------|
-| chrono for time types | jiff 1.0 / time 0.3 | RUSTSEC-2026-0543 (2026-09-14); humantime RUSTSEC-2026-0542 | object_store still depends on chrono (issue #909, 2026-11-17). A scoped exception is needed until its next breaking release. |
+| chrono for time types | jiff 1.0 / time 0.3 | RUSTSEC-2026-0543 (2026-09-14); humantime RUSTSEC-2026-0542 | object_store still depends on chrono (issue #909, 2026-11-17), so Ostro uses rusty-s3 0.12 (jiff 1.0) in `ostro-objstore`. |
 | sqlx 0.8 | sqlx 0.9 (0.9.0 May 2026, 0.9.1 Nov 2026) | 2026 | Feature names: `tls-rustls-aws-lc-rs[-native-roots]`, `runtime-tokio`. No jiff feature, so use `time`. |
 | reqwest 0.12 (native-tls default) | reqwest 0.13 (rustls + aws-lc-rs default, `retry` builder) | 2025/26 | Env proxies are still on by default. |
-| object_store in arrow-rs monorepo | apache/arrow-rs-object-store, 0.14.x with optional reqwest transport | 2025–26 | `Signer` is available behind `cloud-base`. |
+| object_store as the default Rust S3 client | rusty-s3 (sans-IO) + own transport for chrono-free stacks | 2026-11 | Re-evaluate object_store after #909 ships. |
 
-**Deprecated/outdated:** STACK.md's `sqlx` line (feature `tls-rustls-aws-lc-rs` plus `macros`) and its `object_store` line, which does not mention chrono. Both are superseded by this document.
+**Deprecated/outdated:** STACK.md's `sqlx` line (feature `tls-rustls-aws-lc-rs` plus `macros`) and its `object_store` line (blocked by the chrono ban). Both are superseded by this document.
 
 ## Open Questions / Decisions to Confirm
 
-1. **D-FX1: object_store vs the chrono ban.** Recommendation: accept the scoped exception (`wrappers = ["object_store"]` plus two advisory ignores tied to upstream #908/#909), confined to `object.rs`. Phase 8 bottomless benefits too. Fallback: rusty-s3 0.12.0 plus an Ostro local backend (S3-only, so it loses GCS/Azure from FX-05). **USER REVIEW**, because it relaxes a standing rule.
+1. **D-FX1: object store = shared `ostro-objstore` (rusty-s3 0.12.0 + local fs), aligned with Phase 8.** No deny exception. GCS goes through S3 interop (MEDIUM, to verify). Azure is deferred. The FX-05 wording update is proposed in §Object store. **USER REVIEW** only for the FX-05 text change and the Azure deferral.
 2. **D-FX2: SQL TLS roots.** Recommendation: native roots plus a per-connection `ca_file`. Alternative: allow `CDLA-Permissive-2.0` (webpki-roots) in deny.toml.
 3. **D-FX3: default idempotency window = 24h** for unconfigured destinations, and resend for idempotent methods regardless of window.
 4. **D-FX4: body templating** is opt-in per grant (`body = true`). The URL is never templated (docs/03 §9.1).
@@ -628,14 +665,14 @@ if !resend { return Outcome::unknown(op, key, elapsed); }   // NonRetryable effe
 
 | Plan | Wave | Depends on | Scope | Requirements |
 |------|------|------------|-------|--------------|
-| **06-01** GATE + contracts | 1 | Phase 5 complete (05-19 freeze verified) | Verify the freeze, record D-FX1..9 in STATE.md, add all Phase 6 workspace pins and deny.toml edits (D-FX1) plus a negative fixture, and add the additive contract: `Cmd::CompleteEffect` (13), `Intent::RegisterEffect` (9) / `CancelEffect` (10), the `EffectRow` value for keyspace #12, and golden lines appended (never re-blessed). Add `ostro-bridge` to the failpoints feature chain. The only wave-1 plan touching Cargo.toml, Cargo.lock or deny.toml. | infra for all |
+| **06-01** GATE + contracts | 1 | Phase 5 complete (05-19 freeze verified) | Verify the freeze, record D-FX1..9 in STATE.md, add all Phase 6 workspace pins (no deny.toml change), create the `ostro-objstore` skeleton with the agreed trait if Phase 8 has not already, and add the additive contract, using the numbers from the reservation table (§Ordinal Reservations): `Cmd::CompleteEffect`, `Intent::RegisterEffect` / `CancelEffect`, `InvalidCode::BadEffectCompletion`, the `EffectRow` value for keyspace #12, and golden lines appended (never re-blessed). Add `ostro-bridge` to the failpoints feature chain. The only wave-1 plan touching Cargo.toml or Cargo.lock. | infra for all |
 | **06-02** Partition apply for effects | 2 | 06-01 | `apply/effects.rs`: RegisterEffect/CancelEffect/CompleteEffect (first wins, Duplicate, RunTerminal), terminal cleanup hook, wake (InputAppended/EnqueueReady), leader-start scan API, `gen_effects.rs` for the rebuild_digest proptest, read-budget notes in storage-format.md | FX-01, FX-03 |
 | **06-03** Egress core | 2 | 06-01 | url gate, classifier tables, EgressResolver, client builders, streaming cap, allow-list matcher, bypass-table unit tests (injectable lookup for DNS cases) | FX-08 |
 | **06-04** Secrets core | 2 | 06-01 | SecretValue, template parser, grants model plus origin check, scrubber with encodings, sealed store (aws-lc-rs), env/file providers, provider chain, `[secrets]` config | FX-06, FX-07, FX-10 (part) |
 | **06-05** Engine seam | 2 | 06-01 | `EffectDriver` trait, `Activate.effects`, pending LiveEffect, start after flush, replay re-drive for uncompleted ops, redacted journal copy, `ActivationSink::{resolve_secret, complete_effect}` default impls; engine tests with a fake driver (live drive after commit only, re-drive on replay, no drive when a completion exists) | FX-01, FX-03, FX-06 |
 | **06-06** HTTP connector + rate limits | 3 | 06-03, 06-04, 06-05 | key derivation, window decision, retry classification, templating at egress, redirect rules, scrub/redact, outcome encoding, governor per target, http-target config; testkit mock provider (dedupe by key, echo, redirect, slow, oversize) | FX-01, 02, 03, 07, 09 |
 | **06-07** SQL connector | 3 | 06-01, 06-04 (connection secrets) | sqlx pools per connection, value mapping, statement allow-list, exactly-once protocol, error mapping, ostro_effects DDL + GC, failpoints `bridge::sql::*`; env-gated PG/MySQL integration tests | FX-04 |
-| **06-08** Object connector | 3 | 06-01, 06-04 | object_store backends, ops + JSON encodings, Signer presign, local HMAC presign route in ostro-api, chrono containment grep | FX-05 |
+| **06-08** Object connector | 3 | 06-01, 06-04 (and 08-03 if Phase 8 already owns `ostro-objstore`) | `ostro-objstore`: presign + PutOpts (and the base LocalFs/S3 methods if Phase 6 is first); bridge adapter (ops, JSON encodings, caps), local HMAC presign route in ostro-api; MinIO integration test | FX-05 |
 | **06-09** Vault + K8s providers | 3 | 06-04 | vaultrs KV v2 + auth modes, kube Secret reads, TTL caches with zeroize; mock Vault/K8s HTTP servers (axum) for tests | FX-10 |
 | **06-10** Server seam | 4 | 06-02, 06-05, 06-06, 06-07, 06-08 | EffectRegistry, bridge as EffectDriver, CompleteEffect submission, pre-send gate (cancel/terminal/leadership), leader-start wake scan, removal of the 04-15 "unsupported" path for effects (regression: children still unsupported), `[egress]`/`[connectors]` config | FX-01..05 |
 | **06-11** Admin API + CLI | 4 | 06-04, 06-09, 06-01 | REST/gRPC/OpenAPI for secrets/grants/connections/egress over meta (values write-only), CLI `ostro secret|grant|connection|egress`, FakeControlPlane parity | FX-06, 07, 08, 10 |
@@ -667,14 +704,14 @@ Parallelism: wave 2 has 4 plans on disjoint crates (partition / bridge-egress / 
 | FX-03 | Evicted mid-effect + crash → leader scan wakes the run | e2e | `fx_redrive::suspended_inflight_wakes` | ❌ |
 | FX-04 | Crash between COMMIT and effect_completed → exactly 1 row change per run (PG and MySQL, N≥50 runs) | e2e failpoint + kill -9 | `OSTRO_TEST_PG_URL=… OSTRO_TEST_MYSQL_URL=… cargo test -p ostro --features failpoints --test fx_sql_crash --locked -- --test-threads=1` | ❌ |
 | FX-04 | Statement allow-list; MySQL implicit-commit table rejected; `/*!` rejected; NULL-result detection; serialization/deadlock → retryable | unit + DB integration | `cargo test -p ostro-bridge sql::classify --locked`; `cargo test -p ostro-bridge --test sql_pg --test sql_mysql --locked` | ❌ |
-| FX-05 | get/put/head/delete/presign on local + S3-compatible (MinIO); local HMAC presign route; expiry honoured | integration | `cargo test -p ostro-bridge --test object_local --locked`; `OSTRO_TEST_S3_URL=… cargo test -p ostro-bridge --test object_s3 --locked`; `cargo test -p ostro-api --test presign --locked` | ❌ |
+| FX-05 | get/put/head/delete/presign on local + S3-compatible (MinIO); presigned GET/PUT URL usable by a plain HTTP client and rejected after expiry; local HMAC presign route | integration | `cargo test -p ostro-objstore --test presign --locked`; `cargo test -p ostro-bridge --test object_local --locked`; `OSTRO_TEST_S3_URL=… cargo test -p ostro-bridge --test object_s3 --locked`; `cargo test -p ostro-api --test presign --locked` | ❌ |
 | FX-06 | Canary never on disk/journal/logs/tracing/object store/guest/API; secret never readable by the guest | e2e harness | `cargo test -p ostro-server --test fx_canary --locked` | ❌ |
 | FX-06 | Template parser; URL placeholder rejected; zeroize on drop (Ostro buffers) | unit | `cargo test -p ostro-bridge secrets:: --locked` | ❌ |
 | FX-07 | Grant for another origin refused (no request sent); templated request not redirected (3xx returned); echoed value scrubbed (raw/base64 at 3 alignments/hex/pct/JSON) | unit + e2e | `cargo test -p ostro-bridge secrets::scrub --locked`; `fx_canary::grant_origin_refused`, `::no_redirect`, `::echo_scrubbed` | ❌ |
 | FX-08 | Full bypass table blocked (literals, mapped, NAT64, 6to4, Teredo, metadata v4/v6, rebinding mixed answers, redirect to literal, env proxy, userinfo); per-module allow-list deny-by-default | unit table + e2e via guest | `cargo test -p ostro-bridge --test ssrf_table --locked`; `cargo test -p ostro-server --test fx_ssrf_e2e --locked` | ❌ |
 | FX-09 | Per-target limit enforced (N requests in window ≤ quota + burst; other target unaffected); `rate_limited` after max_wait | integration | `cargo test -p ostro-bridge --test ratelimit --locked` | ❌ |
 | FX-10 | Sealed store round trip + wrong-key failure + AAD binding; env/file; Vault KV v2 (mock and dev server in CI); K8s Secret (mock API) | unit + integration | `cargo test -p ostro-bridge secrets::sealed --locked`; `cargo test -p ostro-bridge --test providers --locked` | ❌ |
-| deny | chrono only via object_store; a direct chrono dependency is rejected | fixture | `bash scripts/check-deny-fixtures.sh` | ❌ (new fixture) |
+| deny | Stock deny.toml still passes with the Phase 6 stack; no chrono in the graph | gate | `cargo deny check && ! cargo tree --workspace -e normal --locked \| grep -q 'chrono v'` | ✅ (existing deny step) |
 
 ### Sampling Rate
 - **Per task commit:** `cargo test -p <crate touched> --locked` plus `cargo clippy -p <crate> --all-targets --locked -- -D warnings`.
@@ -693,12 +730,14 @@ Parallelism: wave 2 has 4 plans on disjoint crates (partition / bridge-egress / 
 ## Sources
 
 ### Primary (HIGH confidence)
-- Workspace probe (this research): resolution against `Cargo.lock` plus `cargo deny check bans licenses advisories` with the project's deny.toml. Results: sqlx (aws-lc-rs → webpki-roots licence fail; native-roots → ok), direct drivers (licence fail), object_store (chrono banned + 2 unmaintained), the scoped exception (ok), and the full stack (ok, single hyper/http/tonic/prost/axum/reqwest/rustls/wasmtime).
+- Workspace probe (this research): resolution against `Cargo.lock` plus `cargo deny check bans licenses advisories` with the project's deny.toml. Results: sqlx (aws-lc-rs → webpki-roots licence fail; native-roots → ok), direct drivers (licence fail), object_store (chrono banned + 2 unmaintained), object_store with a scoped exception (ok, rejected anyway), and the final full stack with rusty-s3 under the **stock** deny.toml (ok, no chrono, single hyper/http/tonic/prost/axum/reqwest/rustls/wasmtime).
 - `url` 2.5.8 parse probe on this machine (bypass literal normalisation).
 - crates.io API (versions, features, dependency lists), 2026-11-19: sqlx/sqlx-core/-postgres/-mysql 0.9.1, object_store 0.14.2, hickory-resolver 0.26.3, vaultrs 0.8.0, kube-client/kube-core 5.1.0, k8s-openapi 0.29.0, mysql_async 0.37.1, tokio-postgres 0.7.18, testcontainers 0.28.0 / -modules 0.15.0, bollard 0.21, rusty-s3 0.12.0, governor 0.10.4, secrecy 0.10.3, zeroize 1.9.2, chacha20poly1305 0.11.0
 - OSV: [RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543.html) (chrono unmaintained, published 2026-09-14), RUSTSEC-2026-0542 (humantime)
 - [apache/arrow-rs-object-store#909](https://github.com/apache/arrow-rs-object-store/issues/909) (chrono in public API), #908 (humantime → jiff), and the main-branch `Cargo.toml` (chrono non-optional)
-- [docs.rs object_store 0.14.2 `Signer`](https://docs.rs/object_store/0.14.2/object_store/signer/trait.Signer.html)
+- [docs.rs object_store 0.14.2 `Signer`](https://docs.rs/object_store/0.14.2/object_store/signer/trait.Signer.html) (considered, rejected)
+- rusty-s3 0.12.0 source (`~/.cargo/registry`): `actions/mod.rs` `S3Action::{sign, query_mut, headers_mut}`, `bucket.rs` `{get,put,head,delete}_object`, `credentials` `new_with_token`, `Cargo.toml` licence BSD-2-Clause
+- `.planning/phases/08-triggers-bottomless-observability/08-RESEARCH.md` (commit e757400): `ostro-objstore` design, F2–F4 reservation findings
 - [docs.rs reqwest 0.13.5 ClientBuilder](https://docs.rs/reqwest/0.13.5/reqwest/struct.ClientBuilder.html); reqwest v0.13.5 source (`lib.rs` proxy env docs, `async_impl/client.rs` `auto_sys_proxy`, `redirect.rs` `remove_sensitive_headers`, Cargo.toml tower-http 0.6)
 - hyper-util master `src/client/legacy/connect/http.rs` (`SocketAddrs::try_parse` skips the resolver for IP literals)
 - [MySQL 8.4 Reference Manual §15.3.3 Statements That Cause an Implicit Commit](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)
@@ -723,4 +762,4 @@ Parallelism: wave 2 has 4 plans on disjoint crates (partition / bridge-egress / 
 - Provider windows: Stripe HIGH, others LOW. Hence the per-destination config.
 
 **Research date:** 2026-11-19
-**Valid until:** 2026-12-19. Re-check object_store (#909 may ship a breaking release), sqlx 0.9.x, and the Wasmtime 51 bump (D17) before execution.
+**Valid until:** 2026-12-19. Re-check sqlx 0.9.x, rusty-s3 0.12.x, object_store #909 (possible future swap), and the Wasmtime 51 bump (D17) before execution.
