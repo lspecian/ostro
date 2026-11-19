@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Foundation, Vendoring & Spikes** - Workspace, vendored and modernised Chronik code, CI matrix, and S2/S3 spike decisions (completed 2026-11-18)
 - [x] **Phase 2: Durable Partition Log & State Machine** - CRC-verified WAL journal behind an RF=1 `ReplicatedLog`, deterministic fjall apply, outbox/shuffler, timers, fencing epochs (completed 2026-11-19)
 - [x] **Phase 3: Deterministic Wasm Engine & WIT 0.1** - Wasmtime component host with virtualised WASI, replay divergence detection, sandbox limits, AOT cache/pooling, full WIT 0.1 surface (completed 2026-11-18)
-- [ ] **Phase 4: Single-Node Server & Rust MVP** - Metadata Raft, dispatcher, unified HTTP/gRPC API, `ostro dev`/`server`, and Rust SDK running workflows with steps end to end
+- [x] **Phase 4: Single-Node Server & Rust MVP** - Metadata Raft, dispatcher, unified HTTP/gRPC API, `ostro dev`/`server`, and Rust SDK running workflows with steps end to end (completed 2026-11-19)
 - [ ] **Phase 5: Workflow Semantics & Core Hardening** - Timers, signals, concurrency, cancel, patching, timeouts; crash-injection harness, replay corpus, retention, WIT 0.1 freeze
 - [ ] **Phase 6: Effects Bridge, Connectors & Secrets** - HTTP/SQL/object-store effects with idempotency semantics, origin-bound secrets, SSRF-hardened egress
 - [ ] **Phase 7: Workers, Placement & Flow Control** - mTLS stateless workers, embedded/workers/auto placement, KEDA demand, keyed concurrency/throttle/rate limits, pause, fencing chaos
@@ -308,7 +308,7 @@ Plans:
 ### Phase 9: Polyglot SDKs & Conformance
 **Goal**: Python and TypeScript are first-class. Workflows in all three languages have identical semantics, proven by one language-neutral conformance suite.
 **Depends on**: Phase 6 (effects available to SDKs; WIT frozen in Phase 5)
-**Requirements**: SDK-02, SDK-03, SDK-04, SDK-05, WF-06, WF-10
+**Requirements**: SDK-02, SDK-03, SDK-04, SDK-05, WF-06, WF-10, WF-07 (Py/TS part)
 **Success Criteria** (what must be TRUE):
   1. The conformance suite passes 100% for Rust, Python and TypeScript. It covers steps, retries, timers, signals, concurrency/race, cancellation, children, continue-as-new, await tokens, patching and non-determinism detection.
   2. Two runs of the same Python or TS workflow get different `ctx.random`, and replaying either reproduces its values. Rebuilding the same source yields the same module sha.
@@ -409,7 +409,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
-| 4. Single-Node Server & Rust MVP | 20/20 | In Progress | - |
+| 4. Single-Node Server & Rust MVP | 20/20 | Complete | 2026-11-19 |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |

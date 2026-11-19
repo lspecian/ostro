@@ -35,7 +35,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Metadata
 
-- [ ] **META-01**: Metadata state machine runs on the vendored Raft driver with Ostro's own transport; single voter on a single node
+- [x] **META-01**: Metadata state machine runs on the vendored Raft driver with Ostro's own transport; single voter on a single node
 - [x] **META-02**: Metadata holds membership, partition map (leader, epoch, ISR), modules, workflows and active versions, queues, schedules, tokens, tenants, sealed secrets, grants, connections, egress policies
 - [x] **META-03**: Every replicated metadata record type carries a version field so stale records never overwrite newer state
 
@@ -263,7 +263,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | STOR-12 | Phase 2 | Complete |
 | STOR-13 | Phase 2 | Complete |
 | STOR-14 | Phase 2 | Complete |
-| META-01 | Phase 4 | Pending |
+| META-01 | Phase 4 | Complete |
 | META-02 | Phase 4 | Complete |
 | META-03 | Phase 4 | Complete |
 | ENG-01 | Phase 3 | Complete |
@@ -289,7 +289,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-04 | Phase 5 | Pending |
 | WF-05 | Phase 5 | Pending |
 | WF-06 | Phase 9 | Pending |
-| WF-07 | Phase 4 | Pending |
+| WF-07 | Phase 4 (Rust) / Phase 9 (Py, TS) | Pending |
 | WF-08 | Phase 5 | Pending |
 | WF-09 | Phase 5 | Pending |
 | WF-10 | Phase 9 | Pending |
