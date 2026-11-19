@@ -127,7 +127,9 @@ async fn rest_start_get_typed_result_and_options() {
     assert_eq!(run["version"], 1);
     assert_eq!(run["module_sha256"], sha);
     assert_eq!(run["queue"], "default");
-    assert_eq!(run["attempt"], 1);
+    // `attempt` is the grant counter of the current epoch: one per dispatch (sdk-basic
+    // suspends on its sleeps, so it is dispatched more than once).
+    assert!(run["attempt"].as_u64().is_some_and(|n| n >= 1), "{run}");
     assert_eq!(run["result"], basic_result("a", 3));
     assert_eq!(run["published_status"], json!({"stage": "done"}));
     assert_eq!(run["failure"], Value::Null);
@@ -267,7 +269,7 @@ async fn rest_delayed_start_stays_scheduled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rest_idempotency_keys_survive_restart() {
     let mut s = server().await;
-    deploy(&s, "sdk-basic").await;
+    deploy(&s, "sdk-basic").await; // sdk-basic + sdk-echo
     let body = json!({"input": {"name": "i", "n": 2}, "idempotency_key": "order-42"});
 
     let (st, first) = start(&s, "sdk-basic", body.clone()).await;
@@ -323,7 +325,7 @@ async fn rest_large_input_is_offloaded_and_request_limit_is_413() {
     cfg.api.max_request_bytes = 1024 * 1024;
     let mut s = TestServer::start_cfg(cfg, Some(dir)).await;
     s.wait_ready(Duration::from_secs(5)).await;
-    deploy(&s, "sdk-echo").await;
+    deploy(&s, "sdk-basic").await; // exports sdk-echo too
 
     // 300 KiB > the 256 KiB inline limit: offloaded to the blob store, echoed back.
     let big = "x".repeat(300 * 1024);
@@ -405,12 +407,12 @@ async fn grpc_start_get_and_errors() {
     assert_eq!(info.version, 1);
     assert_eq!(info.module_sha256, sha);
     assert_eq!(info.queue, "default");
-    assert_eq!(info.attempt, Some(1));
+    assert!(info.attempt.is_some_and(|n| n >= 1), "{info:?}");
     assert_eq!(info.tags, vec!["grpc".to_owned()]);
     assert_eq!(info.tenant.as_deref(), Some("t-g"));
     assert_eq!(info.priority, -3);
-    let result: Value = serde_json::from_slice(info.result_json.as_deref().expect("result"))
-        .expect("result json");
+    let result: Value =
+        serde_json::from_slice(info.result_json.as_deref().expect("result")).expect("result json");
     assert_eq!(result, basic_result("g", 5));
     let status: Value =
         serde_json::from_slice(info.published_status_json.as_deref().expect("status"))
