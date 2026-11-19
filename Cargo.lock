@@ -1899,6 +1899,15 @@ version = "0.1.0"
 [[package]]
 name = "ostro-cli"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "jiff",
+ "reqwest",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "ostro-crashtest"

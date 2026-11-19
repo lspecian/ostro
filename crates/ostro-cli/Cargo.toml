@@ -7,6 +7,19 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+clap.workspace = true
+# REST transport (CLI-06): json + http2 only, no TLS until SEC-01 (workspace pin is
+# default-features = false).
+reqwest.workspace = true
+serde_json.workspace = true
+# friendly durations, same parser as ServerConfig / the REST API
+jiff.workspace = true
+# module sha256 for `ostro deploy`
+sha2.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
