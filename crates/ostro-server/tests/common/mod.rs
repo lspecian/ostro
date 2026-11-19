@@ -82,6 +82,8 @@ pub struct Opts {
     pub hot_wait: Duration,
     /// The dispatcher's lease TTL (the executor's view is `ExecutorConfig::lease_ttl`).
     pub dispatcher_lease_ttl: Duration,
+    /// Node-wide executor slots.
+    pub slots: usize,
     pub exec: ExecutorConfig,
 }
 
@@ -94,6 +96,7 @@ impl Opts {
             partitions: 4,
             hot_wait: Duration::from_secs(2),
             dispatcher_lease_ttl: Duration::from_secs(30),
+            slots: 64,
             exec,
         }
     }
@@ -172,7 +175,7 @@ impl TestNode {
         cfg.leader.dispatcher = Some(DispatcherConfig {
             executor,
             lease_ttl: opts.dispatcher_lease_ttl,
-            slots: Arc::new(Semaphore::new(64)),
+            slots: Arc::new(Semaphore::new(opts.slots)),
             stats: Some(Arc::clone(&stats)),
         });
         let node = timeout(T, Node::open(cfg))
