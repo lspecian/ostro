@@ -1,10 +1,12 @@
-//! Leader services of one partition: outbox shuffler, timer service, log retention.
+//! Leader services of one partition: outbox shuffler, timer service, log retention and,
+//! when configured, the dispatcher (plan 04-14).
 //!
 //! They are spawned by [`Node`](crate::node::Node) only after the partition's
 //! [`ReadyBarrier`] is open (state caught up, term started) and after every partition is
 //! registered in the router. Each service has a fixed `spawn(ctx, cfg) -> JoinHandle<()>`
 //! signature and stops when `ctx.shutdown` turns true.
 
+pub mod dispatcher;
 pub mod retention;
 pub mod shuffler;
 pub mod timers;
@@ -41,12 +43,25 @@ impl std::fmt::Debug for LeaderCtx {
     }
 }
 
-/// Configuration of the three leader services.
-#[derive(Clone, Debug, Default)]
+/// Configuration of the leader services.
+#[derive(Clone, Default)]
 pub struct LeaderConfig {
     pub shuffler: shuffler::ShufflerConfig,
     pub timers: timers::TimerConfig,
     pub retention: retention::RetentionConfig,
+    /// The dispatcher runs only when this is `Some` (Phase 2 suites run without it).
+    pub dispatcher: Option<dispatcher::DispatcherConfig>,
+}
+
+impl std::fmt::Debug for LeaderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeaderConfig")
+            .field("shuffler", &self.shuffler)
+            .field("timers", &self.timers)
+            .field("retention", &self.retention)
+            .field("dispatcher", &self.dispatcher)
+            .finish()
+    }
 }
 
 /// The running services of one partition.
@@ -66,7 +81,8 @@ impl LeaderTasks {
     }
 }
 
-/// Spawn shuffler, timers and retention for `ctx.partition`. They stop when either
+/// Spawn shuffler, timers, retention and (if configured) the dispatcher for
+/// `ctx.partition`. They stop when either
 /// `ctx.shutdown` turns true or [`LeaderTasks::shutdown`] is called.
 pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
     let stop = Arc::new(watch::channel(false).0);
@@ -86,11 +102,14 @@ pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
             }
         })
     };
-    let tasks = vec![
+    let mut tasks = vec![
         shuffler::spawn(child.clone(), cfg.shuffler.clone()),
         timers::spawn(child.clone(), cfg.timers.clone()),
-        retention::spawn(child, cfg.retention.clone()),
-        fwd,
     ];
+    if let Some(d) = &cfg.dispatcher {
+        tasks.push(dispatcher::spawn(child.clone(), d.clone()));
+    }
+    tasks.push(retention::spawn(child, cfg.retention.clone()));
+    tasks.push(fwd);
     LeaderTasks { stop, tasks }
 }

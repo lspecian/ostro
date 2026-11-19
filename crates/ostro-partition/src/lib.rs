@@ -9,7 +9,8 @@
 //! - [`handle`]: [`PartitionHandle`], the submit path and read helpers.
 //! - [`query`]: typed read helpers (running runs, ready rows, journal, runs pages).
 //! - [`node`]: [`Node`], the ordered startup of every partition ([`startup`]).
-//! - [`leader`]: leader services (shuffler, timers, retention) started after readiness.
+//! - [`leader`]: leader services (shuffler, timers, retention, dispatcher) started after
+//!   readiness.
 //! - [`leadership`], [`clock`], [`router`]: term epochs, wall clock, cross-partition delivery.
 
 pub mod acks;
@@ -33,6 +34,9 @@ pub use handle::{PartitionError, PartitionHandle};
 pub use machine::{MachineConfig, MachineHandle, PartitionHealth};
 
 pub use clock::{Clock, ManualClock, SystemClock};
+pub use leader::dispatcher::{
+    DispatcherConfig, DispatcherStats, ExecOutcome, Executor, Job, LeaseRenewer,
+};
 pub use leader::{LeaderConfig, LeaderCtx, LeaderTasks};
 pub use leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 pub use node::{Node, NodeConfig, NodeError, PartitionSlot, StartMode};
