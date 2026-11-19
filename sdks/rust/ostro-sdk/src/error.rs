@@ -4,10 +4,21 @@
 //! becomes a non-retryable `StepError { kind: "timeout" }` and a host `failure::cancelled`
 //! becomes a non-retryable `StepError { kind: "cancelled" }`; converting such an error back
 //! to a WIT failure yields `timeout` / `cancelled` again.
+//!
+//! Continue-as-new is also returned through `Err`: [`WorkflowError::continue_as_new`] (or
+//! [`Ctx::continue_as_new`](crate::Ctx::continue_as_new)) builds an error that carries a
+//! [`ContinueAsNew`] request, and the SDK runtime turns it into the WIT
+//! `run-result::continue-as-new` instead of a failure. Returning it through `Err` keeps the
+//! [`Workflow`](crate::Workflow) trait unchanged and lets `?` short-circuit out of nested
+//! helpers.
 
 use std::fmt;
 
+use serde::Serialize;
+
+use crate::bindings::exports::ostro::runtime::workflows::Continuation;
 use crate::bindings::ostro::runtime::types::{ErrorInfo, Failure};
+use crate::step::{JSON, encode_value};
 
 /// Reserved error kind for host timeouts (`failure::timeout`).
 pub const TIMEOUT: &str = "timeout";
@@ -15,6 +26,9 @@ pub const TIMEOUT: &str = "timeout";
 pub const CANCELLED: &str = "cancelled";
 /// Error kind used when a JSON payload cannot be encoded or decoded.
 pub const INVALID_JSON: &str = "invalid_json";
+/// Kind of the [`WorkflowError`] that carries a continue-as-new request. It never reaches
+/// the host as a failure: the SDK maps it to `run-result::continue-as-new`.
+pub const CONTINUE_AS_NEW: &str = "continue_as_new";
 
 /// The failure of a step body or durable operation.
 ///
@@ -133,8 +147,63 @@ impl fmt::Display for StepError {
 
 impl std::error::Error for StepError {}
 
+/// A continue-as-new request: end this run and start a fresh one with `input`.
+///
+/// By default the successor runs the same workflow at the version the server resolves for
+/// it; [`workflow`](Self::workflow) and [`version`](Self::version) override that. The
+/// workflow name is unqualified and resolves inside the run's tenant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinueAsNew {
+    input: Vec<u8>,
+    workflow: Option<String>,
+    version: Option<u32>,
+}
+
+impl ContinueAsNew {
+    /// A request that continues with `input`, JSON-encoded.
+    pub fn new<T: Serialize + ?Sized>(input: &T) -> Result<Self, WorkflowError> {
+        let p = encode_value(input).map_err(WorkflowError::from)?;
+        Ok(Self {
+            input: p.data,
+            workflow: None,
+            version: None,
+        })
+    }
+
+    /// Continue as a different workflow (unqualified name, same tenant).
+    pub fn workflow(mut self, name: impl Into<String>) -> Self {
+        self.workflow = Some(name.into());
+        self
+    }
+
+    /// Pin the successor's workflow version.
+    pub fn version(mut self, version: u32) -> Self {
+        self.version = Some(version);
+        self
+    }
+
+    /// The JSON-encoded successor input.
+    pub fn input_json(&self) -> &[u8] {
+        &self.input
+    }
+
+    pub(crate) fn to_continuation(&self) -> Continuation {
+        Continuation {
+            input: crate::bindings::ostro::runtime::types::Payload {
+                content_type: JSON.to_string(),
+                data: self.input.clone(),
+            },
+            workflow: self.workflow.clone(),
+            version: self.version,
+        }
+    }
+}
+
 /// The failure of a workflow run. Same shape as [`StepError`]; a step error propagates
 /// with `?`.
+///
+/// It can also carry a [`ContinueAsNew`] request (see [`WorkflowError::continue_as_new`]);
+/// such an error ends the run as continued-as-new, not as failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowError {
     /// Machine-readable error kind.
@@ -143,6 +212,7 @@ pub struct WorkflowError {
     pub message: String,
     /// Whether the host may retry the run under its run retry policy.
     pub retryable: bool,
+    continuation: Option<Box<ContinueAsNew>>,
 }
 
 impl WorkflowError {
@@ -152,6 +222,7 @@ impl WorkflowError {
             kind: kind.into(),
             message: message.into(),
             retryable: true,
+            continuation: None,
         }
     }
 
@@ -161,12 +232,46 @@ impl WorkflowError {
             kind: kind.into(),
             message: message.into(),
             retryable: false,
+            continuation: None,
         }
+    }
+
+    /// End the run with continue-as-new, starting the same workflow with `input`:
+    /// `return Err(WorkflowError::continue_as_new(&next))`.
+    ///
+    /// If `input` cannot be JSON-encoded, this is a non-retryable `invalid_json` error
+    /// instead (the run fails). Use [`ContinueAsNew`] to change the workflow or version.
+    pub fn continue_as_new<T: Serialize + ?Sized>(input: &T) -> Self {
+        match ContinueAsNew::new(input) {
+            Ok(c) => c.into(),
+            Err(e) => e,
+        }
+    }
+
+    /// The continue-as-new request this error carries, if any.
+    pub fn continuation(&self) -> Option<&ContinueAsNew> {
+        self.continuation.as_deref()
+    }
+
+    /// True if this error carries a continue-as-new request.
+    pub fn is_continue_as_new(&self) -> bool {
+        self.continuation.is_some()
     }
 
     /// Convert to the WIT `failure` variant.
     pub(crate) fn to_failure(&self) -> Failure {
         failure_of(&self.kind, &self.message, self.retryable)
+    }
+}
+
+impl From<ContinueAsNew> for WorkflowError {
+    fn from(c: ContinueAsNew) -> Self {
+        Self {
+            kind: CONTINUE_AS_NEW.to_string(),
+            message: "continue-as-new".to_string(),
+            retryable: false,
+            continuation: Some(Box::new(c)),
+        }
     }
 }
 
@@ -176,6 +281,7 @@ impl From<StepError> for WorkflowError {
             kind: e.kind,
             message: e.message,
             retryable: e.retryable,
+            continuation: None,
         }
     }
 }
@@ -240,6 +346,33 @@ mod tests {
         ));
         assert!(StepError::from(Failure::Timeout).is_timeout());
         assert!(StepError::from(Failure::Cancelled).is_cancelled());
+    }
+
+    #[test]
+    fn continue_as_new_carries_the_request() {
+        let e = WorkflowError::continue_as_new(&serde_json::json!({"n": 2}));
+        assert!(e.is_continue_as_new());
+        assert_eq!(e.kind, CONTINUE_AS_NEW);
+        let c = e.continuation().expect("continuation").to_continuation();
+        assert_eq!(c.input.content_type, JSON);
+        assert_eq!(c.input.data, br#"{"n":2}"#);
+        assert_eq!((c.workflow, c.version), (None, None));
+
+        let e: WorkflowError = ContinueAsNew::new(&7u32)
+            .expect("encode")
+            .workflow("other")
+            .version(3)
+            .into();
+        let c = e.continuation().expect("continuation").to_continuation();
+        assert_eq!(c.input.data, b"7");
+        assert_eq!((c.workflow.as_deref(), c.version), (Some("other"), Some(3)));
+
+        // Unencodable input fails the run instead (non-string map keys).
+        let bad: std::collections::BTreeMap<Vec<u8>, u8> = [(vec![1], 1)].into();
+        let e = WorkflowError::continue_as_new(&bad);
+        assert!(!e.is_continue_as_new());
+        assert_eq!(e.kind, INVALID_JSON);
+        assert!(!WorkflowError::non_retryable("k", "m").is_continue_as_new());
     }
 
     #[test]

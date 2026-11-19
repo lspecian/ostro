@@ -29,7 +29,9 @@ pub struct RunInfo {
     pub workflow: String,
     /// Workflow version.
     pub workflow_version: u32,
-    /// Run attempt (1-based).
+    /// Activation attempt (1-based). It increases on every re-dispatch (failover, lease
+    /// expiry, worker loss, restart) and is **not** stable across replays: use it for
+    /// logging and metrics only, never for control flow.
     pub attempt: u32,
     /// Hash of the module executing the run.
     pub module_hash: String,
@@ -85,6 +87,46 @@ pub(crate) fn to_datetime(t: SystemTime) -> Datetime {
 
 pub(crate) fn duration_ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// An await token: an external system completes [`op`](Self::op) by presenting
+/// [`token`](Self::token) (`POST /v1/tokens/complete`). The completion payload is
+/// JSON-decoded into `T`.
+///
+/// One-shot: the first completion wins and later completions are rejected. The optional
+/// timeout completes the op with `Err(StepError::timeout())`. Waiting on a token op always
+/// evicts the activation (never hot-parked), so a long wait holds no memory.
+#[must_use = "hand the token to the external system and wait on the op"]
+pub struct AwaitToken<T> {
+    token: String,
+    op: Op<T>,
+}
+
+impl<T> std::fmt::Debug for AwaitToken<T> {
+    // The token is a bearer credential: never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwaitToken")
+            .field("op", &self.op)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> AwaitToken<T> {
+    /// The opaque token string. Treat it as a secret bearer credential: keep it out of
+    /// URLs and logs.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// The op that completes when the token is presented.
+    pub fn op(self) -> Op<T> {
+        self.op
+    }
+
+    /// Split into `(token, op)`.
+    pub fn into_parts(self) -> (String, Op<T>) {
+        (self.token, self.op)
+    }
 }
 
 /// The deterministic run context, handed to [`Workflow::run`](crate::Workflow::run).
@@ -158,6 +200,33 @@ impl Ctx {
         context::continue_as_new_suggested()
     }
 
+    /// Build the error that ends this run with continue-as-new: a fresh run of the same
+    /// workflow starts with `input`. Return it: `return Err(ctx.continue_as_new(&next));`.
+    ///
+    /// Use [`ContinueAsNew`](crate::ContinueAsNew) (`Err(ContinueAsNew::new(&input)?.workflow("w").into())`) to
+    /// continue as another workflow or pin a version. If `input` cannot be JSON-encoded the
+    /// result is a non-retryable `invalid_json` error and the run fails.
+    pub fn continue_as_new<T: Serialize + ?Sized>(&self, input: &T) -> WorkflowError {
+        WorkflowError::continue_as_new(input)
+    }
+
+    /// Run `f` shielded from cancellation (D11): waits inside it (`Op::wait`, `join!`,
+    /// `select!`) wait for their ops only and do not return `Err(cancelled)` when the run
+    /// is cancelled. Use it for cleanup and compensation after a cancel:
+    ///
+    /// ```ignore
+    /// match work(ctx) {
+    ///     Err(e) if e.is_cancelled() => ctx.shielded(|| release(ctx))?,
+    ///     r => r?,
+    /// }
+    /// ```
+    ///
+    /// Sections nest. Shielding does not stop a terminate or the run timeout (hard stops
+    /// with no guest code).
+    pub fn shielded<R>(&self, f: impl FnOnce() -> R) -> R {
+        ops::shielded(f)
+    }
+
     /// Emit a log line. Not journaled; suppressed while replaying.
     pub fn log(&self, level: Level, message: &str) {
         self.log_with(level, message, &[]);
@@ -204,6 +273,11 @@ impl Ctx {
     }
 
     /// Wait for a named signal whose payload is JSON-decoded into `T`.
+    ///
+    /// Signals are FIFO: one signal satisfies one wait, signals sent before the wait are
+    /// buffered per name, and several waits on one name are served oldest op first. The
+    /// timeout completes the op with `Err(StepError::timeout())`. Signal waits always evict
+    /// the activation (never hot-parked).
     pub fn wait_signal<T: DeserializeOwned>(&self, name: &str, timeout: Option<Duration>) -> Op<T> {
         Op::new(
             effects::wait_signal(name, timeout.map(duration_ms)),
@@ -211,12 +285,30 @@ impl Ctx {
         )
     }
 
+    /// Create an await token whose completion payload is JSON-decoded into `T`. See
+    /// [`AwaitToken`].
+    pub fn create_await_token<T: DeserializeOwned>(
+        &self,
+        timeout: Option<Duration>,
+    ) -> AwaitToken<T> {
+        let t = effects::create_await_token(timeout.map(duration_ms));
+        AwaitToken {
+            token: t.token,
+            op: Op::new(t.op, ops::decode_token::<T>),
+        }
+    }
+
     /// Op that completes once a graceful cancel of this run is journaled.
+    ///
+    /// Waiting on it directly (or passing it to `select!`/`join!`) handles cancellation
+    /// explicitly; such waits are not wrapped with the implicit cancellation check.
     pub fn cancellation(&self) -> Op<()> {
         Op::new(effects::cancellation(), ops::decode_unit)
     }
 
-    /// Cancel a pending op; it completes with a `"cancelled"` error.
+    /// Cancel a pending op; waiting on it then returns `Err(StepError::cancelled())`,
+    /// unless it already completed earlier in journal order (the first completion wins).
+    /// Use it on `select!` losers that should not complete later.
     pub fn cancel<T>(&self, op: &Op<T>) {
         effects::cancel_op(op.id());
     }

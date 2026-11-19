@@ -56,14 +56,22 @@ pub fn __describe<W: Workflow>() -> WorkflowMeta {
     }
 }
 
-/// Decode the input, run `W` and encode its output.
+/// Decode the input, run `W` and encode its output. An error carrying a continue-as-new
+/// request becomes `run-result::continue-as-new`.
 #[doc(hidden)]
 pub fn __run<W: Workflow>(input: Payload) -> Result<RunResult, Failure> {
     let input: W::Input = decode_payload(&input).map_err(|e: StepError| e.to_failure())?;
     let ctx = Ctx::new();
-    let output = W::run(&ctx, input).map_err(|e| e.to_failure())?;
-    let payload = encode_value(&output).map_err(|e| e.to_failure())?;
-    Ok(RunResult::Completed(payload))
+    match W::run(&ctx, input) {
+        Ok(output) => {
+            let payload = encode_value(&output).map_err(|e| e.to_failure())?;
+            Ok(RunResult::Completed(payload))
+        }
+        Err(e) => match e.continuation() {
+            Some(c) => Ok(RunResult::ContinueAsNew(c.to_continuation())),
+            None => Err(e.to_failure()),
+        },
+    }
 }
 
 /// Dispatch `run(name, input)` over a table built by `export!`.
@@ -144,6 +152,19 @@ mod tests {
         }
     }
 
+    struct Looper;
+    impl Workflow for Looper {
+        const NAME: &'static str = "looper";
+        type Input = u32;
+        type Output = u32;
+        fn run(_ctx: &Ctx, n: u32) -> Result<u32, WorkflowError> {
+            if n < 3 {
+                return Err(WorkflowError::continue_as_new(&(n + 1)));
+            }
+            Ok(n)
+        }
+    }
+
     struct Unit;
     impl Workflow for Unit {
         const NAME: &'static str = "unit";
@@ -204,6 +225,22 @@ mod tests {
         assert_eq!(
             non_retryable_kind(__run::<Double>(json_payload(b"\"x\"".to_vec()))),
             crate::error::INVALID_JSON
+        );
+    }
+
+    #[test]
+    fn continue_as_new_maps_to_run_result() {
+        match __run::<Looper>(json_payload(b"1".to_vec())) {
+            Ok(RunResult::ContinueAsNew(c)) => {
+                assert_eq!(c.input.content_type, crate::step::JSON);
+                assert_eq!(c.input.data, b"2");
+                assert_eq!((c.workflow, c.version), (None, None));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            completed(__run::<Looper>(json_payload(b"3".to_vec()))),
+            b"3"
         );
     }
 

@@ -12,6 +12,11 @@
 //! `HashMap` seeds and `rand`/`getrandom` draw from the run's journaled seed through the
 //! host's deterministic WASI shim (WF-07), and `Instant` is logical time since the run was
 //! accepted. Real I/O must go through durable steps or effects.
+//!
+//! ## Cancellation
+//!
+//! Waits observe a graceful cancel by default and return `Err(StepError::cancelled())`
+//! (D11); cleanup code runs inside [`Ctx::shielded`]. See [`ops`] and the SDK README.
 
 #![warn(missing_docs)]
 
@@ -25,9 +30,9 @@ pub mod ops;
 pub mod registry;
 pub mod step;
 
-pub use ctx::{Ctx, Header, HttpRequest, HttpResponse, Level, RunInfo};
-pub use error::{StepError, WorkflowError};
-pub use ops::{Completion, Op, OpId};
+pub use ctx::{AwaitToken, Ctx, Header, HttpRequest, HttpResponse, Level, RunInfo};
+pub use error::{ContinueAsNew, StepError, WorkflowError};
+pub use ops::{CANCELLATION, Completion, Op, OpId, is_cancellation};
 
 #[doc(hidden)]
 pub use serde as __serde;
@@ -50,8 +55,8 @@ pub use step::{RetryPolicy, StepOptions, StepOptionsBuilder, run_step};
 
 /// Everything a workflow module usually needs: `use ostro_sdk::prelude::*;`.
 pub mod prelude {
-    pub use crate::ctx::{Ctx, Level, RunInfo};
-    pub use crate::error::{StepError, WorkflowError};
+    pub use crate::ctx::{AwaitToken, Ctx, Level, RunInfo};
+    pub use crate::error::{ContinueAsNew, StepError, WorkflowError};
     pub use crate::ops::{Completion, Op};
     pub use crate::registry::Workflow;
     pub use crate::step::{StepOptions, run_step};
