@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{T, run_on, start_run};
+use common::{OPEN_T, T, run_on, start_run};
 use ostro_partition::store::values::RunStatus;
 use ostro_partition::{
     ApplyOutcome, Clock, DispatcherConfig, DispatcherStats, ExecOutcome, Executor, Job, Node,
@@ -151,7 +151,7 @@ async fn open(dir: &Path, opts: Option<&Opts>) -> Node {
             stats: Some(Arc::clone(&o.stats)),
         });
     }
-    timeout(T, Node::open(cfg))
+    timeout(OPEN_T, Node::open(cfg))
         .await
         .expect("node open timed out")
         .expect("node open")
