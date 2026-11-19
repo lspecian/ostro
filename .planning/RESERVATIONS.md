@@ -41,7 +41,8 @@ Sources:
 | 27 | ScheduleFire | reserved P8 |
 | 28–33 | spare | reserved P8 |
 | 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9 |
-| 41–63 | — | unallocated |
+| 41–42 | — (contingency, expected use 0) | reserved P12 |
+| 43–63 | — | unallocated |
 
 ## 2. `StartRun` field numbers (prost)
 
@@ -219,9 +220,44 @@ Rules (D20):
 | 19–20 | — (QueueFlow / WorkflowFlow only if F2 is rejected) | reserved P7. **Not needed if 07-RESEARCH F2 lands** (05-07 puts the Phase 7 fields in QueuePolicy/WorkflowPolicy pre-freeze) |
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
 | 22–23 | — | reserved P9 |
-| 24+ | — | unallocated |
+| 24–25 | — (fallback only if Phase 14 F2/F3/F4 had not landed pre-freeze) | reserved P14 |
+| 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12 |
+| 27+ | — | unallocated |
 
 META_FORMAT: bumped once pre-freeze by 05-07. The value at 05-20 is the frozen baseline. Each post-freeze bump is recorded here with its phase.
+
+### 10a. `MetaCommand` variant order (postcard, Raft entries)
+
+Appending a `MetaCommand` variant changes no existing encoding and needs **no META_FORMAT bump** (Phase 12 F8, D20 clarified). Mixed-version proposal gating is Phase 13's concern. Existing command validation, such as `SetPartitionLeader`, is never tightened after the freeze.
+
+| Index | Variant | Status |
+|-------|---------|--------|
+| 0 | InitCluster | exists (P4) |
+| 1 | Put | exists (P4) |
+| 2 | Delete | exists (P4) |
+| 3 | SetPartitionLeader | exists (P4) |
+| 4–7 | ElectLeader, AlterIsr, ResignLeader, spare | reserved P12 |
+| 8+ | — | unallocated |
+
+Phase 12 holds no keyspaces, journal kinds, RejectReason/InvalidCode values or outbox kinds.
+
+## 10b. Meta `ext` TLV tags (Phase 14 F2; amended D20)
+
+Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ varint(len u32) ‖ postcard(value)`. Tags are strictly increasing, tag 0 is invalid, and unknown tags are preserved on read-modify-write and ignored by readers.
+- Tags form **one global space across all record kinds**. Each tag is registered here with the record(s) it applies to and its value struct.
+- Registering a tag is a **post-freeze-safe extension**: no new variant and no META_FORMAT bump.
+
+| Tags | Owner | Registered |
+|------|-------|-----------|
+| 0 | invalid | — |
+| 1–15 | reserved P5 (none used yet) | — |
+| 16–31 | reserved P6 | — |
+| 32–47 | reserved P7 | — |
+| 48–63 | reserved P8 | — |
+| 64–79 | reserved P9 | — |
+| 80–111 | reserved P12/P13 (Member, PartitionAssignment, cluster) | — |
+| 112–143 | reserved P14 (ApiToken name/description/created_by/rotation link, ModuleRecord signature evidence + uploader tenants, ClusterInfo security policy, SealedSecret created/rotated, further Tenant knobs) | — |
+| 144+ | unallocated | — |
 
 ---
 
@@ -248,3 +284,20 @@ META_FORMAT: bumped once pre-freeze by 05-07. The value at 05-20 is the frozen b
 | Failpoint prefix | `child::` | P9 |
 | Error kinds (`error-info.kind`) | `child_terminated`, `sdk_protocol`, `invalid_string` | P9 (documented in WIT by P5 05-05) |
 | SDK dirs / packages | `sdks/python`, `sdks/ts`; package name `ostro` on PyPI and npm | P9 |
+| Name grammar (D23) | Qualified storage form `<tenant>/<name>`; resource names exclude `/`, `:` and a leading `__` (`__` is reserved for `__ostro/`, `__cron/`) | P5 (D23) / P14 |
+| Tenant ids | `_` is the default-tenant spelling: reserved, never creatable | P14 (grammar enforced from P5, 05-13) |
+| Config sections | `[auth]`, `[tenants]`, `[audit]`, `[security]` (incl. `[security.modules]`) | P14 |
+| Data dir | `<data>/audit/` (node open, backup/restore and GC ignore unknown data-dir entries: F8) | P14 |
+| REST | `/v1/tenants`, `/v1/auth/tokens`, `/v1/audit`, `POST /hooks/{tenant}/{name}`. Avoid `/v1/tokens/{id}`: `/v1/tokens/complete` is P5's await-token path | P14 |
+| gRPC services | `ostro.api.v1.Tenants`, `ostro.api.v1.ApiTokens`, `ostro.api.v1.Audit` (`ostro.api.v1.Tokens` is P5's await-token service) | P14 |
+| Failpoint prefixes | `auth::`, `audit::` | P14 |
+| Crates / dirs | `fuzz/` (separate workspace, crate `ostro-fuzz`), `ostro-jepsen`, `deploy/helm/ostro`, `deploy/image` | P14 |
+| Id prefixes | `otk_` (API tokens; `wkr_` = Phase 7 worker tokens) | P14 / P7 |
+| Metric prefixes | `ostro_auth_`, `ostro_audit_`, `ostro_tenant_` | P14 |
+| Crate | `ostro-repl-conformance` (replication conformance; P9 owns `ostro-conformance`) | P12 |
+| gRPC package | `ostro.cluster.v1` (services `Replication`, `MetaPeer`) | P12 |
+| Config | `[replication]`; inside P7's `[cluster]`: `[[cluster.peers]]`, `replication_listen` | P12 |
+| Failpoint prefixes | `repl::`, `fetch::`, `isr::`, `elect::`, `install::` | P12 |
+| Metric prefix | `ostro_repl_` | P12 |
+| node.toml keys | `node_id`, `cluster_id` (0 = no-leader sentinel; mismatch fatal), next to P8's `incarnation`/`restored_from` | P12 |
+| Data-dir temp prefix | `snapshots/pNNNN/.incoming-*` | P12 |
