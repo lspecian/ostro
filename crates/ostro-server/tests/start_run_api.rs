@@ -5,6 +5,7 @@
 //! Plan 05-13: the start fields (retention, schedule-to-start, dry_run), D9 policy
 //! resolution, workflow/queue policies over both transports (persisted in meta), GET's
 //! `attempt_failures` / resolved policy fields, and the O(1) published-status read (F10).
+//! Plan 05-25 (D24): an API start journals `RunStarted` at seq 0 inside `StartRun`.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod common;
@@ -17,6 +18,7 @@ use ostro_partition::store::keys::dedupe_key;
 use ostro_proto::api::v1 as pb;
 use ostro_proto::api::v1::runs_client::RunsClient;
 use ostro_proto::api::v1::workflows_client::WorkflowsClient;
+use ostro_types::journal::EventBody;
 use ostro_types::{PartitionCount, RunId, partition_for_key};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -352,6 +354,61 @@ async fn rest_large_input_is_offloaded_and_request_limit_is_413() {
     let huge = "y".repeat(1100 * 1024);
     let (st, body) = start(&s, "sdk-echo", json!({"input": huge})).await;
     assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    s.shutdown().await;
+}
+
+/// D24 (05-25, amends D3): `StartRun.run_started` is set by the API, so a run that was
+/// accepted but never activated already has `RunStarted` at seq 0 (`next_seq == 1`), built
+/// from the command (stripped name, module hash, JSON input, seed, accepted time). An input
+/// over the inline limit makes both the input and the encoded RunStarted blobs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn api_start_journals_run_started_at_seq_zero() {
+    let mut s = TestServer::start_with(ServerOpts::default(), |c| c.executor.slots = 0).await;
+    s.wait_ready(Duration::from_secs(5)).await;
+    let sha = deploy(&s, "sdk-basic").await; // exports sdk-echo too
+    let big = "x".repeat(300 * 1024);
+    for (input, offloaded) in [(json!({"n": 1}), false), (json!({ "big": big }), true)] {
+        let blobs_before = blob_count(&s);
+        let (st, body) = start(&s, "sdk-echo", json!({ "input": input })).await;
+        assert_eq!(st, StatusCode::CREATED, "{body}");
+        let run: RunId = body["run_id"]
+            .as_str()
+            .expect("id")
+            .parse()
+            .expect("run id");
+        let rec = s.run_record(&run);
+        assert_eq!(rec.next_seq, 1, "RunStarted journaled by StartRun");
+        assert!(rec.current_attempt.is_none(), "never granted");
+        let j = s.journal(&run).await;
+        assert_eq!(j.len(), 1);
+        assert_eq!(
+            (j[0].seq, j[0].ts_nanos),
+            (0, rec.created_at_ms * 1_000_000)
+        );
+        let EventBody::RunStarted(rs) = &j[0].body else {
+            panic!("seq 0 is not RunStarted: {:?}", j[0].body)
+        };
+        assert_eq!(rs.workflow, "sdk-echo");
+        assert_eq!(rs.tenant, None);
+        assert_eq!(rs.module_hash, sha);
+        assert_eq!(rs.input.content_type, "application/json");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&rs.input.data).expect("json input"),
+            input
+        );
+        assert_eq!(rs.rng_seed.0.as_slice(), rec.rng_seed.as_slice());
+        assert_eq!(rs.accepted_at_nanos, rec.created_at_ms * 1_000_000);
+        assert_eq!(
+            (rs.parent_run_id.clone(), rs.continued_from.clone()),
+            (None, None)
+        );
+        if offloaded {
+            assert!(
+                blob_count(&s) >= blobs_before + 2,
+                "the input and the encoded RunStarted are blobs"
+            );
+        }
+    }
     s.shutdown().await;
 }
 

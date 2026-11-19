@@ -21,7 +21,7 @@ use ostro_partition::store::values::RunStatus;
 use ostro_proto::api::v1 as pb;
 use ostro_proto::api::v1::runs_client::RunsClient;
 use ostro_proto::api::v1::tokens_client::TokensClient;
-use ostro_types::journal::EventKind;
+use ostro_types::journal::{CancelRequested, EventBody, EventKind};
 use ostro_types::payload::payload_ref::Kind as PayloadKind;
 use ostro_types::{PartitionId, RunId};
 use reqwest::StatusCode;
@@ -524,9 +524,11 @@ async fn cancel_rest_and_grpc() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancel_before_start_is_flag_only_and_idempotent() {
-    // No capacity (`executor.slots = 0`): a cancel at seq 0 sets the flag and wakes the run,
-    // which is then never granted, so the repeat is deterministic.
+async fn cancel_before_start_journals_after_run_started_once_and_is_idempotent() {
+    // No capacity (`executor.slots = 0`): the run is never granted, so the repeat is
+    // deterministic. D24 (05-25, amends D3): StartRun journaled RunStarted at seq 0, so the
+    // first cancel journals `CancelRequested{reason}` directly at seq 1 (and sets the flag);
+    // repeats and dry runs journal nothing more.
     let mut s = TestServer::start_with(ServerOpts::default(), |c| c.executor.slots = 0).await;
     s.wait_ready(Duration::from_secs(10)).await;
     deploy(&s, "signals", None).await;
@@ -534,7 +536,9 @@ async fn cancel_before_start_is_flag_only_and_idempotent() {
         let mut api = Api::new(&s, t).await;
         let id = start(&s, "signals", json!({"input": {"mode": "long_wait"}})).await;
         let before = snapshot(&s, &id).await;
-        assert_eq!(before.1, 0, "never started");
+        assert_eq!(before.1, 1, "never started: RunStarted only");
+        assert_eq!(before.0.next_seq, 1);
+        assert!(before.0.current_attempt.is_none(), "never granted");
         let r = api.cancel(&id, Some("dry"), true).await;
         assert_eq!(
             r,
@@ -544,6 +548,7 @@ async fn cancel_before_start_is_flag_only_and_idempotent() {
         assert_eq!(snapshot(&s, &id).await, before);
         let r = api.cancel(&id, Some("first"), false).await;
         assert_eq!(r, Ok(json!({"already_requested": false, "dry_run": false})));
+        let after_first = snapshot(&s, &id).await;
         let r = api.cancel(&id, Some("again"), false).await;
         assert_eq!(
             r,
@@ -552,10 +557,28 @@ async fn cancel_before_start_is_flag_only_and_idempotent() {
         );
         let r = api.cancel(&id, None, true).await;
         assert_eq!(r, Ok(json!({"already_requested": true, "dry_run": true})));
+        assert_eq!(
+            snapshot(&s, &id).await,
+            after_first,
+            "repeats change nothing"
+        );
         let rec = s.run_record(&rid(&id));
         assert!(rec.cancel_requested);
         assert_eq!(rec.cancel_reason, "first");
-        assert_eq!(rec.next_seq, 0, "nothing is journaled before RunStarted");
+        assert_eq!(rec.next_seq, 2, "RunStarted + one CancelRequested");
+        let j = s.journal(&rid(&id)).await;
+        let placed: Vec<(u64, EventKind)> = j.iter().map(|e| (e.seq, e.body.kind())).collect();
+        assert_eq!(
+            placed,
+            vec![(0, EventKind::RunStarted), (1, EventKind::CancelRequested)],
+            "{t:?}"
+        );
+        assert_eq!(
+            j[1].body,
+            EventBody::CancelRequested(CancelRequested {
+                reason: "first".into()
+            })
+        );
     }
     s.shutdown().await;
 }
@@ -607,13 +630,11 @@ async fn terminate_rest_and_grpc() {
             assert!(t0.elapsed() < LIMIT, "the busy activation did not stop");
             sleep(Duration::from_millis(10)).await;
         }
-        // busy_steps journals nothing until its first flush; D3 writes RunTerminated only
-        // after seq 0, so the history is empty or ends with the marker.
+        // D24 (05-25): StartRun journaled RunStarted at seq 0, so `next_seq > 0` always
+        // holds and the history starts with RunStarted and ends with the RunTerminated marker.
         let kinds = s.history_kinds(&rid(&id)).await;
-        assert!(
-            kinds.is_empty() || kinds.last() == Some(&EventKind::RunTerminated),
-            "{kinds:?}"
-        );
+        assert_eq!(kinds.first(), Some(&EventKind::RunStarted), "{kinds:?}");
+        assert_eq!(kinds.last(), Some(&EventKind::RunTerminated), "{kinds:?}");
         let r = api
             .retry(&id, true)
             .await

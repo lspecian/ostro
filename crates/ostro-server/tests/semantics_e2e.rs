@@ -500,6 +500,27 @@ async fn run_timeouts() {
     s.shutdown().await;
 }
 
+/// D24: the journal of a run that never activated is exactly `RunStarted` (seq 0) then
+/// `RunTerminated{reason}` (seq 1): no attempt was granted and no step ran.
+async fn assert_never_started_then(s: &TestServer, run: &RunId, reason: &str) {
+    let j = s.journal(run).await;
+    assert_eq!(
+        kinds(&j),
+        vec![EventKind::RunStarted, EventKind::RunTerminated],
+        "never started"
+    );
+    assert_eq!(
+        j.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![0, 1],
+        "contiguous from seq 0"
+    );
+    assert_eq!(terminated_reasons(&j), vec![reason.to_owned()]);
+    assert!(
+        s.run_record(run).current_attempt.is_none(),
+        "never granted, so no step ran"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn schedule_to_start_without_capacity() {
     // No executor capacity: runs stay Ready, never granted.
@@ -517,7 +538,10 @@ async fn schedule_to_start_without_capacity() {
     let rec = s.wait_status(&run, RunStatus::TimedOut, LIMIT).await;
     assert_eq!(rec.terminal_reason, "schedule_to_start");
     assert!(t0.elapsed() < Duration::from_secs(10));
-    assert!(s.journal(&run).await.is_empty(), "never started");
+    // D24 (05-25, amends D3): the API journals RunStarted at seq 0 inside StartRun, so a
+    // never-started run's journal is RunStarted then the terminal marker, and no step ran.
+    assert_never_started_then(&s, &run, "schedule_to_start").await;
+    assert_eq!(rec.next_seq, 2);
     let (_, v) = s.get_json(&format!("/v1/runs/{run}")).await;
     assert_eq!(v["status"], "timed_out");
 
@@ -525,11 +549,12 @@ async fn schedule_to_start_without_capacity() {
     let waiting = s
         .start_rest("timeouts", json!({"input": {"mode": "sleep_ms", "n": 10}}))
         .await;
-    // Terminate before start: Terminated with an empty journal (D3).
+    // Terminate before start (D24): RunStarted (seq 0) then RunTerminated (seq 1); the
+    // "RunTerminated only when next_seq > 0" rule now always journals it.
     lifecycle_ok(&s, &waiting, "terminate").await;
     let rec = s.wait_status(&waiting, RunStatus::Terminated, LIMIT).await;
-    assert_eq!(rec.next_seq, 0);
-    assert!(s.journal(&waiting).await.is_empty());
+    assert_eq!(rec.next_seq, 2);
+    assert_never_started_then(&s, &waiting, &rec.terminal_reason).await;
     s.shutdown().await;
 }
 
@@ -740,6 +765,20 @@ async fn retry_restart_links_a_new_run() {
     assert_ne!(new, run);
     assert_eq!(s.run_record(&new).retry_of, Some(run));
     s.wait_status(&new, RunStatus::Failed, LIMIT).await;
+    // D24 (05-25): restart's StartRun carries RunStarted (seq 0) with the predecessor's
+    // input and no continue-as-new link.
+    let j = s.journal(&new).await;
+    let EventBody::RunStarted(rs) = &j[0].body else {
+        panic!("seq 0 is not RunStarted: {:?}", kinds(&j))
+    };
+    assert_eq!(j[0].seq, 0);
+    assert_eq!(rs.workflow, "sdk-basic");
+    assert_eq!(rs.continued_from, None);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&rs.input.data).expect("json input"),
+        json!({"wrong": true})
+    );
+    assert_eq!(n_kind(&j, EventKind::RunStarted), 1);
     s.shutdown().await;
 }
 
@@ -758,10 +797,21 @@ async fn signal_immediately_after_start() {
     for p in ["a", "b", "c"] {
         signal_ok(&s, &run, "x", json!(p)).await;
     }
+    // D24 (05-25): RunStarted is journaled at seq 0 by StartRun, so the signals sent before
+    // any activation are journaled directly at seq 1..=3, in arrival order (no B1 Pending
+    // slot on this path).
+    let rec = s.run_record(&run);
+    assert!(rec.current_attempt.is_none(), "not activated yet");
+    assert_eq!(rec.next_seq, 4, "RunStarted + three SignalPayloads");
+    let pre = s.journal(&run).await;
     assert_eq!(
-        s.run_record(&run).next_seq,
-        0,
-        "nothing journaled before RunStarted"
+        kinds(&pre),
+        vec![
+            EventKind::RunStarted,
+            EventKind::SignalPayload,
+            EventKind::SignalPayload,
+            EventKind::SignalPayload
+        ]
     );
     // "Unpause": restart with capacity.
     s.cfg.executor.slots = 64;
@@ -778,6 +828,11 @@ async fn signal_immediately_after_start() {
         .map(|e| e.seq)
         .collect();
     assert_eq!(payloads.len(), 3, "{:?}", kinds(&j));
+    assert_eq!(
+        payloads,
+        vec![1, 2, 3],
+        "journaled at seq >= 1 before activation"
+    );
     let matched: Vec<(u64, u64)> = j
         .iter()
         .filter_map(|e| match &e.body {
