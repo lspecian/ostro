@@ -7,6 +7,7 @@
 //! - [`machine`]: the per-partition apply thread (HW-capped chunks, checkpoints).
 //! - [`acks`]: the submit/apply ack rendezvous.
 //! - [`handle`]: [`PartitionHandle`], the submit path and read helpers.
+//! - [`query`]: typed read helpers (running runs, ready rows, journal, runs pages).
 //! - [`node`]: [`Node`], the ordered startup of every partition ([`startup`]).
 //! - [`leader`]: leader services (shuffler, timers, retention) started after readiness.
 //! - [`leadership`], [`clock`], [`router`]: term epochs, wall clock, cross-partition delivery.
@@ -19,6 +20,7 @@ pub mod leader;
 pub mod leadership;
 pub mod machine;
 pub mod node;
+pub mod query;
 pub mod router;
 pub mod startup;
 pub mod store;

@@ -28,7 +28,7 @@ pub mod cursor;
 mod inbound;
 mod outbox;
 pub mod outcome;
-mod run;
+pub(crate) mod run;
 mod timer;
 
 use ostro_log::VerifiedBatch;

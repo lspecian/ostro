@@ -18,8 +18,9 @@ use common::{T, copy_dir, run_on, start_run};
 use ostro_log::ReplicatedLog;
 use ostro_partition::{ApplyOutcome, MachineConfig, Node, NodeConfig, PartitionSlot, StartMode};
 use ostro_types::command::{
-    AttemptTokenMsg, CompleteRun, Derived, EventsAppended, JournalEvent, OutboxMsg, ScheduleTimer,
-    SendMessage, Signal, TerminalStatus, derived, outbox_msg,
+    AttemptTokenMsg, CompleteRun, Derived, EventsAppended, JournalEvent, MAX_RUN_TAGS,
+    MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, ScheduleTimer, SendMessage,
+    Signal, StartRun, TerminalStatus, derived, outbox_msg,
 };
 use ostro_types::{
     AttemptToken, Command, INLINE_PAYLOAD_LIMIT, PartitionCount, PartitionId, PayloadRef, RunId,
@@ -83,6 +84,21 @@ enum Op {
         bytes: Vec<u8>,
     },
     Restart(Cfg),
+    /// Plan 04-12: StartRun with fields 14..18 set; `bad` picks a limit violation
+    /// (rejected Invalid) instead.
+    StartV4 {
+        p: u16,
+        bad: Option<u8>,
+    },
+    /// Plan 04-12: EventsAppended ending in `Suspend`, optionally with one event and a
+    /// timer (due in the past, so the timer service wakes the run again).
+    Suspend {
+        p: u16,
+        i: usize,
+        mode: EvMode,
+        event: bool,
+        timer: Option<u64>,
+    },
 }
 
 fn cfg_strategy() -> impl Strategy<Value = Cfg> {
@@ -119,8 +135,19 @@ fn op_strategy() -> impl Strategy<Value = Op> {
             proptest::bool::weighted(0.2),
         )
             .prop_map(|(p, i, mode, timer, signal, complete)| Op::Events { p, i, mode, timer, signal, complete }),
-        1 => (p, proptest::collection::vec(any::<u8>(), 0..24)).prop_map(|(p, bytes)| Op::Raw { p, bytes }),
+        1 => (p.clone(), proptest::collection::vec(any::<u8>(), 0..24)).prop_map(|(p, bytes)| Op::Raw { p, bytes }),
         1 => cfg_strategy().prop_map(Op::Restart),
+        // Plan 04-12 additions (the arms above are unchanged).
+        3 => (p.clone(), proptest::option::weighted(0.2, 0u8..4))
+            .prop_map(|(p, bad)| Op::StartV4 { p, bad }),
+        4 => (
+            p.clone(),
+            any::<usize>(),
+            prop_oneof![8 => Just(EvMode::Valid), 1 => Just(EvMode::StaleToken), 1 => Just(EvMode::OutOfSeq)],
+            any::<bool>(),
+            proptest::option::weighted(0.4, 0u64..10_000),
+        )
+            .prop_map(|(p, i, mode, event, timer)| Op::Suspend { p, i, mode, event, timer }),
     ]
 }
 
@@ -341,6 +368,96 @@ async fn drive(dir: &Path, sc: &Scenario) {
                 node.shutdown().await.expect("shutdown");
                 node = open(dir, cfg, StartMode::Leader).await;
             }
+            Op::StartV4 { p, bad } => {
+                let id = run_on(*p);
+                let mut s = StartRun {
+                    module_sha: vec![0x5a; MODULE_SHA_LEN],
+                    tags: vec![format!("op:{n}"), "env:test".into()],
+                    tenant: "acme".into(),
+                    traceparent: format!("00-{n:032x}-{n:016x}-01"),
+                    run_timeout_ms: 60_000,
+                    ..start_run(&id)
+                };
+                match bad {
+                    Some(0) => s.module_sha = vec![1; MODULE_SHA_LEN - 1],
+                    Some(1) => s.tags = vec!["t".into(); MAX_RUN_TAGS + 1],
+                    Some(2) => s.tenant = "t".repeat(MAX_TENANT_LEN + 1),
+                    Some(_) => s.traceparent = "p".repeat(MAX_TRACEPARENT_LEN + 1),
+                    None => {}
+                }
+                let o = submit(&node, *p, Command::start_run(s)).await;
+                if bad.is_some() {
+                    assert!(matches!(o, ApplyOutcome::Rejected(_)), "{o:?}");
+                } else {
+                    assert_eq!(o, ApplyOutcome::Accepted);
+                    runs[usize::from(*p)].push(RunModel {
+                        id,
+                        token: None,
+                        next_seq: 0,
+                    });
+                }
+            }
+            Op::Suspend {
+                p,
+                i,
+                mode,
+                event,
+                timer,
+            } => {
+                let rs = &mut runs[usize::from(*p)];
+                if rs.is_empty() {
+                    continue;
+                }
+                let k = i % rs.len();
+                let r = &mut rs[k];
+                let base = r.token.unwrap_or(AttemptToken {
+                    epoch: ostro_types::Epoch(1),
+                    n: 1,
+                });
+                let token = match mode {
+                    EvMode::StaleToken => AttemptToken {
+                        epoch: base.epoch,
+                        n: base.n.wrapping_add(5),
+                    },
+                    _ => base,
+                };
+                let from = match mode {
+                    EvMode::OutOfSeq => r.next_seq + 3,
+                    _ => r.next_seq,
+                };
+                let mut d = Vec::new();
+                if let Some(due) = timer {
+                    d.push(intent(derived::Intent::ScheduleTimer(ScheduleTimer {
+                        op: n as u64 + 1,
+                        due_at_ms: *due,
+                    })));
+                }
+                d.push(Derived::suspend());
+                let events = if *event {
+                    vec![JournalEvent {
+                        seq: from,
+                        kind: 16,
+                        payload: inline(b"e"),
+                    }]
+                } else {
+                    vec![]
+                };
+                let added = events.len() as u64;
+                let c = Command::events_appended(EventsAppended {
+                    run_id: r.id.as_bytes().to_vec(),
+                    token: Some(AttemptTokenMsg {
+                        epoch: token.epoch.0,
+                        n: token.n,
+                    }),
+                    from_seq: from,
+                    events,
+                    derived: d,
+                });
+                // Not Running (never granted, already suspended, terminal): rejected, fine.
+                if submit(&node, *p, c).await == ApplyOutcome::Accepted {
+                    r.next_seq = from + added;
+                }
+            }
         }
     }
     settle(&node).await;
@@ -524,6 +641,56 @@ fn fixed_scenario_with_restarts() {
             ops.push(Op::Restart(lazy.clone()));
         }
         if i == 40 {
+            ops.push(Op::Restart(tiny.clone()));
+        }
+    }
+    let sc = Scenario {
+        initial: tiny,
+        ops,
+        rebuild_chunks: (1, 1024),
+    };
+    rt().block_on(check(sc)).expect("live == rebuilt");
+}
+
+/// Plan 04-12: a fixed scenario over the Phase 4 paths: rich and invalid StartV4 starts,
+/// grants (Running rows), suspends with and without timers (timer wake-ups re-ready the
+/// runs), re-grants, completions and a restart; rebuilt with chunk 1 and 1024.
+#[test]
+fn fixed_scenario_phase4() {
+    let tiny = Cfg {
+        max_chunk_cmds: 1,
+        checkpoint_batches: 1,
+        checkpoint_every: Duration::from_millis(1),
+    };
+    let mut ops = Vec::new();
+    for i in 0..40usize {
+        let p = (i % 2) as u16;
+        ops.push(Op::StartV4 {
+            p,
+            bad: (i % 7 == 3).then_some((i % 4) as u8),
+        });
+        ops.push(Op::Grant { p, i });
+        ops.push(Op::Suspend {
+            p,
+            i,
+            mode: match i % 9 {
+                4 => EvMode::StaleToken,
+                7 => EvMode::OutOfSeq,
+                _ => EvMode::Valid,
+            },
+            event: i % 3 != 0,
+            timer: (i % 2 == 0).then_some(i as u64),
+        });
+        ops.push(Op::Grant { p, i: i + 1 });
+        ops.push(Op::Events {
+            p,
+            i: i + 1,
+            mode: EvMode::Valid,
+            timer: None,
+            signal: (i % 5 == 0).then_some(i),
+            complete: i % 4 == 1,
+        });
+        if i == 20 {
             ops.push(Op::Restart(tiny.clone()));
         }
     }

@@ -1,4 +1,4 @@
-# Ostro on-disk format (Phase 2)
+# Ostro on-disk format (Phase 2, with Phase 4 additions in §12)
 
 Status: fixed at the end of Phase 2 (plan 02-16). This document describes what the code writes today. Each section names the source file that defines the format, and the golden files and tests that pin it.
 
@@ -119,7 +119,7 @@ Inline payloads are limited to 256 KiB (`INLINE_PAYLOAD_LIMIT`). Apply rejects a
 
 ## 6. State keyspaces (`crates/ostro-partition/src/store/`)
 
-There are 13 fjall keyspaces per partition. Their declaration order (`TABLES`) is the digest order. Keys use big-endian integers. A string inside a key is `u16 BE len ‖ utf8`. A run id inside a key is its 18 raw bytes. Values marked *postcard* are `VALUE_FORMAT (0x01) ‖ postcard(value)` (`values.rs`). Values marked *prost* are the protobuf bytes of the named message.
+There are 14 fjall keyspaces per partition (13 in Phase 2; `running` added by 04-12, see §12). Their declaration order (`TABLES`) is the digest order. Keys use big-endian integers. A string inside a key is `u16 BE len ‖ utf8`. A run id inside a key is its 18 raw bytes. Values marked *postcard* are `VALUE_FORMAT (0x01) ‖ postcard(value)` (`values.rs`). Values marked *prost* are the protobuf bytes of the named message.
 
 | # | keyspace | key | value |
 |---|---|---|---|
@@ -136,8 +136,9 @@ There are 13 fjall keyspaces per partition. Their declaration order (`TABLES`) i
 | 10 | `children` | parent run ‖ child run | empty |
 | 11 | `dlq` | reserved (no rows written in Phase 2) | |
 | 12 | `effects` | reserved (no rows written in Phase 2) | |
+| 13 | `running` | run (18) | postcard `(epoch u32, n u32)`: the current attempt token (Phase 4, §12) |
 
-`RunRecord` (postcard, field order is the encoding): workflow String, workflow_version u32, queue String, status `RunStatus` (Scheduled, Ready, Running, Completed, Failed, Cancelled), current_attempt `Option<(u32, u32)>`, next_seq u64, ready `Option<ReadySlot{priority i32, ready_at_ms u64}>`, parent `Option<([u8;18], u64)>`, cancel_requested bool, concurrency_key String, priority i32, created_at_ms u64, rng_seed `Vec<u8>`, inbox_next u64, children u32. Because postcard is positional, changing a stored struct means a new `VALUE_FORMAT` byte or a new key.
+`RunRecord` (postcard, field order is the encoding): workflow String, workflow_version u32, queue String, status `RunStatus` (Scheduled, Ready, Running, Completed, Failed, Cancelled), current_attempt `Option<(u32, u32)>`, next_seq u64, ready `Option<ReadySlot{priority i32, ready_at_ms u64}>`, parent `Option<([u8;18], u64)>`, cancel_requested bool, concurrency_key String, priority i32, created_at_ms u64, rng_seed `Vec<u8>`, inbox_next u64, children u32, then the Phase 4 trailing fields (§12): module_sha `Option<[u8;32]>`, tags `Vec<String>`, tenant `Option<String>`, traceparent `Option<String>`, run_timeout_ms `Option<u64>`, completed_at_ms `Option<u64>`. Because postcard is positional, changing a stored struct means a new `VALUE_FORMAT` byte or a new key. After the Phase 5 freeze this is binding; the Phase 4 change in §12 is the one deliberate pre-freeze exception.
 
 ## 7. Meta keys (`store/meta.rs`)
 
@@ -173,7 +174,7 @@ Folded into the rolling hash, so they are part of the format. New codes are appe
 | Rejected(WrongPartition) | 25 |
 | Rejected(Invalid(_)) (any detail) | 26 |
 
-`InvalidCode` details (Decode, Empty, BadRunId, MissingToken, EventsNotContiguous, MissingField, NotImplemented, BadIntent, FieldTooLong, BadSource, TruncateBeyondEnd) are not hashed separately, because the command bytes that determine them are hashed. They are append-only.
+`InvalidCode` details (Decode, Empty, BadRunId, MissingToken, EventsNotContiguous, MissingField, NotImplemented, BadIntent, FieldTooLong, BadSource, TruncateBeyondEnd; Phase 4: BadLength, NotRunning) are not hashed separately, because the command bytes that determine them are hashed. They are append-only.
 
 ## 9. Rolling hash and logical digest
 
@@ -256,3 +257,38 @@ Findings:
 - The S3 ~120 ms write stall does **not** appear with the 8 MiB memtables: no apply batch reached 100 ms, and the worst was 50 ms at machine level. Setting fjall's 64 MiB memtables reproduces it (120.65 ms).
 - Apply keeps to exactly one keyspace point read per command.
 - **Store-level RMW is below the S3 90k cmds/s rule at the default 16 MiB block cache (80.8k).** It reaches 153k once the read working set fits the block cache (cliff between 64 and 128 MiB for 1M runs, because the 10% uniform picks touch the whole `runs` keyspace). This is a per-partition memory-budget question: fjall 3.1.13 has no public API to share one cache across databases. The default stays at 16 MiB for now. The open concern is recorded in STATE.md: size the cache from a node-level memory budget (`budget / P`) in server configuration.
+
+## 12. Phase 4 additions (pre-freeze)
+
+Plans 04-04, 04-09 and 04-12 changed the format before the Phase 5 freeze. The command-set changes are additive: old bytes decode, and re-encode to the same bytes. The state change to `RunRecord` is **not** additive. It is a pre-freeze format change with **no migration** and no `VALUE_FORMAT` bump. **Delete dev data dirs created before Phase 4**: an old `runs` row fails to decode (`StoreError::Codec`).
+
+**Commands** (`crates/ostro-types/src/command.rs`; golden vectors `start_run_v4`, `events_appended_suspend` appended to `commands.txt`):
+
+| change | detail |
+|---|---|
+| `StartRun` 14 `module_sha` bytes | empty = none, else exactly 32 bytes (`MODULE_SHA_LEN`, sha256 of the module). Any other length is rejected `Invalid(BadLength)` |
+| `StartRun` 15 `tags` repeated string | at most 64 tags (`MAX_RUN_TAGS`), each at most 128 bytes (`MAX_RUN_TAG_LEN`), else `Invalid(FieldTooLong)` |
+| `StartRun` 16 `tenant` string | empty = none, at most 128 bytes (`MAX_TENANT_LEN`), else `Invalid(FieldTooLong)` |
+| `StartRun` 17 `traceparent` string | empty = none, at most 256 bytes (`MAX_TRACEPARENT_LEN`), length checked only (no W3C syntax check), else `Invalid(FieldTooLong)` |
+| `StartRun` 18 `run_timeout_ms` u64 | 0 = none |
+| `Derived` 6 = `Suspend {}` | empty message. See the apply rules below |
+
+Tags still free: `Derived` oneof 7, `StartRun` 19 and `Command` 8. Phase 5 reserves `StartRun` 19..23 and `Command` 8..12.
+
+**Journal:** event kind 29 = `StepAttemptFailed` (plan 04-04). Additive, no journal codec bump: replay of a journal without kind 29 is unchanged.
+
+**State** (`crates/ostro-partition/src/store/`):
+
+- `RunRecord` gains trailing fields, in this order: module_sha `Option<[u8;32]>`, tags `Vec<String>`, tenant `Option<String>`, traceparent `Option<String>`, run_timeout_ms `Option<u64>` (all from `StartRun`, empty/0 stored as `None`), completed_at_ms `Option<u64>` (from `CompleteRun.completed_at_ms`, 0 stored as `None`).
+- New keyspace 13 `running`: key = run id (18), value = postcard `(epoch u32, n u32)`. A row exists **exactly while the run's status is `Running`**. `AttemptGranted` inserts it, or overwrites it with the new token. Every transition out of `Running` blind-removes it: `EnqueueReady`, `Suspend` and `CompleteRun`. Inbound messages and timers only wake `Scheduled` runs, so they never touch it. A new leader rebuilds its in-flight set from this keyspace (`ostro_partition::query::running_runs`) without scanning `runs`. Appending a keyspace changes the logical digest of every store, because the digest hashes each keyspace's name and row count. Existing rows are unchanged.
+
+**Apply rules** (`crates/ostro-partition/src/apply/run.rs`):
+
+- `Suspend` must be the **last** intent of its `EventsAppended`. It cannot be combined with `EnqueueReady` or `CompleteRun` (either order) or with a second `Suspend`, else `Invalid(BadIntent)`. The run must be `Running`, else `Invalid(NotRunning)`.
+- Effect: status becomes `Scheduled`; the ready row (if any) and the `running` row are removed; `current_attempt` is kept (for fencing). No action is emitted. A later timer, signal, child result or cancel request makes the run Ready again through the existing wake-up path.
+- **CAS:** the `from_seq == next_seq` check that every `EventsAppended` already passes acts as the compare-and-set. If an input is journaled after the executor's last flush, `next_seq` moves (plan 04-13), the Suspend is rejected `SeqMismatch{expected}`, and the executor re-activates. A rejected Suspend leaves the state unchanged.
+- Read budget: unchanged. `StartRun` field checks run before the point read. `AttemptGranted` adds one blind insert. `Suspend`, `EnqueueReady` and `CompleteRun` add one blind remove each. No new point reads.
+
+**Actions** (`apply/outcome.rs`, not persisted): `Action::InputAppended { run, seq }`. It means an input was journaled at `seq` for a `Running` run, so the dispatcher can forward it to the hot activation. The variant exists since 04-12; plan 04-13 emits it.
+
+**Outcome codes:** unchanged. New `InvalidCode` details `BadLength` and `NotRunning` fold as code 26, like every `Invalid`.
