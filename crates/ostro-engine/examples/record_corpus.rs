@@ -51,6 +51,8 @@
 //!
 //! Before writing, the recorder replays the journal on the same runtime and requires the same
 //! outcome with zero appends.
+//!
+//! `record_corpus --dump <entry-dir>` prints an existing entry's events (read-only).
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -1160,8 +1162,65 @@ fn write_entry(dir: &Path, module: &[u8], bin: &[u8], toml_body: &str) -> Result
     Ok(())
 }
 
+/// `--dump <entry-dir>`: print an existing entry's events (seq, kind, ts, summary) and its
+/// terminal payload. Read-only.
+fn dump(dir: &Path) -> Result<(), String> {
+    let bin = std::fs::read(dir.join("journal.bin")).map_err(|e| format!("journal.bin: {e}"))?;
+    let mut pos = 0usize;
+    while pos + 4 <= bin.len() {
+        let len = u32::from_le_bytes(bin[pos..pos + 4].try_into().expect("4 bytes")) as usize;
+        let msg = bin
+            .get(pos + 4..pos + 4 + len)
+            .ok_or_else(|| format!("truncated record at {pos}"))?;
+        pos += 4 + len;
+        let je = JournalEvent::decode(msg).map_err(|e| format!("record: {e}"))?;
+        let bytes = match je.payload.and_then(|p| p.kind) {
+            Some(ostro_types::payload::payload_ref::Kind::Inline(b)) => b,
+            other => return Err(format!("seq {}: non-inline payload {other:?}", je.seq)),
+        };
+        let ev = ostro_types::journal::decode_event(je.seq, je.kind, &bytes)
+            .map_err(|e| format!("seq {}: {e}", je.seq))?;
+        let detail = match &ev.body {
+            EventBody::SignalMatched(m) => format!(" (payload_seq {})", m.payload_seq),
+            EventBody::StepAttemptFailed(f) => format!(
+                " ({} attempt {} {:?} retry_at {})",
+                f.name, f.attempt, f.backoff, f.retry_at_nanos
+            ),
+            EventBody::RunCompleted(c) => {
+                format!(" -> {}", String::from_utf8_lossy(&c.output.data))
+            }
+            EventBody::RunFailed(f) => format!(" -> {:?}", f.failure),
+            EventBody::RunContinuedAsNew(c) => format!(
+                " -> {}",
+                String::from_utf8_lossy(&c.continuation.input.data)
+            ),
+            _ => String::new(),
+        };
+        println!(
+            "{:>4} {:<18} {} {}{detail}",
+            ev.seq,
+            format!("{:?}", ev.body.kind()),
+            ev.ts_nanos,
+            ev.body.summary()
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, dir] = argv.as_slice()
+        && flag == "--dump"
+    {
+        return match dump(Path::new(dir)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("record_corpus --dump: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
