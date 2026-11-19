@@ -46,6 +46,13 @@ jobs:
           --exclude ostro-raft-rs --exclude ostro-raft-proto
           --exclude ostro-raft-driver --exclude ostro-wal
           -- -D warnings
+      - name: Rust SDK workspace fmt + clippy (host + wasm32-wasip2)
+        # separate workspace without a committed lock (no --locked); keep in sync with
+        # check_sdk_lint in scripts/ci-local.sh
+        run: |
+          cargo fmt --manifest-path sdks/rust/Cargo.toml --all --check
+          cargo clippy --manifest-path sdks/rust/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path sdks/rust/Cargo.toml --target wasm32-wasip2 -- -D warnings
       - name: cargo deny check
         run: cargo deny check
       - name: Vendored provenance check
@@ -125,6 +132,13 @@ jobs:
       - if: ${{ !matrix.zig }}
         name: cargo test
         run: cargo test --workspace --locked
+      - if: matrix.name == 'linux-x86_64-gnu'
+        name: Rust SDK workspace test + wasm32-wasip2 build
+        # keep in sync with check_sdk_test / check_guests in scripts/ci-local.sh
+        run: |
+          cargo test --manifest-path sdks/rust/Cargo.toml
+          cargo build --manifest-path sdks/rust/Cargo.toml --target wasm32-wasip2
+          cargo build --release --target wasm32-wasip2 --manifest-path guests/Cargo.toml --target-dir target/guests
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Failpoint suites
         # keep in sync with FAILPOINT_CRATES in scripts/ci-local.sh

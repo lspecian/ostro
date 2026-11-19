@@ -103,6 +103,31 @@ check_failpoints() {
   done
 }
 
+# Rust guest SDK (plan 04-20): a separate cargo workspace (sdks/rust, no committed lock,
+# so no --locked). Host tests include the trybuild macro diagnostics; the runtime crate
+# must build and lint clean for wasm32-wasip2. Keep in sync with the SDK steps of
+# .github/workflows/ci.yml (lint job + linux-x86_64-gnu leg).
+SDK_MANIFEST="sdks/rust/Cargo.toml"
+
+check_sdk_lint() {
+  cargo fmt --manifest-path "$SDK_MANIFEST" --all --check || return 1
+  cargo clippy --manifest-path "$SDK_MANIFEST" --all-targets -- -D warnings || return 1
+  cargo clippy --manifest-path "$SDK_MANIFEST" --target wasm32-wasip2 -- -D warnings
+}
+
+check_sdk_test() {
+  cargo test --manifest-path "$SDK_MANIFEST" || return 1
+  cargo build --manifest-path "$SDK_MANIFEST" --target wasm32-wasip2
+}
+
+# Test guests (guests/, incl. the SDK-built sdk-*): the same build the integration
+# tests' guest_wasm() helper runs, made an explicit step so a broken guest fails here
+# with the compiler output instead of inside a test panic.
+check_guests() {
+  cargo build --release --target wasm32-wasip2 \
+    --manifest-path guests/Cargo.toml --target-dir target/guests
+}
+
 check_forbidden_crates() {
   local hits
   hits="$(cargo tree --workspace -e normal --locked | grep -E 'chronik|tokio-uring|prometheus ' || true)"
@@ -182,6 +207,9 @@ step "toolchain 1.100.0" check_toolchain
 step "cargo fmt --check" cargo fmt --all --check
 step "cargo clippy -D warnings" check_clippy
 step "cargo build (warning-free)" check_build
+step "sdk workspace fmt + clippy" check_sdk_lint
+step "sdk workspace test + wasm build" check_sdk_test
+step "guests build (wasm32-wasip2)" check_guests
 step "cargo test" cargo test --workspace --locked
 step "failpoint suites" check_failpoints
 step "cargo deny check" cargo deny check
