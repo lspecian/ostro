@@ -9,7 +9,7 @@ use ostro_types::command::{
     self, AttemptGranted, AttemptTokenMsg, CancelTimer, ChildCompleted, CompleteRun,
     ConflictPolicy, CronStart, Derived, EnqueueReady, EventsAppended, InboundBatch, InboundMsg,
     JournalEvent, OutboxMsg, OutboxTruncated, ParentRef, ScheduleTimer, SendMessage, Signal,
-    StartChild, StartRun, TerminalStatus, TimerFired, decode_command, encode_command,
+    StartChild, StartRun, Suspend, TerminalStatus, TimerFired, decode_command, encode_command,
 };
 use ostro_types::{AttemptToken, Command, Epoch, IdError, PartitionId, PayloadRef, RunId};
 use proptest::prelude::*;
@@ -49,6 +49,20 @@ fn sample_start(p: u16) -> StartRun {
             op: 4,
         }),
         rng_seed: vec![0xAB; 32],
+        // Phase 4 fields (14..18) left at their defaults: the original golden bytes must not move.
+        ..Default::default()
+    }
+}
+
+/// `sample_start` plus every Phase 4 field (plan 04-09: StartRun tags 14..18).
+fn sample_start_v4(p: u16) -> StartRun {
+    StartRun {
+        module_sha: vec![0xC3; 32],
+        tags: vec!["env:prod".into(), "team:billing".into()],
+        tenant: "acme".into(),
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+        run_timeout_ms: 3_600_000,
+        ..sample_start(p)
     }
 }
 
@@ -181,14 +195,58 @@ fn golden_commands() -> Vec<(&'static str, Command)> {
     ]
 }
 
+/// Vectors appended after the original seven (additive changes only; never edit an earlier line).
+/// Plan 04-09: StartRun fields 14..18 and the `Suspend` intent (Derived oneof tag 6).
+fn golden_appended() -> Vec<(&'static str, Command)> {
+    vec![
+        ("start_run_v4", Command::start_run(sample_start_v4(5))),
+        (
+            "events_appended_suspend",
+            Command::events_appended(EventsAppended {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                token: token(7, 2),
+                from_seq: 13,
+                events: vec![JournalEvent {
+                    seq: 13,
+                    kind: 20,
+                    payload: Some(PayloadRef::inline(Bytes::from_static(b"wait"))),
+                }],
+                derived: vec![Derived::suspend()],
+            }),
+        ),
+    ]
+}
+
+/// Every golden vector in file order: the original seven, then the appended ones.
+fn all_golden() -> Vec<(&'static str, Command)> {
+    let mut v = golden_commands();
+    v.extend(golden_appended());
+    v
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+fn golden_line(name: &str) -> Vec<u8> {
+    let line = GOLDEN
+        .lines()
+        .find_map(|l| l.strip_prefix(name).and_then(|r| r.strip_prefix('\t')))
+        .unwrap_or_else(|| panic!("golden line {name}"));
+    unhex(line)
 }
 
 fn render_golden() -> String {
     let mut s = String::from(HEADER);
     s.push('\n');
-    for (name, c) in golden_commands() {
+    for (name, c) in all_golden() {
         s.push_str(&format!("{name}\t{}\n", hex(&encode_command(&c))));
     }
     s
@@ -239,7 +297,7 @@ fn golden_encodings() {
     }
     let mut lines = GOLDEN.lines();
     assert_eq!(lines.next(), Some(HEADER));
-    let expected: Vec<(&str, String)> = golden_commands()
+    let expected: Vec<(&str, String)> = all_golden()
         .into_iter()
         .map(|(n, c)| (n, hex(&encode_command(&c))))
         .collect();
@@ -247,11 +305,134 @@ fn golden_encodings() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.split_once('\t').expect("name<TAB>hex"))
         .collect();
-    assert_eq!(got.len(), expected.len(), "one vector per Cmd variant");
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "one vector per Cmd variant + appended vectors"
+    );
     for ((gn, gh), (en, eh)) in got.iter().zip(&expected) {
         assert_eq!(gn, en);
         assert_eq!(*gh, eh.as_str(), "{en} encoding drifted");
     }
+}
+
+#[test]
+fn appended_vectors_round_trip() {
+    for (name, c) in golden_appended() {
+        let back = decode_command(&encode_command(&c)).expect("decode");
+        assert_eq!(back, c, "{name} round trip");
+    }
+    let Some(command::Cmd::StartRun(s)) = golden_appended().remove(0).1.cmd else {
+        panic!("wrong variant")
+    };
+    assert_eq!(s.module_sha.len(), command::MODULE_SHA_LEN);
+    assert_eq!(s.tags, ["env:prod", "team:billing"]);
+    assert_eq!(s.tenant, "acme");
+    assert_eq!(s.run_timeout_ms, 3_600_000);
+}
+
+#[test]
+fn old_start_run_bytes_decode_with_defaults() {
+    // The StartRun line written by plan 02-06, before fields 14..18 existed.
+    let old = golden_line("StartRun");
+    let c = decode_command(&old).expect("old bytes decode");
+    let Some(command::Cmd::StartRun(s)) = &c.cmd else {
+        panic!("wrong variant")
+    };
+    assert!(s.module_sha.is_empty());
+    assert!(s.tags.is_empty());
+    assert!(s.tenant.is_empty());
+    assert!(s.traceparent.is_empty());
+    assert_eq!(s.run_timeout_ms, 0, "0 = no run timeout");
+    assert_eq!(*s, sample_start(5));
+    assert_eq!(
+        encode_command(&c).as_ref(),
+        old.as_slice(),
+        "re-encode is identical"
+    );
+}
+
+#[test]
+fn old_events_appended_bytes_decode_unchanged() {
+    let old = golden_line("EventsAppended");
+    let c = decode_command(&old).expect("old bytes decode");
+    assert_eq!(encode_command(&c).as_ref(), old.as_slice());
+    let Some(command::Cmd::EventsAppended(ea)) = c.cmd else {
+        panic!("wrong variant")
+    };
+    assert!(
+        ea.derived
+            .iter()
+            .all(|d| !matches!(d.intent, Some(command::derived::Intent::Suspend(_))))
+    );
+}
+
+#[test]
+fn start_run_new_fields_bytes_from_first_principles() {
+    // Each new field alone, wrapped in Cmd tag 2 (LEN): key = field << 3 | wire type.
+    let only = |s: StartRun| hex(&encode_command(&Command::start_run(s)));
+    // 14 bytes: key 0x72, len 2.
+    assert_eq!(
+        only(StartRun {
+            module_sha: vec![0xAA, 0xBB],
+            ..Default::default()
+        }),
+        "1204".to_string() + "7202aabb"
+    );
+    // 15 repeated string: key 0x7a per element.
+    assert_eq!(
+        only(StartRun {
+            tags: vec!["a".into(), "b".into()],
+            ..Default::default()
+        }),
+        "1206".to_string() + "7a0161" + "7a0162"
+    );
+    // 16 string: key 0x82 0x01.
+    assert_eq!(
+        only(StartRun {
+            tenant: "t".into(),
+            ..Default::default()
+        }),
+        "1204".to_string() + "820101" + "74"
+    );
+    // 17 string: key 0x8a 0x01.
+    assert_eq!(
+        only(StartRun {
+            traceparent: "x".into(),
+            ..Default::default()
+        }),
+        "1204".to_string() + "8a0101" + "78"
+    );
+    // 18 varint: key 0x90 0x01.
+    assert_eq!(
+        only(StartRun {
+            run_timeout_ms: 1,
+            ..Default::default()
+        }),
+        "1203".to_string() + "900101"
+    );
+}
+
+#[test]
+fn suspend_intent_bytes_from_first_principles() {
+    let d = Derived::suspend();
+    assert_eq!(
+        d.intent,
+        Some(command::derived::Intent::Suspend(Suspend {}))
+    );
+    // Derived oneof tag 6 (LEN), empty Suspend message: 32 00.
+    assert_eq!(hex(&prost::Message::encode_to_vec(&d)), "3200");
+    let back: Derived = prost::Message::decode(&[0x32, 0x00][..]).unwrap();
+    assert_eq!(back, d);
+}
+
+#[test]
+fn start_run_field_limits_are_documented_constants() {
+    assert_eq!(command::MODULE_SHA_LEN, 32);
+    assert_eq!(command::MAX_RUN_TAGS, 64);
+    assert_eq!(command::MAX_RUN_TAG_LEN, 128);
+    assert_eq!(command::MAX_TENANT_LEN, 128);
+    assert_eq!(command::MAX_TRACEPARENT_LEN, 256);
 }
 
 #[test]
@@ -270,7 +451,7 @@ fn empty_slice_decodes_to_none() {
 
 #[test]
 fn unknown_future_field_is_skipped() {
-    for (name, c) in golden_commands() {
+    for (name, c) in all_golden() {
         let mut b = encode_command(&c).to_vec();
         // tag 60, wire type 0 (varint): key = 60 << 3 = 480 -> e0 03; value 5.
         b.extend_from_slice(&[0xe0, 0x03, 0x05]);
@@ -305,8 +486,8 @@ proptest! {
     }
 
     #[test]
-    fn decode_mutated_valid_never_panics(idx in 0usize..7, pos in any::<usize>(), byte in any::<u8>()) {
-        let (_, c) = golden_commands().remove(idx);
+    fn decode_mutated_valid_never_panics(idx in 0usize..9, pos in any::<usize>(), byte in any::<u8>()) {
+        let (_, c) = all_golden().remove(idx);
         let mut b = encode_command(&c).to_vec();
         let p = pos % b.len();
         b[p] = byte;
