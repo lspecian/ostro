@@ -65,6 +65,8 @@ impl Host for HostState {
         Ok(self.replay.is_replaying())
     }
 
+    /// Memoised per change-id; unqueried markers are skipped (D6, see
+    /// `ReplayState::patched`). Only the first query of an id can journal a marker.
     async fn patched(&mut self, change_id: String) -> wasmtime::Result<bool> {
         let hash = self.hash(&CommandArgs::Patch {
             change_id: &change_id,

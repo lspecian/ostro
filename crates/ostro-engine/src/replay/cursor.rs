@@ -144,6 +144,8 @@ pub struct ReplayState {
     pub(super) max_ts: u64,
     /// Op -> seq of its first completion event (see the module doc).
     pub(super) completions: BTreeMap<OpId, u64>,
+    /// `patched(change_id)` memo: the first evaluation per id decides (D6).
+    pub(super) patched: BTreeMap<String, bool>,
     pub(super) clock: Arc<dyn Clock>,
 }
 
@@ -199,6 +201,7 @@ impl ReplayState {
         Ok(Self {
             max_ts,
             completions,
+            patched: BTreeMap::new(),
             next_seq: journal.len() as u64,
             cursor: 1,
             pending: Vec::new(),
@@ -281,6 +284,11 @@ impl ReplayState {
         hash: CommandHash,
         actual: &dyn Fn() -> String,
     ) -> Result<Option<usize>, ReplayError> {
+        // A recorded marker can only match `patched`; any other command skips the
+        // markers the code no longer queries (D6).
+        if kind != CommandKind::Patch {
+            self.skip_unqueried_markers(None);
+        }
         let Some(i) = self.next_guest_command() else {
             return Ok(None);
         };
@@ -366,12 +374,24 @@ impl ReplayState {
         Ok(CommandResult::Live { seq, ts_nanos })
     }
 
-    /// `patched(change_id)`: live → `true` and a `PatchMarker` is appended; replay with a
-    /// matching marker next → `true` (consumed); replay where the next guest command is
-    /// anything else → `false`, nothing consumed, no error.
+    /// `patched(change_id)`, memoised per change-id (D6: "Memoised per change-id;
+    /// unqueried `PatchMarker`s are skipped").
+    ///
+    /// The first evaluation of a change-id in this run decides, and every later call
+    /// returns the memo with no journal effect (one marker per id per run):
+    /// - live → `true` and a `PatchMarker` is appended;
+    /// - replay with this id's marker next (after skipping markers of other ids that
+    ///   the code no longer queries) → `true`, the marker is consumed;
+    /// - replay where the next guest command is anything else → `false`, nothing is
+    ///   consumed, no error. A journal recorded before the patch existed takes the old
+    ///   path.
     pub fn patched(&mut self, hash: CommandHash, change_id: &str) -> Result<bool, ReplayError> {
         self.check_no_open_step()?;
-        match self.next_guest_command() {
+        if let Some(&memo) = self.patched.get(change_id) {
+            return Ok(memo);
+        }
+        self.skip_unqueried_markers(Some(hash));
+        let active = match self.next_guest_command() {
             Some(i) => {
                 let ev = &self.journal[i];
                 let matches = ev.body.kind() == EventKind::PatchMarker
@@ -379,7 +399,7 @@ impl ReplayState {
                 if matches {
                     self.consume(i);
                 }
-                Ok(matches)
+                matches
             }
             None => {
                 let seq = self.next_seq;
@@ -391,8 +411,28 @@ impl ReplayState {
                     change_id: change_id.to_owned(),
                 });
                 self.append_live(seq, body);
-                Ok(true)
+                true
             }
+        };
+        self.patched.insert(change_id.to_owned(), active);
+        Ok(active)
+    }
+
+    /// Unqueried-marker skip (D6, the 03-RESEARCH "patch removed" rule): consume every
+    /// recorded `PatchMarker` at the cursor that the code is not querying now (all of
+    /// them, or all but the one with hash `keep` when called from
+    /// [`patched`](Self::patched)). A module that dropped a `patched(id)` call, or a
+    /// journal with a duplicate marker from before the memo, therefore replays without
+    /// divergence. Markers have no side effects, so skipping one changes nothing else.
+    fn skip_unqueried_markers(&mut self, keep: Option<CommandHash>) {
+        while let Some(i) = self.next_guest_command() {
+            let ev = &self.journal[i];
+            let skip = ev.body.kind() == EventKind::PatchMarker
+                && keep.is_none_or(|k| ev.body.command_meta().is_none_or(|m| m.hash != k));
+            if !skip {
+                break;
+            }
+            self.consume(i);
         }
     }
 
@@ -505,11 +545,13 @@ impl ReplayState {
     }
 
     /// The guest's run function returned (called before its terminal command is
-    /// issued). Unconsumed recorded guest commands are a divergence, except a trailing
-    /// terminal event, which is compared through `command(Terminal, ..)`. An open step is
-    /// abandoned (it never completed, so nothing was journaled).
+    /// issued). Unconsumed recorded guest commands are a divergence, except unqueried
+    /// patch markers (skipped, D6) and a trailing terminal event, which is compared
+    /// through `command(Terminal, ..)`. An open step is abandoned (it never completed,
+    /// so nothing was journaled).
     pub fn finish(&mut self) -> Result<(), ReplayError> {
         self.close_step();
+        self.skip_unqueried_markers(None);
         match self.next_guest_command() {
             Some(i) if !is_terminal(self.journal[i].body.kind()) => {
                 let ev = &self.journal[i];

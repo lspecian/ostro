@@ -1018,7 +1018,11 @@ fn rng_streams_follow_run_seed() {
 // Property: faithful replay appends nothing; single mutations are caught at the exact seq.
 // ---------------------------------------------------------------------------
 
-const KINDS: [CommandKind; 13] = [
+/// Command kinds of the mutation property. `Patch` is not among them: since D6
+/// (05-03) a recorded `PatchMarker` the code does not query is skipped instead of
+/// diverging, so markers have their own tests (`patched_*`) rather than the generic
+/// "every mutation diverges at its seq" rule.
+const KINDS: [CommandKind; 12] = [
     CommandKind::Step,
     CommandKind::Http,
     CommandKind::Sql,
@@ -1030,7 +1034,6 @@ const KINDS: [CommandKind; 13] = [
     CommandKind::CreateAwaitToken,
     CommandKind::CancelOp,
     CommandKind::Wait,
-    CommandKind::Patch,
     CommandKind::SetStatus,
 ];
 
@@ -1947,4 +1950,172 @@ proptest! {
             prop_assert_eq!(st.completion_seq(op), first(op));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// patched memo + unqueried-marker skip (D6, 05-03).
+// ---------------------------------------------------------------------------
+
+fn marker(seq: u64, hash: CommandHash, id: &str) -> Event {
+    recorded(
+        seq,
+        EventBody::PatchMarker(PatchMarker {
+            meta: meta(hash),
+            change_id: id.into(),
+        }),
+    )
+}
+
+#[test]
+fn patched_is_memoised_per_change_id() {
+    // Live: one marker per id, however often it is queried.
+    let mut st = fresh();
+    assert!(st.patched(h(5), "a").unwrap());
+    assert!(st.patched(h(5), "a").unwrap());
+    assert!(st.patched(h(6), "b").unwrap());
+    assert!(st.patched(h(5), "a").unwrap());
+    let p = st.take_pending();
+    assert_eq!(p.len(), 2, "one marker per change-id: {p:?}");
+
+    // Replay of a pre-patch journal: false, memoised, nothing consumed or appended.
+    let journal = vec![
+        run_started(),
+        recorded(1, body_for(CommandKind::Http, h(7))),
+    ];
+    let mut st = replay(journal);
+    assert!(!st.patched(h(5), "a").unwrap());
+    assert!(!st.patched(h(5), "a").unwrap());
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(7)).unwrap(), (1, true));
+    // Still the memo after the cursor moved on (no live marker appended).
+    assert!(!st.patched(h(5), "a").unwrap());
+    assert_eq!(st.pending_len(), 0);
+    st.finish().unwrap();
+
+    // Replay with the marker: true, then the memo (the marker is consumed once).
+    let journal = vec![
+        run_started(),
+        marker(1, h(5), "a"),
+        recorded(2, body_for(CommandKind::Http, h(7))),
+    ];
+    let mut st = replay(journal);
+    assert!(st.patched(h(5), "a").unwrap());
+    assert!(st.patched(h(5), "a").unwrap());
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(7)).unwrap(), (2, true));
+    st.finish().unwrap();
+    assert_eq!(st.pending_len(), 0);
+}
+
+#[test]
+fn patched_inside_open_step_is_rejected_even_when_memoised() {
+    let mut st = fresh();
+    assert!(st.patched(h(5), "a").unwrap());
+    let actual = || "s".to_owned();
+    let StepBegin::Live { .. } = st.begin_step(h(1), &actual).unwrap() else {
+        panic!("live step");
+    };
+    assert!(is_open_step(st.patched(h(5), "a")));
+}
+
+#[test]
+fn unqueried_markers_are_skipped() {
+    // The patched call was removed: the next command skips the marker.
+    let journal = vec![
+        run_started(),
+        recorded(1, body_for(CommandKind::Http, h(7))),
+        marker(2, h(5), "a"),
+        recorded(3, body_for(CommandKind::Sleep, h(8))),
+        marker(4, h(6), "b"),
+        marker(5, h(5), "a"),
+    ];
+    let mut st = replay(journal.clone());
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(7)).unwrap(), (1, true));
+    assert_eq!(cmd(&mut st, CommandKind::Sleep, h(8)).unwrap(), (3, true));
+    // Trailing markers (incl. a duplicate from before the memo) are skipped by finish.
+    st.finish().unwrap();
+    assert_eq!(st.pending_len(), 0);
+
+    // `patched(b)` with `a`'s marker first: `a` is no longer queried, so it is skipped.
+    let journal = vec![
+        run_started(),
+        marker(1, h(5), "a"),
+        marker(2, h(6), "b"),
+        recorded(3, body_for(CommandKind::Http, h(7))),
+    ];
+    let mut st = replay(journal);
+    assert!(st.patched(h(6), "b").unwrap());
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(7)).unwrap(), (3, true));
+    st.finish().unwrap();
+
+    // A later live command after skipped markers appends at the end of the journal.
+    let journal = vec![run_started(), marker(1, h(5), "a")];
+    let mut st = replay(journal);
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(7)).unwrap(), (2, false));
+
+    // A real divergence behind a skipped marker is still caught at its seq.
+    let journal = vec![
+        run_started(),
+        marker(1, h(5), "a"),
+        recorded(2, body_for(CommandKind::Http, h(7))),
+    ];
+    let mut st = replay(journal);
+    assert_eq!(nd(cmd(&mut st, CommandKind::Http, h(9))).seq, 2);
+}
+
+/// v1 (no patch) / v2 (patched + second query) / v3 (patch removed, new path always)
+/// over the replay core, mirroring the patch-v* guests of `tests/patching.rs`.
+#[test]
+fn patched_v1_v2_v3_lifecycle() {
+    let a = (CommandKind::Step, h(1));
+    let c = (CommandKind::Step, h(3));
+    let sleep = (CommandKind::Sleep, h(4));
+    let b = (CommandKind::Step, h(2));
+    let pid = h(9);
+    let run = |st: &mut ReplayState, with_patch: bool, always_c: bool| {
+        let mut steps = vec!['A'];
+        cmd(st, a.0, a.1).unwrap();
+        let take_c = if with_patch {
+            let first = st.patched(pid, "add-c").unwrap();
+            assert_eq!(st.patched(pid, "add-c").unwrap(), first, "memo");
+            first
+        } else {
+            always_c
+        };
+        if take_c {
+            cmd(st, c.0, c.1).unwrap();
+            steps.push('C');
+        }
+        cmd(st, sleep.0, sleep.1).unwrap();
+        cmd(st, b.0, b.1).unwrap();
+        steps.push('B');
+        st.finish().unwrap();
+        steps
+    };
+
+    // v1 journal replayed by v2: old path, no marker, no divergence.
+    let mut st = fresh();
+    assert_eq!(run(&mut st, false, false), vec!['A', 'B']);
+    st.take_pending();
+    let v1 = st.journal().to_vec();
+    let mut st = replay(v1.clone());
+    assert_eq!(run(&mut st, true, false), vec!['A', 'B']);
+    assert_eq!(st.pending_len(), 0);
+
+    // Fresh v2: one marker, new path.
+    let mut st = fresh();
+    assert_eq!(run(&mut st, true, false), vec!['A', 'C', 'B']);
+    let v2 = st.take_pending();
+    let markers = v2
+        .iter()
+        .filter(|e| e.body.kind() == EventKind::PatchMarker)
+        .count();
+    assert_eq!(markers, 1);
+    let v2 = st.journal().to_vec();
+
+    // v2 by v2: nothing new. v2 by v3: the unqueried marker is skipped.
+    let mut st = replay(v2.clone());
+    assert_eq!(run(&mut st, true, false), vec!['A', 'C', 'B']);
+    assert_eq!(st.pending_len(), 0);
+    let mut st = replay(v2);
+    assert_eq!(run(&mut st, false, true), vec!['A', 'C', 'B']);
+    assert_eq!(st.pending_len(), 0);
 }
