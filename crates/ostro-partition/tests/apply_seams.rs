@@ -18,8 +18,8 @@ use ostro_partition::store::values::{self, RunRecord, RunStatus, SignalSlot, Wai
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
     self, AttemptGranted, AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EventsAppended,
-    InboundBatch, InboundMsg, JournalEvent, OutboxMsg, RetryRun, Signal, StartRun, TerminalStatus,
-    TerminateRun, TimerFired, derived, encode_command, outbox_msg,
+    InboundBatch, InboundMsg, JournalEvent, OutboxMsg, Signal, StartRun, TerminalStatus,
+    TimerFired, derived, encode_command, outbox_msg,
 };
 use ostro_types::payload::INLINE_PAYLOAD_LIMIT;
 use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
@@ -242,15 +242,12 @@ fn start_run_stores_phase5_fields() {
     assert_eq!(rec.idempotency_key, b"idem-1");
     assert_eq!(rec.retry_of, Some(rid(8)));
     assert_eq!(rec.continued_from, Some(rid(9)));
+    // 05-09 (D2): the schedule-to-start deadline is set at start (ready_at 100 + 30 s).
+    assert_eq!(rec.s2s_due_ms, 30_100);
     // Not set at start.
     assert_eq!(
-        (
-            rec.open_waits,
-            rec.s2s_due_ms,
-            rec.attempt_failures,
-            rec.resumed_count
-        ),
-        (0, 0, 0, 0)
+        (rec.open_waits, rec.attempt_failures, rec.resumed_count),
+        (0, 0, 0)
     );
     assert!(rec.terminal_reason.is_empty() && !rec.resumable);
     assert_eq!(
@@ -499,32 +496,8 @@ fn guest_timer_still_journals_timer_fired() {
 
 // ---------------------------------------------------------------- dispatch stubs
 
-#[test]
-fn phase5_commands_reach_their_stubs_and_change_nothing() {
-    // lifecycle.rs (05-09): TerminateRun, RetryRun. SignalRun, RequestCancel and
-    // CompleteToken are implemented by 05-08 (tests/apply_waits.rs).
-    let mut h = H::new();
-    let r = running(&mut h, 1);
-    let id = r.as_bytes().to_vec();
-    let cmds = [
-        Command::terminate_run(TerminateRun {
-            run_id: id.clone(),
-            reason: "ops".into(),
-            terminated_at_ms: 5,
-        }),
-        Command::retry_run(RetryRun {
-            run_id: id,
-            requested_at_ms: 5,
-        }),
-    ];
-    for c in &cmds {
-        let before = h.data();
-        let (out, actions, _) = h.apply_full(c);
-        assert_eq!(out, bad_intent(), "{}", c.kind_name());
-        assert!(actions.is_empty(), "{}", c.kind_name());
-        assert_eq!(h.data(), before, "{}", c.kind_name());
-    }
-}
+// TerminateRun and RetryRun are implemented by 05-09 (tests/apply_lifecycle.rs); the former
+// `phase5_commands_reach_their_stubs_and_change_nothing` tripwire is retired.
 
 // RegisterWait / CancelWait intents are implemented by 05-08 (tests/apply_waits.rs); the
 // former `phase5_intents_reach_their_stubs_and_change_nothing` tripwire is retired.

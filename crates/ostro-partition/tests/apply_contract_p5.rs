@@ -12,8 +12,8 @@ use ostro_partition::store::values::{self, RunRecord, RunStatus};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
     self, AttemptGranted, AttemptTokenMsg, CancelTimer, CompleteRun, ConflictPolicy, Derived,
-    EventsAppended, InboundBatch, InboundMsg, JournalEvent, OutboxMsg, RetryRun, ScheduleTimer,
-    SendMessage, StartRun, TerminalStatus, TerminateRun, derived, encode_command,
+    EventsAppended, InboundBatch, InboundMsg, JournalEvent, OutboxMsg, ScheduleTimer, SendMessage,
+    StartRun, TerminalStatus, derived, encode_command,
 };
 use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
 
@@ -160,27 +160,9 @@ fn guest_timer_intents_in_the_reserved_op_range_are_rejected() {
     assert_eq!(h.apply(&append(&r, vec![ok])), ApplyOutcome::Accepted);
 }
 
-#[test]
-fn phase5_commands_are_rejected_until_implemented() {
-    // 05-09: TerminateRun, RetryRun. (05-08 implemented SignalRun, RequestCancel and
-    // CompleteToken: tests/apply_waits.rs.)
-    let (mut h, r) = running(4, 1);
-    let id = r.as_bytes().to_vec();
-    let cmds = [
-        Command::terminate_run(TerminateRun {
-            run_id: id.clone(),
-            ..Default::default()
-        }),
-        Command::retry_run(RetryRun {
-            run_id: id,
-            ..Default::default()
-        }),
-    ];
-    for c in &cmds {
-        assert_eq!(h.apply(c), bad_intent(), "{}", c.kind_name());
-    }
-    assert_eq!(h.run(&r).expect("run").status, RunStatus::Running);
-}
+// Every Phase 5 command is implemented now: SignalRun, RequestCancel, CompleteToken by 05-08
+// (tests/apply_waits.rs), TerminateRun and RetryRun by 05-09 (tests/apply_lifecycle.rs). The
+// former `phase5_commands_are_rejected_until_implemented` tripwire is retired.
 
 #[test]
 fn phase5_intents_are_rejected_until_implemented() {
@@ -219,8 +201,8 @@ fn phase5_intents_are_rejected_until_implemented() {
 }
 
 #[test]
-fn inbound_start_run_is_consumed_without_effect_until_implemented() {
-    // 05-09 replaces this with `lifecycle::inbound_start_run`.
+fn inbound_start_run_starts_the_successor() {
+    // 05-09: `lifecycle::inbound_start_run` (details in tests/apply_lifecycle.rs).
     let mut h = H::new(6);
     assert_eq!(
         h.apply(&Command::leader_announced(1, 1, 0)),
@@ -235,7 +217,7 @@ fn inbound_start_run_is_consumed_without_effect_until_implemented() {
         }],
     });
     assert_eq!(h.apply(&batch), ApplyOutcome::Accepted);
-    assert!(h.run(&successor).is_none(), "no run started yet");
+    assert!(h.run(&successor).is_some(), "successor started");
     assert_eq!(h.cur.inbound_seen.get(&2), Some(&1), "message consumed");
 }
 
