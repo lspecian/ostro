@@ -77,7 +77,11 @@ impl ReplayState {
         let actual = || format!("wait {ops:?} {mode:?}");
         if let Some(i) = self.match_next(CommandKind::Wait, hash, &actual)? {
             return match &self.journal[i].body {
-                EventBody::WaitResolved(w) => Ok(WaitOutcome::Resolved(w.completed.clone())),
+                EventBody::WaitResolved(w) => {
+                    let completed = w.completed.clone();
+                    self.note_cancel_observed(&completed);
+                    Ok(WaitOutcome::Resolved(completed))
+                }
                 other => Err(ReplayError::BadJournal(format!(
                     "wait matched {} at seq {i}",
                     other.summary()
@@ -121,6 +125,7 @@ impl ReplayState {
                 completed: completed.clone(),
             }),
         );
+        self.note_cancel_observed(&completed);
         Ok(WaitOutcome::Resolved(completed))
     }
 

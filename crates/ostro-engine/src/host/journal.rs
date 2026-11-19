@@ -34,6 +34,30 @@
 //! journals `StepAttemptFailed(Requeue)` and evicts `StepBackoff { retry_at }`; no retry
 //! left journals `StepCompleted(Err(..))` and evicts `StepInterrupted` (re-activate at
 //! once; the run continues from replay).
+//!
+//! Retry backoff is a cancellation point (D25, plan 05-27). While the run has a journaled
+//! `CancelRequested` that the guest has not been handed yet
+//! ([`ReplayState::cancel_pending`](crate::replay::ReplayState::cancel_pending)), a step is
+//! never retried: its next attempt resolves as `StepCompleted(Err(cancelled))` instead.
+//! - In-activation: a failed attempt whose retry is decided journals its
+//!   `StepAttemptFailed` as usual; if a cancel is already pending, or a `CancelRequested`
+//!   input arrives during the backoff sleep (it is delivered to the replay core and the
+//!   step's reserved seq moves past it), the step's `StepCompleted(Err(cancelled))` is
+//!   journaled and the activation evicts `StepInterrupted`. The guest never sees an
+//!   answer for that `complete` call (it is still blocked in it), and the re-activation
+//!   replays the recorded `Err(cancelled)`, so live and replay hand the guest the same
+//!   value.
+//! - Requeued: the same check runs before evicting `StepBackoff`, and `begin-step` for a
+//!   resumed attempt (one with recorded failures) journals the cancelled completion and
+//!   returns it as `replayed`, before the not-yet-due check, so a pending cancel ends the
+//!   backoff early.
+//! - Interrupted attempts (timeout) take the same check in [`HostState::fail_interrupted_step`].
+//!
+//! Once the guest has been handed the cancellation (a wait resolved with the cancellation
+//! op, the SDK's default per D11, or a step resolved as cancelled) retries run normally
+//! again, so cleanup and compensation steps (D11 `shielded`) still retry to completion.
+//! The decision depends only on the journal order of `CancelRequested` and the step's
+//! attempts (and on the guest's own replayed commands), so replay reproduces it exactly.
 
 use std::time::{Duration, Instant};
 
@@ -49,7 +73,7 @@ use crate::host::bindings::StepRep;
 use crate::host::bindings::ostro::runtime::journal::{CompletionAck, Host, HostStep, StepStart};
 use crate::host::bindings::ostro::runtime::types::{self as wit_types, StepOptions};
 use crate::host::effects::{convert, flush_trap};
-use crate::host::state::{HostState, OpenStep, StepFuel, trap, violation};
+use crate::host::state::{HostState, HotWait, OpenStep, StepFuel, trap, violation};
 use crate::replay::{ReplayError, StepBegin};
 use crate::retry::{self, RetryDecision, RetryPolicy};
 
@@ -114,13 +138,17 @@ impl HostState {
                         ev.body.summary()
                     )));
                 };
+                let seq = ev.seq;
                 let outcome: Result<Payload, Failure> =
                     decode_result(&sc.outcome).map_err(|e| {
                         violation(format!(
-                            "bad journal: step {:?} outcome at seq {}: {e:?}",
-                            sc.name, ev.seq
+                            "bad journal: step {:?} outcome at seq {seq}: {e:?}",
+                            sc.name
                         ))
                     })?;
+                if outcome == Err(Failure::Cancelled) {
+                    self.replay.note_step_cancelled(seq);
+                }
                 Ok((
                     StepStart::Replayed(convert::step_outcome_to_wit(outcome)),
                     None,
@@ -131,6 +159,16 @@ impl HostState {
                 attempt,
                 last_retry_at_nanos,
             } => {
+                // D25: a resumed attempt (failures recorded) never runs while a cancel is
+                // pending; the step resolves as cancelled and the guest gets that outcome
+                // now, exactly as a replay of the recorded completion returns it.
+                if last_retry_at_nanos.is_some() && self.replay.cancel_pending() {
+                    self.resolve_cancelled(seq, name, 0).map_err(trap)?;
+                    return Ok((
+                        StepStart::Replayed(convert::step_outcome_to_wit(Err(Failure::Cancelled))),
+                        None,
+                    ));
+                }
                 // Resuming a step whose next attempt is not due yet: hand the run back
                 // to the scheduler without running the body (nothing is journaled).
                 if let Some(at) = last_retry_at_nanos
@@ -228,6 +266,17 @@ impl HostState {
                     r.attempt = rep.attempt.saturating_add(1);
                     r.fuel_before = fuel;
                 }
+                // D25: the retry is a cancellation point. The guest is blocked in this
+                // `complete` call and must not see a value the replay would not give it, so
+                // the cancelled completion is journaled and the activation evicted; the
+                // re-activation replays `Err(cancelled)`.
+                if self.replay.cancel_pending() {
+                    self.open_step = None;
+                    self.step_fuel = None;
+                    self.resolve_cancelled(next, rep.name.clone(), 0)
+                        .map_err(trap)?;
+                    return evict(EvictReason::StepInterrupted);
+                }
                 if backoff == AttemptBackoff::Requeue {
                     self.open_step = None;
                     // The driver flushes the attempt failure after the trap unwinds.
@@ -261,11 +310,7 @@ impl HostState {
                 };
                 // The leader must know about the failed attempt before we wait.
                 self.flush().await.map_err(flush_trap)?;
-                let cancel = self
-                    .retry_cancel
-                    .clone()
-                    .or_else(|| self.hot.as_ref().map(|h| h.cancel.clone()));
-                retry_sleep(delay, cancel).await?;
+                self.retry_backoff(&step, delay).await?;
                 // The next attempt's timeout starts when its body starts (after the sleep).
                 let next_rep = GuestEnv::table(self).get(&step)?.clone();
                 self.open_step = Some(OpenStep {
@@ -364,11 +409,11 @@ impl HostState {
             now,
             Duration::ZERO,
         ) {
-            self.replay.record_attempt_failed(
+            let next = self.replay.record_attempt_failed(
                 rep.seq,
                 EventBody::StepAttemptFailed(StepAttemptFailed {
                     meta,
-                    name: rep.name,
+                    name: rep.name.clone(),
                     attempt: rep.attempt,
                     failure,
                     retry_at_nanos,
@@ -377,6 +422,11 @@ impl HostState {
                     fuel_used,
                 }),
             )?;
+            // D25: a pending cancel resolves the step instead of the retry.
+            if self.replay.cancel_pending() {
+                self.resolve_cancelled(next, rep.name, 0)?;
+                return Ok(EvictReason::StepInterrupted);
+            }
             metrics::counter!("ostro_step_retries_total", "backoff" => "requeue").increment(1);
             return Ok(EvictReason::StepBackoff { retry_at_nanos });
         }
@@ -394,21 +444,125 @@ impl HostState {
     }
 }
 
-/// Sleep an in-activation retry delay; external eviction (cancel) wins.
+impl HostState {
+    /// Journal `StepCompleted(Err(cancelled))` for the open live step at `seq` (D25: its
+    /// retry was a cancellation point) and record that the guest was handed the cancel.
+    fn resolve_cancelled(
+        &mut self,
+        seq: u64,
+        name: String,
+        fuel_used: u64,
+    ) -> Result<(), ReplayError> {
+        let meta = step_command_meta(&name)?;
+        self.replay.complete_step(
+            seq,
+            EventBody::StepCompleted(StepCompleted {
+                meta,
+                name,
+                outcome: encode_result(&Err::<Payload, Failure>(Failure::Cancelled)),
+                fuel_used,
+            }),
+        )?;
+        self.completed_steps.insert(seq);
+        self.open_step.take_if(|o| o.rep.seq == seq);
+        self.step_fuel.take_if(|s| s.seq == seq);
+        self.replay.note_step_cancelled(seq);
+        metrics::counter!("ostro_step_retries_cancelled_total").increment(1);
+        Ok(())
+    }
+
+    /// Sleep an in-activation retry delay (WF-02). External eviction wins. Input events
+    /// that arrive meanwhile are delivered to the replay core (the step's reserved seq
+    /// moves past them); if one of them is the run's `CancelRequested` (D25), the step
+    /// resolves as cancelled and the activation evicts `StepInterrupted`.
+    async fn retry_backoff(
+        &mut self,
+        step: &Resource<StepRep>,
+        delay: Duration,
+    ) -> wasmtime::Result<()> {
+        let cancel = self
+            .retry_cancel
+            .clone()
+            .or_else(|| self.hot.as_ref().map(|h| h.cancel.clone()));
+        let deadline = tokio::time::Instant::now() + delay;
+        let Some(mut hot) = self.hot.take() else {
+            return retry_sleep(deadline, cancel).await;
+        };
+        let r = self
+            .retry_backoff_with_inputs(step, &mut hot, deadline, cancel)
+            .await;
+        self.hot = Some(hot);
+        r
+    }
+
+    async fn retry_backoff_with_inputs(
+        &mut self,
+        step: &Resource<StepRep>,
+        hot: &mut HotWait,
+        deadline: tokio::time::Instant,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> wasmtime::Result<()> {
+        let mut inputs_open = true;
+        loop {
+            let ev = tokio::select! {
+                biased;
+                _ = cancelled(cancel.as_ref()) => return evict(EvictReason::External),
+                ev = hot.inputs.recv(), if inputs_open => ev,
+                _ = tokio::time::sleep_until(deadline) => return Ok(()),
+            };
+            let Some(ev) = ev else {
+                // No more inputs can arrive; sleep out the delay (or a cancel).
+                inputs_open = false;
+                continue;
+            };
+            let mut batch = vec![ev];
+            while let Ok(ev) = hot.inputs.try_recv() {
+                batch.push(ev);
+            }
+            let next = match self.replay.deliver_inputs_in_backoff(batch) {
+                Ok(next) => next,
+                Err(e) => {
+                    // The inputs do not continue this activation's journal: re-dispatch
+                    // replays the committed one.
+                    tracing::warn!(error = %e, "step retry backoff: undeliverable inputs");
+                    return evict(EvictReason::AppendConflict);
+                }
+            };
+            let name = {
+                let r = GuestEnv::table(self).get_mut(step)?;
+                r.seq = next;
+                r.name.clone()
+            };
+            if let Some(sf) = self.step_fuel.as_mut() {
+                sf.seq = next;
+            }
+            if self.replay.cancel_pending() {
+                self.open_step = None;
+                self.step_fuel = None;
+                self.resolve_cancelled(next, name, 0).map_err(trap)?;
+                return evict(EvictReason::StepInterrupted);
+            }
+        }
+    }
+}
+
+/// Resolves when `c` is cancelled; never without a token.
+async fn cancelled(c: Option<&tokio_util::sync::CancellationToken>) {
+    match c {
+        Some(c) => c.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sleep an in-activation retry delay without an input channel; external eviction wins.
 async fn retry_sleep(
-    delay: std::time::Duration,
+    deadline: tokio::time::Instant,
     cancel: Option<tokio_util::sync::CancellationToken>,
 ) -> wasmtime::Result<()> {
-    match cancel {
-        Some(c) => tokio::select! {
-            biased;
-            _ = c.cancelled() => evict(EvictReason::External),
-            _ = tokio::time::sleep(delay) => Ok(()),
-        },
-        None => {
-            tokio::time::sleep(delay).await;
-            Ok(())
-        }
+    tokio::select! {
+        biased;
+        _ = cancelled(cancel.as_ref()) => evict(EvictReason::External),
+        _ = tokio::time::sleep_until(deadline) => Ok(()),
     }
 }
 

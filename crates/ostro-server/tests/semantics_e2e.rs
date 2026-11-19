@@ -612,6 +612,103 @@ async fn cancel_cleanup() {
     s.shutdown().await;
 }
 
+/// `StepAttemptFailed` count of the `sdk-cancel` `retry_step` step `flaky`.
+fn flaky_attempts(j: &[Event]) -> usize {
+    j.iter()
+        .filter(|e| matches!(&e.body, EventBody::StepAttemptFailed(f) if f.name == "flaky"))
+        .count()
+}
+
+/// D25 (05-27): start `sdk-cancel` `retry_step` (a step that always fails retryably, fixed
+/// `backoff_ms`), cancel after its first failed attempt, and check that the run ends
+/// `cancelled` with the step resolved as cancelled and the attempt count frozen.
+async fn cancel_in_retry_backoff(s: &TestServer, backoff_ms: u64) {
+    let run = s
+        .start_rest(
+            "sdk-cancel",
+            json!({"input": {"mode": "retry_step", "backoff_ms": backoff_ms}}),
+        )
+        .await;
+    let t0 = Instant::now();
+    while flaky_attempts(&s.journal(&run).await) == 0 {
+        assert!(t0.elapsed() < LIMIT, "attempt 1 never failed");
+        sleep(Duration::from_millis(10)).await;
+    }
+    lifecycle_ok(s, &run, "cancel").await;
+    s.wait_status(&run, RunStatus::Cancelled, LIMIT).await;
+    let (st, v) = s.get_json(&format!("/v1/runs/{run}")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "cancelled", "{v}");
+    let j = s.journal(&run).await;
+    let attempts = flaky_attempts(&j);
+    assert!(
+        attempts < 3,
+        "backoff {backoff_ms} ms: retries stopped at the cancel, {attempts} failed attempts: {:?}",
+        kinds(&j)
+    );
+    let cancel_seq = j
+        .iter()
+        .find(|e| e.body.kind() == EventKind::CancelRequested)
+        .expect("cancel journaled")
+        .seq;
+    let done: Vec<&Event> = j
+        .iter()
+        .filter(|e| matches!(&e.body, EventBody::StepCompleted(sc) if sc.name == "flaky"))
+        .collect();
+    assert_eq!(done.len(), 1, "{:?}", kinds(&j));
+    assert!(
+        done[0].seq > cancel_seq,
+        "the step resolved after the cancel"
+    );
+    let EventBody::StepCompleted(sc) = &done[0].body else {
+        unreachable!()
+    };
+    let outcome: Result<ostro_types::journal::Payload, ostro_types::journal::Failure> =
+        ostro_types::journal::decode_result(&sc.outcome).expect("decode");
+    assert_eq!(outcome, Err(ostro_types::journal::Failure::Cancelled));
+    // No attempt after the cancel: nothing failed between the cancel and the completion.
+    assert!(
+        j[cancel_seq as usize..]
+            .iter()
+            .all(|e| e.body.kind() != EventKind::StepAttemptFailed),
+        "{:?}",
+        kinds(&j)
+    );
+    // The attempt count stays frozen past several backoff periods.
+    sleep(Duration::from_millis(backoff_ms * 2 + 200)).await;
+    let later = s.journal(&run).await;
+    assert_eq!(later, j, "nothing journaled after the cancelled end");
+    // Replay identity: the cancelled step and the cancelled terminal replay with no appends.
+    let (outcome, appended, recorded) = replay_fresh("sdk-cancel", &run, j.clone()).await;
+    assert_eq!(appended, 0);
+    assert_eq!(
+        outcome,
+        ActivationOutcome::Failed {
+            failure: ostro_types::journal::Failure::Cancelled
+        }
+    );
+    assert_eq!(recorded, j);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_stops_step_retries_in_activation() {
+    // hot_wait 3 s: a 1.5 s backoff is slept in-activation, the cancel arrives during it.
+    let mut s = server_with(|c| c.engine.hot_wait = Duration::from_secs(3).into()).await;
+    s.deploy_guest("sdk-cancel", None).await;
+    cancel_in_retry_backoff(&s, 1_500).await;
+    s.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_stops_requeued_step_retries() {
+    // hot_wait 50 ms: the 1.5 s backoff is requeued; the cancel resolves the step as
+    // cancelled when it would be retried, without another attempt.
+    let mut s = server().await;
+    s.deploy_guest("sdk-cancel", None).await;
+    cancel_in_retry_backoff(&s, 1_500).await;
+    s.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn terminate_runs_no_guest_code() {
     let mut s = server().await;

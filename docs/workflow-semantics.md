@@ -149,6 +149,26 @@ signals, forced restart, fresh-runtime replay identical),
   `ctx.cancellation()` is an op that completes on cancel, for `select!`.
 - Code inside `ctx.shielded(|| ...)` is **not** interrupted, so compensations and cleanup
   run to completion after a cancel.
+- **Cancellation points.** The workflow sees a cancel at exactly these points:
+  - an SDK wait (`Op::wait()`, `join!`, `select!`) outside `shielded`, or a wait on
+    `ctx.cancellation()`;
+  - **a step retry (D25).** While a cancel is journaled that the workflow has not been
+    handed yet, a failed step is not retried: the step resolves `Err(cancelled)` instead
+    of running its next attempt, and that error flows into the workflow's normal
+    cancellation handling (returned with `?`, the run ends `cancelled`). This holds for
+    in-activation retries (a cancel already journaled, or arriving during the backoff
+    sleep, ends the backoff at once) and for requeued retries (the step resolves as
+    cancelled when it would be retried, at the latest at its `retry_at`). A step's first
+    attempt always runs; an attempt that is running is never interrupted.
+  - Once the workflow has been handed the cancel (a wait returned `Err(cancelled)` or a
+    step resolved as cancelled), step retries run normally again, so cleanup and
+    compensation steps (typically inside `ctx.shielded`) retry to completion. The host
+    cannot see `shielded` itself (D11 is SDK policy): a step retried inside a `shielded`
+    section *before* the workflow has observed the cancel still resolves `Err(cancelled)`.
+  - The decision comes only from the journal order of `CancelRequested` and the step's
+    attempts (and the workflow's own replayed commands), so replay reproduces it exactly.
+    The history shows the step's last `step_attempt_failed`, the `cancel_requested`, then
+    the step completed with `cancelled`.
 - **Status.** If the workflow returns the cancellation error, the run ends `cancelled`. If
   it handles the cancel and returns a value, the run ends `completed`; cancel is a request,
   not a verdict.
@@ -163,7 +183,11 @@ reverse order, shielded), `crates/ostro/tests/order_saga.rs::cancelled_path` (vi
 cleanup, `cancelled`, `result --wait` exits 3),
 `crates/ostro-engine/tests/sdk_cancellation.rs::shielded_cleanup_runs_after_cancel`,
 `sdk_cancellation.rs::timer_fired_before_cancel_is_slept` (a completion earlier in journal
-order wins), `crates/ostro-server/tests/executor_phase5.rs::cancel_before_start_is_journaled_after_run_started`,
+order wins), `crates/ostro-engine/tests/step_retry_cancel.rs` (cancel during an
+in-activation backoff, a cancel journaled before the failed attempt, a requeued retry, a
+shielded cleanup step that still retries, replay identity for each),
+`semantics_e2e.rs::cancel_stops_step_retries_in_activation`,
+`semantics_e2e.rs::cancel_stops_requeued_step_retries`, `crates/ostro-server/tests/executor_phase5.rs::cancel_before_start_is_journaled_after_run_started`,
 `executor_phase5.rs::cancel_before_start_runs_shielded_cleanup`,
 `crates/ostro-server/tests/lifecycle_api.rs::cancel_before_start_journals_after_run_started_once_and_is_idempotent`,
 `crates/ostro-partition/tests/apply_waits.rs::request_cancel_journals_once_wakes_and_cascades`,

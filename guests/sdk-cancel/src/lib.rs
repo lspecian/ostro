@@ -13,15 +13,43 @@
 //! - `continue`: continues as new with `{"mode":"wait_sleep"}`.
 //! - `continue_as`: continues as new through the `ContinueAsNew` builder, naming the
 //!   workflow and version explicitly.
+//! - `retry_step` (D25, plan 05-27): one step `flaky` that always fails `retryable
+//!   ("transient")`, policy max 10 attempts with a fixed `backoff_ms` backoff (default
+//!   200 ms: in-activation; above `engine.hot_wait`: requeued). The step error is returned
+//!   with `?`, so a step resolved as cancelled ends the run cancelled.
+//! - `shielded_retry` (D25): the 10 s sleep is cancelled; then a shielded cleanup step
+//!   `cleanup` fails retryably twice (10 ms backoff) and succeeds on attempt 3; returns
+//!   `"cleaned:3"`.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use ostro_sdk::RetryPolicy;
 use ostro_sdk::prelude::*;
 
 /// `sdk-cancel` input.
 #[derive(Debug, Deserialize)]
 pub struct Input {
     pub mode: String,
+    /// `retry_step` backoff (ms).
+    #[serde(default)]
+    pub backoff_ms: Option<u64>,
+}
+
+/// Body runs of the `cleanup` step in this activation.
+static CLEANUP_RUNS: AtomicU32 = AtomicU32::new(0);
+
+fn fixed_backoff(max_attempts: u32, ms: u64) -> StepOptions {
+    StepOptions {
+        retry: Some(RetryPolicy {
+            max_attempts,
+            initial_interval: Duration::from_millis(ms),
+            max_interval: Duration::from_millis(ms),
+            backoff_coefficient: 1.0,
+            non_retryable_kinds: Vec::new(),
+        }),
+        ..StepOptions::default()
+    }
 }
 
 fn unexpected(what: &str, detail: impl std::fmt::Debug) -> WorkflowError {
@@ -71,6 +99,30 @@ pub fn sdk_cancel(ctx: &Ctx, input: Input) -> Result<String, WorkflowError> {
             }
             let v = t.op().wait()?;
             Ok(format!("token:{v}"))
+        }
+        "retry_step" => {
+            let opts = fixed_backoff(10, input.backoff_ms.unwrap_or(200));
+            let _: String = run_step("flaky", &opts, || {
+                Err(StepError::retryable("transient", "always fails"))
+            })?;
+            Err(unexpected("flaky step", "succeeded"))
+        }
+        "shielded_retry" => {
+            match ctx.sleep(Duration::from_secs(10)).wait() {
+                Err(e) if e.is_cancelled() => {}
+                other => return Err(unexpected("work wait", other)),
+            }
+            let n: u32 = ctx.shielded(|| {
+                run_step("cleanup", &fixed_backoff(5, 10), || {
+                    let n = CLEANUP_RUNS.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n < 3 {
+                        Err(StepError::retryable("transient", format!("cleanup {n}")))
+                    } else {
+                        Ok(n)
+                    }
+                })
+            })?;
+            Ok(format!("cleaned:{n}"))
         }
         "continue" => Err(ctx.continue_as_new(&json!({ "mode": "wait_sleep" }))),
         "continue_as" => Err(ContinueAsNew::new(&json!({ "mode": "token" }))?

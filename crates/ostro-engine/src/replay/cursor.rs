@@ -26,6 +26,15 @@
 //! and replay agree. A fully recorded chain is consumed through its `StepCompleted`,
 //! whose ts then defines `now` exactly as it was recorded.
 //!
+//! Cancellation point at a step retry (D25, plan 05-27): the guest is "handed" the run's
+//! cancellation when a wait it issued resolves with [`CANCELLATION_OP`] in its completed list
+//! (live or replayed `WaitResolved`) or when a step resolves with `Err(cancelled)` after the
+//! `CancelRequested`. [`ReplayState::cancel_pending`] is true while a `CancelRequested` is in
+//! the journal and the guest has not been handed it yet; the host then resolves a step that
+//! is about to be retried as `Err(cancelled)` instead of running another attempt. Both inputs
+//! of the decision (the `CancelRequested` seq and the guest's own command sequence up to the
+//! retry point) come from the journal, so record and replay agree.
+//!
 //! Completion index (05-03): `completions` maps every op to the seq of the first event
 //! that completes it ([`completion_target`](super::wait::completion_target): an input
 //! with `completes_op`, or the guest's own `OpCancelled`). It is filled when the journal
@@ -37,8 +46,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ostro_types::journal::{
-    CommandHash, CommandKind, CommandMeta, Event, EventBody, EventKind, HASH_VER, OpId,
-    PatchMarker, RunStarted,
+    CANCELLATION_OP, CommandHash, CommandKind, CommandMeta, Event, EventBody, EventKind, HASH_VER,
+    OpId, PatchMarker, RunStarted,
 };
 
 use crate::env::{Clock, RandomStream};
@@ -159,6 +168,8 @@ pub struct ReplayState {
     pub(super) completions: BTreeMap<OpId, u64>,
     /// `patched(change_id)` memo: the first evaluation per id decides (D6).
     pub(super) patched: BTreeMap<String, bool>,
+    /// The guest has been handed the run's cancellation (D25, see the module doc).
+    pub(super) cancel_observed: bool,
     pub(super) clock: Arc<dyn Clock>,
 }
 
@@ -215,6 +226,7 @@ impl ReplayState {
             max_ts,
             completions,
             patched: BTreeMap::new(),
+            cancel_observed: false,
             next_seq: journal.len() as u64,
             cursor: 1,
             pending: Vec::new(),
@@ -574,6 +586,60 @@ impl ReplayState {
         if self.open_step == Some(seq) {
             self.close_step();
         }
+    }
+
+    /// Seq of the run's `CancelRequested`, if one is in the journal (the completion of
+    /// [`CANCELLATION_OP`]).
+    pub fn cancel_requested_seq(&self) -> Option<u64> {
+        self.completions.get(&CANCELLATION_OP).copied()
+    }
+
+    /// D25: a `CancelRequested` is journaled and the guest has not been handed it yet (no
+    /// wait of the guest resolved with [`CANCELLATION_OP`], no step resolved as cancelled
+    /// after it). While true, a step retry is a cancellation point.
+    pub fn cancel_pending(&self) -> bool {
+        !self.cancel_observed && self.cancel_requested_seq().is_some()
+    }
+
+    /// Record that the guest was handed the cancellation (a step resolved `Err(cancelled)`
+    /// at `seq`). A `cancelled` step outcome before the `CancelRequested` is not a hand-off.
+    pub fn note_step_cancelled(&mut self, seq: u64) {
+        if self.cancel_requested_seq().is_some_and(|c| c < seq) {
+            self.cancel_observed = true;
+        }
+    }
+
+    /// Record a resolved wait: the cancellation is handed over when its completed list
+    /// contains [`CANCELLATION_OP`].
+    pub(super) fn note_cancel_observed(&mut self, completed: &[OpId]) {
+        if completed.contains(&CANCELLATION_OP) {
+            self.cancel_observed = true;
+        }
+    }
+
+    /// Deliver committed input events that arrived while the open live step waits out an
+    /// in-activation retry backoff (D25). Same rules as
+    /// [`deliver_inputs`](Self::deliver_inputs), except that a step must be open at
+    /// `next_seq` with nothing pending (its failed attempt is already flushed and its next
+    /// attempt has not started): the step is re-opened at the new `next_seq`, which is
+    /// returned (the seq reserved for the next attempt).
+    pub fn deliver_inputs_in_backoff(&mut self, events: Vec<Event>) -> Result<u64, ReplayError> {
+        let Some(seq) = self.open_step else {
+            return Err(protocol("backoff inputs delivered with no open step"));
+        };
+        if seq != self.next_seq {
+            return Err(protocol(format!(
+                "backoff inputs delivered while step {seq} is not at the journal end {}",
+                self.next_seq
+            )));
+        }
+        self.open_step = None;
+        let res = self.deliver_inputs(events);
+        // Re-open the step at the (possibly new) journal end, with step-local randomness
+        // seeded from that seq, exactly as a resumed attempt opens it in `begin_step`.
+        let next = self.next_seq;
+        self.open_live_step(next);
+        res.map(|()| next)
     }
 
     /// The guest's run function returned (called before its terminal command is
