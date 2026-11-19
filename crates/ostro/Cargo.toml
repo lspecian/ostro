@@ -18,6 +18,8 @@ serde_json.workspace = true
 tracing.workspace = true
 ostro-server = { path = "../ostro-server" }
 ostro-api = { path = "../ostro-api" }
+# CLI-06 client verbs (05-14)
+ostro-cli = { path = "../ostro-cli" }
 
 [dev-dependencies]
 # spawned-binary tests (04-19): REST + gRPC health against the real binary
@@ -28,6 +30,8 @@ tonic.workspace = true
 ostro-proto = { path = "../ostro-proto" }
 # e2e (04-20): module sha256 for PUT /v1/modules/{sha256}
 sha2.workspace = true
+# CLI-06 (05-14): --json snapshots of the client verbs
+insta.workspace = true
 
 [lints]
 workspace = true

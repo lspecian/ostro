@@ -1,0 +1,14 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&body, &sa)"
+---
+{
+  "error": {
+    "code": "conflict",
+    "details": {
+      "reason": "run_terminal",
+      "status": "cancelled"
+    },
+    "message": "run [run_id] is already cancelled"
+  }
+}

@@ -1,0 +1,9 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&b, &sub)"
+---
+{
+  "accepted": true,
+  "dry_run": true,
+  "run_id": "[run_id]"
+}

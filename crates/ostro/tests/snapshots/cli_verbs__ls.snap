@@ -1,0 +1,21 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&ls, &[])"
+---
+{
+  "next_page_token": null,
+  "runs": [
+    {
+      "created_at": "[timestamp]",
+      "created_at_ms": "[ms]",
+      "queue": "default",
+      "run_id": "[run_id]",
+      "status": "completed",
+      "tags": [
+        "env=test"
+      ],
+      "version": 1,
+      "workflow": "sdk-echo"
+    }
+  ]
+}

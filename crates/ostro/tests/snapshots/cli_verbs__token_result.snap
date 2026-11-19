@@ -1,0 +1,12 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&res, &sub)"
+---
+{
+  "completed": true,
+  "result": {
+    "ok": true
+  },
+  "run_id": "[run_id]",
+  "status": "completed"
+}

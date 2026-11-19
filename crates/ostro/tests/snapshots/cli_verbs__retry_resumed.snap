@@ -1,0 +1,9 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&b, &st)"
+---
+{
+  "dry_run": false,
+  "mode": "resumed",
+  "run_id": "[run_id]"
+}

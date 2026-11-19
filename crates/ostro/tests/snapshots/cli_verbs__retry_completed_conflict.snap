@@ -1,0 +1,13 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&body, &st)"
+---
+{
+  "error": {
+    "code": "conflict",
+    "details": {
+      "reason": "run_completed"
+    },
+    "message": "run [run_id] completed successfully and cannot be retried"
+  }
+}

@@ -1,4 +1,8 @@
-//! The `ostro` binary: `ostro dev`, `ostro server`, `ostro openapi`, `ostro build-info`.
+//! The `ostro` binary: `ostro dev`, `ostro server`, `ostro openapi`, `ostro build-info`,
+//! and the CLI-06 client verbs (`run`, `ls`, `inspect`, `history`, `signal`, `cancel`,
+//! `terminate`, `retry`, `result`, `token complete`, `deploy`) from [`ostro_cli`], which
+//! talk to a server over REST (`--server` / `OSTRO_SERVER`, default
+//! `http://127.0.0.1:7700`).
 //!
 //! `dev` and `server` load the layered configuration (base profile < optional TOML file
 //! < `OSTRO_<SECTION>__<KEY>` env < flags), start [`ostro_server::Server`], print one
@@ -58,6 +62,8 @@ enum Command {
     Openapi,
     /// Print build information (version, target triple, allocator).
     BuildInfo,
+    #[command(flatten)]
+    Client(Box<ostro_cli::ClientCommand>),
 }
 
 fn main() -> ExitCode {
@@ -124,6 +130,7 @@ fn main() -> ExitCode {
             }
             run_server("ostro server", cfg, started)
         }
+        Some(Command::Client(cmd)) => ostro_cli::run(*cmd).into(),
         None => {
             use clap::CommandFactory;
             Cli::command().print_help().expect("print help");

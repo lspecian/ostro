@@ -1845,8 +1845,10 @@ name = "ostro"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "insta",
  "mimalloc",
  "ostro-api",
+ "ostro-cli",
  "ostro-proto",
  "ostro-server",
  "reqwest",

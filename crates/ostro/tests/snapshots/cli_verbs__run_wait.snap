@@ -1,0 +1,20 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&r, &[])"
+---
+{
+  "result": {
+    "completed": true,
+    "result": {
+      "greeting": "hello, cli",
+      "steps": 2,
+      "sum": 10
+    },
+    "run_id": "[run_id]",
+    "status": "completed"
+  },
+  "start": {
+    "created": true,
+    "run_id": "[run_id]"
+  }
+}

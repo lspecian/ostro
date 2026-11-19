@@ -1,0 +1,10 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&body, &[])"
+---
+{
+  "error": {
+    "code": "not_found",
+    "message": "run 00000000000000000000000000000 not found"
+  }
+}

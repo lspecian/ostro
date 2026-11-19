@@ -1,0 +1,54 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&up, &[])"
+---
+{
+  "activated": [
+    {
+      "active_version": 1,
+      "name": "sdk-basic",
+      "record_version": "[record_version]",
+      "versions": [
+        {
+          "default_queue": null,
+          "module_sha256": "[sha256]",
+          "run_timeout_ms": null,
+          "version": 1
+        }
+      ]
+    },
+    {
+      "active_version": 1,
+      "name": "sdk-echo",
+      "record_version": "[record_version]",
+      "versions": [
+        {
+          "default_queue": null,
+          "module_sha256": "[sha256]",
+          "run_timeout_ms": null,
+          "version": 1
+        }
+      ]
+    }
+  ],
+  "upload": {
+    "created": true,
+    "module": {
+      "language": null,
+      "sha256": "[sha256]",
+      "size_bytes": "[size]",
+      "uploaded_at": "[timestamp]",
+      "uploaded_at_ms": "[ms]",
+      "workflows": [
+        {
+          "name": "sdk-basic",
+          "version": 1
+        },
+        {
+          "name": "sdk-echo",
+          "version": 1
+        }
+      ]
+    }
+  }
+}

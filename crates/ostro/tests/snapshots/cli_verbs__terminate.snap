@@ -1,0 +1,8 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&b, &st)"
+---
+{
+  "dry_run": false,
+  "status": "terminated"
+}

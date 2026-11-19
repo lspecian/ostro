@@ -1,0 +1,20 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&r, &[(run.as_str(), \"[run_id]\")])"
+---
+{
+  "result": {
+    "completed": true,
+    "failure": {
+      "kind": "bad_mode",
+      "message": "unknown mode \"bogus\"",
+      "reason_code": "workflow_failed"
+    },
+    "run_id": "[run_id]",
+    "status": "failed"
+  },
+  "start": {
+    "created": true,
+    "run_id": "[run_id]"
+  }
+}

@@ -1,0 +1,8 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&b, &sa)"
+---
+{
+  "already_requested": false,
+  "dry_run": false
+}

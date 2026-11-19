@@ -555,3 +555,101 @@ pub fn step_completions(history: &[Value], name: &str) -> usize {
         .filter(|e| e["kind"] == "step_completed" && e["details"]["name"] == name)
         .count()
 }
+
+// ---------------------------------------------------------------------------------
+// CLI-06 helpers (plan 05-14): run the client verbs of the spawned-binary under test
+// against a server address, write guests to files for `ostro deploy`, redact --json
+// bodies for snapshots.
+// ---------------------------------------------------------------------------------
+
+/// Run `ostro <args>` with `OSTRO_SERVER=http://addr` (inherited `OSTRO_*` scrubbed):
+/// (exit code, stdout, stderr).
+pub fn run_cli(addr: SocketAddr, args: &[&str]) -> (i32, String, String) {
+    let mut cmd = command();
+    cmd.env("OSTRO_SERVER", format!("http://{addr}"))
+        .args(args)
+        .stdin(Stdio::null());
+    let (st, out, err) = run_to_end(cmd);
+    (st.code().unwrap_or(-1), out, err)
+}
+
+/// [`run_cli`] with `--json` appended; stdout parsed as JSON (Null when empty).
+pub fn cli_json(addr: SocketAddr, args: &[&str]) -> (i32, Value, String) {
+    let mut v = args.to_vec();
+    v.push("--json");
+    let (code, out, err) = run_cli(addr, &v);
+    let body = if out.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("stdout of {args:?} is not JSON ({e}): {out}\n{err}"))
+    };
+    (code, body, err)
+}
+
+/// Write the named guest's component to `dir/<name>.wasm` (so `ostro deploy` derives
+/// the module name `<name>` from the file stem).
+pub fn write_guest(dir: &Path, name: &str) -> PathBuf {
+    let p = dir.join(format!("{name}.wasm"));
+    std::fs::write(&p, guest_wasm(name)).expect("write guest wasm");
+    p
+}
+
+/// Snapshot redaction of a REST body: ids, timestamps, shas, sizes and meta record
+/// versions become placeholders; every `(needle, label)` in `subst` is replaced inside
+/// strings (e.g. a run id quoted in an error message).
+pub fn redact(v: &Value, subst: &[(&str, &str)]) -> Value {
+    fn key_placeholder(k: &str) -> Option<&'static str> {
+        Some(match k {
+            "run_id" | "existing_run_id" | "next_run_id" | "retry_of" => "[run_id]",
+            "created_at" | "completed_at" | "ts" | "uploaded_at" => "[timestamp]",
+            "created_at_ms" | "completed_at_ms" | "ts_ms" | "uploaded_at_ms" => "[ms]",
+            "sha256" | "module_sha256" | "actual_sha256" => "[sha256]",
+            "size_bytes" => "[size]",
+            "record_version" => "[record_version]",
+            "next_page_token" | "page_token" => "[page_token]",
+            // any other wall-clock field (`accepted_at_ms`, `sent_at_ms`, ...)
+            k if k.ends_with("_at_ms") => "[ms]",
+            k if k.ends_with("_at") => "[timestamp]",
+            _ => return None,
+        })
+    }
+    fn walk(v: &Value, subst: &[(&str, &str)]) -> Value {
+        match v {
+            Value::Object(m) => Value::Object(
+                m.iter()
+                    .map(|(k, x)| {
+                        let nv = match key_placeholder(k) {
+                            Some(p) if !x.is_null() => {
+                                if x.as_str().is_some_and(str::is_empty) {
+                                    x.clone()
+                                } else {
+                                    Value::String(p.to_owned())
+                                }
+                            }
+                            _ => walk(x, subst),
+                        };
+                        (k.clone(), nv)
+                    })
+                    .collect(),
+            ),
+            Value::Array(a) => Value::Array(a.iter().map(|x| walk(x, subst)).collect()),
+            Value::String(s) => {
+                let mut s = s.clone();
+                for (needle, label) in subst {
+                    if !needle.is_empty() {
+                        s = s.replace(needle, label);
+                    }
+                }
+                Value::String(s)
+            }
+            other => other.clone(),
+        }
+    }
+    walk(v, subst)
+}
+
+/// Pretty JSON of [`redact`] for `insta::assert_snapshot!`.
+pub fn redacted(v: &Value, subst: &[(&str, &str)]) -> String {
+    serde_json::to_string_pretty(&redact(v, subst)).expect("json")
+}

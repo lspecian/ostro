@@ -1,0 +1,40 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&hist, &[(&echo, \"[run_id]\")])"
+---
+{
+  "events": [
+    {
+      "details": {
+        "accepted_at_ms": "[ms]",
+        "deadline_ms": null,
+        "input": {
+          "hello": "file"
+        },
+        "module_sha256": "[sha256]",
+        "parent_run_id": null,
+        "tenant": null,
+        "version": 1,
+        "workflow": "sdk-echo"
+      },
+      "kind": "run_started",
+      "seq": 0,
+      "summary": "run started \"sdk-echo\" v1",
+      "ts": "[timestamp]",
+      "ts_ms": "[ms]"
+    },
+    {
+      "details": {
+        "output": {
+          "hello": "file"
+        }
+      },
+      "kind": "run_completed",
+      "seq": 1,
+      "summary": "run completed",
+      "ts": "[timestamp]",
+      "ts_ms": "[ms]"
+    }
+  ],
+  "next_from_seq": null
+}

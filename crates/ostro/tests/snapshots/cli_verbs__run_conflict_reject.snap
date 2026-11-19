@@ -1,0 +1,13 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&body, &[(&echo, \"[run_id]\")])"
+---
+{
+  "error": {
+    "code": "conflict",
+    "details": {
+      "existing_run_id": "[run_id]"
+    },
+    "message": "idempotency key already used by run [run_id]"
+  }
+}

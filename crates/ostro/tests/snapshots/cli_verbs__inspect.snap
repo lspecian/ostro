@@ -1,0 +1,32 @@
+---
+source: crates/ostro/tests/cli_verbs.rs
+expression: "redacted(&ins, &[])"
+---
+{
+  "attempt": 1,
+  "attempt_failures": 0,
+  "completed_at": "[timestamp]",
+  "completed_at_ms": "[ms]",
+  "concurrency_key": null,
+  "created_at": "[timestamp]",
+  "created_at_ms": "[ms]",
+  "failure": null,
+  "module_sha256": "[sha256]",
+  "priority": 0,
+  "published_status": null,
+  "queue": "default",
+  "result": {
+    "hello": "file"
+  },
+  "retention_ms": 172800000,
+  "run_id": "[run_id]",
+  "schedule_to_start_ms": null,
+  "status": "completed",
+  "tags": [
+    "env=test"
+  ],
+  "tenant": null,
+  "traceparent": null,
+  "version": 1,
+  "workflow": "sdk-echo"
+}
