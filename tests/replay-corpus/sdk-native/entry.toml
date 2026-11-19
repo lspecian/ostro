@@ -1,0 +1,19 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "sdk-native"
+workflow = "sdk-native"
+expected = "completed"
+partition = 7
+run_id = "run-sdk-native"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "3362a50ba36d76688174818a742362b86f16177b05d23e01721ffdf9bf45cd0b"
+journal_events = 3
+module_sha256 = "7be2ae8416df15daf16bddc68951e735e91dea4ce63550a95248023b470def54"
+journal_sha256 = "77adadff8ce2ca054f53b5a56c3b29918d78eec5d2964ea4480e9d62b6ca1235"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = "record_corpus sdk-native sdk-native"

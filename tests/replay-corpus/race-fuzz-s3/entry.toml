@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "race-fuzz-s3"
+workflow = "race-fuzz"
+input_json = '{"seed":3,"sleeps_ms":[966,965,953],"signals":["c"],"nest":false}'
+expected = "completed"
+partition = 7
+run_id = "run-race-fuzz-s3"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "115f4107b3d5f02d8b71fd2643981bdeedcbc626c785968a546937d2cb749ca3"
+journal_events = 14
+module_sha256 = "409dcfc3e1f26ac2deab7d4f69138a47298a3ac71f7707fa4dfa16416e100c26"
+journal_sha256 = "1be6eb0640b8b146197a974d704db6821dc9f2aa99b3e84105cc8962c28e97ac"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = "record_corpus race-fuzz race-fuzz-s3 --race-seed 3"

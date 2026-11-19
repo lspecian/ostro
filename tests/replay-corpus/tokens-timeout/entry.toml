@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "tokens-timeout"
+workflow = "tokens"
+input_json = '{"timeout_ms":5000}'
+expected = "completed"
+partition = 7
+run_id = "run-tokens-timeout"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "492bd0204b74443b7d8d36be9d38f139bd23776b1b1762051c15b89705768595"
+journal_events = 6
+module_sha256 = "8b85921ab7265d06084764de08cefba2f8c0c9ef43a4f93c03e7347e5ace2b8e"
+journal_sha256 = "d2797bb4149075b4a9db1a4fa120a2ea322b9b1290674e57b524b0c5f1eaf0fc"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus tokens tokens-timeout --input '{"timeout_ms":5000}' --inputs '{"rounds":[[{"timeout":"*"}]]}'"""

@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "sdk-retry-backoff"
+workflow = "sdk-retry"
+input_json = '{"mode":"long_backoff"}'
+expected = "completed"
+partition = 7
+run_id = "run-sdk-retry-backoff"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "25b9f6c7f2060ce03a0226c703eebf6ef52411367f6b5e20bd9eef7951d450b1"
+journal_events = 5
+module_sha256 = "32f81875789033244bd17a97e488035d2c15170c71bbaf725ce7ed8d4c89d085"
+journal_sha256 = "1efeb35838b024000416829f073a8067050bb3a17aca0549dee0bb0f211faa51"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus sdk-retry sdk-retry-backoff --input '{"mode":"long_backoff"}'"""

@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "signals-fifo"
+workflow = "signals"
+input_json = '{"mode":"fifo"}'
+expected = "completed"
+partition = 7
+run_id = "run-signals-fifo"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "fa1844c2988ad15ab7b49e0ece09684500fad94df916859fb9a43ff85f5bb477"
+journal_events = 14
+module_sha256 = "35e8464c0e046b92784a0b81a7c8771368ef42c796ea1aae45a7e52a73252128"
+journal_sha256 = "d06675c8f60811554d8a5c4e6045ff4ab9481f5e697b72d2a6e00a3907a9e76e"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = '''record_corpus signals signals-fifo --input '{"mode":"fifo"}' --inputs '{"rounds":[[{"signal":{"name":"x","payload":"\"a\""}},{"signal":{"name":"x","payload":"\"b\""}},{"signal":{"name":"x","payload":"\"c\""}}]]}''''

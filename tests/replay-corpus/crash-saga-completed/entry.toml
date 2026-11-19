@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "crash-saga-completed"
+workflow = "crash-saga"
+input_json = '{"id":"c1","steps":4,"fail_pattern":"0120","sleep_ms":100,"signal_timeout_ms":1000}'
+expected = "completed"
+partition = 7
+run_id = "run-crash-saga-completed"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "facba30513d915315f1b6c1839333bc4928008e444f5d1aea7b60931e3e3e28b"
+journal_events = 23
+module_sha256 = "2687585079775c3d50ad851f7d34f98862c2c2fec591a5689b191e91cbc4551c"
+journal_sha256 = "60ccdfe011c6ead83edf7969c6b638d1da15fe14afb9dd3098aa63e4f39ab1b3"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = '''record_corpus crash-saga crash-saga-completed --input '{"id":"c1","steps":4,"fail_pattern":"0120","sleep_ms":100,"signal_timeout_ms":1000}' --inputs '{"auto":["fire_timers",{"signal":{"name":"go","payload":"{\"ok\":1}","buffer":false}},{"timeout":"extra"}]}''''

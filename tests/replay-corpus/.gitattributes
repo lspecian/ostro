@@ -1,0 +1,4 @@
+# Corpus bytes are hashed in entry.toml: never convert line endings or diff as text.
+* -text
+*.wasm binary
+*.bin binary

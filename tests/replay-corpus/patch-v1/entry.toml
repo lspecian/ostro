@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "patch-v1"
+workflow = "patch-demo"
+input_json = "{}"
+expected = "completed"
+partition = 7
+run_id = "run-patch-v1"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "b64e3448a83a5b86466465080361c1a7e1157a27ddccd4b68069cb18caffb74a"
+journal_events = 7
+module_sha256 = "9ebfa445709de38442c32091af73ba2b22be632bd67c386d9d1b88942e8d0623"
+journal_sha256 = "a1bffa15ccc8dbae910aab18ef6ccb87ce477b6e8a2849599c5c4329a9ed8f16"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = "record_corpus patch-v1 patch-v1 --workflow patch-demo --input '{}'"

@@ -130,7 +130,7 @@ re-run it over an existing entry.
 | `sdk-retry-exhaust` | sdk-retry `exhaust` | 3 in-activation StepAttemptFailed, then the failed step | failed |
 | `sdk-retry-recover` | sdk-retry `recover_hot` | in-activation retries stamped at `retry_at` (D22) | completed |
 | `sdk-retry-backoff` | sdk-retry `long_backoff` | requeued retry: exactly one SAF, completion at `retry_at` (D22) | completed |
-| `race-fuzz-s1..s3` | race-fuzz | select / join / select_join, cancelled losers, signal vs timeout races | completed |
+| `race-fuzz-s1`, `-s2`, `-s3`, `-s8` | race-fuzz `--race-seed N` | wait / select / select_join (s1-s3) and join (s8); cancelled losers, signal vs timeout races | completed |
 | `signals-fifo` | signals `fifo` | SignalPayload+SignalMatched in one batch, then buffered payloads late-matched FIFO | completed |
 | `signals-timeout` | signals `timeout` | WaitTimedOut | completed |
 | `signals-before` | signals `before` | payload buffered during a sleep, matched at registration | completed |

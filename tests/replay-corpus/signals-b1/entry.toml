@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "signals-b1"
+workflow = "signals"
+input_json = '{"mode":"long_wait"}'
+expected = "completed"
+partition = 7
+run_id = "run-signals-b1"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "60799eb29089f396fcde5286c6e1830601adf1c7c6a1049334f6701df998801c"
+journal_events = 6
+module_sha256 = "35e8464c0e046b92784a0b81a7c8771368ef42c796ea1aae45a7e52a73252128"
+journal_sha256 = "698ecd75469e0cb0f1a4cb0816f64cc7fb54410596fbe46bbf5976fddd5d18d7"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = '''record_corpus signals signals-b1 --input '{"mode":"long_wait"}' --inputs '{"pre":[{"signal":{"name":"x","payload":"\"b1\""}}]}''''

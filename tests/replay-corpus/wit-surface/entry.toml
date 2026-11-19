@@ -1,0 +1,19 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "wit-surface"
+workflow = "surface"
+expected = "completed"
+partition = 7
+run_id = "run-wit-surface"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "0d58bcbd90ef4551716cbcd1ca8176c28caa5e798e2518eef040c607353b2385"
+journal_events = 24
+module_sha256 = "73132f41476a0462d42df24c07982614f132782588faaa78cb94267eaaa7101e"
+journal_sha256 = "326d7dccc6e1b25ca3caa76132da61d06c541851782ed771f7830fbf76d75583"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = '''record_corpus wit-surface wit-surface --workflow surface --deadline-nanos 1700000030000000000 --inputs '{"rounds":[["effects","children","fire_timers",{"signal":{"name":"go","payload":"\"sig\""}},{"token":"\"tok\""}]]}''''

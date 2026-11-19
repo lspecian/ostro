@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "signals-before"
+workflow = "signals"
+input_json = '{"mode":"before"}'
+expected = "completed"
+partition = 7
+run_id = "run-signals-before"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "42c77d0c895239ee7e3e160a1d51baf8095f8b3dcf0067c4459ade690aa3a1e8"
+journal_events = 9
+module_sha256 = "35e8464c0e046b92784a0b81a7c8771368ef42c796ea1aae45a7e52a73252128"
+journal_sha256 = "a82f20c699b2305ff19fc7c96be8132360ba0e222f340249ea8702beacc67642"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = '''record_corpus signals signals-before --input '{"mode":"before"}' --inputs '{"rounds":[[{"signal":{"name":"x","payload":"{\"early\":true}"}},"fire_timers"]]}''''

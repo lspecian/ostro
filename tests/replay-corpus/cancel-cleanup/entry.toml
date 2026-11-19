@@ -1,0 +1,19 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "cancel-cleanup"
+workflow = "cancel-cleanup"
+expected = "cancelled"
+partition = 7
+run_id = "run-cancel-cleanup"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5"
+journal_events = 6
+module_sha256 = "73132f41476a0462d42df24c07982614f132782588faaa78cb94267eaaa7101e"
+journal_sha256 = "6fe9199d25faf244dee898616e7e09ee8c24c1382f8f8c23a4b6b095f8a1211e"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus wit-surface cancel-cleanup --workflow cancel-cleanup --deadline-nanos 1700000030000000000 --inputs '{"rounds":[["cancel"]],"auto":[]}'"""

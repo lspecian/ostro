@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "can-chain"
+workflow = "can-chain"
+input_json = '{"n":0,"max":3}'
+expected = "continued_as_new"
+partition = 7
+run_id = "run-can-chain"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "93958595e8f7171b5454ba10d13db3ae2b8e1d0b30c207f1529b0ed6a74dd445"
+journal_events = 2
+module_sha256 = "40b1c54e59da4abb616e648482cf047d81be55009641c536a822317a34fdebd0"
+journal_sha256 = "813419334f010a3af516eec8390270f6db720a7ec89a6128ea64949d8390673c"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus can-chain can-chain --input '{"n":0,"max":3}'"""

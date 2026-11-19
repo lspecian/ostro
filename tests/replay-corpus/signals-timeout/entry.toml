@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "signals-timeout"
+workflow = "signals"
+input_json = '{"mode":"timeout"}'
+expected = "completed"
+partition = 7
+run_id = "run-signals-timeout"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "492bd0204b74443b7d8d36be9d38f139bd23776b1b1762051c15b89705768595"
+journal_events = 5
+module_sha256 = "35e8464c0e046b92784a0b81a7c8771368ef42c796ea1aae45a7e52a73252128"
+journal_sha256 = "aa29e027bf8f3f02919d7d527aefd623da695d09312ce699f884017a02c84901"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus signals signals-timeout --input '{"mode":"timeout"}' --inputs '{"rounds":[[{"timeout":"x"}]]}'"""

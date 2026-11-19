@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "sdk-basic"
+workflow = "sdk-basic"
+input_json = '{"name":"ostro","n":10}'
+expected = "completed"
+partition = 7
+run_id = "run-sdk-basic"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "9c8c59e100a5ca54e0e0447bf11ee941a5eb44e4a141d62b9f6121cfe0613726"
+journal_events = 16
+module_sha256 = "89c1ad0fa65bccf46ecbb1b9aba77d62e192837db8bc7aee464528d864e84d57"
+journal_sha256 = "70c4a0e99f189009cf548e070a7a1ed1c36903826912ccd4f4c6490261f4a58e"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus sdk-basic sdk-basic --input '{"name":"ostro","n":10}'"""

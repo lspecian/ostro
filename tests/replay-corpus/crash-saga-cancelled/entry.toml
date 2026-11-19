@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "crash-saga-cancelled"
+workflow = "crash-saga"
+input_json = '{"id":"c4","steps":3,"fail_pattern":"","sleep_ms":5000,"signal_timeout_ms":1000}'
+expected = "cancelled"
+partition = 7
+run_id = "run-crash-saga-cancelled"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5"
+journal_events = 11
+module_sha256 = "2687585079775c3d50ad851f7d34f98862c2c2fec591a5689b191e91cbc4551c"
+journal_sha256 = "5559437b79bb0657627eb6c32a3f879a558496a688ca42f84e9ba8fb6e04a932"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus crash-saga crash-saga-cancelled --input '{"id":"c4","steps":3,"fail_pattern":"","sleep_ms":5000,"signal_timeout_ms":1000}' --inputs '{"rounds":[["cancel"]],"auto":[]}'"""

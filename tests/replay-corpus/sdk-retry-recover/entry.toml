@@ -1,0 +1,20 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+name = "sdk-retry-recover"
+workflow = "sdk-retry"
+input_json = '{"mode":"recover_hot","fail_times":2}'
+expected = "completed"
+partition = 7
+run_id = "run-sdk-retry-recover"
+token_key_hex = "0909090909090909090909090909090909090909090909090909090909090909"
+terminal_payload_sha256 = "557a6f3abb851388cfdaabb868725b2e1bb0a119b1186c4e3733feb12680b53d"
+journal_events = 6
+module_sha256 = "32f81875789033244bd17a97e488035d2c15170c71bbaf725ce7ed8d4c89d085"
+journal_sha256 = "359c64af4945c41675ef1edbab7aa9e92cbb0083893bce52102c5b5828604c68"
+
+[recorded_with]
+ostro = "d69df946894b"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-19"
+tool = "record_corpus"
+command = """record_corpus sdk-retry sdk-retry-recover --input '{"mode":"recover_hot","fail_times":2}'"""
