@@ -42,7 +42,9 @@ Sources:
 | 28–33 | spare | reserved P8 |
 | 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9 |
 | 41–42 | — (contingency, expected use 0) | reserved P12 |
-| 43–63 | — | unallocated |
+| 43 | RepinRun (`ostro migrate-runs`) | reserved P13 |
+| 44 | spare | reserved P13 |
+| 45–63 | — | unallocated |
 
 ## 2. `StartRun` field numbers (prost)
 
@@ -173,7 +175,8 @@ Rules:
 | 15–17 | — | reserved P7 |
 | 18–19 | — (P8 declared 0) | reserved P8 |
 | 20–22 | — | reserved P9 |
-| 23+ | — | unallocated |
+| 23–24 | — (Phase 13 repin / version-gate rejects; names chosen by 13-01) | reserved P13 |
+| 25+ | — | unallocated |
 
 ## 8. `InvalidCode` (declaration index; reported in Rejected(Invalid) detail)
 
@@ -237,7 +240,9 @@ Appending a `MetaCommand` variant changes no existing encoding and needs **no ME
 | 2 | Delete | exists (P4) |
 | 3 | SetPartitionLeader | exists (P4) |
 | 4–7 | ElectLeader, AlterIsr, ResignLeader, spare | reserved P12 |
-| 8+ | — | unallocated |
+| 8 | AlterReplicas | reserved P13 |
+| 9–11 | spare | reserved P13 |
+| 12+ | — | unallocated |
 
 Phase 12 holds no keyspaces, journal kinds, RejectReason/InvalidCode values or outbox kinds.
 
@@ -256,7 +261,15 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 32–47 | reserved P7 | — |
 | 48–63 | reserved P8 | — |
 | 64–79 | reserved P9 | — |
-| 80–111 | reserved P12/P13 (Member, PartitionAssignment, cluster) | — |
+| 80–95 | reserved P12 (Member, PartitionAssignment, cluster) | — |
+| 96 | `Member` NodeVersion `{ostro_version, level_min, level_max, wasmtime, event_codec_ver, wit_lines, reported_at_ms}` | reserved P13 |
+| 97 | `Member` MemberState `{state: Joining/Active/Draining/Removed, changed_at_ms}` (tombstone; node ids never reused) | reserved P13 |
+| 98 | `ClusterInfo` ClusterVersion `{finalized, hold: Option<u32>, finalized_at_ms}` (the 1.0 binary must already read it; absent = baseline level) | reserved P13 |
+| 99 | `ClusterInfo` ReplicationPolicy `{rf, min_insync, max_voters}` | reserved P13 |
+| 100 | `PartitionAssignment` Reassignment `{target, adding, removing, started_at_ms}` (KIP-455 shape) | reserved P13 |
+| 101 | `ModuleRecord` WitRequirement `{line, min_level}` | reserved P13 |
+| 102 | `ModuleRecord` / `WorkflowVersion` Retired `{retired_at_ms}` | reserved P13 |
+| 103–111 | spare | reserved P13 |
 | 112–143 | reserved P14 (ApiToken name/description/created_by/rotation link, ModuleRecord signature evidence + uploader tenants, ClusterInfo security policy, SealedSecret created/rotated, further Tenant knobs) | — |
 | 144+ | unallocated | — |
 
