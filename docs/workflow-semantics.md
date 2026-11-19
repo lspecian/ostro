@@ -29,17 +29,16 @@ pinned to the module sha of the workflow version active at that moment (or the v
 named in the request).
 
 **Start path (D24).** The API pre-encodes the run's `RunStarted` event, and apply journals
-it at seq 0 as part of the `StartRun` command. An accepted run that has not started
-executing therefore already has a one-event journal (`RunStarted` at seq 0, `next_seq` 1),
-never an empty one. Everything that happens before the first activation is journaled after
-it: buffered signals (§2), a cancel request (§5), and the `RunTerminated` marker of a
-terminate or a schedule-to-start timeout (§6, §8). Exactly one `RunStarted` exists, always
-at seq 0.
-
-> Status at the time of writing: apply support for `StartRun.run_started` landed in 05-16
-> (`crates/ostro-partition/tests/apply_run_started.rs`). The API switch and the updated
-> end-to-end pins are plan 05-25. Builds before 05-25 still write `RunStarted` at the first
-> activation, so a never-started run has an empty journal there.
+it at seq 0 as part of the `StartRun` command (REST and gRPC starts, and the new run of a
+retry in `restarted` mode). An accepted run that has not started executing therefore
+already has a one-event journal (`RunStarted` at seq 0, `next_seq` 1), never an empty one.
+Everything that happens before the first activation is journaled after it: signals (§2),
+a cancel request (§5), and the `RunTerminated` marker of a terminate or a
+schedule-to-start timeout (§6, §8) at seq 1. Runs started through a partition's outbox
+(child runs and continue-as-new successors) get their `RunStarted` from the executor at
+the first activation; signals that reach such a run before then are held and journaled
+right after it, in arrival order. Either way exactly one `RunStarted` exists, always at
+seq 0.
 
 **Inputs are journaled by apply.** Timer firings, wait timeouts, signal payloads and
 matches, token completions and cancel requests are written into the run's journal by the
@@ -53,6 +52,9 @@ what would happen without submitting anything.
 
 **Proven by:** `crates/ostro-server/tests/start_run_api.rs::rest_idempotency_keys_survive_restart`,
 `start_run_api.rs::dry_run_start_validates_and_submits_nothing`,
+`start_run_api.rs::api_start_journals_run_started_at_seq_zero` (D24),
+`crates/ostro-server/tests/semantics_e2e.rs::schedule_to_start_without_capacity` (D24:
+`RunStarted` at 0 + `RunTerminated` at 1 for a never-started run),
 `crates/ostro-partition/tests/apply_run_started.rs`,
 `crates/ostro/tests/order_saga.rs::happy_path` (`RunStarted` first, one per run).
 
@@ -150,8 +152,9 @@ signals, forced restart, fresh-runtime replay identical),
 - **Status.** If the workflow returns the cancellation error, the run ends `cancelled`. If
   it handles the cancel and returns a value, the run ends `completed`; cancel is a request,
   not a verdict.
-- A cancel before the first activation is recorded and delivered at the first activation
-  (journaled after `RunStarted`), so the workflow still gets to run its cleanup.
+- A cancel before the first activation is journaled right after `RunStarted` (seq 1 for an
+  API-started run, D24) and seen by the first activation, so the workflow still gets to
+  run its cleanup.
 - A cancel of a terminal run is 409 `run_terminal`. Cancel is forwarded to the successor
   of a continue-as-new chain (§11).
 
@@ -162,7 +165,7 @@ cleanup, `cancelled`, `result --wait` exits 3),
 `sdk_cancellation.rs::timer_fired_before_cancel_is_slept` (a completion earlier in journal
 order wins), `crates/ostro-server/tests/executor_phase5.rs::cancel_before_start_is_journaled_after_run_started`,
 `executor_phase5.rs::cancel_before_start_runs_shielded_cleanup`,
-`crates/ostro-server/tests/lifecycle_api.rs::cancel_before_start_is_flag_only_and_idempotent`,
+`crates/ostro-server/tests/lifecycle_api.rs::cancel_before_start_journals_after_run_started_once_and_is_idempotent`,
 `crates/ostro-partition/tests/apply_waits.rs::request_cancel_journals_once_wakes_and_cascades`,
 `apply_waits.rs::cancel_is_forwarded_along_a_continue_as_new_chain`.
 
