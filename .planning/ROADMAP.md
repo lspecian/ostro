@@ -207,27 +207,29 @@ Plans:
   3. A canary secret referenced as `{{secret:name}}` never appears on disk, in the journal, in logs, in OTLP or in object storage, and is never readable by the guest. Grants bound to other origins are refused, templated requests don't follow redirects, and echoed values are scrubbed from responses.
   4. The SSRF bypass table is blocked: private, link-local and metadata ranges, IPv4-mapped IPv6, NAT64, decimal/octal literals, `fd00:ec2::254`, redirects and env proxies. Per-module allow-lists and per-target rate limits are enforced.
   5. Object-store get/put/presign works against S3-compatible and local backends. Secrets resolve from the sealed store, env/file, Vault and Kubernetes providers.
-**Plans**: 18 plans (7 waves; 06-01 is the PHASE-6 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only, + WIT freeze in place) and checking the code against .planning/RESERVATIONS.md (P6 block: Cmd 13, Intent 9/10, InvalidCode 15, effects rows); decisions D-FX1–D-FX9 + P-1–P-17 adopted in 06-DECISIONS.md, user may override; MySQL/MinIO legs env-gated → CI service containers / human_needed; the OTLP canary leg closes at the Phase 8 gate)
+**Plans**: 20 plans (8 waves; 06-01 is the PHASE-6 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only, + WIT freeze in place) and checking the code against .planning/RESERVATIONS.md (P6 block: Cmd 13, Intent 9/10, InvalidCode 15, effects rows); 06-02 lands deps/skeletons/contract; decisions D-FX1–D-FX9 + P-1–P-21 adopted in 06-DECISIONS.md, user may override; MySQL/MinIO legs env-gated → CI service containers / human_needed; the OTLP canary leg closes at the Phase 8 gate)
 
 Plans:
-- [ ] 06-01-PLAN.md — PHASE-6 GATE (Phase 5 + WIT freeze, code vs RESERVATIONS) + decisions to STATE + FX-05 wording + all Phase 6 deps + ostro-bridge contract skeleton + ostro-objstore skeleton (if absent) + ostro-types contract (CompleteEffect 13, RegisterEffect/CancelEffect 9/10, BadEffectCompletion 15) (all FX)
-- [ ] 06-02-PLAN.md — Partition apply: effects rows (#12), RegisterEffect/CancelEffect, first-wins CompleteEffect, resumable-aware cleanup, LeaderAnnounced wake (FX-01, FX-03)
-- [ ] 06-03-PLAN.md — Egress core: URL gate, IANA classifier + mapped/NAT64/6to4 unwrap, allow-lists, hickory resolver with pinning, guarded client (no proxy/redirects/gzip), capped reader, SSRF table (FX-08)
-- [ ] 06-04-PLAN.md — Secrets core: template parser, origin-bound grants, multi-encoding scrubber, AES-256-GCM sealed store, env/file/sealed providers + chain, resolver (FX-06, FX-07, FX-10)
-- [ ] 06-05-PLAN.md — Engine seam: EffectDriver + ActivationSink::effect_driver, start only after commit, replay re-drive, redacted journal copy (FX-01, FX-03, FX-06)
-- [ ] 06-06-PLAN.md — Bridge driver core: Bridge/EffectRegistry, gate → rate limit → execute → completion sink, per-target rate limits (FX-09, FX-01, FX-03)
-- [ ] 06-07-PLAN.md — Admin API surface: bridge.proto (Secrets, Connectors), REST/gRPC/fake/parity/OpenAPI, unauthenticated local presign route (FX-05..FX-08, FX-10)
-- [ ] 06-08-PLAN.md — Rust SDK effect builders + ctx.idempotency_key + guests fx-http/fx-sql/fx-object/fx-canary/fx-ssrf (FX-02, FX-04, FX-05)
-- [ ] 06-09-PLAN.md — HTTP connector: idempotency key, unknown-outcome window, retries/timeouts/size cap, templating + no-redirect + scrub/redact, manual redirects, mock provider (FX-01, FX-02, FX-03, FX-07)
-- [ ] 06-10-PLAN.md — SQL connector: sqlx PG/MySQL pools, exactly-once statement allow-list (MySQL implicit-commit table), token-first protocol, error/value mapping, GC (FX-04)
-- [ ] 06-11-PLAN.md — Object store: shared ostro-objstore LocalFs + S3 (rusty-s3) + presign, bridge object adapter + local HMAC presign (FX-05)
-- [ ] 06-12-PLAN.md — Vault (vaultrs) + Kubernetes (kube) secret providers with zeroizing TTL cache (FX-10)
-- [ ] 06-13-PLAN.md — Server seam: [secrets]/[egress]/[connectors] config, BridgeServices, EffectDriver adapter, CompleteEffect submission, SendGate, derive mappings, effects no longer unsupported (FX-01..FX-06, FX-08)
-- [ ] 06-14-PLAN.md — Server admin impl (sealed secrets, grants, connections, egress, presign route) + CLI verbs + API-based e2e helpers (FX-05..FX-08, FX-10)
-- [ ] 06-15-PLAN.md — E2E SC1/SC4: intent before I/O, kill -9 re-drive with same key, window → effect_outcome_unknown, SSRF table via guest, env proxy, allow-lists, rate limits (FX-01, FX-02, FX-03, FX-08, FX-09)
-- [ ] 06-16-PLAN.md — E2E SC2: kill -9 between COMMIT and effect_completed on PG (+ MySQL in CI), CI service containers, ci-local env gating (FX-04)
-- [ ] 06-17-PLAN.md — E2E SC3/SC5: canary harness (OTLP hook for Phase 8), grant/redirect/echo, object via guest (local + MinIO), five secret providers (FX-05, FX-06, FX-07, FX-10)
-- [ ] 06-18-PLAN.md — PHASE GATE: docs (connectors/egress/secrets, docs/03 + docs/02 fixes), effect replay-corpus entries, RESERVATIONS flip, freeze/deny re-check, full ci-local, VALIDATION (all)
+- [ ] 06-01-PLAN.md — PHASE-6 GATE (Phase 5 + WIT freeze, code vs RESERVATIONS) + decisions to STATE + FX-05 wording + RESERVATIONS names and canonical InvalidCode placeholder names (docs only) (all FX)
+- [ ] 06-02-PLAN.md — All Phase 6 deps + ostro-bridge contract skeleton + ostro-objstore skeleton (08-03 signatures, if absent) + ostro-types contract (CompleteEffect 13 = encoded EffectCompleted payload, RegisterEffect/CancelEffect 9/10, BadEffectCompletion 15) (all FX)
+- [ ] 06-03-PLAN.md — Partition apply: effects rows (#12), RegisterEffect/CancelEffect, first-wins CompleteEffect stored verbatim, resumable-aware cleanup, LeaderAnnounced wake (FX-01, FX-03)
+- [ ] 06-04-PLAN.md — Egress core: URL gate, IANA classifier + mapped/NAT64/6to4 unwrap, allow-lists, hickory resolver with pinning, guarded client, capped reader, full [egress] config, SSRF table (FX-08)
+- [ ] 06-05-PLAN.md — Secrets core: template parser, origin-bound grants, multi-encoding scrubber, AES-256-GCM sealed store, env/file/sealed providers + chain, resolver (FX-06, FX-07, FX-10)
+- [ ] 06-06-PLAN.md — Engine seam: EffectDriver + ActivationSink::effect_driver, start only after the HostState::flush commit, replay re-drive, redacted journal copy (FX-01, FX-03, FX-06)
+- [ ] 06-07-PLAN.md — Bridge driver core: Bridge/EffectRegistry, gate → rate limit → execute → completion sink, panic → internal_error, per-target rate limits (FX-09, FX-01, FX-03)
+- [ ] 06-08-PLAN.md — Admin API surface: bridge.proto (Secrets, Connectors), REST/gRPC/fake/parity/OpenAPI, unauthenticated local presign route (FX-05..FX-08, FX-10)
+- [ ] 06-09-PLAN.md — Rust SDK effect builders + ctx.idempotency_key + guests fx-http/fx-sql/fx-object/fx-canary/fx-ssrf (FX-02, FX-04, FX-05)
+- [ ] 06-10-PLAN.md — HTTP connector: idempotency key, unknown-outcome window, retries/timeouts/size cap, templating + no-redirect + identity encoding + scrub/redact, manual redirects, mock provider (FX-01, FX-02, FX-03, FX-07)
+- [ ] 06-11-PLAN.md — SQL connector: sqlx PG/MySQL pools (schema option), statement allow-list, token-first protocol with post-COMMIT reconcile (never Retryable), retention horizon, GC (FX-04)
+- [ ] 06-12-PLAN.md — Object store: shared ostro-objstore LocalFs + S3 (rusty-s3) + presign, bridge object adapter + local HMAC presign (FX-05)
+- [ ] 06-13-PLAN.md — Vault (vaultrs) + Kubernetes (kube) secret providers with zeroizing TTL cache (FX-10)
+- [ ] 06-14-PLAN.md — Server seam: config sections, BridgeServices + PresignKeyStore, EffectDriver adapter, CompleteEffect submission, SendGate, derive mappings, no unsupported repair for effects (B1), test helpers (FX-01..FX-06, FX-08)
+- [ ] 06-15-PLAN.md — Seam e2e (in-process): intent before I/O, journal delivery, crash re-drive instead of unsupported repair, 1 MiB blob outcome, evicted-run wake, children regression (FX-01, FX-03, FX-06)
+- [ ] 06-16-PLAN.md — Server admin impl (sealed secrets, grants, connections, egress, presign route) + CLI verbs + API-based e2e helpers (FX-05..FX-08, FX-10)
+- [ ] 06-17-PLAN.md — E2E SC1/SC4: kill -9 re-drive with same key, window → effect_outcome_unknown, SSRF table via guest (classifier reasons asserted), env proxy, allow-lists, rate limits (FX-01, FX-02, FX-03, FX-08, FX-09)
+- [ ] 06-18-PLAN.md — E2E SC2: kill -9 between COMMIT and effect_completed on PG (+ MySQL in CI), CI service containers (shared MinIO spec), ci-local env gating (FX-04)
+- [ ] 06-19-PLAN.md — E2E SC3/SC5: canary harness (OTLP hook for Phase 8; mocks isolated from capture), grant/redirect/echo, object via guest (local + MinIO), five secret providers (FX-05, FX-06, FX-07, FX-10)
+- [ ] 06-20-PLAN.md — PHASE GATE: docs (connectors/egress/secrets incl. normative error table, docs/03 + docs/02 fixes), effect replay-corpus entries, RESERVATIONS flip, freeze/deny re-check, full ci-local, VALIDATION (all)
 **Research flag**: SSRF and secret binding; MySQL implicit-commit list; provider idempotency windows
 
 ### Phase 7: Workers, Placement & Flow Control
