@@ -488,6 +488,7 @@ async fn metadata_survives_restart() {
                 scopes: vec!["runs:write".into()],
                 tenant: None,
                 created_at_ms: 1,
+                ..Default::default()
             }),
         })
         .await

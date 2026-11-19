@@ -1,7 +1,8 @@
 //! Record validation at meta apply.
 //!
-//! Only shape rules live here: enum ranges, length caps and "Some must be
-//! positive". Semantic checks (IANA zone names, cron syntax, JSON pointers,
+//! Only shape rules live here: a well-formed `ext` on every record, enum
+//! ranges, length caps, "Some must be positive" and the D23 grammar of
+//! `WorkflowVersion.module`. Semantic checks (IANA zone names, cron syntax, JSON pointers,
 //! verifier configs) belong to the phase that uses the field. Validation
 //! runs at apply, so every node reaches the same verdict, and a rejected Put
 //! leaves the state unchanged.
@@ -10,10 +11,11 @@
 //! stricter rule would reject replay of a command that was accepted before.
 
 use crate::command::MetaRecord;
+use crate::ext::ext_validate;
 use crate::records::{
     CATCHUP_ALL, ON_EXHAUSTED_PAUSE, OVERLAP_TERMINATE_OTHER, PLACEMENT_AUTO, QueuePolicy,
     RateSpec, SCHEDULE_TIMEZONE_MAX, SELECTOR_ENTRY_MAX, SELECTOR_MAX_ENTRIES, Schedule,
-    SpillPolicy, Webhook, WorkflowPolicy,
+    SpillPolicy, Tenant, Webhook, WorkflowPolicy, WorkflowVersion,
 };
 
 type Check = Result<(), String>;
@@ -108,13 +110,73 @@ fn webhook(w: &Webhook) -> Check {
     )
 }
 
+fn tenant(t: &Tenant) -> Check {
+    for (field, v) in [
+        ("weight", t.weight.map(u64::from)),
+        ("max_concurrency", t.max_concurrency.map(u64::from)),
+        ("fuel_per_s", t.fuel_per_s),
+        ("fuel_burst", t.fuel_burst),
+        ("memory_bytes", t.memory_bytes),
+    ] {
+        if v == Some(0) {
+            return Err(format!("{field} must be > 0 when set"));
+        }
+    }
+    rate("event_rate", &t.event_rate)
+}
+
+/// D23 resource-name grammar: `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` (so no
+/// `/`, no `:`, no leading `__`).
+pub(crate) fn is_resource_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 128
+        && b[0].is_ascii_alphanumeric()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+/// D23 tenant-id grammar: `^[a-z0-9][a-z0-9-]{0,62}$` (`_`, the default
+/// tenant's spelling, never matches).
+pub(crate) fn is_tenant_id(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 63
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// A D23 qualified name: `<name>` (default tenant) or `<tenant>/<name>`.
+pub(crate) fn is_qualified_name(s: &str) -> bool {
+    match s.split_once('/') {
+        None => is_resource_name(s),
+        Some((t, n)) => is_tenant_id(t) && is_resource_name(n),
+    }
+}
+
+fn workflow_version(w: &WorkflowVersion) -> Check {
+    if !w.module.is_empty() && !is_qualified_name(&w.module) {
+        return Err(format!(
+            "module {:?} is not a D23 qualified name ([<tenant>/]<name>)",
+            w.module
+        ));
+    }
+    Ok(())
+}
+
 /// Shape-check `record`; `Err` carries the reason reported as `Invalid`.
 pub(crate) fn validate_record(record: &MetaRecord) -> Check {
+    ext_validate(record.ext()).map_err(|e| e.to_string())?;
     match record {
         MetaRecord::Schedule(s) => schedule(s),
         MetaRecord::WorkflowPolicy(p) => workflow_policy(p),
         MetaRecord::QueuePolicy(p) => queue_policy(p),
         MetaRecord::Webhook(w) => webhook(w),
+        MetaRecord::Tenant(t) => tenant(t),
+        MetaRecord::Workflow(w) => workflow_version(w),
         _ => Ok(()),
     }
 }

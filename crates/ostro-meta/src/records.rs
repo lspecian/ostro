@@ -1,7 +1,10 @@
 //! Metadata record types (META-02).
 //!
 //! Every record is plain serde data: `BTreeMap`/`Vec` only (no `HashMap`) and no
-//! clocks. Every timestamp is supplied by the proposer as `*_at_ms`, so applying
+//! clocks. Fields are positional postcard: every record ends with
+//! `ext: Vec<u8>` (the [`crate::ext`] TLV codec), and after the 05-20 freeze
+//! fields are never added to an existing record (D20: register an ext tag or
+//! append a new `MetaRecord` variant instead). Every timestamp is supplied by the proposer as `*_at_ms`, so applying
 //! the same command on any node yields byte-identical state.
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +52,8 @@ pub struct ClusterInfo {
     pub partitions: u16,
     pub format: u32,
     pub created_at_ms: u64,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +61,12 @@ pub struct Member {
     pub node_id: u64,
     pub addr: String,
     pub joined_at_ms: u64,
+    /// Phase 12 F7 (stored only): cluster RPC address.
+    pub cluster_addr: Option<String>,
+    /// Phase 12 F7 (stored only): replication fetch address.
+    pub repl_addr: Option<String>,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +75,18 @@ pub struct PartitionAssignment {
     pub leader: u64,
     pub epoch: u32,
     pub isr: Vec<u64>,
+    /// Phase 12 F7 (stored only): replica set, preferred leader first;
+    /// RF = `replicas.len()`. `InitCluster` writes `[node]`.
+    pub replicas: Vec<u64>,
+    /// Phase 12 F7 (stored only): AlterIsr CAS token, so an ISR change needs
+    /// no leader-epoch bump. `InitCluster` writes 0; `SetPartitionLeader`
+    /// preserves it.
+    pub isr_version: u64,
+    /// Phase 12 F7 (stored only): minimum in-sync replicas. `InitCluster`
+    /// writes 1.
+    pub min_insync: u8,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +97,8 @@ pub struct ModuleRecord {
     /// `(workflow name, version)` pairs registered from this module.
     pub workflows: Vec<(String, u32)>,
     pub uploaded_at_ms: u64,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +109,13 @@ pub struct WorkflowVersion {
     pub default_queue: Option<String>,
     pub run_timeout_ms: Option<u64>,
     pub created_at_ms: u64,
+    /// Phase 14 F4 (D23): tenant-qualified deployed module name
+    /// (`<name>` for the default tenant, else `<tenant>/<name>`); `""` =
+    /// unnamed. Module records stay sha-keyed with no name (a name there is
+    /// unsafe under cross-tenant re-uploads); names resolve through here.
+    pub module: String,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 /// Which version of a workflow new runs start on.
@@ -91,6 +123,8 @@ pub struct WorkflowVersion {
 pub struct ActiveVersion {
     pub name: String,
     pub version: u32,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +132,8 @@ pub struct QueueConfig {
     pub name: String,
     pub max_concurrency: Option<u32>,
     pub created_at_ms: u64,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 /// Cron schedule (defined and persisted now; driven from Phase 8).
@@ -129,7 +165,7 @@ pub struct Schedule {
     pub end_at_ms: Option<u64>,
     /// Proposer-supplied creation time (unix ms).
     pub created_at_ms: u64,
-    /// TLV extensions (RESERVATIONS §10b).
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
     pub ext: Vec<u8>,
 }
 
@@ -155,12 +191,30 @@ pub struct ApiToken {
     pub scopes: Vec<String>,
     pub tenant: Option<String>,
     pub created_at_ms: u64,
+    /// Phase 7 F8 (stored only): expiry (unix ms); `None` = never. The expiry
+    /// check lands with token verification (Phase 7/14).
+    pub expires_at_ms: Option<u64>,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
+/// A tenant. The quota fields are Phase 14 F3: stored only, enforced in
+/// Phase 14 (quotas delay work, they never fail it). Every `Some` must be > 0.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: String,
     pub created_at_ms: u64,
+    /// Fair-share weight.
+    pub weight: Option<u32>,
+    pub max_concurrency: Option<u32>,
+    /// Fuel refill rate per second.
+    pub fuel_per_s: Option<u64>,
+    pub fuel_burst: Option<u64>,
+    pub memory_bytes: Option<u64>,
+    pub event_rate: Option<RateSpec>,
+    pub suspended: bool,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 /// A secret stored sealed. See [`TOKEN_KEY_SECRET`] for the Phase 4 caveat.
@@ -169,6 +223,8 @@ pub struct SealedSecret {
     pub name: String,
     pub ciphertext: Vec<u8>,
     pub key_id: String,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +232,8 @@ pub struct Grant {
     pub id: String,
     pub subject: String,
     pub scopes: Vec<String>,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,12 +241,16 @@ pub struct Connection {
     pub name: String,
     pub kind: String,
     pub config: Vec<u8>,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressPolicy {
     pub name: String,
     pub allow: Vec<String>,
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
+    pub ext: Vec<u8>,
 }
 
 /// `on_retries_exhausted`: fail the run (the default).
@@ -209,7 +271,7 @@ pub struct WorkflowPolicy {
     pub paused: bool,
     /// [`ON_EXHAUSTED_FAIL`] (0) or [`ON_EXHAUSTED_PAUSE`] (1); `None` = default.
     pub on_retries_exhausted: Option<u8>,
-    /// TLV extensions (RESERVATIONS §10b).
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
     pub ext: Vec<u8>,
 }
 
@@ -249,7 +311,7 @@ pub struct QueuePolicy {
     /// [`ON_EXHAUSTED_FAIL`] (0) or [`ON_EXHAUSTED_PAUSE`] (1); `None` = default.
     pub on_retries_exhausted: Option<u8>,
     pub paused: bool,
-    /// TLV extensions (RESERVATIONS §10b).
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
     pub ext: Vec<u8>,
 }
 
@@ -314,6 +376,6 @@ pub struct Webhook {
     pub idempotency: String,
     /// Replay window in seconds; 0 = verifier default.
     pub tolerance_s: u32,
-    /// TLV extensions (RESERVATIONS §10b).
+    /// TLV extensions (RESERVATIONS §10b; [`crate::ext`]).
     pub ext: Vec<u8>,
 }

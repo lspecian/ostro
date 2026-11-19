@@ -4,10 +4,12 @@
 //! - [`command`]: [`MetaKey`], [`MetaCommand`], [`MetaResult`] and their
 //!   `[META_FORMAT] ‖ postcard` encoding.
 //! - [`state`]: [`MetaState`] with deterministic, versioned (CAS) apply.
+//! - [`ext`]: the TLV codec of the trailing `ext` bytes on every record.
 //! - [`handle`]: [`MetaHandle`] (start + immediate campaign, propose, read, watch).
 //! - [`sm`]: [`MetaSm`] (Raft `StateMachine`, postcard snapshots) and [`MetaView`].
 
 pub mod command;
+pub mod ext;
 pub mod handle;
 pub mod records;
 pub mod sm;
@@ -17,6 +19,10 @@ mod validate;
 pub use command::{
     DecodeError, META_FORMAT, MetaCommand, MetaKey, MetaKind, MetaRecord, MetaResult,
     decode_command, decode_result, encode_command, encode_result,
+};
+pub use ext::{
+    EXT_TAG_TEST, ExtEntry, ExtError, ext_entries, ext_get, ext_get_value, ext_put, ext_put_value,
+    ext_remove, ext_validate,
 };
 pub use handle::{MetaError, MetaHandle};
 pub use records::{

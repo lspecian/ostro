@@ -278,6 +278,7 @@ fn set_partition_leader_epochs() {
         leader: 1,
         epoch: 4,
         isr: vec![1],
+        ..Default::default()
     });
     assert_eq!(
         s.apply(8, put(lower, Some(5))),

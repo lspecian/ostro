@@ -124,6 +124,7 @@ impl MetaState {
                 partitions,
                 format: CLUSTER_FORMAT,
                 created_at_ms,
+                ext: Vec::new(),
             },
         ));
         self.members.entry(node_id).or_insert_with(|| {
@@ -133,6 +134,9 @@ impl MetaState {
                     node_id,
                     addr: String::new(),
                     joined_at_ms: created_at_ms,
+                    cluster_addr: None,
+                    repl_addr: None,
+                    ext: Vec::new(),
                 },
             )
         });
@@ -147,6 +151,11 @@ impl MetaState {
                         leader: node_id,
                         epoch: 0,
                         isr: vec![node_id],
+                        // Phase 12 F7 defaults: RF 1, ISR CAS token 0.
+                        replicas: vec![node_id],
+                        isr_version: 0,
+                        min_insync: 1,
+                        ext: Vec::new(),
                     },
                 });
         }
@@ -159,6 +168,7 @@ impl MetaState {
                         name: TOKEN_KEY_SECRET.to_string(),
                         ciphertext: token_key.to_vec(),
                         key_id: TOKEN_KEY_PLAINTEXT_ID.to_string(),
+                        ext: Vec::new(),
                     },
                 )
             });
@@ -262,6 +272,10 @@ impl MetaState {
                 MetaResult::Conflict { current: cur_epoch }
             };
         }
+        // Validation is unchanged from Phase 4 (12-RESEARCH F8). The Phase 12
+        // F7 fields (replicas, isr_version, min_insync) and ext are stored
+        // only and carried over untouched.
+        let prev = std::mem::take(&mut cur.value);
         *cur = Versioned {
             version: new_epoch,
             updated_index: index,
@@ -270,6 +284,10 @@ impl MetaState {
                 leader,
                 epoch,
                 isr,
+                replicas: prev.replicas,
+                isr_version: prev.isr_version,
+                min_insync: prev.min_insync,
+                ext: prev.ext,
             },
         };
         MetaResult::Ok { version: new_epoch }

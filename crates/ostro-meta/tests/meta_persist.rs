@@ -39,6 +39,7 @@ fn records() -> Vec<MetaRecord> {
             language: Some("rust".into()),
             workflows: vec![("greet".into(), 1)],
             uploaded_at_ms: 10,
+            ..Default::default()
         }),
         MetaRecord::Workflow(WorkflowVersion {
             name: "greet".into(),
@@ -47,11 +48,13 @@ fn records() -> Vec<MetaRecord> {
             default_queue: Some("default".into()),
             run_timeout_ms: None,
             created_at_ms: 10,
+            ..Default::default()
         }),
         MetaRecord::Queue(QueueConfig {
             name: "default".into(),
             max_concurrency: Some(8),
             created_at_ms: 10,
+            ..Default::default()
         }),
         MetaRecord::Token(ApiToken {
             id: "t1".into(),
@@ -59,6 +62,7 @@ fn records() -> Vec<MetaRecord> {
             scopes: vec!["admin".into()],
             tenant: None,
             created_at_ms: 10,
+            ..Default::default()
         }),
     ]
 }
@@ -85,6 +89,7 @@ async fn records_survive_restart_and_versions_never_regress() {
         name: "default".into(),
         max_concurrency: Some(16),
         created_at_ms: 11,
+        ..Default::default()
     });
     assert_eq!(
         h.propose(put(q2.clone(), Some(1))).await.unwrap(),
@@ -125,6 +130,7 @@ async fn records_survive_restart_and_versions_never_regress() {
         name: "default".into(),
         max_concurrency: Some(1),
         created_at_ms: 12,
+        ..Default::default()
     });
     assert_eq!(
         h.propose(put(q3, Some(1))).await.unwrap(),

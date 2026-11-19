@@ -578,6 +578,7 @@ async fn meta_stale_cas_rejected() {
                 record: MetaRecord::Active(ActiveVersion {
                     name: "sdk-basic".into(),
                     version: 2,
+                    ..Default::default()
                 }),
             })
             .await
@@ -594,6 +595,7 @@ async fn meta_stale_cas_rejected() {
             record: MetaRecord::Active(ActiveVersion {
                 name: "sdk-basic".into(),
                 version: 2,
+                ..Default::default()
             }),
         })
         .await

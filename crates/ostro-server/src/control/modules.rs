@@ -218,6 +218,9 @@ pub(crate) async fn upload_module(
                 default_queue: m.default_queue.clone(),
                 run_timeout_ms: m.run_timeout_ms,
                 created_at_ms: now,
+                // 05-24 sets the tenant-qualified upload name (D23, Phase 14 F4).
+                module: String::new(),
+                ext: Vec::new(),
             }),
         )
         .await?;
@@ -247,6 +250,7 @@ pub(crate) async fn upload_module(
                 MetaRecord::Active(ActiveVersion {
                     name: name.clone(),
                     version,
+                    ext: Vec::new(),
                 }),
             )
             .await?;
@@ -258,6 +262,7 @@ pub(crate) async fn upload_module(
         language: req.language.filter(|l| !l.is_empty()),
         workflows: by_key.keys().cloned().collect(),
         uploaded_at_ms: now,
+        ext: Vec::new(),
     };
     let created = match cp
         .meta
@@ -393,6 +398,7 @@ pub(crate) async fn activate_workflow(
                 record: MetaRecord::Active(ActiveVersion {
                     name: req.name.clone(),
                     version: req.version,
+                    ext: Vec::new(),
                 }),
             })
             .await

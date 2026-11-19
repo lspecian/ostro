@@ -162,12 +162,67 @@ impl MetaRecord {
         }
     }
 
+    /// The record's trailing TLV `ext` bytes ([`crate::ext`]).
+    pub fn ext(&self) -> &[u8] {
+        match self {
+            MetaRecord::Cluster(r) => &r.ext,
+            MetaRecord::Member(r) => &r.ext,
+            MetaRecord::Partition(r) => &r.ext,
+            MetaRecord::Module(r) => &r.ext,
+            MetaRecord::Workflow(r) => &r.ext,
+            MetaRecord::Active(r) => &r.ext,
+            MetaRecord::Queue(r) => &r.ext,
+            MetaRecord::Schedule(r) => &r.ext,
+            MetaRecord::Token(r) => &r.ext,
+            MetaRecord::Tenant(r) => &r.ext,
+            MetaRecord::Secret(r) => &r.ext,
+            MetaRecord::Grant(r) => &r.ext,
+            MetaRecord::Connection(r) => &r.ext,
+            MetaRecord::Egress(r) => &r.ext,
+            MetaRecord::WorkflowPolicy(r) => &r.ext,
+            MetaRecord::QueuePolicy(r) => &r.ext,
+            MetaRecord::Webhook(r) => &r.ext,
+        }
+    }
+
+    /// Mutable access to the record's `ext` bytes.
+    pub fn ext_mut(&mut self) -> &mut Vec<u8> {
+        match self {
+            MetaRecord::Cluster(r) => &mut r.ext,
+            MetaRecord::Member(r) => &mut r.ext,
+            MetaRecord::Partition(r) => &mut r.ext,
+            MetaRecord::Module(r) => &mut r.ext,
+            MetaRecord::Workflow(r) => &mut r.ext,
+            MetaRecord::Active(r) => &mut r.ext,
+            MetaRecord::Queue(r) => &mut r.ext,
+            MetaRecord::Schedule(r) => &mut r.ext,
+            MetaRecord::Token(r) => &mut r.ext,
+            MetaRecord::Tenant(r) => &mut r.ext,
+            MetaRecord::Secret(r) => &mut r.ext,
+            MetaRecord::Grant(r) => &mut r.ext,
+            MetaRecord::Connection(r) => &mut r.ext,
+            MetaRecord::Egress(r) => &mut r.ext,
+            MetaRecord::WorkflowPolicy(r) => &mut r.ext,
+            MetaRecord::QueuePolicy(r) => &mut r.ext,
+            MetaRecord::Webhook(r) => &mut r.ext,
+        }
+    }
+
     /// Test constructor: a record of `kind` named/identified by `id`, with
     /// content derived from `generation`. Partition records use
     /// `epoch = generation`, so a CAS chain of generations 1, 2, 3 yields
-    /// versions 1, 2, 3 for every kind.
+    /// versions 1, 2, 3 for every kind. Every sample carries a non-empty ext
+    /// under the test-only tag [`crate::ext::EXT_TAG_TEST`].
     #[doc(hidden)]
     pub fn sample(kind: MetaKind, id: u8, generation: u32) -> MetaRecord {
+        let mut rec = Self::sample_fields(kind, id, generation);
+        *rec.ext_mut() =
+            crate::ext::ext_put(&[], crate::ext::EXT_TAG_TEST, &[id, generation as u8])
+                .expect("tag 15 is valid");
+        rec
+    }
+
+    fn sample_fields(kind: MetaKind, id: u8, generation: u32) -> MetaRecord {
         let g = generation;
         let name = format!("{kind:?}-{id}").to_lowercase();
         let ms = u64::from(g) * 1000;
@@ -177,17 +232,25 @@ impl MetaRecord {
                 partitions: 16,
                 format: crate::records::CLUSTER_FORMAT,
                 created_at_ms: ms,
+                ext: Vec::new(),
             }),
             MetaKind::Member => MetaRecord::Member(Member {
                 node_id: u64::from(id),
                 addr: format!("10.0.0.{id}:{g}"),
                 joined_at_ms: ms,
+                cluster_addr: Some(format!("10.0.0.{id}:7001")),
+                repl_addr: None,
+                ext: Vec::new(),
             }),
             MetaKind::Partition => MetaRecord::Partition(PartitionAssignment {
                 partition: u16::from(id),
                 leader: u64::from(g),
                 epoch: g,
                 isr: vec![u64::from(g)],
+                replicas: vec![u64::from(g), u64::from(g) + 1],
+                isr_version: u64::from(g),
+                min_insync: 1,
+                ext: Vec::new(),
             }),
             MetaKind::Module => MetaRecord::Module(ModuleRecord {
                 sha256: [id; 32],
@@ -195,6 +258,7 @@ impl MetaRecord {
                 language: Some("rust".into()),
                 workflows: vec![(name, g)],
                 uploaded_at_ms: ms,
+                ext: Vec::new(),
             }),
             MetaKind::Workflow => MetaRecord::Workflow(WorkflowVersion {
                 name,
@@ -203,12 +267,19 @@ impl MetaRecord {
                 default_queue: Some(format!("q{g}")),
                 run_timeout_ms: Some(u64::from(g)),
                 created_at_ms: ms,
+                module: format!("acme/mod-{g}"),
+                ext: Vec::new(),
             }),
-            MetaKind::Active => MetaRecord::Active(ActiveVersion { name, version: g }),
+            MetaKind::Active => MetaRecord::Active(ActiveVersion {
+                name,
+                version: g,
+                ext: Vec::new(),
+            }),
             MetaKind::Queue => MetaRecord::Queue(QueueConfig {
                 name,
                 max_concurrency: Some(g),
                 created_at_ms: ms,
+                ext: Vec::new(),
             }),
             MetaKind::Schedule => MetaRecord::Schedule(Schedule {
                 name,
@@ -232,29 +303,47 @@ impl MetaRecord {
                 scopes: vec!["runs:write".into()],
                 tenant: None,
                 created_at_ms: ms,
+                expires_at_ms: Some(ms + 3_600_000),
+                ext: Vec::new(),
             }),
             MetaKind::Tenant => MetaRecord::Tenant(Tenant {
                 id: name,
                 created_at_ms: ms,
+                weight: Some(g),
+                max_concurrency: Some(10 * g),
+                fuel_per_s: Some(1_000_000),
+                fuel_burst: None,
+                memory_bytes: Some(64 << 20),
+                event_rate: Some(RateSpec {
+                    limit: 100,
+                    period_ms: 1000,
+                    burst: 10,
+                }),
+                suspended: g.is_multiple_of(2),
+                ext: Vec::new(),
             }),
             MetaKind::Secret => MetaRecord::Secret(SealedSecret {
                 name,
                 ciphertext: vec![g as u8; 8],
                 key_id: "k1".into(),
+                ext: Vec::new(),
             }),
             MetaKind::Grant => MetaRecord::Grant(Grant {
                 id: name,
                 subject: format!("user-{g}"),
                 scopes: vec!["admin".into()],
+                ext: Vec::new(),
             }),
             MetaKind::Connection => MetaRecord::Connection(Connection {
                 name,
                 kind: "postgres".into(),
                 config: vec![g as u8],
+                ext: Vec::new(),
             }),
             MetaKind::Egress => MetaRecord::Egress(EgressPolicy {
                 name,
                 allow: vec![format!("example{g}.com")],
+                ext: Vec::new(),
             }),
             MetaKind::WorkflowPolicy => MetaRecord::WorkflowPolicy(WorkflowPolicy {
                 workflow: name,
