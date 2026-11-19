@@ -287,7 +287,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Pending |
 | WF-04 | Phase 5 | Pending |
-| WF-05 | Phase 5 | Pending |
+| WF-05 | Phase 5 | Pending (apply: waits/signals/timeouts 05-08) |
 | WF-06 | Phase 9 | Pending |
 | WF-07 | Phase 4 (Rust) / Phase 9 (Py, TS) | Pending |
 | WF-08 | Phase 5 | Pending |
@@ -304,9 +304,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | API-02 | Phase 4 | Complete |
 | API-03 | Phase 4 | Complete |
 | API-04 | Phase 4 | Complete |
-| API-05 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
+| API-05 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply signal/cancel: 05-08; server: 05-13) |
 | API-06 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
-| API-07 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
+| API-07 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply CompleteToken: 05-08; server: 05-13) |
 | API-08 | Phase 13 | Pending |
 | TRIG-01 | Phase 8 | Pending |
 | TRIG-02 | Phase 8 | Pending |
