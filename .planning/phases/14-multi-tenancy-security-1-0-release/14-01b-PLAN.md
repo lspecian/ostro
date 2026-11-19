@@ -2,7 +2,7 @@
 phase: 14-multi-tenancy-security-1-0-release
 plan: 01b
 type: execute
-wave: 1
+wave: 2
 depends_on: ["14-01"]
 files_modified:
   - crates/ostro-server/src/lib.rs
@@ -74,6 +74,7 @@ must_haves:
   truths:
     - "The p14 seam (final after this plan) and every stub exist with fixed signatures; every stub preserves Phase 13 behaviour except that the default principal outside any scope is Anonymous (14-01 contract)"
     - "Hook call sites are in place: upload_gate right after the sha check and before the existing-sha lookup and auto-activation; version_gate on every path that selects a non-active version or sha (start with explicit version, migrate target, rerun/retry version overrides); activation_gate; admit_ingress after the dedupe lookup; register_existing at the existing-sha branch; audited resolver; worker events; wrap_clock"
+    - "The /ui router runs handlers inside PRINCIPAL.scope(Principal::dev()) in auth mode none and delegates to UiAuth in token mode, so Phase 11 UI suites stay green behind the deny-by-default guard"
     - "main.rs intercepts `ostro auth bootstrap --data-dir` and `ostro audit verify --data-dir` (offline commands that need server internals)"
     - "Config sections [auth], [tenants] (metrics_tenant_labels default false), [audit] (head_export_interval), [security.modules] parse in both profiles"
     - "Fuzz target bins build on the pinned nightly; scripts/fetch-tools.sh pins every tool with sha256; FAILPOINT_CRATES equals the ci.yml list; no manifest is edited by this plan"
@@ -96,7 +97,7 @@ must_haves:
 ---
 
 <objective>
-**PHASE-14 GATE, part 2 of 2** (wave 1, runs strictly after 14-01). Land the server seam (`p14/`, `audit/`, `flow/tenant.rs`) with every fixed call site, config sections, CLI/client stubs, the fuzz target bins, the conformance scenario module, the tool pins and the CI sync check. No manifest is edited here (14-01 owns them).
+**PHASE-14 GATE, part 2 of 2** (wave 2, after 14-01; every later plan depends on it). Land the server seam (`p14/`, `audit/`, `flow/tenant.rs`) with every fixed call site, config sections, CLI/client stubs, the fuzz target bins, the conformance scenario module, the tool pins and the CI sync check. No manifest is edited here (14-01 owns them).
 
 Purpose: later waves edit only their own hook files (D-P14-33).
 
@@ -141,6 +142,7 @@ pub fn authenticator(ctx) -> Arc<dyn Authenticator>               // → authn (
 pub fn wrap_ingress(ctx, routed, routed_ext) -> Guarded           // → guard::wrap (14-03); stub = passthrough clone
 pub fn fill_extensions(ctx, ext: &mut ApiExtensions)              // 14-17/18/19 impls; stub leaves None
 pub fn ui_auth(ctx) -> Arc<dyn UiAuth>                            // → ui_auth (14-21); stub = AllowAll
+pub fn ui_scope_layer(ctx) -> UiScopeLayer                        // N2: mode none → PRINCIPAL.scope(Principal::dev()); token mode → UiAuth principal (14-21)
 pub fn wrap_clock(clock: Clock) -> Clock                          // → test_hooks (14-10, failpoints only); stub = identity
 pub async fn start(ctx: Arc<P14Ctx>) -> P14Services               // audit writer (14-04), bootstrap (14-03), reseal (14-19), quota view (14-06)
 pub async fn before_shutdown(ctx)                                 // audit + coalescer flush
@@ -170,10 +172,11 @@ Commit `feat(14-01b): p14 seam, stubs and config`.
   <action>
 **Call sites (one edit each):**
 - `server.rs`: `p14::build_ctx` after meta + clock; `p14::wrap_clock` at the clock construction; `p14::authenticator` into `ApiConfig`; `p14::fill_extensions` then `p14::wrap_ingress` right after `p13::wrap_control_plane` — REST, gRPC and the UI router receive `Guarded`, in-process consumers keep the routed instances; `p14::ui_auth` into the UI router; `p14::start` after `p13::start`; `p14::before_shutdown` before `p13::before_shutdown`.
-- `control/modules.rs` (B1b): `p14::upload_gate` **immediately after the sha is computed/checked, before the existing-sha lookup, before compilation, before any meta write and before auto-activation**; `p14::register_existing` at the existing-sha branch; `p14::activation_gate` in activation.
-- `p14::version_gate` (B1a) at every non-active-version path from the 14-01 inventory: start with an explicit `version` (control/runs.rs), the migrate target (`control/migrate.rs`), rerun with a version override (`rerun.rs`) and retry/restart with a version override (lifecycle file recorded by 14-01). Called only when the selected version is not the active one.
+- `control/modules.rs` (B1b): `p14::upload_gate` **immediately after the sha is computed/checked, before the existing-module lookup (`s.module(&sha)` or the name recorded by 14-01), before compilation, before any meta write and before the auto-activation `Active` put** (the verify asserts all three orderings; if the lookup/put use different identifiers at HEAD, update the check's patterns to the recorded names); `p14::register_existing` at the existing-sha branch; `p14::activation_gate` in activation.
+- `p14::version_gate` (B1a) at every non-active-version path from the 14-01 inventory: start with an explicit `version` (control/runs.rs), the migrate target (`control/migrate.rs`), rerun with a version override (`rerun.rs`) and retry/restart with a version override (lifecycle file recorded by 14-01). Called for **every** explicit version or sha selection whenever enforcement may apply (not only non-active ones); `version_gate` accepts immediately when the target is the active version or already has valid evidence, so a concurrent Activate cannot open a window (W3).
 - `control/runs.rs` start path after the dedupe lookup, and the signal/token completion paths: `p14::admit_ingress`.
 - Bridge resolver construction: wrap with `Audited::new(inner, p14::audit_sink(ctx))`. Worker join/renew/revoke sites: `p14::worker_event`.
+- **UI scope layer (N2):** the `/ui` router gets a tower layer built in `p14::ui_scope_layer(ctx)` (declared in `p14/mod.rs`, implemented in `p14/ui_auth.rs`): with `[auth] mode = "none"` it runs every UI handler inside `PRINCIPAL.scope(Principal::dev(), …)`; in token mode it delegates to `UiAuth` (stub: AllowAll → Dev until 14-21). This keeps the Phase 11 UI working behind the deny-by-default guard from 14-03 on.
 - `main.rs` (B5): intercept `ostro auth bootstrap --data-dir` → `ostro_server::p14::bootstrap::offline(args)` and `ostro audit verify --data-dir` → `ostro_server::audit::verify::offline(args)`.
 
 **CLI/client stubs:** client modules `tenants`, `api_tokens`, `audit`, `security` (declared in `lib.rs`) returning `ClientError::Unimplemented`; shared `Authorization: Bearer $OSTRO_TOKEN` helper in `lib.rs`. `commands/mod.rs` variants `Tenant`, `Auth{Token{Create,Ls,Revoke,Rotate}, Whoami, Bootstrap}`, `Audit{Ls, Verify}`, `Security{Policy{Get,Set}, Trust{Add,Rm}}` with stub files (Bootstrap and Audit Verify are dispatched by main.rs).
@@ -185,9 +188,14 @@ Commit `feat(14-01b): Phase 14 call sites + CLI/client stubs`.
 import sys
 s=open(sys.argv[1]).read()
 g=s.index("p14::upload_gate"); r=s.index("p14::register_existing")
+m=s.index("s.module(&sha)")
+import re as _re
+act=min(x.start() for x in _re.finditer(r"MetaRecord::Active|MetaKey::Active|ActiveVersion", s))
+assert g < m, "upload_gate must precede the existing-module lookup s.module(&sha)"
+assert g < act, "upload_gate must precede the auto-activation Active put"
 assert g < r, "upload_gate must precede the existing-sha branch"
 EOF
-for t in "-p ostro-server" "-p ostro-cli" "-p ostro-client"; do out=$(cargo test $t --locked -- 2>&1); grep -Eq "test result: ok\. [1-9][0-9]* passed" <<<"$out"; done'</automated>
+for t in "-p ostro-server" "-p ostro-cli" "-p ostro-client" "-p ostro-ui"; do out=$(cargo test $t --locked -- 2>&1); grep -Eq "test result: ok\. [1-9][0-9]* passed" <<<"$out"; done'</automated>
   </verify>
   <done>Every hook is wired at its fixed site with passthrough behaviour; offline commands are dispatched.</done>
 </task>
