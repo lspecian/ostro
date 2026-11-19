@@ -13,8 +13,8 @@ use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
     AttemptGranted, AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EnqueueReady,
     EventsAppended, JournalEvent, MAX_RUN_TAG_LEN, MAX_RUN_TAGS, MAX_TENANT_LEN,
-    MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, ScheduleTimer, StartRun, TerminalStatus, TimerFired, derived,
-    encode_command,
+    MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, ScheduleTimer, StartRun, TerminalStatus, TimerFired,
+    derived, encode_command,
 };
 use ostro_types::{AttemptToken, Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
 
@@ -170,7 +170,9 @@ fn complete_at(at: u64) -> Derived {
 }
 
 fn enqueue(at: u64) -> Derived {
-    intent(derived::Intent::EnqueueReady(EnqueueReady { ready_at_ms: at }))
+    intent(derived::Intent::EnqueueReady(EnqueueReady {
+        ready_at_ms: at,
+    }))
 }
 
 fn rej(r: RejectReason) -> ApplyOutcome {
@@ -204,7 +206,11 @@ fn start_run_new_fields_stored() {
     let r = rid(0, 1);
     let s = StartRun {
         module_sha: vec![0xab; MODULE_SHA_LEN],
-        tags: vec!["env:prod".into(), String::new(), "x".repeat(MAX_RUN_TAG_LEN)],
+        tags: vec![
+            "env:prod".into(),
+            String::new(),
+            "x".repeat(MAX_RUN_TAG_LEN),
+        ],
         tenant: "t".repeat(MAX_TENANT_LEN),
         traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into(),
         run_timeout_ms: 30_000,
@@ -215,7 +221,11 @@ fn start_run_new_fields_stored() {
     assert_eq!(rec.module_sha, Some([0xab; 32]));
     assert_eq!(
         rec.tags,
-        vec!["env:prod".to_string(), String::new(), "x".repeat(MAX_RUN_TAG_LEN)]
+        vec![
+            "env:prod".to_string(),
+            String::new(),
+            "x".repeat(MAX_RUN_TAG_LEN)
+        ]
     );
     assert_eq!(rec.tenant.as_deref(), Some(&*"t".repeat(MAX_TENANT_LEN)));
     assert_eq!(
@@ -316,7 +326,10 @@ fn start_run_new_fields_validated() {
 fn complete_run_stores_completed_at() {
     let (mut h, r) = running(0, 1);
     assert_eq!(
-        h.apply(1, &events(&r, (1, 1), 0, vec![ev(0)], vec![complete_at(4242)])),
+        h.apply(
+            1,
+            &events(&r, (1, 1), 0, vec![ev(0)], vec![complete_at(4242)])
+        ),
         ApplyOutcome::Accepted
     );
     let rec = h.run(&r);
@@ -340,7 +353,10 @@ fn running_row_lifecycle_grant_and_complete() {
 
     let (o, _, reads) = h.apply_full(1, &grant(&r, 1, 1));
     assert_eq!(o, ApplyOutcome::Accepted);
-    assert_eq!(reads, 1, "AttemptGranted: still one point read (Running row is blind)");
+    assert_eq!(
+        reads, 1,
+        "AttemptGranted: still one point read (Running row is blind)"
+    );
     assert_eq!(h.running_row(&r), Some((1, 1)));
 
     // A later grant overwrites the row.
@@ -349,10 +365,7 @@ fn running_row_lifecycle_grant_and_complete() {
     assert_eq!(h.all_running(), 1);
 
     // CompleteRun removes it.
-    let (o, _, reads) = h.apply_full(
-        1,
-        &events(&r, (1, 2), 0, vec![ev(0)], vec![complete_at(7)]),
-    );
+    let (o, _, reads) = h.apply_full(1, &events(&r, (1, 2), 0, vec![ev(0)], vec![complete_at(7)]));
     assert_eq!(o, ApplyOutcome::Accepted);
     assert_eq!(reads, 1);
     assert_eq!(h.running_row(&r), None);
@@ -416,7 +429,11 @@ fn suspend_moves_running_to_scheduled() {
     assert_eq!(rec.status, RunStatus::Scheduled);
     assert_eq!(rec.ready, None);
     assert_eq!(rec.next_seq, 2);
-    assert_eq!(rec.current_attempt, Some((1, 1)), "the token stays for fencing");
+    assert_eq!(
+        rec.current_attempt,
+        Some((1, 1)),
+        "the token stays for fencing"
+    );
     assert_eq!(h.running_row(&r), None);
     assert_eq!(h.all_running(), 0);
     assert!(
@@ -470,7 +487,8 @@ fn suspend_with_events_and_timer() {
     let (o, a, _) = h.apply_full(1, &fired);
     assert_eq!(o, ApplyOutcome::Accepted);
     assert!(
-        a.iter().any(|x| matches!(x, Action::EnqueueReady { run, .. } if *run == r)),
+        a.iter()
+            .any(|x| matches!(x, Action::EnqueueReady { run, .. } if *run == r)),
         "{a:?}"
     );
     assert_eq!(h.run(&r).status, RunStatus::Ready);
@@ -487,7 +505,10 @@ fn suspend_seq_mismatch_is_rejected_and_state_unchanged() {
     let running_before = h.running_row(&r);
     for from in [0u64, 2, 5] {
         assert_eq!(
-            h.apply(1, &events(&r, (1, 1), from, vec![], vec![Derived::suspend()])),
+            h.apply(
+                1,
+                &events(&r, (1, 1), from, vec![], vec![Derived::suspend()])
+            ),
             rej(RejectReason::SeqMismatch { expected: 1 })
         );
     }
@@ -596,7 +617,10 @@ fn same_commands_same_digest() {
         assert_eq!(h.apply(1, &Command::start_run(s)), ApplyOutcome::Accepted);
         assert_eq!(h.apply(1, &grant(&r2, 1, 1)), ApplyOutcome::Accepted);
         assert_eq!(
-            h.apply(1, &events(&r, (1, 1), 0, vec![ev(0)], vec![Derived::suspend()])),
+            h.apply(
+                1,
+                &events(&r, (1, 1), 0, vec![ev(0)], vec![Derived::suspend()])
+            ),
             ApplyOutcome::Accepted
         );
         assert_eq!(

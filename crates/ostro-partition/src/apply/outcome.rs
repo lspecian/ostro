@@ -25,7 +25,8 @@
 //! The [`InvalidCode`] detail is not part of the hash code (the command
 //! bytes are folded anyway, and they determine the detail). `InvalidCode`
 //! variants are append-only as well (02-09 added `BadIntent`,
-//! `FieldTooLong`; 02-10 added `BadSource`, `TruncateBeyondEnd`).
+//! `FieldTooLong`; 02-10 added `BadSource`, `TruncateBeyondEnd`; 04-12 added `BadLength`,
+//! `NotRunning`).
 
 use ostro_types::{AttemptToken, Epoch, PartitionId, RunId};
 
@@ -76,12 +77,18 @@ pub enum InvalidCode {
     /// `CompleteRun`).
     BadIntent,
     /// A string that becomes part of a key (workflow, queue) is longer than
-    /// 65535 bytes.
+    /// 65535 bytes, or a StartRun field exceeds its `ostro_types::command`
+    /// limit (tags, tenant, traceparent; 04-12).
     FieldTooLong,
     /// `InboundBatch.src` is outside the partition count.
     BadSource,
     /// `OutboxTruncated.upto_seq` names a seq that was never emitted.
     TruncateBeyondEnd,
+    /// A fixed-length byte field has the wrong length (`StartRun.module_sha` must be empty or
+    /// 32 bytes). Added by 04-12.
+    BadLength,
+    /// A `Suspend` intent for a run whose status is not `Running`. Added by 04-12.
+    NotRunning,
 }
 
 impl RejectReason {
@@ -149,5 +156,12 @@ pub enum Action {
     },
     CancelRequested {
         run: RunId,
+    },
+    /// An input (signal, timer, child result, ...) was journaled at `seq` for a run that is
+    /// `Running`; the dispatcher forwards it to the hot activation. Added by 04-12; emitted
+    /// by 04-13.
+    InputAppended {
+        run: RunId,
+        seq: u64,
     },
 }

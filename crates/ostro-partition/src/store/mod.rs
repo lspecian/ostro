@@ -53,10 +53,14 @@ pub enum Table {
     Children,
     Dlq,
     Effects,
+    /// Runs whose status is `Running`, keyed by run id; value `(epoch, n)` of the current
+    /// attempt token (plan 04-12). Lets a new leader find in-flight runs without scanning
+    /// `runs` (DISP-01).
+    Running,
 }
 
 /// Every table, in fixed (declaration) order.
-pub const TABLES: [Table; 13] = [
+pub const TABLES: [Table; TABLE_COUNT] = [
     Table::Meta,
     Table::Runs,
     Table::Events,
@@ -70,7 +74,11 @@ pub const TABLES: [Table; 13] = [
     Table::Children,
     Table::Dlq,
     Table::Effects,
+    Table::Running,
 ];
+
+/// Number of keyspaces.
+pub const TABLE_COUNT: usize = 14;
 
 impl Table {
     /// fjall keyspace name.
@@ -89,6 +97,7 @@ impl Table {
             Table::Children => "children",
             Table::Dlq => "dlq",
             Table::Effects => "effects",
+            Table::Running => "running",
         }
     }
 
@@ -129,7 +138,7 @@ pub enum StoreError {
 /// the only writer.
 pub struct PartitionStore {
     db: Database,
-    ks: [Keyspace; 13],
+    ks: [Keyspace; TABLE_COUNT],
 }
 
 impl std::fmt::Debug for PartitionStore {
@@ -164,7 +173,7 @@ impl PartitionStore {
                 KeyspaceCreateOptions::default().max_memtable_size(memtable)
             })?);
         }
-        let ks: [Keyspace; 13] = handles
+        let ks: [Keyspace; TABLE_COUNT] = handles
             .try_into()
             .unwrap_or_else(|_| unreachable!("one keyspace per table"));
         let store = Self { db, ks };
@@ -241,7 +250,7 @@ impl PartitionStore {
 /// Cheap-to-clone read handle (cloned fjall keyspace handles).
 #[derive(Clone)]
 pub struct StoreReader {
-    ks: [Keyspace; 13],
+    ks: [Keyspace; TABLE_COUNT],
 }
 
 impl StoreReader {

@@ -67,6 +67,21 @@ pub struct RunRecord {
     pub rng_seed: Vec<u8>,
     pub inbox_next: u64,
     pub children: u32,
+    // ---- Phase 4 additions (plan 04-12). Appended at the end: postcard is positional, so
+    // this changes the encoding of every stored RunRecord. Pre-freeze format change, no
+    // migration (dev data dirs created before Phase 4 must be deleted). Phase 5 freezes it.
+    /// sha256 of the module the run is pinned to (`StartRun.module_sha`; empty = none).
+    pub module_sha: Option<[u8; 32]>,
+    /// `StartRun.tags`, in submission order.
+    pub tags: Vec<String>,
+    /// `StartRun.tenant` (empty = none).
+    pub tenant: Option<String>,
+    /// `StartRun.traceparent` (empty = none).
+    pub traceparent: Option<String>,
+    /// `StartRun.run_timeout_ms` (0 = none).
+    pub run_timeout_ms: Option<u64>,
+    /// `CompleteRun.completed_at_ms` of the terminal transition (0 = none).
+    pub completed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

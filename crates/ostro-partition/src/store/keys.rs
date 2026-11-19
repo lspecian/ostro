@@ -33,6 +33,11 @@ pub fn run_key(run: &RunId) -> Vec<u8> {
     run.as_bytes().to_vec()
 }
 
+/// `running`: run (18 B), same as [`run_key`]. Value: postcard `(epoch, n)`.
+pub fn running_key(run: &RunId) -> Vec<u8> {
+    run_key(run)
+}
+
 /// `events`: run ‖ seq.
 pub fn event_key(run: &RunId, seq: u64) -> Vec<u8> {
     let mut k = Vec::with_capacity(RUN_LEN + 8);

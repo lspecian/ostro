@@ -1,14 +1,29 @@
 //! Run lifecycle apply: `StartRun`, `AttemptGranted`, `EventsAppended` with
-//! Phase-2 `Derived` intents (STOR-05, STOR-10, STOR-14).
+//! `Derived` intents (STOR-05, STOR-10, STOR-14; Phase 4 additions: plan 04-12).
 //!
 //! Every handler validates completely before its first write, so a rejected
 //! command leaves nothing in the overlay. Hot-path handlers issue at most one
 //! keyspace point read (S3 RMW margin 1.19x): the run record (or the dedupe
 //! row for a keyed start). All other writes are blind.
+//!
+//! **`running` index (04-12):** a row exists exactly while the run's status is
+//! `Running`. `AttemptGranted` inserts (or overwrites) it with the new token;
+//! every transition out of `Running` (`EnqueueReady`, `Suspend`, `CompleteRun`)
+//! blind-removes it. Only `EventsAppended` moves a run out of `Running`
+//! (inbound messages and timers only wake `Scheduled` runs). No reads added.
+//!
+//! **`Suspend` (04-12):** must be the last intent, cannot be combined with
+//! `EnqueueReady` or `CompleteRun`, and needs status `Running`. It sets the
+//! status to `Scheduled` (the token stays, for fencing) and removes the ready
+//! and running rows. The `from_seq == next_seq` check that every
+//! `EventsAppended` already passes is the compare-and-set: an input journaled
+//! after the executor's last flush moves `next_seq` (04-13), so the Suspend is
+//! rejected `SeqMismatch` and the executor re-activates.
 
 use ostro_types::command::{
-    AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, OutboxMsg, StartRun,
-    TerminalStatus, derived::Intent, outbox_msg,
+    AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, MAX_RUN_TAG_LEN, MAX_RUN_TAGS,
+    MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, StartRun, TerminalStatus,
+    derived::Intent, outbox_msg,
 };
 use ostro_types::{AttemptToken, Epoch, PayloadRef, RunId};
 use prost::Message;
@@ -18,7 +33,7 @@ use super::cursor::Cursor;
 use super::outbox::{emit, msg_oversize, msg_target};
 use super::outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
 use crate::store::keys::{
-    children_key, dedupe_key, event_key, payload_key, ready_key, run_key, timer_key,
+    children_key, dedupe_key, event_key, payload_key, ready_key, run_key, running_key, timer_key,
 };
 use crate::store::values::{self, ReadySlot, ReadyValue, RunRecord, RunStatus};
 use crate::store::{ApplyBatch, StoreError, Table};
@@ -92,6 +107,14 @@ pub(crate) fn remove_ready(b: &mut ApplyBatch<'_>, run: &RunId, rec: &mut RunRec
     }
 }
 
+/// Blind-removes the run's `running` row if the run is `Running`. Call before
+/// changing the status away from `Running`.
+pub(crate) fn leave_running(b: &mut ApplyBatch<'_>, run: &RunId, rec: &RunRecord) {
+    if rec.status == RunStatus::Running {
+        b.remove(Table::Running, running_key(run));
+    }
+}
+
 /// Inserts the ready row, marks the run Ready and emits `EnqueueReady`.
 pub(crate) fn enqueue_ready(
     b: &mut ApplyBatch<'_>,
@@ -100,6 +123,7 @@ pub(crate) fn enqueue_ready(
     ready_at_ms: u64,
     actions: &mut Vec<Action>,
 ) {
+    leave_running(b, run, rec);
     remove_ready(b, run, rec);
     b.insert(
         Table::Ready,
@@ -123,6 +147,41 @@ pub(crate) fn enqueue_ready(
 }
 
 // ------------------------------------------------------------------ StartRun
+
+/// Validated Phase 4 StartRun fields (14..18), as stored in [`RunRecord`].
+struct StartExtras {
+    module_sha: Option<[u8; 32]>,
+    tenant: Option<String>,
+    traceparent: Option<String>,
+    run_timeout_ms: Option<u64>,
+}
+
+/// Checks fields 14..18 against the `ostro_types::command` limits. No reads.
+fn check_start_extras(s: &StartRun) -> Check<StartExtras> {
+    let module_sha = match s.module_sha.len() {
+        0 => None,
+        MODULE_SHA_LEN => {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&s.module_sha);
+            Some(a)
+        }
+        _ => return Err(invalid(InvalidCode::BadLength)),
+    };
+    if s.tags.len() > MAX_RUN_TAGS
+        || s.tags.iter().any(|t| t.len() > MAX_RUN_TAG_LEN)
+        || s.tenant.len() > MAX_TENANT_LEN
+        || s.traceparent.len() > MAX_TRACEPARENT_LEN
+    {
+        return Err(invalid(InvalidCode::FieldTooLong));
+    }
+    let non_empty = |v: &String| (!v.is_empty()).then(|| v.clone());
+    Ok(StartExtras {
+        module_sha,
+        tenant: non_empty(&s.tenant),
+        traceparent: non_empty(&s.traceparent),
+        run_timeout_ms: (s.run_timeout_ms != 0).then_some(s.run_timeout_ms),
+    })
+}
 
 /// Creates a run. `dedupe` is the `(workflow, key)` idempotency row to check
 /// and claim; `None` checks the run id instead. Exactly one point read.
@@ -152,6 +211,10 @@ pub(crate) fn start_run(
     };
     let Ok(policy) = ConflictPolicy::try_from(s.conflict_policy) else {
         return reject(invalid(InvalidCode::Decode));
+    };
+    let extras = match check_start_extras(s) {
+        Ok(x) => x,
+        Err(r) => return reject(r),
     };
     if oversize(&s.input) {
         return reject(RejectReason::PayloadTooLarge);
@@ -201,6 +264,12 @@ pub(crate) fn start_run(
         rng_seed: s.rng_seed.clone(),
         inbox_next: 0,
         children: 0,
+        module_sha: extras.module_sha,
+        tags: s.tags.clone(),
+        tenant: extras.tenant,
+        traceparent: extras.traceparent,
+        run_timeout_ms: extras.run_timeout_ms,
+        completed_at_ms: None,
     };
     if let Some(input) = &s.input {
         b.insert(
@@ -259,6 +328,12 @@ pub(crate) fn apply_attempt_granted(
     rec.current_attempt = Some((t.epoch.0, t.n));
     rec.status = RunStatus::Running;
     remove_ready(b, &run, &mut rec);
+    // Blind insert (overwrites the previous attempt's row): no extra read.
+    b.insert(
+        Table::Running,
+        running_key(&run),
+        values::encode(&(t.epoch.0, t.n)),
+    );
     store_run(b, &run, &rec);
     Ok(ApplyOutcome::Accepted)
 }
@@ -266,13 +341,18 @@ pub(crate) fn apply_attempt_granted(
 // ------------------------------------------------------------ EventsAppended
 
 /// Validates the Derived intents' structure; returns nothing on success.
-fn check_intents(cur: &Cursor, e: &EventsAppended) -> Check<()> {
+///
+/// `CompleteRun` and `Suspend` must be last; `Suspend` cannot be combined with
+/// `EnqueueReady` or `CompleteRun` and needs a `Running` run.
+fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus) -> Check<()> {
     let mut completed = false;
+    let mut suspended = false;
+    let mut enqueued = false;
     for d in &e.derived {
         let Some(i) = &d.intent else {
             return Err(invalid(InvalidCode::MissingField));
         };
-        if completed {
+        if completed || suspended {
             return Err(invalid(InvalidCode::BadIntent));
         }
         match i {
@@ -282,7 +362,8 @@ fn check_intents(cur: &Cursor, e: &EventsAppended) -> Check<()> {
             Intent::CancelTimer(t) if t.op == START_DELAY_OP => {
                 return Err(invalid(InvalidCode::BadIntent));
             }
-            Intent::ScheduleTimer(_) | Intent::CancelTimer(_) | Intent::EnqueueReady(_) => {}
+            Intent::ScheduleTimer(_) | Intent::CancelTimer(_) => {}
+            Intent::EnqueueReady(_) => enqueued = true,
             Intent::SendMessage(m) => {
                 let msg = m.msg.as_ref().ok_or(invalid(InvalidCode::MissingField))?;
                 msg_target(cur, msg)?;
@@ -291,10 +372,16 @@ fn check_intents(cur: &Cursor, e: &EventsAppended) -> Check<()> {
                 terminal_status(c.status).ok_or(invalid(InvalidCode::BadIntent))?;
                 completed = true;
             }
-            // Plan 04-09 added the intent; apply implements it in plan 04-12. Until then it is
-            // rejected deterministically.
-            Intent::Suspend(_) => return Err(invalid(InvalidCode::BadIntent)),
+            Intent::Suspend(_) => {
+                if enqueued {
+                    return Err(invalid(InvalidCode::BadIntent));
+                }
+                suspended = true;
+            }
         }
+    }
+    if suspended && status != RunStatus::Running {
+        return Err(invalid(InvalidCode::NotRunning));
     }
     Ok(())
 }
@@ -348,7 +435,7 @@ pub(crate) fn apply_events_appended(
     if !e.events_contiguous_from(e.from_seq) {
         return reject(invalid(InvalidCode::EventsNotContiguous));
     }
-    if let Err(r) = check_intents(cur, e) {
+    if let Err(r) = check_intents(cur, e, rec.status) {
         return reject(r);
     }
     if any_oversize(e) {
@@ -398,12 +485,19 @@ pub(crate) fn apply_events_appended(
             Intent::EnqueueReady(er) => {
                 enqueue_ready(b, &run, &mut rec, er.ready_at_ms, actions);
             }
-            // Rejected by check_intents until plan 04-12 implements it.
-            Intent::Suspend(_) => {}
+            Intent::Suspend(_) => {
+                // Validated: last intent, no EnqueueReady/CompleteRun, status Running.
+                // Blind writes only (no read).
+                leave_running(b, &run, &rec);
+                remove_ready(b, &run, &mut rec);
+                rec.status = RunStatus::Scheduled;
+            }
             Intent::CompleteRun(c) => {
                 let status = terminal_status(c.status)
                     .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;
+                leave_running(b, &run, &rec);
                 rec.status = status;
+                rec.completed_at_ms = (c.completed_at_ms != 0).then_some(c.completed_at_ms);
                 if let Some(res) = &c.result {
                     b.insert(
                         Table::Payloads,

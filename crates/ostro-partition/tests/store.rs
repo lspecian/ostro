@@ -76,7 +76,8 @@ fn defaults_and_tables() {
             "inbound_seen",
             "children",
             "dlq",
-            "effects"
+            "effects",
+            "running"
         ]
     );
     let mut sorted = TABLES;
@@ -425,6 +426,12 @@ fn value_round_trips() {
         rng_seed: vec![1, 2, 3],
         inbox_next: 0,
         children: 2,
+        module_sha: Some([0xab; 32]),
+        tags: vec!["a".into(), "b".into()],
+        tenant: Some("acme".into()),
+        traceparent: None,
+        run_timeout_ms: Some(30_000),
+        completed_at_ms: Some(99),
     });
     round_trip(&ReadyValue {
         concurrency_key: "ck".into(),
