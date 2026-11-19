@@ -103,6 +103,11 @@ pub struct UploadModule {
     pub wasm: bytes::Bytes,
     /// Optional source language hint ("rust", "python", "typescript").
     pub language: Option<String>,
+    /// Uploading tenant (D23); `None` or empty = the default tenant. `_` is reserved.
+    pub tenant: Option<String>,
+    /// Deployed module name (Phase 14 F4), stored tenant-qualified on every workflow
+    /// version this upload registers.
+    pub name: Option<String>,
 }
 
 /// Upload outcome.

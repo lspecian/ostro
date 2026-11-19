@@ -3,21 +3,30 @@
 //! # Upload
 //!
 //! 1. The path sha256 must be 64 lowercase hex characters and equal `sha256(body)`.
-//! 2. A module already recorded in meta is an idempotent no-op (`created = false`): the
-//!    runtime is not touched, so nothing is compiled again.
-//! 3. Otherwise the bytes are validated and AOT-compiled (`Runtime::prepare_cached`, which
+//! 2. The optional `tenant` (absent/empty = the default tenant; `_` is reserved) and the
+//!    optional deployed module `name` must match the D23 grammar ([`super::names`], 400).
+//! 3. A module already recorded in meta is not compiled again and its blob is not
+//!    rewritten (`created = false`): its workflows are read back from the versions an
+//!    earlier upload registered. A re-upload by the same tenant is a no-op; a re-upload by
+//!    another tenant still registers that tenant's versions (Phase 14 F4).
+//! 4. Otherwise the bytes are validated and AOT-compiled (`Runtime::prepare_cached`, which
 //!    also warms the L2 cache for the first dispatch) and `describe()` lists the
-//!    workflows. Invalid bytes are `400` with the validation message.
-//! 4. A `(name, version)` already bound to a different module is `409` naming that sha:
-//!    bindings are write-once (research Pitfall 6). Nothing is stored in that case.
-//! 5. The blob goes into the node-wide blob store (the executor loads modules from it).
-//! 6. Meta: create-only `Workflow(name, version)` records, then a create-only `Active`
+//!    workflows. Invalid bytes are `400` with the validation message, and so are workflow
+//!    names and default queues outside the D23 resource grammar.
+//! 5. Workflow versions are keyed by the tenant-qualified name (`<tenant>/<name>`, bare for
+//!    the default tenant). A `(name, version)` already bound to a different module is
+//!    `409` naming that sha, and one bound under a different explicit module name is
+//!    `409` too: bindings are write-once (research Pitfall 6). Nothing is stored then.
+//! 6. The blob goes into the node-wide blob store (the executor loads modules from it).
+//! 7. Meta: create-only `Workflow(name, version)` records carrying
+//!    `module = qualify(tenant, name)` (empty without a name), then a create-only `Active`
 //!    record for every workflow name that has none (the first version auto-activates),
-//!    and finally the create-only `Module` record. The module record is the commit point:
-//!    an upload interrupted before it is simply repeated by the next upload of the same
-//!    bytes (existing records with the same sha are accepted). `Conflict` on a create-only
-//!    put means a concurrent upload won the race and is accepted unless it bound a
-//!    workflow version to a different module.
+//!    and finally the create-only `Module` record (name-less; its `workflows` list the
+//!    qualified pairs of every tenant, merged by CAS on a cross-tenant re-upload). The
+//!    module record is the commit point: an upload interrupted before it is simply
+//!    repeated by the next upload of the same bytes (existing records with the same sha
+//!    are accepted). `Conflict` on a create-only put means a concurrent upload won the
+//!    race and is accepted unless it bound a workflow version to a different module.
 //!
 //! # Activation
 //!
@@ -34,6 +43,7 @@ use ostro_api::domain::{
     WorkflowVersionInfo,
 };
 use ostro_engine::error::EngineError;
+use ostro_engine::runtime::WorkflowMeta;
 use ostro_meta::{
     ActiveVersion, MetaCommand, MetaError, MetaKey, MetaRecord, MetaResult, MetaState,
     ModuleRecord, Versioned, WorkflowVersion,
@@ -41,6 +51,7 @@ use ostro_meta::{
 use sha2::{Digest, Sha256};
 
 use super::ServerControlPlane;
+use super::names::{qualify, request_tenant, split_qualified, validate_name};
 
 /// Activation attempts without a client CAS token before giving up (each retry means a
 /// concurrent activation changed the record in between).
@@ -140,6 +151,96 @@ async fn create_only(cp: &ServerControlPlane, record: MetaRecord) -> Result<(), 
     }
 }
 
+/// The module's workflows by module-local `(name, version)`, rebuilt from the
+/// `WorkflowVersion` records an earlier upload of the same bytes registered (in any
+/// tenant). The bytes are not compiled again.
+fn described_from_meta(
+    s: &MetaState,
+    existing: &ModuleRecord,
+) -> Result<BTreeMap<(String, u32), WorkflowMeta>, ApiError> {
+    let mut out = BTreeMap::new();
+    for (qualified, version) in &existing.workflows {
+        let (_, local) = split_qualified(qualified);
+        let w = s.workflow(qualified, *version).ok_or_else(|| {
+            ApiError::internal(format!(
+                "module {} lists {qualified}@{version}, which is not registered",
+                hex(&existing.sha256)
+            ))
+        })?;
+        out.entry((local.to_owned(), *version))
+            .or_insert_with(|| WorkflowMeta {
+                name: local.to_owned(),
+                version: *version,
+                default_queue: w.value.default_queue.clone(),
+                run_timeout_ms: w.value.run_timeout_ms,
+            });
+    }
+    Ok(out)
+}
+
+/// A `(name, version)` already registered from this module under another deployed module
+/// name: bindings are write-once, so a different explicit name is a conflict.
+fn module_name_conflict(name: &str, version: u32, existing: &str, requested: &str) -> ApiError {
+    ApiError::conflict(format!(
+        "workflow {name}@{version} is already registered under module name {existing:?}"
+    ))
+    .with_details(serde_json::json!({
+        "workflow": name,
+        "version": version,
+        "existing_module_name": existing,
+        "requested_module_name": requested,
+    }))
+}
+
+/// Add `pairs` to the existing module record's workflow list (CAS; a re-upload of the same
+/// bytes by another tenant). The record stays name-less (Phase 14 F4).
+async fn merge_module_workflows(
+    cp: &ServerControlPlane,
+    sha: &[u8; 32],
+    pairs: &[(String, u32)],
+) -> Result<(), ApiError> {
+    for _ in 0..ACTIVATE_RETRIES {
+        let cur = cp
+            .meta
+            .view()
+            .read(|s| s.module(sha).cloned())
+            .ok_or_else(|| ApiError::internal("module record vanished during upload"))?;
+        let missing: Vec<&(String, u32)> = pairs
+            .iter()
+            .filter(|p| !cur.value.workflows.contains(p))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut record = cur.value.clone();
+        record.workflows.extend(missing.into_iter().cloned());
+        record.workflows.sort();
+        match cp
+            .meta
+            .propose(MetaCommand::Put {
+                key: MetaKey::Module(*sha),
+                expected_version: Some(cur.version),
+                record: MetaRecord::Module(record),
+            })
+            .await
+            .map_err(meta_unavailable)?
+        {
+            MetaResult::Ok { .. } => return Ok(()),
+            // A concurrent upload changed the record: re-read and merge again.
+            MetaResult::StaleVersion { .. } | MetaResult::Conflict { .. } => {}
+            other => {
+                return Err(ApiError::internal(format!(
+                    "metadata rejected the module record update: {other:?}"
+                )));
+            }
+        }
+    }
+    Err(ApiError::unavailable(format!(
+        "module {} is being uploaded concurrently; retry",
+        hex(sha)
+    )))
+}
+
 pub(crate) async fn upload_module(
     cp: &ServerControlPlane,
     req: UploadModule,
@@ -155,60 +256,98 @@ pub(crate) async fn upload_module(
         ))
         .with_details(serde_json::json!({ "actual_sha256": actual })));
     }
-    if let Some(existing) = cp.meta.view().read(|s| s.module(&sha).cloned()) {
-        return Ok(UploadModuleResult {
-            module: module_info(&existing),
-            created: false,
-        });
-    }
-
-    // Validate + AOT compile (+ warm L2), then describe.
-    if !req.wasm.starts_with(&WASM_MAGIC) {
-        return Err(ApiError::invalid_argument(
-            "invalid Wasm component: the body is not a Wasm binary (missing the \\0asm magic)",
-        ));
-    }
-    let prepared = cp
-        .runtime
-        .prepare_cached(&req.wasm)
-        .await
-        .map_err(engine_error)?;
-    let metas =
-        cp.runtime.describe(&prepared).await.map_err(|e| {
-            ApiError::invalid_argument(format!("describe() of the module failed: {e}"))
-        })?;
-    let mut by_key: BTreeMap<(String, u32), _> = BTreeMap::new();
-    for m in metas {
-        if m.name.is_empty() {
-            return Err(ApiError::invalid_argument(
-                "describe() returned a workflow with an empty name",
-            ));
+    // D23 / Phase 14 F4: the uploading tenant and the deployed module name.
+    let tenant = request_tenant(req.tenant.as_deref())?;
+    let module_name = match req.name.as_deref().filter(|n| !n.is_empty()) {
+        Some(n) => {
+            validate_name("name", n)?;
+            qualify(tenant, n)
         }
-        by_key.entry((m.name.clone(), m.version)).or_insert(m);
-    }
+        None => String::new(),
+    };
 
-    // Write-once bindings: check before storing anything.
-    cp.meta.view().read(|s| {
+    let existing = cp.meta.view().read(|s| s.module(&sha).cloned());
+    let by_local = match &existing {
+        // Already stored: register this tenant's versions from the earlier registration
+        // without touching the runtime or the blob store.
+        Some(existing) => cp
+            .meta
+            .view()
+            .read(|s| described_from_meta(s, &existing.value))?,
+        None => {
+            // Validate + AOT compile (+ warm L2), then describe.
+            if !req.wasm.starts_with(&WASM_MAGIC) {
+                return Err(ApiError::invalid_argument(
+                    "invalid Wasm component: the body is not a Wasm binary (missing the \\0asm magic)",
+                ));
+            }
+            let prepared = cp
+                .runtime
+                .prepare_cached(&req.wasm)
+                .await
+                .map_err(engine_error)?;
+            let metas = cp.runtime.describe(&prepared).await.map_err(|e| {
+                ApiError::invalid_argument(format!("describe() of the module failed: {e}"))
+            })?;
+            let mut by_local: BTreeMap<(String, u32), WorkflowMeta> = BTreeMap::new();
+            for m in metas {
+                if m.name.is_empty() {
+                    return Err(ApiError::invalid_argument(
+                        "describe() returned a workflow with an empty name",
+                    ));
+                }
+                validate_name("workflow", &m.name)?;
+                if let Some(q) = &m.default_queue {
+                    validate_name("default_queue", q)?;
+                }
+                by_local.entry((m.name.clone(), m.version)).or_insert(m);
+            }
+            by_local
+        }
+    };
+    // Storage keys: tenant-qualified workflow names (D23).
+    let by_key: BTreeMap<(String, u32), &WorkflowMeta> = by_local
+        .iter()
+        .map(|((name, version), m)| ((qualify(tenant, name), *version), m))
+        .collect();
+
+    // Write-once bindings: check before storing anything. `todo` holds the versions this
+    // upload still has to create.
+    let todo: Vec<(String, u32)> = cp.meta.view().read(|s| {
+        let mut todo = Vec::new();
         for (name, version) in by_key.keys() {
-            if let Some(w) = s.workflow(name, *version)
-                && w.value.module_sha256 != sha
-            {
-                return Err(binding_conflict(name, *version, &w.value.module_sha256));
+            match s.workflow(name, *version) {
+                Some(w) if w.value.module_sha256 != sha => {
+                    return Err(binding_conflict(name, *version, &w.value.module_sha256));
+                }
+                Some(w) if !module_name.is_empty() && w.value.module != module_name => {
+                    return Err(module_name_conflict(
+                        name,
+                        *version,
+                        &w.value.module,
+                        &module_name,
+                    ));
+                }
+                Some(_) => {}
+                None => todo.push((name.clone(), *version)),
             }
         }
-        Ok(())
+        Ok(todo)
     })?;
 
-    let blobs = std::sync::Arc::clone(cp.blobs()?);
-    let wasm = req.wasm.clone();
-    let blob = tokio::task::spawn_blocking(move || blobs.put(&wasm))
-        .await
-        .map_err(|e| ApiError::internal(format!("blob store task failed: {e}")))?
-        .map_err(|e| ApiError::unavailable(format!("storing the module failed: {e}")))?;
-    debug_assert_eq!(blob.sha256, sha);
+    if existing.is_none() {
+        let blobs = std::sync::Arc::clone(cp.blobs()?);
+        let wasm = req.wasm.clone();
+        let blob = tokio::task::spawn_blocking(move || blobs.put(&wasm))
+            .await
+            .map_err(|e| ApiError::internal(format!("blob store task failed: {e}")))?
+            .map_err(|e| ApiError::unavailable(format!("storing the module failed: {e}")))?;
+        debug_assert_eq!(blob.sha256, sha);
+    }
 
     let now = cp.now_ms();
-    for ((name, version), m) in &by_key {
+    for (name, version) in &todo {
+        let m = by_key[&(name.clone(), *version)];
         create_only(
             cp,
             MetaRecord::Workflow(WorkflowVersion {
@@ -218,8 +357,8 @@ pub(crate) async fn upload_module(
                 default_queue: m.default_queue.clone(),
                 run_timeout_ms: m.run_timeout_ms,
                 created_at_ms: now,
-                // 05-24 sets the tenant-qualified upload name (D23, Phase 14 F4).
-                module: String::new(),
+                // The tenant-qualified deployed module name (D23, Phase 14 F4).
+                module: module_name.clone(),
                 ext: Vec::new(),
             }),
         )
@@ -256,30 +395,40 @@ pub(crate) async fn upload_module(
             .await?;
         }
     }
-    let record = ModuleRecord {
-        sha256: sha,
-        size: req.wasm.len() as u64,
-        language: req.language.filter(|l| !l.is_empty()),
-        workflows: by_key.keys().cloned().collect(),
-        uploaded_at_ms: now,
-        ext: Vec::new(),
-    };
-    let created = match cp
-        .meta
-        .propose(MetaCommand::Put {
-            key: MetaKey::Module(sha),
-            expected_version: None,
-            record: MetaRecord::Module(record),
-        })
-        .await
-        .map_err(meta_unavailable)?
-    {
-        MetaResult::Ok { .. } => true,
-        MetaResult::Conflict { .. } => false, // a concurrent upload of the same bytes
-        other => {
-            return Err(ApiError::internal(format!(
-                "metadata rejected the module record: {other:?}"
-            )));
+    let pairs: Vec<(String, u32)> = by_key.keys().cloned().collect();
+    let created = if existing.is_some() {
+        merge_module_workflows(cp, &sha, &pairs).await?;
+        false
+    } else {
+        let record = ModuleRecord {
+            sha256: sha,
+            size: req.wasm.len() as u64,
+            language: req.language.filter(|l| !l.is_empty()),
+            workflows: pairs.clone(),
+            uploaded_at_ms: now,
+            ext: Vec::new(),
+        };
+        match cp
+            .meta
+            .propose(MetaCommand::Put {
+                key: MetaKey::Module(sha),
+                expected_version: None,
+                record: MetaRecord::Module(record),
+            })
+            .await
+            .map_err(meta_unavailable)?
+        {
+            MetaResult::Ok { .. } => true,
+            MetaResult::Conflict { .. } => {
+                // A concurrent upload of the same bytes (maybe by another tenant) won.
+                merge_module_workflows(cp, &sha, &pairs).await?;
+                false
+            }
+            other => {
+                return Err(ApiError::internal(format!(
+                    "metadata rejected the module record: {other:?}"
+                )));
+            }
         }
     };
     let stored = cp

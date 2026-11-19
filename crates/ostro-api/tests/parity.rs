@@ -283,6 +283,8 @@ fn norm_result(
 
 trait Client {
     async fn upload(&mut self, sha: &str, wasm: Bytes) -> Out;
+    /// Upload with the D23 tenant and the deployed module name (05-24).
+    async fn upload_named(&mut self, sha: &str, wasm: Bytes, tenant: &str, name: &str) -> Out;
     async fn get_module(&mut self, sha: &str) -> Out;
     async fn list_workflows(&mut self) -> Out;
     async fn activate(&mut self, name: &str, version: u32, expected: Option<u64>) -> Out;
@@ -351,6 +353,19 @@ impl Client for RestClient {
         let req = self
             .http
             .put(format!("{}/v1/modules/{sha}?language=rust", self.base))
+            .header("content-type", "application/wasm")
+            .body(wasm);
+        let v = self.send(req).await?;
+        Ok(json!({ "created": v["created"], "module": norm_module_rest(&v["module"]) }))
+    }
+
+    async fn upload_named(&mut self, sha: &str, wasm: Bytes, tenant: &str, name: &str) -> Out {
+        let req = self
+            .http
+            .put(format!(
+                "{}/v1/modules/{sha}?language=rust&tenant={tenant}&name={name}",
+                self.base
+            ))
             .header("content-type", "application/wasm")
             .body(wasm);
         let v = self.send(req).await?;
@@ -649,6 +664,27 @@ impl Client for GrpcClient {
                 sha256: sha.to_owned(),
                 wasm: wasm.to_vec(),
                 language: Some("rust".to_owned()),
+                tenant: None,
+                name: None,
+            })
+            .await
+            .map_err(grpc_err)?
+            .into_inner();
+        Ok(json!({
+            "created": r.created,
+            "module": norm_module(r.module.as_ref().expect("module")),
+        }))
+    }
+
+    async fn upload_named(&mut self, sha: &str, wasm: Bytes, tenant: &str, name: &str) -> Out {
+        let r = self
+            .modules
+            .upload(pb::UploadModuleRequest {
+                sha256: sha.to_owned(),
+                wasm: wasm.to_vec(),
+                language: Some("rust".to_owned()),
+                tenant: Some(tenant.to_owned()),
+                name: Some(name.to_owned()),
             })
             .await
             .map_err(grpc_err)?
@@ -999,6 +1035,21 @@ async fn scenario<C: Client>(c: &mut C, fake: &FakeControlPlane) -> Vec<(String,
         c.upload(&sha256_hex(&clash), clash.clone()).await
     );
     rec!("get m1", c.get_module(&sha1).await);
+    // D23 / Phase 14 F4: tenant and deployed module name reach the control plane
+    // identically over both transports.
+    rec!(
+        "upload m1 as tenant acme, name mod-a",
+        c.upload_named(&sha1, m1.clone(), "acme", "mod-a").await
+    );
+    rec!(
+        "upload naming of m1",
+        Ok(json!(
+            fake.upload_naming(&sha1)
+                .into_iter()
+                .map(|(t, n)| json!([t, n]))
+                .collect::<Vec<_>>()
+        ))
+    );
     rec!("get unknown module", c.get_module(&"0".repeat(64)).await);
 
     // Workflows.

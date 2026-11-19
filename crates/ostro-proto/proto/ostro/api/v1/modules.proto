@@ -17,6 +17,12 @@ message UploadModuleRequest {
   string sha256 = 1;
   bytes wasm = 2;
   optional string language = 3;
+  // Uploading tenant (D23, ^[a-z0-9][a-z0-9-]{0,62}$); absent or empty = the default
+  // tenant. "_" is reserved and rejected.
+  optional string tenant = 4;
+  // Deployed module name (Phase 14 F4, ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$), stored
+  // tenant-qualified on every workflow version this upload registers.
+  optional string name = 5;
 }
 
 message UploadModuleResponse {

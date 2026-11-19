@@ -284,6 +284,8 @@ fn upload_req(sha: &str, wasm: Vec<u8>) -> pb::UploadModuleRequest {
         sha256: sha.to_string(),
         wasm,
         language: Some("rust".into()),
+        tenant: None,
+        name: None,
     }
 }
 

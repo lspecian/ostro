@@ -152,6 +152,11 @@ pub struct WasmBytes(#[allow(dead_code)] Vec<u8>);
 pub struct UploadModuleQuery {
     /// Source language hint ("rust", "python", "typescript").
     pub language: Option<String>,
+    /// Uploading tenant (`^[a-z0-9][a-z0-9-]{0,62}$`); absent = the default tenant.
+    pub tenant: Option<String>,
+    /// Deployed module name (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`), recorded on the
+    /// workflow versions this upload registers.
+    pub name: Option<String>,
 }
 
 /// One workflow version.
@@ -794,6 +799,8 @@ async fn upload_module(
             sha256,
             wasm,
             language: q.language,
+            tenant: q.tenant,
+            name: q.name,
         })
         .await?;
     let status = if res.created {

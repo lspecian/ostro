@@ -169,6 +169,24 @@ expression: pretty
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Uploading tenant (`^[a-z0-9][a-z0-9-]{0,62}$`); absent = the default tenant.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Deployed module name (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`), recorded on the\nworkflow versions this upload registers.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {

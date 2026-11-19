@@ -68,6 +68,9 @@ struct State {
     continued_to: BTreeMap<String, String>,
     workflow_policies: BTreeMap<String, RunPolicy>,
     queue_policies: BTreeMap<String, RunPolicy>,
+    /// `(sha256, tenant, name)` of every upload past the sha check, in order (the fake does not
+    /// qualify names; the real server does, 05-24).
+    uploads: Vec<(String, Option<String>, Option<String>)>,
 }
 
 impl State {
@@ -254,6 +257,16 @@ impl FakeControlPlane {
         self.lock().tokens.get(&(run_id.to_owned(), op)).copied()
     }
 
+    /// Test helper: `(tenant, name)` of every upload of `sha256` past the sha check, in order.
+    pub fn upload_naming(&self, sha256: &str) -> Vec<(Option<String>, Option<String>)> {
+        self.lock()
+            .uploads
+            .iter()
+            .filter(|(s, _, _)| s == sha256)
+            .map(|(_, t, n)| (t.clone(), n.clone()))
+            .collect()
+    }
+
     /// Test helper: signals delivered to a run, in order.
     pub fn signals(&self, run_id: &str) -> Vec<(String, serde_json::Value)> {
         self.lock().signals.get(run_id).cloned().unwrap_or_default()
@@ -361,6 +374,8 @@ impl ControlPlane for FakeControlPlane {
             .with_details(serde_json::json!({ "actual_sha256": actual })));
         }
         let mut st = self.lock();
+        st.uploads
+            .push((req.sha256.clone(), req.tenant.clone(), req.name.clone()));
         if let Some(existing) = st.modules.get(&req.sha256) {
             return Ok(UploadModuleResult {
                 module: existing.clone(),
@@ -880,6 +895,8 @@ mod tests {
             sha256: sha256_hex(&wasm),
             wasm,
             language: Some("rust".into()),
+            tenant: None,
+            name: None,
         }
     }
 

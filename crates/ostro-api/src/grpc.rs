@@ -409,6 +409,8 @@ impl modules_server::Modules for GrpcModules {
                 sha256: r.sha256,
                 wasm: r.wasm.into(),
                 language: r.language,
+                tenant: r.tenant,
+                name: r.name,
             })
             .await
             .map_err(to_status)?;
