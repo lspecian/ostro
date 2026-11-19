@@ -22,7 +22,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **STOR-02**: Every journal read verifies CRC; a corrupt record outside a torn tail fails the partition open instead of being skipped
 - [x] **STOR-03**: On restart the log end is recovered by scanning segments; a torn tail is truncated
 - [x] **STOR-04**: An Ostro-owned `ReplicatedLog` trait (append, HW, epoch cache, ISR) exists from day one; single node runs it with RF=1, ISR={self}
-- [ ] **STOR-05**: Partition state machine applies committed commands deterministically into redb (`Durability::None` + periodic `Immediate` checkpoint of `applied_offset`); apply never passes HW. *Superseded engine (Phase 1 S3 decision): fjall 3.1.13 with one `WriteBatch` per apply batch + `persist(SyncAll)` checkpoint every 100 ms/256 batches; recovery replays the WAL from the state's `applied_offset`. See PROJECT.md Key Decisions.*
+- [x] **STOR-05**: Partition state machine applies committed commands deterministically into redb (`Durability::None` + periodic `Immediate` checkpoint of `applied_offset`); apply never passes HW. *Superseded engine (Phase 1 S3 decision): fjall 3.1.13 with one `WriteBatch` per apply batch + `persist(SyncAll)` checkpoint every 100 ms/256 batches; recovery replays the WAL from the state's `applied_offset`. See PROJECT.md Key Decisions.*
 - [x] **STOR-06**: Deleting a partition's state store and restarting rebuilds byte-identical state (rolling state hash matches)
 - [x] **STOR-07**: fsync/write errors (EIO, ENOSPC) are fatal for the affected partition and are never retried or reported as success
 - [x] **STOR-08**: WAL segments are deleted only below the last durable state checkpoint, and no GC/retention task runs before startup recovery has completed (readiness barrier)
@@ -253,7 +253,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | STOR-02 | Phase 2 | Complete |
 | STOR-03 | Phase 2 | Complete |
 | STOR-04 | Phase 2 | Complete |
-| STOR-05 | Phase 2 | Pending |
+| STOR-05 | Phase 2 | Complete |
 | STOR-06 | Phase 2 | Complete |
 | STOR-07 | Phase 2 | Complete |
 | STOR-08 | Phase 2 | Complete |
