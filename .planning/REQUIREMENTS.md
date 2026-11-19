@@ -287,7 +287,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Complete (server e2e: race-fuzz x 5 seeds, concurrent signals + restart, fresh-Runtime replay identical: 05-15 semantics_e2e gather_race) |
 | WF-04 | Phase 5 | Complete (1,000 sleepers hold no activation/parked/budget/lease, 11.4 KiB RSS each: 05-15 semantics_sleepers, serial CI step) |
-| WF-05 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
+| WF-05 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api; approval signal via `ostro signal` incl. across kill -9: 05-17 order_saga; semantics documented in docs/workflow-semantics.md) |
 | WF-06 | Phase 9 | Pending |
 | WF-07 | Phase 4 (Rust) / Phase 9 (Py, TS) | Pending |
 | WF-08 | Phase 5 | Complete (in-flight v1 run re-pinned to v2 keeps the old path, fresh v2 run one PatchMarker, v3 control diverges: 05-15 patched_in_flight) |
@@ -350,7 +350,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | CLI-03 | Phase 10 | Pending |
 | CLI-04 | Phase 10 | Pending |
 | CLI-05 | Phase 10 | Pending |
-| CLI-06 | Phase 5 | Complete (spawned-binary cli_verbs suite + --json snapshots: 05-14) |
+| CLI-06 | Phase 5 | Complete (spawned-binary cli_verbs suite + --json snapshots: 05-14; order-saga happy/compensated/cancelled/kill -9 driven only by the CLI: 05-17 order_saga) |
 | CLI-07 | Phase 10 | Pending |
 | CLI-08 | Phase 10 | Pending |
 | UI-01 | Phase 11 | Pending |
