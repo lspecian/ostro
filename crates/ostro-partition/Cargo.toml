@@ -32,6 +32,8 @@ tempfile.workspace = true
 proptest.workspace = true
 proptest-state-machine.workspace = true
 ostro-testkit.workspace = true
+# Format corpus (plan 05-12): tests/format_corpus.rs reads format.toml. Already in Cargo.lock.
+toml = "1.2"
 
 [[test]]
 name = "fatal_io_state"
