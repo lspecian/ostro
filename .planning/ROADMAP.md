@@ -411,32 +411,34 @@ Plans:
 
 ### Phase 12: Replicated Partition Logs
 **Goal**: Partition logs replicate across nodes with no acknowledged-write loss. Chronik's pure algorithms are ported behind the existing `ReplicatedLog`, and the conformance suite gates everything.
-**Depends on**: Phase 8 (snapshot format), Phase 5 (`ReplicatedLog` at RF=1)
+**Depends on**: Phase 8 (snapshot format), Phase 7 (cluster CA, node identity SAN, mTLS cluster listener), Phase 5 (`ReplicatedLog` at RF=1)
 **Requirements**: CLUS-01, CLUS-02, CLUS-03, CLUS-04
 **Success Criteria** (what must be TRUE):
   1. The replication conformance suite exists before integration and is shown to fail on a deliberately broken build. It covers placement, ISR honesty from measured LEOs, divergence/truncation, failover and min-insync.
   2. With RF=3, HW = min(LEO over ISR). Fetches with a stale epoch are rejected. After a leader dies holding unreplicated writes, its divergent tail is truncated on rejoin, including in object storage, and the suite stays 100% green.
   3. Leaders are elected only from the published ISR. Writes stop when the ISR drops below `min_insync_replicas`.
   4. Followers apply committed entries as hot standbys and bootstrap from a snapshot. Leader failover p99 is < 10 s and runs resume automatically. RF=1 still uses exactly the same code path.
-**Plans**: 16 plans (8 waves; 12-01 is the PHASE-12 GATE requiring Phase 8 complete (all 08-*-SUMMARY + 08-VERIFICATION passed, or human_needed with by-design items only) and Phase 7 complete (cluster CA with node SAN identity, mTLS cluster listener); the conformance suite and ten permanent `repl::mutant::*` failpoint mutants are written and run red in wave 3, before integration in 12-12 (wave 5); decisions D-P12-1..D-P12-26 adopted in 12-DECISIONS.md, user reviews D-P12-2 (static multi-voter meta pulled forward from CLUS-05), D-P12-3 (cluster-wide restore deferred) and D-P12-4 (parsed-base rule for a torn first record of an anchored log); ordinals only from the P12 block (MetaCommand 4-6, ext tag 80); native-Linux failover p99/benchmark and MinIO legs human_needed)
+**Plans**: 18 plans (9 waves; 12-01 is the PHASE-12 GATE requiring Phase 8 complete (all 08-*-SUMMARY + 08-VERIFICATION passed, or human_needed with by-design items only) and Phase 7 complete (cluster CA with node SAN identity, mTLS cluster listener); contracts in 12-02; the conformance suite and ten permanent `repl::mutant::*` failpoint mutants are written and run red in wave 4 (12-06/12-07), before integration in 12-14 (wave 6); decisions D-P12-1..D-P12-26 adopted in 12-DECISIONS.md (revised after the plan check), user reviews D-P12-2 (static multi-voter meta pulled forward from CLUS-05), D-P12-3 (cluster-wide restore deferred) and D-P12-4 (parsed-base rule for a torn first record of an anchored log); ordinals only from the P12 block (MetaCommand 4-6, ext tag 80); native-Linux failover p99/benchmark and MinIO legs human_needed)
 
 Plans:
-- [ ] 12-01-PLAN.md — PHASE-12 GATE (Phase 8 + Phase 7 complete, seam signatures, reservations) + decisions/USER REVIEW to STATE + contracts (cluster.proto, MetaCommand 4-6, ext 80, ReplicatedLog replica API, mutant names, role contracts, crate skeletons, config) + all deps + FAILPOINT_CRATES sync (all CLUS)
-- [ ] 12-02-PLAN.md — Tier-B harness: test PKI, in-memory tonic transport + FaultLayer, in-process cluster, measured oracles with damaged-input self-tests (wave 2; CLUS-01)
-- [ ] 12-03-PLAN.md — Pure algorithms (TDD): tracker, KIP-497 maximal ISR + min_insync freeze, KIP-595 divergence, ISR-only failover planner, proptest-state-machine model, six mutants (wave 2; CLUS-02, CLUS-03)
-- [ ] 12-04-PLAN.md — ElectLeader/AlterIsr/ResignLeader validated at meta apply + command golden, multi-voter MetaHandle with forwarding, MetaPeer over mTLS with node-identity authz (wave 2; CLUS-03)
-- [ ] 12-05-PLAN.md — Conformance suite FIRST: all scenarios + pending registry + mutant matrix + recorded red run before integration (wave 3; CLUS-01)
-- [ ] 12-06-PLAN.md — One log implementation: Rf1Log -> PartitionLog, tracker-driven HW via publish_hw (RF=1 included), follower/install primitives, parsed-base torn rule, one-path grep gate (wave 3; CLUS-02, CLUS-04)
-- [ ] 12-07-PLAN.md — Tier-C harness: Rust TCP chaos proxy + multi-process loopback cluster with real kill -9 (wave 3; CLUS-04)
-- [ ] 12-08-PLAN.md — Controller: learner-aware sample_live + suspect-confirmed liveness, static bootstrap placement, fresh-term self-election, ISR-only failover, resign, Member self-upsert (wave 3; CLUS-03, CLUS-04)
-- [ ] 12-09-PLAN.md — Follower-pull Fetch: leader handler (fencing, divergence, two timeouts, durable-capped reads), follower loop with truncation + blobs-before-durable, ISR publisher via AlterIsr (wave 4; CLUS-02, CLUS-03)
-- [ ] 12-10-PLAN.md — Snapshot bootstrap: FetchSnapshot OSNP v1 streaming with resume, crash-safe install (reset log first) + crash loop (wave 4; CLUS-04)
-- [ ] 12-11-PLAN.md — Partition role lifecycle (meta-driven leader/follower/offline), replica services in both roles, install/roles contracts, node.toml identity binding (wave 4; CLUS-03, CLUS-04)
-- [ ] 12-12-PLAN.md — Server integration: meta-first boot order (single node included), always-live meta transport, not-leader 503 + hints, self-demotion, module blob replication, /v1/admin/replication, first conformance run (wave 5; CLUS-02..04)
-- [ ] 12-13-PLAN.md — Bottomless in cluster mode: leader-only per-partition uploads, epoch-fenced p/<pppp>/head, takeover repair of divergent remote tails, restore refuses cluster buckets (wave 5; CLUS-02)
-- [ ] 12-14-PLAN.md — Tier-B conformance suite 100% green with every tier-B mutant biting (wave 6; CLUS-01..04)
-- [ ] 12-15-PLAN.md — Multi-process: SC2 kill path, follower power-loss + tier-C mutant, failover p99 (>= 200 iterations) + meta election tick tuning, RF=3 bytes-on-disk benchmark, crash-campaign smoke (wave 7; CLUS-02, CLUS-04)
-- [ ] 12-16-PLAN.md — PHASE GATE: mutant matrix required in CI, grep gates, full ci-local, p99 + 10,000-fault campaign recorded, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (wave 8; all CLUS)
+- [ ] 12-01-PLAN.md — PHASE-12 GATE (Phase 8 + Phase 7 complete, seam signatures, reservations incl. env/metric names) + decisions/USER REVIEW to STATE + every dependency + FAILPOINT_CRATES sync (all CLUS) (W1)
+- [ ] 12-02-PLAN.md — Contracts: cluster.proto, MetaCommand 4-6 shapes, ext 80, ReplicatedLog replica API, mutant names, role contracts, all module stubs, config + validation, harness API + scenario registry (all CLUS) (W2)
+- [ ] 12-03-PLAN.md — Tier-B harness: test PKI, in-memory tonic transport + FaultLayer, in-process cluster, measured oracles (cluster_formed, proposal-auditing election oracle), scenario runner with deadlines (CLUS-01) (W3)
+- [ ] 12-04-PLAN.md — Pure algorithms (TDD): tracker (caught-up vs previous durable end), KIP-497 maximal ISR + min_insync freeze, KIP-595 divergence, ISR-only planner (isr ∩ live), model, six mutants (CLUS-02, CLUS-03) (W3)
+- [ ] 12-05-PLAN.md — ElectLeader (ISR ⊆ published)/AlterIsr/ResignLeader validated at meta apply + command golden, multi-voter MetaHandle with forwarding, MetaPeer over mTLS with node-identity authz (CLUS-03) (W3)
+- [ ] 12-06-PLAN.md — Conformance suite FIRST, core groups: placement, ISR honesty, HW, stale epoch, divergence, failover/offline, min_insync + red run (CLUS-01) (W4)
+- [ ] 12-07-PLAN.md — Conformance suite FIRST, remaining groups (standby, bootstrap, fetch path, blobs, one path, zombie, object storage) + permanent mutant matrix + red run (CLUS-01) (W4)
+- [ ] 12-08-PLAN.md — One log implementation: Rf1Log -> PartitionLog, tracker-driven HW via publish_hw (RF=1 included), follower/install primitives, become_leader only above the log's epoch, parsed-base torn rule, grep gate (CLUS-02, CLUS-04) (W4)
+- [ ] 12-09-PLAN.md — Tier-C harness: Rust TCP chaos proxy (RST passthrough) + multi-process loopback cluster with real kill -9 (CLUS-04) (W4)
+- [ ] 12-10-PLAN.md — Controller: learner-aware sample_live, Ostro wiped-voter remedy text, suspect-confirmed liveness, placement for any voter count, fresh terms, ISR-only failover, resign, Member self-upsert (CLUS-03, CLUS-04) (W4)
+- [ ] 12-11-PLAN.md — Follower-pull Fetch: leader handler (fencing, divergence, two timeouts, durable-capped reads), follower loop with truncation + blobs-before-durable, ISR publisher via AlterIsr (CLUS-02, CLUS-03) (W5)
+- [ ] 12-12-PLAN.md — Snapshot bootstrap: FetchSnapshot OSNP v1 streaming with resume, crash-safe install (reset log first) + crash loop, derived keyspaces checked (CLUS-04) (W5)
+- [ ] 12-13-PLAN.md — Partition role lifecycle (epoch 0 offline, lead only above the log's epoch, resign on failure), replica services in both roles, install/roles contracts, node.toml identity binding (CLUS-03, CLUS-04) (W5)
+- [ ] 12-14-PLAN.md — Server integration: cluster-id + meta-voter checks before meta, meta-first boot (single node included), always-live meta transport, not-leader 503 + hints, self-demotion, module blob replication, /v1/admin/replication, first conformance run (CLUS-02..04) (W6)
+- [ ] 12-15-PLAN.md — Bottomless in cluster mode: leader-only per-partition uploads, epoch-fenced p/<pppp>/head, takeover repair + gap re-chain from a remote snapshot, restore refuses cluster buckets (CLUS-02) (W6)
+- [ ] 12-16-PLAN.md — Tier-B conformance suite 100% green with every tier-B mutant biting (>= 11 bites, REQUIRE_ALL) (CLUS-01..04) (W7)
+- [ ] 12-17-PLAN.md — Multi-process: SC2 kill path, follower power-loss + tier-C mutant, failover p99 (>= 200 iterations incl. controller faults and no-RST blackholes) + meta election tick tuning, RF=3 bytes-on-disk benchmark, crash-campaign smoke (CLUS-02, CLUS-04) (W8)
+- [ ] 12-18-PLAN.md — PHASE GATE: mutant matrix required in CI, grep gates, full ci-local, p99 + 10,000-fault campaign recorded, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (all CLUS) (W9)
 **Research flag**: Snapshot install; failover liveness detection
 
 ### Phase 13: Cluster Membership, Routing & Upgrades
