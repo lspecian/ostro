@@ -11,10 +11,9 @@ use ostro_partition::store::keys::run_key;
 use ostro_partition::store::values::{self, RunRecord, RunStatus};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
-    self, AttemptGranted, AttemptTokenMsg, CancelTimer, CompleteRun, CompleteToken, ConflictPolicy,
-    Derived, EventsAppended, InboundBatch, InboundMsg, JournalEvent, OutboxMsg, RequestCancel,
-    RetryRun, ScheduleTimer, SendMessage, SignalRun, StartRun, TerminalStatus, TerminateRun,
-    WaitKind, derived, encode_command,
+    self, AttemptGranted, AttemptTokenMsg, CancelTimer, CompleteRun, ConflictPolicy, Derived,
+    EventsAppended, InboundBatch, InboundMsg, JournalEvent, OutboxMsg, RetryRun, ScheduleTimer,
+    SendMessage, StartRun, TerminalStatus, TerminateRun, derived, encode_command,
 };
 use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
 
@@ -163,30 +162,17 @@ fn guest_timer_intents_in_the_reserved_op_range_are_rejected() {
 
 #[test]
 fn phase5_commands_are_rejected_until_implemented() {
-    // 05-08: SignalRun, RequestCancel, CompleteToken; 05-09: TerminateRun, RetryRun.
+    // 05-09: TerminateRun, RetryRun. (05-08 implemented SignalRun, RequestCancel and
+    // CompleteToken: tests/apply_waits.rs.)
     let (mut h, r) = running(4, 1);
     let id = r.as_bytes().to_vec();
     let cmds = [
-        Command::signal_run(SignalRun {
-            run_id: id.clone(),
-            name: "approve".into(),
-            ..Default::default()
-        }),
-        Command::request_cancel(RequestCancel {
-            run_id: id.clone(),
-            ..Default::default()
-        }),
         Command::terminate_run(TerminateRun {
             run_id: id.clone(),
             ..Default::default()
         }),
         Command::retry_run(RetryRun {
-            run_id: id.clone(),
-            ..Default::default()
-        }),
-        Command::complete_token(CompleteToken {
             run_id: id,
-            op: 3,
             ..Default::default()
         }),
     ];
@@ -207,10 +193,8 @@ fn phase5_intents_are_rejected_until_implemented() {
             parent_event: None,
         }))
     };
+    // (05-08 implemented RegisterWait / CancelWait: tests/apply_waits.rs.)
     let cases = [
-        // 05-08
-        Derived::register_wait(1, WaitKind::Signal, "approve", 0, 10),
-        Derived::cancel_wait(1),
         // Terminated/TimedOut: apply-side only (05-09), never from an executor.
         complete(TerminalStatus::Terminated),
         complete(TerminalStatus::TimedOut),

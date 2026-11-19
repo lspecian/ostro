@@ -2,8 +2,8 @@
 //! wait-timer cleanup, read budget), `CompleteRun.parent_event` oversize, reserved-timer
 //! routing, and the stub entry points that 05-08 / 05-09 fill.
 //!
-//! Waits rows are written directly into the store here: `RegisterWait` is rejected until
-//! 05-08 implements it.
+//! Waits rows are written directly into the store here (05-08 implements `RegisterWait`; its
+//! own suite is tests/apply_waits.rs).
 
 use bytes::Bytes;
 use ostro_partition::apply::{
@@ -17,10 +17,9 @@ use ostro_partition::store::keys::{
 use ostro_partition::store::values::{self, RunRecord, RunStatus, SignalSlot, WaitKind, WaitRow};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
-    self, AttemptGranted, AttemptTokenMsg, CompleteRun, CompleteToken, ConflictPolicy, Derived,
-    EventsAppended, InboundBatch, InboundMsg, JournalEvent, OutboxMsg, RequestCancel, RetryRun,
-    Signal, SignalRun, StartRun, TerminalStatus, TerminateRun, TimerFired, WaitKind as CmdWaitKind,
-    derived, encode_command, outbox_msg,
+    self, AttemptGranted, AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EventsAppended,
+    InboundBatch, InboundMsg, JournalEvent, OutboxMsg, RetryRun, Signal, StartRun, TerminalStatus,
+    TerminateRun, TimerFired, derived, encode_command, outbox_msg,
 };
 use ostro_types::payload::INLINE_PAYLOAD_LIMIT;
 use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
@@ -502,31 +501,12 @@ fn guest_timer_still_journals_timer_fired() {
 
 #[test]
 fn phase5_commands_reach_their_stubs_and_change_nothing() {
-    // waits.rs (05-08): SignalRun, RequestCancel, CompleteToken; lifecycle.rs (05-09):
-    // TerminateRun, RetryRun.
+    // lifecycle.rs (05-09): TerminateRun, RetryRun. SignalRun, RequestCancel and
+    // CompleteToken are implemented by 05-08 (tests/apply_waits.rs).
     let mut h = H::new();
     let r = running(&mut h, 1);
     let id = r.as_bytes().to_vec();
-    let event = Some(PayloadRef::inline(Bytes::from_static(b"\x01ev")));
     let cmds = [
-        Command::signal_run(SignalRun {
-            run_id: id.clone(),
-            name: "go".into(),
-            event: event.clone(),
-            request_id: b"req".to_vec(),
-            sent_at_ms: 5,
-        }),
-        Command::request_cancel(RequestCancel {
-            run_id: id.clone(),
-            reason: "stop".into(),
-            requested_at_ms: 5,
-        }),
-        Command::complete_token(CompleteToken {
-            run_id: id.clone(),
-            op: 1,
-            event,
-            completed_at_ms: 5,
-        }),
         Command::terminate_run(TerminateRun {
             run_id: id.clone(),
             reason: "ops".into(),
@@ -546,20 +526,8 @@ fn phase5_commands_reach_their_stubs_and_change_nothing() {
     }
 }
 
-#[test]
-fn phase5_intents_reach_their_stubs_and_change_nothing() {
-    let mut h = H::new();
-    let r = running(&mut h, 1);
-    for d in [
-        Derived::register_wait(1, CmdWaitKind::Signal, "go", 500, 10),
-        Derived::register_wait(1, CmdWaitKind::Token, "", 0, 10),
-        Derived::cancel_wait(1),
-    ] {
-        let before = h.data();
-        assert_eq!(h.apply(&append(&r, 0, 1, vec![d])), bad_intent());
-        assert_eq!(h.data(), before);
-    }
-}
+// RegisterWait / CancelWait intents are implemented by 05-08 (tests/apply_waits.rs); the
+// former `phase5_intents_reach_their_stubs_and_change_nothing` tripwire is retired.
 
 // ---------------------------------------------------------------- inbound Signal
 
@@ -596,10 +564,11 @@ fn slots(h: &H, r: &RunId) -> Vec<(String, SignalSlot)> {
     rows.into_iter().map(|(_, n, s)| (n, s)).collect()
 }
 
-/// Tripwire: 05-08 adds the wait match in front of this "no wait" branch (no wait can exist
-/// before 05-08, because RegisterWait is rejected).
+/// The "no wait" branch of inbound signals (05-02), unchanged by 05-08: with no open wait
+/// (`open_waits == 0`) the signal is buffered and the waits prefix is not even read. Wait
+/// matching is covered by tests/apply_waits.rs.
 #[test]
-fn inbound_signal_buffers_without_waits_until_implemented() {
+fn inbound_signal_buffers_without_waits() {
     let mut h = H::new();
     let r = running(&mut h, 1);
     // Empty journal (B1): a Pending slot with the sender's encoded event; nothing journaled.
@@ -624,19 +593,28 @@ fn inbound_signal_buffers_without_waits_until_implemented() {
     assert_eq!(h.run(&r).next_seq, 0);
     assert_eq!(h.run(&r).inbox_next, 1);
 
-    // Journal started: the 1 MiB blob-backed event is journaled verbatim (D21, no blob
-    // read) and the slot points at it.
+    // The seq-0 batch (2 events) journals the pending event right after its events (B1,
+    // 05-08) and converts the slot.
     assert_eq!(h.apply(&append(&r, 0, 2, vec![])), ApplyOutcome::Accepted);
+    assert_eq!(
+        slots(&h, &r)[0].1,
+        SignalSlot::Journaled {
+            payload_seq: 2,
+            sent_at_ms: 0
+        }
+    );
+    // Journal started: the 1 MiB blob-backed event is journaled verbatim (D21, no blob
+    // read) and the slot points at it. No open wait: the run record is the only read.
     let big = PayloadRef::blob([0x42; 32], 1 << 20);
     let (out, actions, reads) = h.apply_full(&inbound_signal(2, &r, "go", big.clone()));
     assert_eq!(out, ApplyOutcome::Accepted);
     assert_eq!(reads, 1);
-    assert_eq!(actions, vec![Action::InputAppended { run: r, seq: 2 }]);
-    let row = h.get(Table::Events, &event_key(&r, 2)).expect("event row");
+    assert_eq!(actions, vec![Action::InputAppended { run: r, seq: 3 }]);
+    let row = h.get(Table::Events, &event_key(&r, 3)).expect("event row");
     assert_eq!(
         JournalEvent::decode(row.as_slice()).expect("journal event"),
         JournalEvent {
-            seq: 2,
+            seq: 3,
             kind: ostro_types::journal::EventKind::SignalPayload.code(),
             payload: Some(big),
         }
@@ -646,13 +624,13 @@ fn inbound_signal_buffers_without_waits_until_implemented() {
         (
             "go".to_string(),
             SignalSlot::Journaled {
-                payload_seq: 2,
+                payload_seq: 3,
                 sent_at_ms: 0
             }
         )
     );
     let rec = h.run(&r);
-    assert_eq!((rec.next_seq, rec.inbox_next), (3, 2));
+    assert_eq!((rec.next_seq, rec.inbox_next), (4, 2));
 
     // Terminal or unknown targets, a missing event and an over-long name are dropped.
     let before = h.data();

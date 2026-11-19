@@ -574,12 +574,11 @@ fn inbound_cancel_cascade() {
     }));
     let pr = p0.run(&parent).unwrap();
     assert!(pr.cancel_requested);
-    assert_eq!(
-        p0.inbox(&parent),
-        vec![InboxMsg::CancelRequested {
-            reason: "stop".into()
-        }]
-    );
+    // Plan 05-08: no legacy inbox row any more. The parent's journal is empty
+    // (next_seq == 0), so only the flag is set: a CancelRequested event (kind 69) at seq 0
+    // would precede RunStarted (journaled cases: tests/apply_waits.rs).
+    assert!(p0.inbox(&parent).is_empty());
+    assert_eq!(cancel_events(&p0, &parent), 0);
     let m5 = p0.outbox_msgs(5);
     assert_eq!(m5.len(), 1);
     assert_eq!(
@@ -600,7 +599,18 @@ fn inbound_cancel_cascade() {
     assert_eq!(o, ApplyOutcome::Accepted);
     assert!(a.is_empty(), "{a:?}");
     assert!(p0.rows(Table::Outbox, &[]).is_empty());
-    assert_eq!(p0.inbox(&parent).len(), 1);
+    assert_eq!(cancel_events(&p0, &parent), 0);
+    assert!(p0.inbox(&parent).is_empty());
+}
+
+/// Journaled `CancelRequested` events of `run` (plan 05-08).
+fn cancel_events(h: &H, run: &RunId) -> usize {
+    h.rows(Table::Events, run.as_bytes())
+        .into_iter()
+        .filter(|(_, v)| {
+            JournalEvent::decode(&**v).expect("event").kind == EventKind::CancelRequested.code()
+        })
+        .count()
 }
 
 #[test]

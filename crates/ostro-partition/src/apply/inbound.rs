@@ -17,27 +17,31 @@
 //! deterministic per-message drops: the seq is still consumed.
 //!
 //! Inbound handlers may read more than once (one point read per message plus
-//! a children scan for cancel); they are not on the per-command hot path.
+//! a children scan for cancel, and the waits/inbox reads of `waits.rs` for
+//! signals); they are not on the per-command hot path.
+//!
+//! Signals and cancel requests are handled in `waits.rs` (plan 05-08): a
+//! signal journals its `SignalPayload` and matches the oldest wait or is
+//! buffered; a `CancelRun` sets the flag, journals `CancelRequested` once and
+//! cascades to the children, or is forwarded along a continue-as-new chain.
 
 use ostro_types::RunId;
 use ostro_types::command::{
-    CancelRun, ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg, outbox_msg,
+    ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg, outbox_msg,
 };
 use prost::Message;
 
 use super::cursor::Cursor;
-use super::outbox::{emit, msg_oversize};
+use super::outbox::msg_oversize;
 use super::outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
 use super::run::{enqueue_ready, load_run, local_run, start_run, store_run, terminal_status};
 use super::{lifecycle, waits};
-use crate::store::keys::{children_key, children_prefix, inbox_key};
+use crate::store::keys::{children_key, inbox_key};
 use crate::store::values::{self, InboxMsg, RunRecord, RunStatus};
 use crate::store::{ApplyBatch, StoreError, Table};
 
 /// Dedupe workflow namespace for cron starts: `(__cron/<schedule>, fire_time)`.
 const CRON_DEDUPE_PREFIX: &str = "__cron/";
-
-const RUN_LEN: usize = 18;
 
 fn reject(r: RejectReason) -> Result<ApplyOutcome, StoreError> {
     Ok(ApplyOutcome::Rejected(r))
@@ -140,11 +144,13 @@ fn apply_msg(
         }
         Kind::CronStart(c) => cron_start(b, cur, c, actions)?,
         Kind::ChildCompleted(c) => child_completed(b, cur, c, actions)?,
-        // Phase 5 seams (plan 05-02): signals go to `waits.rs` (05-08 adds wait matching),
+        // Phase 5: signals go to `waits.rs` (05-08: wait matching, B1 pending slots),
         // continue-as-new successor starts to `lifecycle.rs` (05-09; consumed with no effect
         // until then, like the other per-message deterministic drops).
         Kind::Signal(s) => waits::inbound_signal(b, cur, s, actions)?,
-        Kind::CancelRun(c) => cancel_run(b, cur, c, actions)?,
+        // Graceful cancel (plan 05-08): flag + journaled CancelRequested + children cascade,
+        // forwarded along a continue-as-new chain (PF-F2).
+        Kind::CancelRun(c) => waits::inbound_cancel(b, cur, c, actions)?,
         Kind::StartRun(s) => lifecycle::inbound_start_run(b, cur, s, actions)?,
     }
     Ok(())
@@ -239,47 +245,5 @@ fn child_completed(
     let at = rec.created_at_ms;
     make_ready(b, &parent, &mut rec, at, actions);
     store_run(b, &parent, &rec);
-    Ok(())
-}
-
-fn cancel_run(
-    b: &mut ApplyBatch<'_>,
-    cur: &mut Cursor,
-    c: &CancelRun,
-    actions: &mut Vec<Action>,
-) -> Result<(), StoreError> {
-    let Some((run, mut rec)) = live_run(b, cur, &c.target_run)? else {
-        return Ok(());
-    };
-    if rec.cancel_requested {
-        return Ok(()); // already requested: no second cascade
-    }
-    rec.cancel_requested = true;
-    push_inbox(
-        b,
-        &run,
-        &mut rec,
-        &InboxMsg::CancelRequested {
-            reason: c.reason.clone(),
-        },
-    );
-    let at = rec.created_at_ms;
-    make_ready(b, &run, &mut rec, at, actions);
-    store_run(b, &run, &rec);
-    actions.push(Action::CancelRequested { run });
-
-    // Cascade to every child, wherever it lives (one prefix scan).
-    for (k, _) in b.range_prefix(Table::Children, &children_prefix(&run))? {
-        let child_bytes = k
-            .get(RUN_LEN..)
-            .ok_or_else(|| StoreError::Codec("short children key".into()))?;
-        let msg = OutboxMsg {
-            kind: Some(outbox_msg::Kind::CancelRun(CancelRun {
-                target_run: child_bytes.to_vec(),
-                reason: c.reason.clone(),
-            })),
-        };
-        emit(b, cur, &msg, actions)?;
-    }
     Ok(())
 }
