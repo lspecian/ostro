@@ -7,10 +7,13 @@
 //! cache ([`AotCache`], compile at deploy, ENG-07); every component loaded from L1 or
 //! compiled fresh is validated against the production linker before it is
 //! pre-instantiated. [`Runtime::prepare`] is the uncached path (tests/tools).
-//! [`Runtime::activate`] runs one activation through [`crate::activation`].
+//! [`Runtime::activate`] runs one activation through [`crate::activation`];
+//! [`Runtime::live_activations`] counts the activations running right now (WF-04: a
+//! sleeping run holds no activation, so the gauge is 0 once every run has evicted).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -82,7 +85,27 @@ pub struct Runtime {
     parked: Arc<ParkedRegistry>,
     aot: Option<AotCache>,
     l2: Mutex<InstancePreLru>,
+    /// Activations currently inside [`Runtime::activate`] (see [`LiveGuard`]).
+    live: AtomicU64,
     pub(crate) opts: RuntimeOptions,
+}
+
+/// Counts one running activation in [`Runtime::live_activations`] for its lifetime.
+/// Dropped on every exit path of the activation future: return (any outcome), panic
+/// unwind, or the future itself being dropped (caller cancellation).
+struct LiveGuard<'a>(&'a AtomicU64);
+
+impl<'a> LiveGuard<'a> {
+    fn enter(live: &'a AtomicU64) -> Self {
+        live.fetch_add(1, Ordering::Relaxed);
+        Self(live)
+    }
+}
+
+impl Drop for LiveGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// L2 cache: prepared modules by SHA-256, evicting the least recently used.
@@ -199,6 +222,7 @@ impl Runtime {
             parked,
             aot,
             l2: Mutex::new(InstancePreLru::default()),
+            live: AtomicU64::new(0),
             opts,
         })
     }
@@ -388,13 +412,22 @@ impl Runtime {
     }
 
     /// Run one activation; reports the outcome through `sink.done` (exactly once) and
-    /// returns it.
+    /// returns it. Counted in [`live_activations`](Self::live_activations) from entry
+    /// until the activation ends (or its future is dropped).
     pub async fn activate(
         &self,
         p: &Prepared,
         act: Activate,
         sink: Arc<dyn ActivationSink>,
     ) -> ActivationOutcome {
+        let _live = LiveGuard::enter(&self.live);
         crate::activation::run_activation(self, p, act, sink).await
+    }
+
+    /// Number of activations running right now on this runtime, hot-parked ones
+    /// included (WF-04 gauge). Evicted runs hold no activation: once every run is
+    /// sleeping (evicted, Suspended) this is 0.
+    pub fn live_activations(&self) -> u64 {
+        self.live.load(Ordering::Relaxed)
     }
 }

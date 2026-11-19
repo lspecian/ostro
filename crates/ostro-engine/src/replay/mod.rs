@@ -18,5 +18,5 @@ mod tests;
 
 pub use cursor::{CommandResult, ReplayError, ReplayState, StepBegin};
 pub use rng::{ChaChaStream, RngStreams, insecure_seed, uuid_v7};
-pub use token::TokenParts;
+pub use token::{TokenError, TokenParts};
 pub use wait::WaitOutcome;
