@@ -88,7 +88,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 ### Control-Plane API
 
 - [ ] **API-01**: One client port serves HTTP/1.1, HTTP/2 and gRPC (tonic Routes into axum) with identical semantics; OpenAPI published [FR-0.3]
-- [ ] **API-02**: Client can upload a module by sha256 (idempotent) and activate a workflow version [FR-3.1]
+- [x] **API-02**: Client can upload a module by sha256 (idempotent) and activate a workflow version [FR-3.1]
 - [ ] **API-03**: Client can start a run with queue, delay, priority, tags, version, traceparent, tenant and idempotency key with a conflict policy (return existing run or reject) [FR-3.2]
 - [ ] **API-04**: Client can get run status (incl. published status), history, and list/filter runs [FR-3.3]
 - [ ] **API-05**: Client can signal, cancel (graceful), terminate, and retry runs [FR-3.4]
@@ -301,7 +301,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | DISP-06 | Phase 14 | Pending |
 | DISP-07 | Phase 4 | Complete |
 | API-01 | Phase 4 | Pending |
-| API-02 | Phase 4 | Pending |
+| API-02 | Phase 4 | Complete |
 | API-03 | Phase 4 | Pending |
 | API-04 | Phase 4 | Pending |
 | API-05 | Phase 5 | Pending |
