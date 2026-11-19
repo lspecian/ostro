@@ -186,6 +186,7 @@ fn grant(id: &RunId, n: u32) -> Command {
     Command::attempt_granted(AttemptGranted {
         run_id: id.as_bytes().to_vec(),
         token: Some(AttemptTokenMsg { epoch: 0, n }),
+        after_failure: false,
     })
 }
 
@@ -486,6 +487,8 @@ fn inbound_child_roundtrip() {
         status: TerminalStatus::Completed as i32,
         result: inline(b"out"),
         completed_at_ms: 9,
+        resumable: false,
+        parent_event: None,
     }));
     assert_eq!(
         p5.apply(&events(&child, 1, vec![done])),
@@ -843,6 +846,8 @@ fn timer_terminal_run() {
         status: TerminalStatus::Completed as i32,
         result: None,
         completed_at_ms: 9,
+        resumable: false,
+        parent_event: None,
     }));
     assert_eq!(
         h.apply(&events(&r, 1, vec![schedule(7, 1000), done])),

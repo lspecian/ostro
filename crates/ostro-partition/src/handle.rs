@@ -173,6 +173,7 @@ impl<L: ReplicatedLog> PartitionHandle<L> {
         let cmd = Command::attempt_granted(AttemptGranted {
             run_id: run.as_bytes().to_vec(),
             token: Some(AttemptTokenMsg { epoch: epoch.0, n }),
+            after_failure: false,
         });
         match self.submit_one(cmd).await? {
             ApplyOutcome::Accepted => Ok(AttemptToken { epoch, n }),

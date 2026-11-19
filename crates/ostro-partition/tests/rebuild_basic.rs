@@ -104,6 +104,8 @@ async fn workload(node: &Node) {
                     status: TerminalStatus::Completed as i32,
                     result: inline(b"out"),
                     completed_at_ms: 9,
+                    resumable: false,
+                    parent_event: None,
                 }));
                 // The timer above is already overdue (real clock), so the timer service may
                 // have journaled its TimerFired input at seq 1 (plan 04-13): follow

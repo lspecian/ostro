@@ -284,6 +284,7 @@ async fn load(
                         epoch: h.epoch().0,
                         n: 1,
                     }),
+                    after_failure: false,
                 });
                 let Some(out) = submit(&h, vec![cmd], &[]).await else {
                     return;
@@ -326,6 +327,8 @@ async fn load(
                         status: TerminalStatus::Completed as i32,
                         result: inline(b"out"),
                         completed_at_ms: now_ms(),
+                        resumable: false,
+                        parent_event: None,
                     })));
                 }
                 let cmd = Command::events_appended(EventsAppended {

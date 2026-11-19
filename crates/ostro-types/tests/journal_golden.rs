@@ -353,6 +353,40 @@ fn golden_events() -> Vec<(&'static str, Event)> {
                 }),
             ),
         ),
+        // Phase 5 kinds (plan 05-01, D3/D4/D21), appended in EventBody order.
+        (
+            "wait_timed_out",
+            ev(23, EventBody::WaitTimedOut(WaitTimedOut { op: 9 })),
+        ),
+        (
+            "run_terminated",
+            ev(
+                24,
+                EventBody::RunTerminated(RunTerminated {
+                    reason: "run_timeout".into(),
+                }),
+            ),
+        ),
+        (
+            "signal_payload",
+            ev(
+                25,
+                EventBody::SignalPayload(SignalPayload {
+                    name: "approve".into(),
+                    payload: payload("{\"approved\":true}"),
+                }),
+            ),
+        ),
+        (
+            "signal_matched",
+            ev(
+                26,
+                EventBody::SignalMatched(SignalMatched {
+                    op: 6,
+                    payload_seq: 25,
+                }),
+            ),
+        ),
     ]
 }
 
@@ -596,7 +630,7 @@ fn golden_event_codec() {
     let events = golden_events();
     let kinds: std::collections::BTreeSet<u32> =
         events.iter().map(|(_, e)| e.body.kind().code()).collect();
-    assert_eq!(kinds.len(), 21, "every EventKind needs a golden event");
+    assert_eq!(kinds.len(), 25, "every EventKind needs a golden event");
     for (line, (name, ev)) in golden_section("event").iter().zip(&events) {
         let mut parts = line.split(' ');
         assert_eq!(parts.next(), Some("event"));
@@ -1052,6 +1086,13 @@ fn arb_body() -> impl Strategy<Value = EventBody> {
         ),
         (any::<u64>(), arb_payload())
             .prop_map(|(op, payload)| EventBody::SignalReceived(SignalReceived { op, payload })),
+        any::<u64>().prop_map(|op| EventBody::WaitTimedOut(WaitTimedOut { op })),
+        arb_string().prop_map(|reason| EventBody::RunTerminated(RunTerminated { reason })),
+        (arb_string(), arb_payload())
+            .prop_map(|(name, payload)| EventBody::SignalPayload(SignalPayload { name, payload })),
+        (any::<u64>(), any::<u64>()).prop_map(|(op, payload_seq)| EventBody::SignalMatched(
+            SignalMatched { op, payload_seq }
+        )),
         (
             arb_meta(),
             arb_string(),

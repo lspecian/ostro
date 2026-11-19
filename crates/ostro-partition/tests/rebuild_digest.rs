@@ -329,6 +329,8 @@ async fn drive(dir: &Path, sc: &Scenario) {
                         status: TerminalStatus::Completed as i32,
                         result: inline(b"out"),
                         completed_at_ms: 9,
+                        resumable: false,
+                        parent_event: None,
                     })));
                 }
                 let c = Command::events_appended(EventsAppended {

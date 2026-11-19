@@ -155,6 +155,8 @@ pub fn intents(
                 status: status as i32,
                 result: Some(r),
                 completed_at_ms: ceil_ms(ev.ts_nanos),
+                resumable: false,
+                parent_event: None,
             })));
             done = true;
             continue;
@@ -379,6 +381,8 @@ mod tests {
                 status: TerminalStatus::Completed as i32,
                 result: Some(pref(b"{\"ok\":1}")),
                 completed_at_ms: 2001,
+                resumable: false,
+                parent_event: None,
             }))]
         );
     }

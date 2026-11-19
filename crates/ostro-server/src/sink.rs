@@ -443,6 +443,8 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
                 status: TerminalStatus::Failed as i32,
                 result: Some(r),
                 completed_at_ms: derive::ceil_ms(tok.ts_nanos),
+                resumable: false,
+                parent_event: None,
             })));
         }
         // 3. Events.

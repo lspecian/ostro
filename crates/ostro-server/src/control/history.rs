@@ -52,6 +52,11 @@ pub fn kind_name(k: EventKind) -> &'static str {
         EventKind::ChildCompleted => "child_completed",
         EventKind::TokenCompleted => "token_completed",
         EventKind::CancelRequested => "cancel_requested",
+        // Phase 5 kinds (plan 05-01).
+        EventKind::WaitTimedOut => "wait_timed_out",
+        EventKind::RunTerminated => "run_terminated",
+        EventKind::SignalPayload => "signal_payload",
+        EventKind::SignalMatched => "signal_matched",
     }
 }
 
@@ -191,6 +196,13 @@ pub fn details(body: &EventBody) -> Value {
         EventBody::ChildCompleted(e) => json!({ "op": e.op }),
         EventBody::TokenCompleted(e) => json!({ "op": e.op, "payload": payload_json(&e.payload) }),
         EventBody::CancelRequested(e) => json!({ "reason": e.reason }),
+        // Phase 5 kinds (plan 05-01).
+        EventBody::WaitTimedOut(e) => json!({ "op": e.op }),
+        EventBody::RunTerminated(e) => json!({ "reason": e.reason }),
+        EventBody::SignalPayload(e) => {
+            json!({ "name": e.name, "payload": payload_json(&e.payload) })
+        }
+        EventBody::SignalMatched(e) => json!({ "op": e.op, "payload_seq": e.payload_seq }),
     }
 }
 

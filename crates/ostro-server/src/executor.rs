@@ -737,6 +737,8 @@ impl EngineExecutor {
                 status: TerminalStatus::Failed as i32,
                 result: Some(result.clone()),
                 completed_at_ms,
+                resumable: false,
+                parent_event: None,
             }));
             match sink.submit_intents(vec![d]).await {
                 Ok(_) => return ExecOutcome::Released,

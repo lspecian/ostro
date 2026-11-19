@@ -6,10 +6,11 @@
 
 use bytes::Bytes;
 use ostro_types::command::{
-    self, AttemptGranted, AttemptTokenMsg, CancelTimer, ChildCompleted, CompleteRun,
-    ConflictPolicy, CronStart, Derived, EnqueueReady, EventsAppended, InboundBatch, InboundMsg,
-    JournalEvent, OutboxMsg, OutboxTruncated, ParentRef, ScheduleTimer, SendMessage, Signal,
-    StartChild, StartRun, Suspend, TerminalStatus, TimerFired, decode_command, encode_command,
+    self, AttemptGranted, AttemptTokenMsg, CancelTimer, CancelWait, ChildCompleted, CompleteRun,
+    CompleteToken, ConflictPolicy, CronStart, Derived, EnqueueReady, EventsAppended, InboundBatch,
+    InboundMsg, JournalEvent, OutboxMsg, OutboxTruncated, ParentRef, RegisterWait, RequestCancel,
+    RetryRun, ScheduleTimer, SendMessage, Signal, SignalRun, StartChild, StartRun, Suspend,
+    TerminalStatus, TerminateRun, TimerFired, WaitKind, decode_command, encode_command,
 };
 use ostro_types::{AttemptToken, Command, Epoch, IdError, PartitionId, PayloadRef, RunId};
 use proptest::prelude::*;
@@ -76,6 +77,7 @@ fn outbox_all(p: u16) -> Vec<OutboxMsg> {
                 op: 7,
                 status: TerminalStatus::Failed as i32,
                 result: Some(PayloadRef::blob([0x5A; 32], 300_000)),
+                event: None,
             })),
         },
         OutboxMsg {
@@ -129,6 +131,8 @@ fn derived_all() -> Vec<Derived> {
                 status: TerminalStatus::Completed as i32,
                 result: Some(PayloadRef::inline(Bytes::from_static(b"done"))),
                 completed_at_ms: 7_000,
+                resumable: false,
+                parent_event: None,
             })),
         },
     ]
@@ -144,6 +148,7 @@ fn golden_commands() -> Vec<(&'static str, Command)> {
             Command::attempt_granted(AttemptGranted {
                 run_id: run(5, 0x11).as_bytes().to_vec(),
                 token: token(7, 2),
+                after_failure: false,
             }),
         ),
         (
@@ -217,10 +222,163 @@ fn golden_appended() -> Vec<(&'static str, Command)> {
     ]
 }
 
+/// `sample_start_v4` plus every Phase 5 field (plan 05-01: StartRun fields 19..23).
+fn sample_start_v5(p: u16) -> StartRun {
+    StartRun {
+        schedule_to_start_ms: 60_000,
+        retention_ms: 604_800_000,
+        retry_of: run(p, 0x77).as_bytes().to_vec(),
+        continued_from: run(p, 0x78).as_bytes().to_vec(),
+        run_started: Some(JournalEvent {
+            seq: 0,
+            kind: 1,
+            payload: Some(PayloadRef::inline(Bytes::from_static(b"run-started"))),
+        }),
+        ..sample_start_v4(p)
+    }
+}
+
+/// An `EventsAppended` (seq 14) whose only intent is `CompleteRun` with `status`.
+fn complete_with(status: TerminalStatus, resumable: bool, parent_event: bool) -> Command {
+    Command::events_appended(EventsAppended {
+        run_id: run(5, 0x11).as_bytes().to_vec(),
+        token: token(7, 2),
+        from_seq: 14,
+        events: vec![],
+        derived: vec![Derived::new(command::derived::Intent::CompleteRun(
+            CompleteRun {
+                status: status as i32,
+                result: None,
+                completed_at_ms: 8_000,
+                resumable,
+                parent_event: parent_event
+                    .then(|| PayloadRef::inline(Bytes::from_static(b"child-completed-event"))),
+            },
+        ))],
+    })
+}
+
+/// Vectors appended by plan 05-01 (Phase 5 contract; D1-D4, D9, D10, D13, D21, F9, PF-F1).
+fn golden_appended_v5() -> Vec<(&'static str, Command)> {
+    vec![
+        (
+            "signal_run",
+            Command::signal_run(SignalRun {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                name: "approve".into(),
+                event: Some(PayloadRef::inline(Bytes::from_static(
+                    b"signal-payload-event",
+                ))),
+                request_id: b"req-1".to_vec(),
+                sent_at_ms: 9_000,
+            }),
+        ),
+        (
+            "request_cancel",
+            Command::request_cancel(RequestCancel {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                reason: "user".into(),
+                requested_at_ms: 9_001,
+            }),
+        ),
+        (
+            "terminate_run",
+            Command::terminate_run(TerminateRun {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                reason: "ops".into(),
+                terminated_at_ms: 9_002,
+            }),
+        ),
+        (
+            "retry_run",
+            Command::retry_run(RetryRun {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                requested_at_ms: 9_003,
+            }),
+        ),
+        (
+            "complete_token",
+            Command::complete_token(CompleteToken {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                op: 8,
+                event: Some(PayloadRef::blob([0x6B; 32], 1_048_576)),
+                completed_at_ms: 9_004,
+            }),
+        ),
+        ("start_run_v5", Command::start_run(sample_start_v5(5))),
+        (
+            "events_appended_waits",
+            Command::events_appended(EventsAppended {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                token: token(7, 2),
+                from_seq: 14,
+                events: vec![JournalEvent {
+                    seq: 14,
+                    kind: 19,
+                    payload: Some(PayloadRef::inline(Bytes::from_static(b"wait-signal"))),
+                }],
+                derived: vec![
+                    Derived::register_wait(6, WaitKind::Signal, "approve", 70_000, 10_000),
+                    Derived::register_wait(7, WaitKind::Token, "", 0, 10_000),
+                    Derived::cancel_wait(5),
+                ],
+            }),
+        ),
+        (
+            "complete_run_terminated_resumable",
+            complete_with(TerminalStatus::Terminated, true, true),
+        ),
+        (
+            "complete_run_timed_out",
+            complete_with(TerminalStatus::TimedOut, true, false),
+        ),
+        (
+            "complete_run_continued_as_new",
+            complete_with(TerminalStatus::ContinuedAsNew, false, false),
+        ),
+        (
+            "attempt_granted_after_failure",
+            Command::attempt_granted(AttemptGranted {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                token: token(7, 3),
+                after_failure: true,
+            }),
+        ),
+        (
+            "inbound_batch_v5",
+            Command::inbound_batch(InboundBatch {
+                src: 2,
+                msgs: vec![
+                    InboundMsg {
+                        seq: 6,
+                        msg: Some(OutboxMsg::start_run(sample_start_v5(5))),
+                    },
+                    InboundMsg {
+                        seq: 7,
+                        msg: Some(OutboxMsg {
+                            kind: Some(command::outbox_msg::Kind::ChildCompleted(ChildCompleted {
+                                parent_run: run(5, 0x33).as_bytes().to_vec(),
+                                child_run: run(9, 0x44).as_bytes().to_vec(),
+                                op: 7,
+                                status: TerminalStatus::TimedOut as i32,
+                                result: None,
+                                event: Some(PayloadRef::inline(Bytes::from_static(
+                                    b"child-completed-event",
+                                ))),
+                            })),
+                        }),
+                    },
+                ],
+            }),
+        ),
+    ]
+}
+
 /// Every golden vector in file order: the original seven, then the appended ones.
 fn all_golden() -> Vec<(&'static str, Command)> {
     let mut v = golden_commands();
     v.extend(golden_appended());
+    v.extend(golden_appended_v5());
     v
 }
 
@@ -525,6 +683,7 @@ fn routing_malformed_run_id_is_error() {
             Kind::Signal(s) => s.target_run = bad.clone(),
             Kind::CancelRun(c) => c.target_run = bad.clone(),
             Kind::CronStart(c) => c.start.as_mut().unwrap().run_id = bad.clone(),
+            Kind::StartRun(s) => s.run_id = bad.clone(),
         }
         assert_eq!(m.target_partition(), Err(IdError::BadLength(17)), "{m:?}");
     }
@@ -608,4 +767,283 @@ fn routing_timer_fired_run_id() {
     assert_eq!(t.run_id(), Ok(run(8, 0x12)));
     t.run_id.pop();
     assert_eq!(t.run_id(), Err(IdError::BadLength(17)));
+}
+
+// ---- Plan 05-01: Phase 5 contract ---------------------------------------------------------
+
+#[test]
+fn phase5_vectors_round_trip() {
+    for (name, c) in golden_appended_v5() {
+        let back = decode_command(&encode_command(&c)).expect("decode");
+        assert_eq!(back, c, "{name} round trip");
+    }
+    let names: Vec<&str> = golden_appended_v5()
+        .iter()
+        .map(|(_, c)| c.kind_name())
+        .collect();
+    for n in [
+        "SignalRun",
+        "RequestCancel",
+        "TerminateRun",
+        "RetryRun",
+        "CompleteToken",
+    ] {
+        assert!(names.contains(&n), "{n} has a golden vector");
+    }
+}
+
+#[test]
+fn phase5_cmd_tags_from_first_principles() {
+    // Cmd oneof key = tag << 3 | 2 (LEN); an empty message encodes as key 00.
+    let empty = |c: Command| hex(&encode_command(&c));
+    assert_eq!(empty(Command::signal_run(SignalRun::default())), "4200");
+    assert_eq!(
+        empty(Command::request_cancel(RequestCancel::default())),
+        "4a00"
+    );
+    assert_eq!(
+        empty(Command::terminate_run(TerminateRun::default())),
+        "5200"
+    );
+    assert_eq!(empty(Command::retry_run(RetryRun::default())), "5a00");
+    assert_eq!(
+        empty(Command::complete_token(CompleteToken::default())),
+        "6200"
+    );
+}
+
+#[test]
+fn phase5_start_run_fields_from_first_principles() {
+    let only = |s: StartRun| hex(&encode_command(&Command::start_run(s)));
+    // 19 varint: key 0x98 0x01.
+    assert_eq!(
+        only(StartRun {
+            schedule_to_start_ms: 1,
+            ..Default::default()
+        }),
+        "1203".to_string() + "980101"
+    );
+    // 20 varint: key 0xa0 0x01.
+    assert_eq!(
+        only(StartRun {
+            retention_ms: 1,
+            ..Default::default()
+        }),
+        "1203".to_string() + "a00101"
+    );
+    // 21 bytes: key 0xaa 0x01.
+    assert_eq!(
+        only(StartRun {
+            retry_of: vec![0xAA],
+            ..Default::default()
+        }),
+        "1204".to_string() + "aa0101aa"
+    );
+    // 22 bytes: key 0xb2 0x01.
+    assert_eq!(
+        only(StartRun {
+            continued_from: vec![0xBB],
+            ..Default::default()
+        }),
+        "1204".to_string() + "b20101bb"
+    );
+    // 23 message: key 0xba 0x01, empty JournalEvent.
+    assert_eq!(
+        only(StartRun {
+            run_started: Some(JournalEvent::default()),
+            ..Default::default()
+        }),
+        "1203".to_string() + "ba0100"
+    );
+}
+
+#[test]
+fn phase5_intent_and_field_tags_from_first_principles() {
+    use prost::Message as _;
+    // Derived oneof tag 7 / 8 (LEN).
+    assert_eq!(
+        hex(&Derived::new(command::derived::Intent::RegisterWait(
+            RegisterWait::default()
+        ))
+        .encode_to_vec()),
+        "3a00"
+    );
+    assert_eq!(hex(&Derived::cancel_wait(0).encode_to_vec()), "4200");
+    // RegisterWait.at_ms = field 5 varint (key 0x28); WaitKind::Token = field 2 value 1.
+    let rw = RegisterWait {
+        kind: WaitKind::Token as i32,
+        at_ms: 1,
+        ..Default::default()
+    };
+    assert_eq!(hex(&rw.encode_to_vec()), "10012801");
+    // CompleteRun.resumable = field 4 bool (key 0x20); parent_event = field 5 LEN (key 0x2a).
+    let cr = CompleteRun {
+        resumable: true,
+        parent_event: Some(PayloadRef::default()),
+        ..Default::default()
+    };
+    assert_eq!(hex(&cr.encode_to_vec()), "20012a00");
+    // ChildCompleted.event = field 6 LEN (key 0x32).
+    let cc = ChildCompleted {
+        event: Some(PayloadRef::default()),
+        ..Default::default()
+    };
+    assert_eq!(hex(&cc.encode_to_vec()), "3200");
+    // AttemptGranted.after_failure = field 3 bool (key 0x18).
+    let ag = AttemptGranted {
+        after_failure: true,
+        ..Default::default()
+    };
+    assert_eq!(hex(&ag.encode_to_vec()), "1801");
+    // Outbox Kind::StartRun = tag 6 (LEN, key 0x32).
+    assert_eq!(
+        hex(&OutboxMsg::start_run(StartRun::default()).encode_to_vec()),
+        "3200"
+    );
+    // TerminalStatus values.
+    assert_eq!(TerminalStatus::Terminated as i32, 3);
+    assert_eq!(TerminalStatus::TimedOut as i32, 4);
+    assert_eq!(TerminalStatus::ContinuedAsNew as i32, 5);
+}
+
+#[test]
+fn old_bytes_decode_with_phase5_defaults() {
+    // StartRun written by 02-06 and by 04-09: the Phase 5 fields default and re-encode
+    // byte-identically.
+    for (line, expected) in [
+        ("StartRun", sample_start(5)),
+        ("start_run_v4", sample_start_v4(5)),
+    ] {
+        let old = golden_line(line);
+        let c = decode_command(&old).expect("old bytes decode");
+        let Some(command::Cmd::StartRun(s)) = &c.cmd else {
+            panic!("wrong variant")
+        };
+        assert_eq!(s.schedule_to_start_ms, 0);
+        assert_eq!(s.retention_ms, 0);
+        assert!(s.retry_of.is_empty());
+        assert!(s.continued_from.is_empty());
+        assert!(s.run_started.is_none());
+        assert_eq!(*s, expected);
+        assert_eq!(encode_command(&c).as_ref(), old.as_slice(), "{line}");
+    }
+    // AttemptGranted / CompleteRun / ChildCompleted written before Phase 5.
+    for line in ["AttemptGranted", "EventsAppended", "InboundBatch"] {
+        let old = golden_line(line);
+        let c = decode_command(&old).expect("old bytes decode");
+        assert_eq!(encode_command(&c).as_ref(), old.as_slice(), "{line}");
+    }
+    let Some(command::Cmd::AttemptGranted(g)) =
+        decode_command(&golden_line("AttemptGranted")).unwrap().cmd
+    else {
+        panic!("wrong variant")
+    };
+    assert!(!g.after_failure);
+}
+
+#[test]
+fn reserved_ops_are_pinned() {
+    assert_eq!(command::RESERVED_OP_MIN, u64::MAX - 15);
+    assert_eq!(command::START_DELAY_OP, u64::MAX);
+    assert_eq!(command::RUN_TIMEOUT_OP, u64::MAX - 1);
+    assert_eq!(command::SCHEDULE_TO_START_OP, u64::MAX - 2);
+    assert_eq!(command::EXPIRE_OP, u64::MAX - 3);
+    for op in [
+        command::START_DELAY_OP,
+        command::RUN_TIMEOUT_OP,
+        command::SCHEDULE_TO_START_OP,
+        command::EXPIRE_OP,
+        u64::MAX - 15,
+    ] {
+        assert!(command::is_reserved_op(op), "{op}");
+    }
+    assert!(!command::is_reserved_op(u64::MAX - 16));
+    assert!(!command::is_reserved_op(0));
+}
+
+#[test]
+fn phase5_field_limits() {
+    assert_eq!(command::MAX_SIGNAL_NAME_LEN, 256);
+    assert_eq!(command::MAX_REASON_LEN, 1024);
+    assert_eq!(command::MAX_REQUEST_ID_LEN, 64);
+    let mut s = SignalRun {
+        name: "n".repeat(256),
+        request_id: vec![1; 64],
+        ..Default::default()
+    };
+    assert!(s.check_limits().is_ok());
+    s.name.push('x');
+    assert_eq!(s.check_limits().unwrap_err().field, "name");
+    s.name.pop();
+    s.request_id.push(1);
+    assert_eq!(s.check_limits().unwrap_err().field, "request_id");
+    let mut rc = RequestCancel {
+        reason: "r".repeat(1024),
+        ..Default::default()
+    };
+    assert!(rc.check_limits().is_ok());
+    rc.reason.push('r');
+    assert!(rc.check_limits().is_err());
+    let t = TerminateRun {
+        reason: "r".repeat(1025),
+        ..Default::default()
+    };
+    assert!(t.check_limits().is_err());
+    let rw = RegisterWait {
+        name: "n".repeat(257),
+        ..Default::default()
+    };
+    assert!(rw.check_limits().is_err());
+}
+
+#[test]
+fn phase5_run_id_helpers_and_routing() {
+    let id = run(6, 0x99);
+    let b = id.as_bytes().to_vec();
+    assert_eq!(
+        SignalRun {
+            run_id: b.clone(),
+            ..Default::default()
+        }
+        .run_id(),
+        Ok(id)
+    );
+    assert_eq!(
+        RequestCancel {
+            run_id: b.clone(),
+            ..Default::default()
+        }
+        .run_id(),
+        Ok(id)
+    );
+    assert_eq!(
+        TerminateRun {
+            run_id: b.clone(),
+            ..Default::default()
+        }
+        .run_id(),
+        Ok(id)
+    );
+    assert_eq!(
+        RetryRun {
+            run_id: b.clone(),
+            ..Default::default()
+        }
+        .run_id(),
+        Ok(id)
+    );
+    assert_eq!(
+        CompleteToken {
+            run_id: vec![1],
+            ..Default::default()
+        }
+        .run_id(),
+        Err(IdError::BadLength(1))
+    );
+    // Outbox Kind::StartRun routes by the new run's id.
+    for p in 0..16u16 {
+        let m = OutboxMsg::start_run(sample_start_v5(p));
+        assert_eq!(m.target_partition(), Ok(PartitionId(p)));
+    }
+    let _ = CancelWait::default();
 }

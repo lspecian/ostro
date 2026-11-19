@@ -189,6 +189,7 @@ impl Gen {
             Command::attempt_granted(AttemptGranted {
                 run_id: r.id.as_bytes().to_vec(),
                 token,
+                after_failure: false,
             })
         };
         (i, cmd)

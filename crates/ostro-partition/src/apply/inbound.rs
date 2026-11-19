@@ -141,6 +141,11 @@ fn apply_msg(
         Kind::ChildCompleted(c) => child_completed(b, cur, c, actions)?,
         Kind::Signal(s) => signal(b, cur, s, actions)?,
         Kind::CancelRun(c) => cancel_run(b, cur, c, actions)?,
+        // Phase 5: implemented in 05-09 (`lifecycle::inbound_start_run`). Until then the
+        // message is consumed with no effect, like the other per-message deterministic drops
+        // (a missing or terminal target run): the batch stays accepted and the source's
+        // outbox still truncates.
+        Kind::StartRun(_) => {}
     }
     Ok(())
 }

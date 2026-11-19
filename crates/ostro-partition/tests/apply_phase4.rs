@@ -127,6 +127,7 @@ fn grant(id: &RunId, e: u32, n: u32) -> Command {
     Command::attempt_granted(AttemptGranted {
         run_id: id.as_bytes().to_vec(),
         token: Some(AttemptTokenMsg { epoch: e, n }),
+        after_failure: false,
     })
 }
 
@@ -166,6 +167,8 @@ fn complete_at(at: u64) -> Derived {
         status: TerminalStatus::Completed as i32,
         result: inline(b"out"),
         completed_at_ms: at,
+        resumable: false,
+        parent_event: None,
     }))
 }
 

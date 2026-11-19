@@ -127,6 +127,7 @@ fn grant(id: &RunId, e: u32, n: u32) -> Command {
     Command::attempt_granted(AttemptGranted {
         run_id: id.as_bytes().to_vec(),
         token: Some(AttemptTokenMsg { epoch: e, n }),
+        after_failure: false,
     })
 }
 
@@ -234,6 +235,7 @@ fn fencing_attempts() {
     let no_tok = Command::attempt_granted(AttemptGranted {
         run_id: r.as_bytes().to_vec(),
         token: None,
+        after_failure: false,
     });
     assert_eq!(
         h.apply(2, &no_tok),
@@ -456,6 +458,8 @@ fn payload_limits() {
         status: TerminalStatus::Completed as i32,
         result: inline_len(INLINE_PAYLOAD_LIMIT + 1),
         completed_at_ms: 1,
+        resumable: false,
+        parent_event: None,
     }));
     assert_eq!(
         h.apply(1, &events(&r, (1, 1), 0, vec![ev(0)], vec![big_result])),
@@ -473,6 +477,8 @@ fn complete_run() {
         status: TerminalStatus::Completed as i32,
         result: inline(b"out"),
         completed_at_ms: 9,
+        resumable: false,
+        parent_event: None,
     }));
     let (o, a) = h.apply_act(1, &events(&r, (1, 1), 0, vec![ev(0)], vec![done]));
     assert_eq!(o, ApplyOutcome::Accepted);
@@ -503,6 +509,8 @@ fn complete_run_then_more_intents_is_invalid() {
         status: TerminalStatus::Failed as i32,
         result: None,
         completed_at_ms: 9,
+        resumable: false,
+        parent_event: None,
     }));
     let again = intent(derived::Intent::EnqueueReady(EnqueueReady {
         ready_at_ms: 5,
@@ -632,6 +640,8 @@ fn complete(status: TerminalStatus) -> Derived {
         status: status as i32,
         result: inline(b"out"),
         completed_at_ms: 9,
+        resumable: false,
+        parent_event: None,
     }))
 }
 
@@ -966,6 +976,7 @@ fn outbox_child() {
             op: 3,
             status: TerminalStatus::Failed as i32,
             result: inline(b"out"),
+            event: None,
         }))
     );
 }

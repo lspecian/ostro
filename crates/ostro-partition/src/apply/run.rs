@@ -23,7 +23,7 @@
 use ostro_types::command::{
     AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, JournalEvent, MAX_RUN_TAG_LEN,
     MAX_RUN_TAGS, MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, StartRun,
-    TerminalStatus, derived::Intent, outbox_msg,
+    TerminalStatus, derived::Intent, is_reserved_op, outbox_msg,
 };
 use ostro_types::{AttemptToken, Epoch, PayloadRef, RunId};
 use prost::Message;
@@ -100,6 +100,10 @@ pub(crate) fn terminal_status(code: i32) -> Option<RunStatus> {
         TerminalStatus::Completed => Some(RunStatus::Completed),
         TerminalStatus::Failed => Some(RunStatus::Failed),
         TerminalStatus::Cancelled => Some(RunStatus::Cancelled),
+        // Phase 5: mapped to RunStatus by 05-01 Task 3; apply arms land in 05-09.
+        TerminalStatus::Terminated | TerminalStatus::TimedOut | TerminalStatus::ContinuedAsNew => {
+            None
+        }
     }
 }
 
@@ -362,16 +366,27 @@ fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus) -> Check<(
             return Err(invalid(InvalidCode::BadIntent));
         }
         match i {
-            Intent::ScheduleTimer(t) if t.op == START_DELAY_OP => {
+            // Apply-owned reserved timer ops (START_DELAY_OP, RUN_TIMEOUT_OP, ...) are never
+            // guest ops (plan 05-01).
+            Intent::ScheduleTimer(t) if is_reserved_op(t.op) => {
                 return Err(invalid(InvalidCode::BadIntent));
             }
-            Intent::CancelTimer(t) if t.op == START_DELAY_OP => {
+            Intent::CancelTimer(t) if is_reserved_op(t.op) => {
+                return Err(invalid(InvalidCode::BadIntent));
+            }
+            // Phase 5: implemented in 05-08. Rejected until then.
+            Intent::RegisterWait(_) | Intent::CancelWait(_) => {
                 return Err(invalid(InvalidCode::BadIntent));
             }
             Intent::ScheduleTimer(_) | Intent::CancelTimer(_) => {}
             Intent::EnqueueReady(_) => enqueued = true,
             Intent::SendMessage(m) => {
                 let msg = m.msg.as_ref().ok_or(invalid(InvalidCode::MissingField))?;
+                // Phase 5: continue-as-new successor start, implemented in 05-09 (with
+                // CompleteRun{ContinuedAsNew}). Rejected until then.
+                if matches!(msg.kind, Some(outbox_msg::Kind::StartRun(_))) {
+                    return Err(invalid(InvalidCode::BadIntent));
+                }
                 msg_target(cur, msg)?;
             }
             Intent::CompleteRun(c) => {
@@ -498,6 +513,8 @@ pub(crate) fn apply_events_appended(
                 remove_ready(b, &run, &mut rec);
                 rec.status = RunStatus::Scheduled;
             }
+            // Rejected by check_intents (Phase 5: implemented in 05-08).
+            Intent::RegisterWait(_) | Intent::CancelWait(_) => {}
             Intent::CompleteRun(c) => {
                 let status = terminal_status(c.status)
                     .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;
@@ -521,6 +538,9 @@ pub(crate) fn apply_events_appended(
                             op,
                             status: c.status,
                             result: c.result.clone(),
+                            // Phase 5: 05-02 forwards CompleteRun.parent_event here verbatim
+                            // (D21 / Phase 9 PF-F1), with its oversize check.
+                            event: None,
                         })),
                     };
                     emit(b, cur, &msg, actions)?;

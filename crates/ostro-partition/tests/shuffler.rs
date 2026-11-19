@@ -271,6 +271,8 @@ fn complete_cmd(run: &RunId, t: AttemptToken) -> Command {
                 status: TerminalStatus::Completed as i32,
                 result: Some(PayloadRef::inline(Bytes::from_static(b"out"))),
                 completed_at_ms: 9,
+                resumable: false,
+                parent_event: None,
             })),
         }],
     })

@@ -40,6 +40,7 @@ async fn outcomes_in_order_with_rejections() {
     let grant = Command::attempt_granted(AttemptGranted {
         run_id: r1.as_bytes().to_vec(),
         token: Some(AttemptTokenMsg { epoch: e.0, n: 1 }),
+        after_failure: false,
     });
     let out = tp
         .handle

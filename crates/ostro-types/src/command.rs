@@ -7,7 +7,8 @@
 //!   fields, new oneof variants, new enum values.
 //! - Field numbers and oneof tags are never reused or renumbered. A removed field's number is
 //!   retired forever.
-//! - Reserved for future use: `Cmd` tags `8..=63`. Unknown fields are skipped on decode, so an
+//! - Reserved for future use: `Cmd` tags `13..=63` (blocks per phase in `.planning/RESERVATIONS.md`).
+//!   Unknown fields are skipped on decode, so an
 //!   older binary can read a log that carries newer optional fields.
 //! - The bytes are pinned by `tests/golden/commands.txt`.
 //!
@@ -36,6 +37,29 @@
 //!   Apply treats `EventsAppended.from_seq` as a compare-and-set on the journal end, so an input
 //!   journaled after the executor's last flush makes the Suspend fail (no lost wake-up).
 //!
+//! # Phase 5 additions (plan 05-01, pre-freeze, additive)
+//!
+//! Every number below comes from `.planning/RESERVATIONS.md`; decision ids refer to
+//! `05-DECISIONS.md`.
+//!
+//! - [`Cmd`] tags 8..=12: [`SignalRun`], [`RequestCancel`], [`TerminateRun`], [`RetryRun`],
+//!   [`CompleteToken`].
+//! - [`StartRun`] fields 19..=23: `schedule_to_start_ms` (D2), `retention_ms` (D9), `retry_of`
+//!   (D1), `continued_from` (D10), `run_started`.
+//! - [`derived::Intent`] tags 7..=8: [`RegisterWait`], [`CancelWait`].
+//! - [`CompleteRun`] fields 4 `resumable` (D1) and 5 `parent_event` (D21, Phase 9 PF-F1);
+//!   [`ChildCompleted`] field 6 `event`; [`AttemptGranted`] field 3 `after_failure` (F9).
+//! - [`TerminalStatus`] 3..=5: `Terminated` (D3), `TimedOut` (D2), `ContinuedAsNew` (D10).
+//! - [`outbox_msg::Kind::StartRun`] at tag 6 (continue-as-new, D10).
+//! - Reserved timer ops ([`RESERVED_OP_MIN`]..=`u64::MAX`, [`is_reserved_op`]).
+//!
+//! **D21: submitter-encoded event bytes.** [`SignalRun::event`], [`CompleteToken::event`],
+//! [`CompleteRun::parent_event`] and [`ChildCompleted::event`] carry the [`PayloadRef`] (inline,
+//! or a blob above 256 KiB) of a **fully encoded journal event**:
+//! `[EVENT_CODEC_VER] ‖ postcard((ts_nanos, body))`, ts included, no seq (see
+//! `crate::journal`). The submitter builds them; apply stores or forwards them verbatim and never
+//! decodes them.
+//!
 //! The helpers in this module are pure and never panic on malformed input: they return errors so
 //! apply can produce deterministic `Rejected(Invalid)` outcomes.
 
@@ -56,17 +80,44 @@ pub const MAX_TENANT_LEN: usize = 128;
 /// Maximum length of [`StartRun::traceparent`], in bytes. A W3C `traceparent` is 55 bytes for
 /// version 00; the limit leaves room for future versions. Apply checks length only, not syntax.
 pub const MAX_TRACEPARENT_LEN: usize = 256;
+/// Maximum length of a signal name ([`SignalRun::name`], [`RegisterWait::name`]), in bytes.
+/// Phase 5.
+pub const MAX_SIGNAL_NAME_LEN: usize = 256;
+/// Maximum length of a human-readable reason ([`RequestCancel::reason`],
+/// [`TerminateRun::reason`]), in bytes. Phase 5.
+pub const MAX_REASON_LEN: usize = 1024;
+/// Maximum length of [`SignalRun::request_id`] (signal dedupe key, D13), in bytes. Phase 5.
+pub const MAX_REQUEST_ID_LEN: usize = 64;
+
+/// Lowest timer op id reserved for apply-owned timers. Ops in
+/// `RESERVED_OP_MIN..=u64::MAX` are never allocated to guest operations; a guest
+/// `ScheduleTimer`/`CancelTimer` intent naming one is rejected (`BadIntent`).
+pub const RESERVED_OP_MIN: u64 = u64::MAX - 15;
+/// Timer op of a delayed run start (`ready_at_ms > requested_at_ms`). Phase 2.
+pub const START_DELAY_OP: u64 = u64::MAX;
+/// Timer op of the run timeout (D2: hard stop -> `TimedOut`). Phase 5.
+pub const RUN_TIMEOUT_OP: u64 = u64::MAX - 1;
+/// Timer op of the schedule-to-start timeout (D2: initial start only). Phase 5.
+pub const SCHEDULE_TO_START_OP: u64 = u64::MAX - 2;
+/// Timer op of terminal-run retention expiry (D9). Phase 5.
+pub const EXPIRE_OP: u64 = u64::MAX - 3;
+
+/// Whether `op` lies in the apply-owned reserved timer range ([`RESERVED_OP_MIN`]..=`u64::MAX`).
+pub const fn is_reserved_op(op: u64) -> bool {
+    op >= RESERVED_OP_MIN
+}
 
 /// One partition command (an element of an envelope's `cmds`).
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Command {
     /// The command variant. `None` only for malformed/empty input (apply rejects it as invalid).
-    /// Tags 8..=63 are reserved for future variants.
-    #[prost(oneof = "Cmd", tags = "1, 2, 3, 4, 5, 6, 7")]
+    /// Tags 13..=63 are reserved for future variants (`.planning/RESERVATIONS.md` §1).
+    #[prost(oneof = "Cmd", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
     pub cmd: Option<Cmd>,
 }
 
 /// Command variants. Tags are frozen.
+// RESERVATIONS.md: reserved P6 = 13..19, P7 = 20..26, P8 = 27..33, P9 = 34..40.
 // StartRun grew past the other variants with the Phase 4 fields (plan 04-09). Boxing it would
 // change the variant type every submitter and apply match pins; commands are short-lived, so the
 // size gap is accepted (same trade-off as `derived::Intent`).
@@ -94,6 +145,21 @@ pub enum Cmd {
     /// The target acknowledged outbox messages up to a sequence number.
     #[prost(message, tag = "7")]
     OutboxTruncated(OutboxTruncated),
+    /// Deliver a named signal to a run (Phase 5, D13/D21).
+    #[prost(message, tag = "8")]
+    SignalRun(SignalRun),
+    /// Request graceful cancellation of a run (Phase 5).
+    #[prost(message, tag = "9")]
+    RequestCancel(RequestCancel),
+    /// Hard-stop a run as `Terminated` (Phase 5, D3).
+    #[prost(message, tag = "10")]
+    TerminateRun(TerminateRun),
+    /// Retry a terminal run, in place or as a new linked run (Phase 5, D1).
+    #[prost(message, tag = "11")]
+    RetryRun(RetryRun),
+    /// Complete an await token (Phase 5, D21).
+    #[prost(message, tag = "12")]
+    CompleteToken(CompleteToken),
 }
 
 /// A new leader epoch.
@@ -130,6 +196,14 @@ pub enum TerminalStatus {
     Failed = 1,
     /// Cancelled.
     Cancelled = 2,
+    /// Hard-stopped by an operator (D3). Set by apply only, never by a `CompleteRun` intent.
+    Terminated = 3,
+    /// Run timeout or schedule-to-start timeout (D2). Set by apply only.
+    TimedOut = 4,
+    /// The run continued as a new run (D10); its successor is started via
+    /// [`outbox_msg::Kind::StartRun`].
+    ContinuedAsNew = 5,
+    // RESERVATIONS.md: reserved P7 = 6..9, P9 = 10..11.
 }
 
 /// Start a run.
@@ -194,6 +268,27 @@ pub struct StartRun {
     /// `RunStarted.deadline`. Phase 4.
     #[prost(uint64, tag = "18")]
     pub run_timeout_ms: u64,
+    /// Schedule-to-start timeout in ms (0 = none). Applies to the initial start only: a run
+    /// never granted within it ends `TimedOut` with reason `schedule_to_start` (D2). Phase 5.
+    #[prost(uint64, tag = "19")]
+    pub schedule_to_start_ms: u64,
+    /// Retention of the terminal run in ms (0 = keep forever), resolved by the submitter
+    /// (request > WorkflowPolicy > QueuePolicy > config, D9). Phase 5.
+    #[prost(uint64, tag = "20")]
+    pub retention_ms: u64,
+    /// Run id (18 bytes) of the run this run retries as a new linked run (D1; empty = none).
+    /// Phase 5.
+    #[prost(bytes = "vec", tag = "21")]
+    pub retry_of: Vec<u8>,
+    /// Run id (18 bytes) of the predecessor this run continues (continue-as-new, D10;
+    /// empty = none). Phase 5.
+    #[prost(bytes = "vec", tag = "22")]
+    pub continued_from: Vec<u8>,
+    /// The run's `RunStarted` journal event (seq 0) when encoded by the submitter (D21 style;
+    /// `None` = apply/executor builds it). Phase 5.
+    #[prost(message, optional, tag = "23")]
+    pub run_started: Option<JournalEvent>,
+    // RESERVATIONS.md: reserved P6 = 24..27, P7 = 28..31, P8 = 32..35, P9 = 36..39.
 }
 
 /// A parent run and the operation that started the child.
@@ -245,6 +340,10 @@ pub struct AttemptGranted {
     /// The granted fencing token.
     #[prost(message, optional, tag = "2")]
     pub token: Option<AttemptTokenMsg>,
+    /// True when this grant follows a retryable attempt failure; apply then increments the
+    /// durable `RunRecord.attempt_failures` (pre-freeze F9). Phase 5.
+    #[prost(bool, tag = "3")]
+    pub after_failure: bool,
 }
 
 /// An opaque journal event. `kind` and `payload` semantics are owned by Phase 3.
@@ -285,13 +384,14 @@ pub struct EventsAppended {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Derived {
     /// The intent.
-    #[prost(oneof = "derived::Intent", tags = "1, 2, 3, 4, 5, 6")]
+    #[prost(oneof = "derived::Intent", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     pub intent: Option<derived::Intent>,
 }
 
 /// Oneof variants of [`Derived`].
 pub mod derived {
     /// A storage intent.
+    // RESERVATIONS.md: reserved P6 = 9..12, P7 = 13..16, P8 = 17..18, P9 = 19..22.
     // SendMessage embeds an OutboxMsg (~280 bytes). Boxing it would change the field type the
     // interface pins; intents are short-lived, so the size gap is accepted.
     #[allow(clippy::large_enum_variant)]
@@ -315,6 +415,12 @@ pub mod derived {
         /// The run waits for an input: Running -> Scheduled, guarded by `from_seq` (Phase 4).
         #[prost(message, tag = "6")]
         Suspend(super::Suspend),
+        /// Register a signal or await-token wait (Phase 5).
+        #[prost(message, tag = "7")]
+        RegisterWait(super::RegisterWait),
+        /// Cancel a registered wait (Phase 5).
+        #[prost(message, tag = "8")]
+        CancelWait(super::CancelWait),
     }
 }
 
@@ -330,6 +436,68 @@ impl Derived {
     pub fn suspend() -> Self {
         Self::new(derived::Intent::Suspend(Suspend {}))
     }
+
+    /// A [`RegisterWait`] intent.
+    pub fn register_wait(
+        op: u64,
+        kind: WaitKind,
+        name: impl Into<String>,
+        timeout_due_ms: u64,
+        at_ms: u64,
+    ) -> Self {
+        Self::new(derived::Intent::RegisterWait(RegisterWait {
+            op,
+            kind: kind as i32,
+            name: name.into(),
+            timeout_due_ms,
+            at_ms,
+        }))
+    }
+
+    /// A [`CancelWait`] intent.
+    pub fn cancel_wait(op: u64) -> Self {
+        Self::new(derived::Intent::CancelWait(CancelWait { op }))
+    }
+}
+
+/// What a [`RegisterWait`] waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum WaitKind {
+    /// A named signal (`SignalWaitStarted`).
+    Signal = 0,
+    /// An await-token completion (`AwaitTokenCreated`).
+    Token = 1,
+}
+
+/// Register a wait for operation `op` (Phase 5). Apply records it in the waits keyspace; a
+/// buffered signal with the same name matches it immediately (apply journals `SignalMatched`).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RegisterWait {
+    /// Operation id.
+    #[prost(uint64, tag = "1")]
+    pub op: u64,
+    /// Wait kind.
+    #[prost(enumeration = "WaitKind", tag = "2")]
+    pub kind: i32,
+    /// Signal name (empty for tokens), at most [`MAX_SIGNAL_NAME_LEN`] bytes.
+    #[prost(string, tag = "3")]
+    pub name: String,
+    /// Due time of the wait timeout in ms (0 = none); fires as `WaitTimedOut` (D4).
+    #[prost(uint64, tag = "4")]
+    pub timeout_due_ms: u64,
+    /// Timestamp (ms) of the `SignalWaitStarted`/`AwaitTokenCreated` event. Apply uses it as
+    /// the ts of the `SignalMatched` event it writes on a match at registration (D21).
+    #[prost(uint64, tag = "5")]
+    pub at_ms: u64,
+}
+
+/// Cancel the wait of operation `op` (Phase 5).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CancelWait {
+    /// Operation id.
+    #[prost(uint64, tag = "1")]
+    pub op: u64,
 }
 
 /// Suspend the run until an input arrives (plan 04-09). Must be the last intent of an
@@ -389,6 +557,14 @@ pub struct CompleteRun {
     /// Completion time (ms), set by the submitter.
     #[prost(uint64, tag = "3")]
     pub completed_at_ms: u64,
+    /// The run may be retried in place (resume-in-place, D1): an executor-level failure
+    /// rather than a guest terminal event. Phase 5.
+    #[prost(bool, tag = "4")]
+    pub resumable: bool,
+    /// Submitter-encoded `ChildCompleted` (kind 67) journal event bytes for the parent (D21,
+    /// Phase 9 PF-F1). Apply forwards them verbatim in [`ChildCompleted::event`]. Phase 5.
+    #[prost(message, optional, tag = "5")]
+    pub parent_event: Option<PayloadRef>,
 }
 
 /// A durable timer fired.
@@ -413,13 +589,16 @@ pub struct TimerFired {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct OutboxMsg {
     /// The message kind.
-    #[prost(oneof = "outbox_msg::Kind", tags = "1, 2, 3, 4, 5")]
+    #[prost(oneof = "outbox_msg::Kind", tags = "1, 2, 3, 4, 5, 6")]
     pub kind: Option<outbox_msg::Kind>,
 }
 
 /// Oneof variants of [`OutboxMsg`].
 pub mod outbox_msg {
     /// Outbox message kind.
+    // RESERVATIONS.md: reserved P6 = 7, P7 = 8..9, P8 = 10, P9 = 11..12.
+    // StartRun is large; boxing would change the variant type every match pins (see `Cmd`).
+    #[allow(clippy::large_enum_variant)]
     #[derive(Clone, PartialEq, prost::Oneof)]
     pub enum Kind {
         /// Start a child run (target = the child's partition).
@@ -437,6 +616,10 @@ pub mod outbox_msg {
         /// Start a run for a cron firing (target = the new run's partition).
         #[prost(message, tag = "5")]
         CronStart(super::CronStart),
+        /// Start a successor run (continue-as-new, D10; target = the new run's partition).
+        /// Phase 5.
+        #[prost(message, tag = "6")]
+        StartRun(super::StartRun),
     }
 }
 
@@ -466,6 +649,10 @@ pub struct ChildCompleted {
     /// Child result.
     #[prost(message, optional, tag = "5")]
     pub result: Option<PayloadRef>,
+    /// Submitter-encoded `ChildCompleted` (kind 67) journal event bytes for the parent, copied
+    /// verbatim from [`CompleteRun::parent_event`] (D21, Phase 9 PF-F1). Phase 5.
+    #[prost(message, optional, tag = "6")]
+    pub event: Option<PayloadRef>,
 }
 
 /// Deliver a named signal to a run.
@@ -477,7 +664,8 @@ pub struct Signal {
     /// Signal name.
     #[prost(string, tag = "2")]
     pub name: String,
-    /// Signal payload.
+    /// From Phase 5 on (D21): the encoded `SignalPayload` (kind 96) journal event bytes,
+    /// built by the sender. Inbound delivery follows the [`SignalRun`] path.
     #[prost(message, optional, tag = "3")]
     pub payload: Option<PayloadRef>,
 }
@@ -540,6 +728,84 @@ pub struct OutboxTruncated {
     pub upto_seq: u64,
 }
 
+/// Deliver a named signal to a run (Phase 5, `Cmd` tag 8).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct SignalRun {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// Signal name, at most [`MAX_SIGNAL_NAME_LEN`] bytes.
+    #[prost(string, tag = "2")]
+    pub name: String,
+    /// D21: the PayloadRef of the fully encoded `SignalPayload{name, payload}` (kind 96)
+    /// journal event bytes, ts included, no seq. Apply journals them verbatim, never decodes.
+    #[prost(message, optional, tag = "3")]
+    pub event: Option<PayloadRef>,
+    /// Dedupe key (D13; empty = none), at most [`MAX_REQUEST_ID_LEN`] bytes.
+    #[prost(bytes = "vec", tag = "4")]
+    pub request_id: Vec<u8>,
+    /// Time the signal was sent (ms), set by the submitter.
+    #[prost(uint64, tag = "5")]
+    pub sent_at_ms: u64,
+}
+
+/// Request graceful cancellation of a run (Phase 5, `Cmd` tag 9).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RequestCancel {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// Human-readable reason, at most [`MAX_REASON_LEN`] bytes.
+    #[prost(string, tag = "2")]
+    pub reason: String,
+    /// Request time (ms), set by the submitter.
+    #[prost(uint64, tag = "3")]
+    pub requested_at_ms: u64,
+}
+
+/// Hard-stop a run as `Terminated` (Phase 5, `Cmd` tag 10, D3).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct TerminateRun {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// Human-readable reason, at most [`MAX_REASON_LEN`] bytes.
+    #[prost(string, tag = "2")]
+    pub reason: String,
+    /// Termination time (ms), set by the submitter.
+    #[prost(uint64, tag = "3")]
+    pub terminated_at_ms: u64,
+}
+
+/// Retry a terminal run (Phase 5, `Cmd` tag 11, D1).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RetryRun {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// Request time (ms), set by the submitter.
+    #[prost(uint64, tag = "2")]
+    pub requested_at_ms: u64,
+}
+
+/// Complete an await token (Phase 5, `Cmd` tag 12).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CompleteToken {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// The token's operation id, repeated so apply can validate without decoding `event`.
+    #[prost(uint64, tag = "2")]
+    pub op: u64,
+    /// D21: the PayloadRef of the fully encoded `TokenCompleted{op, payload}` (kind 68)
+    /// journal event bytes, ts included, no seq, built by the submitter (the API).
+    #[prost(message, optional, tag = "3")]
+    pub event: Option<PayloadRef>,
+    /// Completion time (ms), set by the submitter.
+    #[prost(uint64, tag = "4")]
+    pub completed_at_ms: u64,
+}
+
 /// Encode a command to its frozen protobuf bytes.
 pub fn encode_command(c: &Command) -> Bytes {
     Bytes::from(c.encode_to_vec())
@@ -595,6 +861,31 @@ impl Command {
         Self::of(Cmd::OutboxTruncated(t))
     }
 
+    /// `SignalRun` (Phase 5).
+    pub fn signal_run(s: SignalRun) -> Self {
+        Self::of(Cmd::SignalRun(s))
+    }
+
+    /// `RequestCancel` (Phase 5).
+    pub fn request_cancel(r: RequestCancel) -> Self {
+        Self::of(Cmd::RequestCancel(r))
+    }
+
+    /// `TerminateRun` (Phase 5).
+    pub fn terminate_run(t: TerminateRun) -> Self {
+        Self::of(Cmd::TerminateRun(t))
+    }
+
+    /// `RetryRun` (Phase 5).
+    pub fn retry_run(r: RetryRun) -> Self {
+        Self::of(Cmd::RetryRun(r))
+    }
+
+    /// `CompleteToken` (Phase 5).
+    pub fn complete_token(c: CompleteToken) -> Self {
+        Self::of(Cmd::CompleteToken(c))
+    }
+
     /// Variant name (for logs and metrics); `"None"` for an empty command.
     pub fn kind_name(&self) -> &'static str {
         match &self.cmd {
@@ -606,6 +897,11 @@ impl Command {
             Some(Cmd::TimerFired(_)) => "TimerFired",
             Some(Cmd::InboundBatch(_)) => "InboundBatch",
             Some(Cmd::OutboxTruncated(_)) => "OutboxTruncated",
+            Some(Cmd::SignalRun(_)) => "SignalRun",
+            Some(Cmd::RequestCancel(_)) => "RequestCancel",
+            Some(Cmd::TerminateRun(_)) => "TerminateRun",
+            Some(Cmd::RetryRun(_)) => "RetryRun",
+            Some(Cmd::CompleteToken(_)) => "CompleteToken",
         }
     }
 }
@@ -619,6 +915,13 @@ impl OutboxMsg {
             })),
         }
     }
+
+    /// A `StartRun` message (continue-as-new successor, Phase 5).
+    pub fn start_run(start: StartRun) -> Self {
+        Self {
+            kind: Some(outbox_msg::Kind::StartRun(start)),
+        }
+    }
 }
 
 /// A required message field is absent (e.g. an [`EventsAppended`] without a token).
@@ -630,6 +933,83 @@ pub struct MissingField(pub &'static str);
 /// `IdError::BadLength(0)`.
 fn parse_run_id(b: &[u8]) -> Result<RunId, IdError> {
     RunId::from_bytes(b)
+}
+
+/// A Phase 5 command field exceeds its documented length limit (apply reports
+/// `InvalidCode::FieldTooLong`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("field `{field}` is longer than {max} bytes")]
+pub struct FieldTooLong {
+    /// Field name.
+    pub field: &'static str,
+    /// The limit, in bytes.
+    pub max: usize,
+}
+
+fn check_len(field: &'static str, len: usize, max: usize) -> Result<(), FieldTooLong> {
+    if len > max {
+        Err(FieldTooLong { field, max })
+    } else {
+        Ok(())
+    }
+}
+
+impl SignalRun {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+
+    /// Checks `name` ≤ [`MAX_SIGNAL_NAME_LEN`] and `request_id` ≤ [`MAX_REQUEST_ID_LEN`].
+    pub fn check_limits(&self) -> Result<(), FieldTooLong> {
+        check_len("name", self.name.len(), MAX_SIGNAL_NAME_LEN)?;
+        check_len("request_id", self.request_id.len(), MAX_REQUEST_ID_LEN)
+    }
+}
+
+impl RequestCancel {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+
+    /// Checks `reason` ≤ [`MAX_REASON_LEN`].
+    pub fn check_limits(&self) -> Result<(), FieldTooLong> {
+        check_len("reason", self.reason.len(), MAX_REASON_LEN)
+    }
+}
+
+impl TerminateRun {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+
+    /// Checks `reason` ≤ [`MAX_REASON_LEN`].
+    pub fn check_limits(&self) -> Result<(), FieldTooLong> {
+        check_len("reason", self.reason.len(), MAX_REASON_LEN)
+    }
+}
+
+impl RetryRun {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+}
+
+impl CompleteToken {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+}
+
+impl RegisterWait {
+    /// Checks `name` ≤ [`MAX_SIGNAL_NAME_LEN`].
+    pub fn check_limits(&self) -> Result<(), FieldTooLong> {
+        check_len("name", self.name.len(), MAX_SIGNAL_NAME_LEN)
+    }
 }
 
 impl StartRun {
@@ -678,7 +1058,7 @@ impl EventsAppended {
 
 impl OutboxMsg {
     /// The partition this message must be delivered to, read from the embedded run id (no lookup):
-    /// `StartChild`/`CronStart` -> the new run, `ChildCompleted` -> the parent, `Signal`/`CancelRun`
+    /// `StartChild`/`CronStart`/`StartRun` -> the new run, `ChildCompleted` -> the parent, `Signal`/`CancelRun`
     /// -> the target run. A missing kind or nested start counts as an empty run id
     /// (`IdError::BadLength(0)`).
     pub fn target_partition(&self) -> Result<PartitionId, IdError> {
@@ -690,6 +1070,7 @@ impl OutboxMsg {
             None => &[],
             Some(Kind::StartChild(c)) => start_id(&c.start),
             Some(Kind::CronStart(c)) => start_id(&c.start),
+            Some(Kind::StartRun(s)) => &s.run_id,
             Some(Kind::ChildCompleted(c)) => &c.parent_run,
             Some(Kind::Signal(s)) => &s.target_run,
             Some(Kind::CancelRun(c)) => &c.target_run,

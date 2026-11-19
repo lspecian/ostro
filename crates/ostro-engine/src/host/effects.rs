@@ -131,6 +131,18 @@ impl HostState {
             EventBody::SignalReceived(s) => Ok(OpOutput::Signal(s.payload.clone())),
             EventBody::TokenCompleted(t) => Ok(OpOutput::Token(t.payload.clone())),
             EventBody::CancelRequested(_) => Ok(OpOutput::CancelRequested),
+            // D4: a timed-out signal/token wait completes with Err(timeout). Tests: 05-03.
+            EventBody::WaitTimedOut(_) => Err(Failure::Timeout),
+            // Phase 5: implemented in 05-03 (completion = payload of the SignalPayload event at
+            // `payload_seq`). Until then a SignalMatched completion is a bad journal.
+            EventBody::SignalMatched(m) => {
+                return Err(violation(format!(
+                    "bad journal: signal-matched op {op} (payload seq {}) is not supported yet",
+                    m.payload_seq
+                )));
+            }
+            // RunTerminated and SignalPayload are non-completing (completes_op() = None) and
+            // fall through to the error below like every other non-input event.
             other => {
                 return Err(violation(format!(
                     "bad journal: {} is not a completion",

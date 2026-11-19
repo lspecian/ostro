@@ -40,8 +40,9 @@ pub use outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
 
 use crate::store::{ApplyBatch, StoreError};
 
-/// Timer op reserved for a delayed run start (`ready_at_ms > requested_at_ms`).
-pub const START_DELAY_OP: u64 = u64::MAX;
+/// Timer op reserved for a delayed run start (`ready_at_ms > requested_at_ms`). Defined next
+/// to the other reserved timer ops in `ostro_types::command` (plan 05-01); same value.
+pub use ostro_types::command::START_DELAY_OP;
 
 /// One step of the rolling hash:
 /// `blake3(prev ‖ off.0.to_le_bytes() ‖ [code] ‖ cmd_bytes)`.
@@ -123,6 +124,15 @@ fn dispatch(
         Cmd::TimerFired(t) => timer::apply_timer_fired(b, cur, t, actions),
         Cmd::InboundBatch(ib) => inbound::apply_inbound_batch(b, cur, ib, actions),
         Cmd::OutboxTruncated(t) => outbox::apply_outbox_truncated(b, cur, t),
+        // Phase 5: implemented in 05-08 (SignalRun, RequestCancel, CompleteToken) and 05-09
+        // (TerminateRun, RetryRun). Rejected until then.
+        Cmd::SignalRun(_)
+        | Cmd::RequestCancel(_)
+        | Cmd::TerminateRun(_)
+        | Cmd::RetryRun(_)
+        | Cmd::CompleteToken(_) => Ok(ApplyOutcome::Rejected(RejectReason::Invalid(
+            InvalidCode::BadIntent,
+        ))),
     }
 }
 

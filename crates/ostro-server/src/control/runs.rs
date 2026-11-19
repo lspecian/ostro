@@ -265,6 +265,14 @@ pub(crate) async fn start_run(
         tenant: req.tenant.unwrap_or_default(),
         traceparent: req.traceparent.unwrap_or_default(),
         run_timeout_ms: wf.run_timeout_ms.unwrap_or(0),
+        // Phase 5 fields (05-01 contract): schedule-to-start comes with the start request in
+        // 05-13, retention is resolved in 05-11; retry/continue-as-new links are set by
+        // 05-09/05-11, never by a plain start.
+        schedule_to_start_ms: 0,
+        retention_ms: 0,
+        retry_of: Vec::new(),
+        continued_from: Vec::new(),
+        run_started: None,
     };
     let outcome = handle
         .submit_one(Command::start_run(start))

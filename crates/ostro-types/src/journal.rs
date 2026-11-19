@@ -38,6 +38,22 @@
 //! re-blessed. Bump the version only when an existing kind's encoding changes. Example:
 //! [`EventKind::StepAttemptFailed`] (29, plan 04-04, step retry WF-02).
 //!
+//! # Phase 5 kinds (plan 05-01; codes from `.planning/RESERVATIONS.md` §4)
+//!
+//! - [`EventKind::WaitTimedOut`] (70, D4): a signal/token wait timed out; completes its op
+//!   with `Err(Failure::Timeout)`. Encoded by apply.
+//! - [`EventKind::RunTerminated`] (71, D3): history marker of a hard stop (`Terminated`, or
+//!   `TimedOut` with reason `run_timeout`/`schedule_to_start`). Non-completing; apply-encoded.
+//! - [`EventKind::SignalPayload`] (96, D21): a delivered signal's name and payload, encoded by
+//!   the **submitter** and journaled verbatim by apply. Non-completing on its own.
+//! - [`EventKind::SignalMatched`] (97, D21): apply matched a wait `op` with the signal at
+//!   `payload_seq`; carries no user data. The op completes with the payload of the
+//!   `SignalPayload` event at `payload_seq`.
+//!
+//! [`EventKind::SignalReceived`] (66) stays decodable for old journals, but Phase 5+ apply
+//! never produces it (D21: the matched op is chosen in apply, so the submitter cannot
+//! pre-encode it).
+//!
 //! # Command hash (v1, [`HASH_VER`])
 //!
 //! `command_hash = sha256(b"ostro/cmd" ‖ [hash_ver] ‖ [CommandKind as u8] ‖ canonical_args)[..16]`.
@@ -316,6 +332,16 @@ pub enum EventKind {
     ChildCompleted = 67,
     TokenCompleted = 68,
     CancelRequested = 69,
+    /// A wait timed out (D4, Phase 5).
+    WaitTimedOut = 70,
+    /// A run was hard-stopped (D3, Phase 5).
+    RunTerminated = 71,
+    // RESERVATIONS.md: reserved P6 = 72..79, P7 = 80..87, P8 = 88..95.
+    /// A delivered signal, submitter-encoded (D21, Phase 5).
+    SignalPayload = 96,
+    /// Apply matched a wait with a journaled signal (D21, Phase 5).
+    SignalMatched = 97,
+    // RESERVATIONS.md: reserved P9 = 98..105.
 }
 
 impl EventKind {
@@ -487,6 +513,34 @@ pub struct CancelRequested {
     pub reason: String,
 }
 
+/// A signal/token wait timed out (kind 70, D4). Completes `op` with `Err(Failure::Timeout)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaitTimedOut {
+    pub op: OpId,
+}
+
+/// History marker of a hard stop (kind 71, D3); never completes an op.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RunTerminated {
+    pub reason: String,
+}
+
+/// A delivered signal (kind 96, D21). Encoded by the submitter, journaled verbatim by apply;
+/// never completes an op on its own (see [`SignalMatched`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SignalPayload {
+    pub name: String,
+    pub payload: Payload,
+}
+
+/// Apply matched wait `op` with the [`SignalPayload`] event at `payload_seq` (kind 97, D21).
+/// Carries no user data; the op's completion payload is read from that event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SignalMatched {
+    pub op: OpId,
+    pub payload_seq: u64,
+}
+
 /// Body of a journal event; one variant per [`EventKind`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EventBody {
@@ -512,6 +566,12 @@ pub enum EventBody {
     CancelRequested(CancelRequested),
     // Appended after the original Phase 3 variants (additive, see module docs).
     StepAttemptFailed(StepAttemptFailed),
+    // Phase 5 (plan 05-01), appended in this order. RESERVATIONS.md: P6 = 72..79,
+    // P7 = 80..87, P8 = 88..95, P9 = 98..105.
+    WaitTimedOut(WaitTimedOut),
+    RunTerminated(RunTerminated),
+    SignalPayload(SignalPayload),
+    SignalMatched(SignalMatched),
 }
 
 impl EventBody {
@@ -539,6 +599,10 @@ impl EventBody {
             Self::TokenCompleted(_) => EventKind::TokenCompleted,
             Self::CancelRequested(_) => EventKind::CancelRequested,
             Self::StepAttemptFailed(_) => EventKind::StepAttemptFailed,
+            Self::WaitTimedOut(_) => EventKind::WaitTimedOut,
+            Self::RunTerminated(_) => EventKind::RunTerminated,
+            Self::SignalPayload(_) => EventKind::SignalPayload,
+            Self::SignalMatched(_) => EventKind::SignalMatched,
         }
     }
 
@@ -570,13 +634,20 @@ impl EventBody {
             | Self::SignalReceived(_)
             | Self::ChildCompleted(_)
             | Self::TokenCompleted(_)
-            | Self::CancelRequested(_) => None,
+            | Self::CancelRequested(_)
+            | Self::WaitTimedOut(_)
+            | Self::RunTerminated(_)
+            | Self::SignalPayload(_)
+            | Self::SignalMatched(_) => None,
         }
     }
 
     /// The op an input event completes (`CancelRequested` completes [`CANCELLATION_OP`]).
+    /// `RunTerminated` and `SignalPayload` complete nothing.
     pub fn completes_op(&self) -> Option<OpId> {
         match self {
+            Self::WaitTimedOut(e) => Some(e.op),
+            Self::SignalMatched(e) => Some(e.op),
             Self::TimerFired(e) => Some(e.op),
             Self::EffectCompleted(e) => Some(e.op),
             Self::SignalReceived(e) => Some(e.op),
@@ -620,6 +691,12 @@ impl EventBody {
             Self::CancelRequested(_) => "cancel requested".to_string(),
             Self::StepAttemptFailed(e) => {
                 format!("step {:?} attempt {} failed", e.name, e.attempt)
+            }
+            Self::WaitTimedOut(e) => format!("wait timed out op {}", e.op),
+            Self::RunTerminated(e) => format!("run terminated ({:?})", e.reason),
+            Self::SignalPayload(e) => format!("signal payload {:?}", e.name),
+            Self::SignalMatched(e) => {
+                format!("signal matched op {} (payload seq {})", e.op, e.payload_seq)
             }
         }
     }
@@ -767,6 +844,10 @@ impl EventKind {
             67 => Self::ChildCompleted,
             68 => Self::TokenCompleted,
             69 => Self::CancelRequested,
+            70 => Self::WaitTimedOut,
+            71 => Self::RunTerminated,
+            96 => Self::SignalPayload,
+            97 => Self::SignalMatched,
             _ => return None,
         })
     }
@@ -821,6 +902,10 @@ pub fn encode_event(ev: &Event) -> (u32, Vec<u8>) {
         EventBody::TokenCompleted(p) => enc(ts, p),
         EventBody::CancelRequested(p) => enc(ts, p),
         EventBody::StepAttemptFailed(p) => enc(ts, p),
+        EventBody::WaitTimedOut(p) => enc(ts, p),
+        EventBody::RunTerminated(p) => enc(ts, p),
+        EventBody::SignalPayload(p) => enc(ts, p),
+        EventBody::SignalMatched(p) => enc(ts, p),
     };
     (ev.body.kind().code(), bytes)
 }
@@ -863,6 +948,10 @@ pub fn decode_event(seq: u64, kind: u32, bytes: &[u8]) -> Result<Event, CodecErr
         EventKind::TokenCompleted => dec(rest, EventBody::TokenCompleted),
         EventKind::CancelRequested => dec(rest, EventBody::CancelRequested),
         EventKind::StepAttemptFailed => dec(rest, EventBody::StepAttemptFailed),
+        EventKind::WaitTimedOut => dec(rest, EventBody::WaitTimedOut),
+        EventKind::RunTerminated => dec(rest, EventBody::RunTerminated),
+        EventKind::SignalPayload => dec(rest, EventBody::SignalPayload),
+        EventKind::SignalMatched => dec(rest, EventBody::SignalMatched),
     }?;
     Ok(Event {
         seq,
@@ -1299,13 +1388,37 @@ mod tests {
                 }),
                 EventKind::StepAttemptFailed,
             ),
+            (
+                EventBody::WaitTimedOut(WaitTimedOut { op: 3 }),
+                EventKind::WaitTimedOut,
+            ),
+            (
+                EventBody::RunTerminated(RunTerminated {
+                    reason: "ops".into(),
+                }),
+                EventKind::RunTerminated,
+            ),
+            (
+                EventBody::SignalPayload(SignalPayload {
+                    name: "approve".into(),
+                    payload: payload(),
+                }),
+                EventKind::SignalPayload,
+            ),
+            (
+                EventBody::SignalMatched(SignalMatched {
+                    op: 4,
+                    payload_seq: 7,
+                }),
+                EventKind::SignalMatched,
+            ),
         ]
     }
 
     #[test]
     fn kind_round_trips_for_every_variant() {
         let bodies = all_bodies();
-        assert_eq!(bodies.len(), 21);
+        assert_eq!(bodies.len(), 25);
         for (body, kind) in &bodies {
             assert_eq!(body.kind(), *kind);
         }
@@ -1320,13 +1433,19 @@ mod tests {
                 (16..=29).contains(&code),
                 "code {code}"
             );
-            assert_eq!(body.completes_op().is_some(), (64..=69).contains(&code));
+            // Inputs 64..=70 and SignalMatched (97) complete an op; RunTerminated (71) and
+            // SignalPayload (96) do not.
+            assert_eq!(
+                body.completes_op().is_some(),
+                (64..=70).contains(&code) || code == 97,
+                "code {code}"
+            );
         }
     }
 
     #[test]
     fn event_kind_codes_are_pinned() {
-        let expected: [(EventKind, u32); 21] = [
+        let expected: [(EventKind, u32); 25] = [
             (EventKind::RunStarted, 1),
             (EventKind::StepCompleted, 16),
             (EventKind::TimerStarted, 17),
@@ -1348,7 +1467,14 @@ mod tests {
             (EventKind::ChildCompleted, 67),
             (EventKind::TokenCompleted, 68),
             (EventKind::CancelRequested, 69),
+            (EventKind::WaitTimedOut, 70),
+            (EventKind::RunTerminated, 71),
+            (EventKind::SignalPayload, 96),
+            (EventKind::SignalMatched, 97),
         ];
+        for (kind, code) in expected {
+            assert_eq!(EventKind::from_code(code), Some(kind), "{kind:?}");
+        }
         for (kind, code) in expected {
             assert_eq!(kind as u32, code, "{kind:?}");
         }

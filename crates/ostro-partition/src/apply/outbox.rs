@@ -32,6 +32,7 @@ pub(crate) fn msg_oversize(msg: &OutboxMsg) -> bool {
         None | Some(Kind::CancelRun(_)) => false,
         Some(Kind::StartChild(c)) => c.start.as_ref().is_some_and(|s| big(&s.input)),
         Some(Kind::CronStart(c)) => c.start.as_ref().is_some_and(|s| big(&s.input)),
+        Some(Kind::StartRun(s)) => big(&s.input),
         Some(Kind::ChildCompleted(c)) => big(&c.result),
         Some(Kind::Signal(s)) => big(&s.payload),
     }
