@@ -22,8 +22,8 @@
 
 use ostro_types::journal::{
     AwaitTokenCreated, CANCELLATION_OP, ChildStarted, CommandArgs, CommandHash, CommandKind,
-    CommandMeta, EffectRequest, EffectScheduled, EventBody, EventKind, Failure, HASH_VER,
-    OpCancelled, OpId, OpOutput, SignalWaitStarted, TimerStarted, command_args, decode_result,
+    CommandMeta, EffectRequest, EffectScheduled, EventBody, EventKind, HASH_VER, OpCancelled, OpId,
+    SignalWaitStarted, TimerStarted, command_args,
 };
 
 use crate::error::{Evict, EvictReason, Fenced};
@@ -111,45 +111,12 @@ impl HostState {
         })
     }
 
-    /// Build the guest-visible completion of a resolved op from its journaled input.
+    /// Build the guest-visible completion of a resolved op from its journaled
+    /// completion event (rules in `replay::wait`: first completion wins, `OpCancelled`
+    /// → `Err(cancelled)`, `WaitTimedOut` → `Err(timeout)`, `SignalMatched` → the payload
+    /// of the referenced `SignalPayload`). A bad journal traps as a protocol violation.
     fn completion(&self, op: OpId) -> wasmtime::Result<Completion> {
-        let ev = self.replay.completion_for(op).ok_or_else(|| {
-            violation(format!(
-                "bad journal: resolved op {op} has no completion event"
-            ))
-        })?;
-        let bad = |e| {
-            violation(format!(
-                "bad journal: outcome of op {op} at seq {}: {e:?}",
-                ev.seq
-            ))
-        };
-        let outcome: Result<OpOutput, Failure> = match &ev.body {
-            EventBody::TimerFired(_) => Ok(OpOutput::Timer),
-            EventBody::EffectCompleted(c) => decode_result(&c.outcome).map_err(bad)?,
-            EventBody::ChildCompleted(c) => decode_result(&c.outcome).map_err(bad)?,
-            EventBody::SignalReceived(s) => Ok(OpOutput::Signal(s.payload.clone())),
-            EventBody::TokenCompleted(t) => Ok(OpOutput::Token(t.payload.clone())),
-            EventBody::CancelRequested(_) => Ok(OpOutput::CancelRequested),
-            // D4: a timed-out signal/token wait completes with Err(timeout). Tests: 05-03.
-            EventBody::WaitTimedOut(_) => Err(Failure::Timeout),
-            // Phase 5: implemented in 05-03 (completion = payload of the SignalPayload event at
-            // `payload_seq`). Until then a SignalMatched completion is a bad journal.
-            EventBody::SignalMatched(m) => {
-                return Err(violation(format!(
-                    "bad journal: signal-matched op {op} (payload seq {}) is not supported yet",
-                    m.payload_seq
-                )));
-            }
-            // RunTerminated and SignalPayload are non-completing (completes_op() = None) and
-            // fall through to the error below like every other non-input event.
-            other => {
-                return Err(violation(format!(
-                    "bad journal: {} is not a completion",
-                    other.summary()
-                )));
-            }
-        };
+        let outcome = self.replay.completion_outcome(op).map_err(trap)?;
         Ok(Completion {
             op,
             outcome: match outcome {
@@ -165,7 +132,12 @@ impl HostState {
 
     /// Whether an unsatisfied wait on `ops` may park hot: hot-wait wiring present and
     /// every still-open op (except the cancellation op) a timer due within `hot_wait`
-    /// of logical now or an in-flight effect.
+    /// of logical now or an in-flight effect (see [`hot_waitable_op`]).
+    ///
+    /// **Signal and token waits always evict** (frozen semantics, W12): an open
+    /// `wait-signal` or `create-await-token` op is never hot-waitable, whatever its
+    /// timeout, because its completion depends on an external party. Parking would hold
+    /// guest memory for an unbounded time.
     ///
     /// The node budget is deliberately not checked here: parking over budget registers
     /// this activation as the most recently parked and wakes the LRU, which evicts
@@ -185,14 +157,11 @@ impl HostState {
         if open.peek().is_none() {
             return false;
         }
-        open.all(|op| match self.replay.op_kind(op).map(|e| &e.body) {
-            Some(EventBody::TimerStarted(t)) => t.fire_at_nanos.saturating_sub(now) <= window,
-            Some(EventBody::EffectScheduled(_)) => true,
-            _ => false,
-        })
+        open.all(|op| hot_waitable_op(self.replay.op_kind(op).map(|e| &e.body), now, window))
     }
 
     /// Unsatisfied live wait: park hot if possible, else evict (`WaitUnsatisfied`).
+    /// Waits on signal or token ops always evict (see [`hot_waitable`](Self::hot_waitable)).
     async fn park_or_evict(
         &mut self,
         ops: &[OpId],
@@ -255,6 +224,19 @@ impl HostState {
                 }
             }
         }
+    }
+}
+
+/// Whether one still-open op (its scheduling event) can resolve within `window` of
+/// logical `now`: a timer due within the window or an in-flight effect. Signal waits
+/// and await tokens are never hot-waitable, with or without a timeout (W12, frozen);
+/// children and unknown ops are not either.
+fn hot_waitable_op(scheduled: Option<&EventBody>, now: u64, window: u64) -> bool {
+    match scheduled {
+        Some(EventBody::TimerStarted(t)) => t.fire_at_nanos.saturating_sub(now) <= window,
+        Some(EventBody::EffectScheduled(_)) => true,
+        Some(EventBody::SignalWaitStarted(_) | EventBody::AwaitTokenCreated(_)) => false,
+        _ => false,
     }
 }
 
@@ -600,5 +582,57 @@ pub(crate) mod convert {
             j::OpOutput::Token(p) => wit::OpOutput::Token(payload_to_wit(p)),
             j::OpOutput::CancelRequested => wit::OpOutput::CancelRequested,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ostro_types::journal::{AwaitTokenCreated, SignalWaitStarted, TimerStarted};
+
+    use super::*;
+
+    const MS: u64 = 1_000_000;
+
+    fn m() -> CommandMeta {
+        meta(CommandHash([1; 16]))
+    }
+
+    /// W12: signal and token waits always evict, whatever their timeout; timers due
+    /// within the window and in-flight effects stay hot-waitable.
+    #[test]
+    fn signal_and_token_waits_are_never_hot_waitable() {
+        let window = 2_000 * MS;
+        let now = 10_000 * MS;
+        let signal = EventBody::SignalWaitStarted(SignalWaitStarted {
+            meta: m(),
+            name: "go".into(),
+            timeout_ms: Some(1),
+        });
+        assert!(!hot_waitable_op(Some(&signal), now, window));
+        let signal_no_timeout = EventBody::SignalWaitStarted(SignalWaitStarted {
+            meta: m(),
+            name: "go".into(),
+            timeout_ms: None,
+        });
+        assert!(!hot_waitable_op(Some(&signal_no_timeout), now, window));
+        for timeout_ms in [None, Some(1)] {
+            let token = EventBody::AwaitTokenCreated(AwaitTokenCreated {
+                meta: m(),
+                token: "ot1_x".into(),
+                timeout_ms,
+            });
+            assert!(!hot_waitable_op(Some(&token), now, window));
+        }
+        let due = EventBody::TimerStarted(TimerStarted {
+            meta: m(),
+            fire_at_nanos: now + MS,
+        });
+        assert!(hot_waitable_op(Some(&due), now, window));
+        let far = EventBody::TimerStarted(TimerStarted {
+            meta: m(),
+            fire_at_nanos: now + window + 1,
+        });
+        assert!(!hot_waitable_op(Some(&far), now, window));
+        assert!(!hot_waitable_op(None, now, window));
     }
 }

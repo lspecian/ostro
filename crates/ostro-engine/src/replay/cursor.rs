@@ -13,18 +13,27 @@
 //! followed by its `StepCompleted`. [`ReplayState::begin_step`] consumes the whole chain;
 //! if the chain is not yet closed by a completion the step goes live at attempt `k + 1`,
 //! so the attempt count always comes from the journal and never resets on restart.
+//!
+//! Completion index (05-03): `completions` maps every op to the seq of the first event
+//! that completes it ([`completion_target`](super::wait::completion_target): an input
+//! with `completes_op`, or the guest's own `OpCancelled`). It is filled when the journal
+//! is loaded, in [`ReplayState::deliver_inputs`] and in every live append, so
+//! `completion_for` is a map lookup instead of a journal scan. First completion in
+//! journal order wins (D5), so later events for the same op never change it.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ostro_types::journal::{
-    CommandHash, CommandKind, CommandMeta, Event, EventBody, EventKind, HASH_VER, PatchMarker,
-    RunStarted,
+    CommandHash, CommandKind, CommandMeta, Event, EventBody, EventKind, HASH_VER, OpId,
+    PatchMarker, RunStarted,
 };
 
 use crate::env::{Clock, RandomStream};
 use crate::error::{NonDeterminism, ProtocolViolation};
 
 use super::rng::{ChaChaStream, RngStreams, insecure_seed, step_seed, uuid_v7};
+use super::wait::completion_target;
 
 const OPEN_STEP: &str = "journaled command inside an open step";
 const RUN_RETURNED: &str = "run returned";
@@ -133,6 +142,8 @@ pub struct ReplayState {
     /// across a live append and `now()` after a wait is never earlier than the input
     /// (e.g. `TimerFired`) that resolved it, whatever the node's wall clock says.
     pub(super) max_ts: u64,
+    /// Op -> seq of its first completion event (see the module doc).
+    pub(super) completions: BTreeMap<OpId, u64>,
     pub(super) clock: Arc<dyn Clock>,
 }
 
@@ -179,8 +190,15 @@ impl ReplayState {
             }
         }
         let max_ts = journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
+        let mut completions = BTreeMap::new();
+        for ev in &journal {
+            if let Some(op) = completion_target(&ev.body) {
+                completions.entry(op).or_insert(ev.seq);
+            }
+        }
         Ok(Self {
             max_ts,
+            completions,
             next_seq: journal.len() as u64,
             cursor: 1,
             pending: Vec::new(),
@@ -296,6 +314,7 @@ impl ReplayState {
             ts_nanos: ts,
             body,
         };
+        self.index_completion(&ev);
         self.journal.push(ev.clone());
         self.pending.push(ev);
         self.next_seq = seq + 1;
@@ -304,6 +323,13 @@ impl ReplayState {
         self.last_cmd_ts = ts;
         self.last_cmd_seq = seq;
         (seq, ts)
+    }
+
+    /// Record `ev` in the completion index if it completes an op not completed yet.
+    fn index_completion(&mut self, ev: &Event) {
+        if let Some(op) = completion_target(&ev.body) {
+            self.completions.entry(op).or_insert(ev.seq);
+        }
     }
 
     fn check_live_body(kind: CommandKind, body: &EventBody) -> Result<(), ReplayError> {
@@ -509,6 +535,12 @@ impl ReplayState {
 
     /// Append committed input events. They must continue `next_seq` contiguously, be
     /// input events, and arrive only when no live events are pending and no step is open.
+    ///
+    /// Input events are the completing kinds (`completes_op` is `Some`: timer fired,
+    /// effect/child/token completed, signal received/matched, wait timed out, cancel
+    /// requested) plus the apply-written kinds that complete nothing: `SignalPayload`
+    /// (96, a delivered signal that a later `SignalMatched` references, D21) and
+    /// `RunTerminated` (71, a history marker, D3). Guest commands are rejected.
     pub fn deliver_inputs(&mut self, events: Vec<Event>) -> Result<(), ReplayError> {
         if !self.pending.is_empty() {
             return Err(ReplayError::BadJournal(format!(
@@ -529,7 +561,7 @@ impl ReplayState {
                     ev.seq
                 )));
             }
-            if ev.body.completes_op().is_none() {
+            if !is_input(&ev.body) {
                 return Err(ReplayError::BadJournal(format!(
                     "delivered event {} at seq {} is not an input",
                     ev.body.summary(),
@@ -540,6 +572,9 @@ impl ReplayState {
         }
         if let Some(m) = events.iter().map(|e| e.ts_nanos).max() {
             self.max_ts = self.max_ts.max(m);
+        }
+        for ev in &events {
+            self.index_completion(ev);
         }
         self.journal.extend(events);
         self.next_seq = expect;
@@ -573,6 +608,16 @@ impl ReplayState {
     pub fn journal(&self) -> &[Event] {
         &self.journal
     }
+}
+
+/// Whether `body` may be delivered as a committed input (see
+/// [`ReplayState::deliver_inputs`]).
+fn is_input(body: &EventBody) -> bool {
+    body.completes_op().is_some()
+        || matches!(
+            body,
+            EventBody::SignalPayload(_) | EventBody::RunTerminated(_)
+        )
 }
 
 fn expected_text(ev: &Event) -> String {

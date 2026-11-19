@@ -1206,3 +1206,745 @@ fn step_closure_randomness_does_not_leak() {
     st.abandon_step(seq);
     assert_eq!(st.rng(RandomStream::CtxRandom).next_u64(), run_level(1));
 }
+
+// ---------------------------------------------------------------------------
+// Completion semantics (05-03): cancel-op, WaitTimedOut, D21 signals, index.
+// ---------------------------------------------------------------------------
+
+use ostro_types::journal::{
+    OpId, OpOutput, RunTerminated, SignalMatched, SignalPayload, SignalReceived, TokenCompleted,
+    WaitTimedOut,
+};
+
+use super::wait::completion_target;
+
+fn sig_payload(data: &[u8]) -> Payload {
+    Payload {
+        content_type: "application/json".into(),
+        data: data.to_vec(),
+    }
+}
+
+/// Live `cancel-op(op)`; returns the seq of the `OpCancelled` (or the replayed one).
+fn cancel(st: &mut ReplayState, op: OpId, hash: CommandHash) -> Result<u64, ReplayError> {
+    let actual = move || format!("cancel-op {op}");
+    match st.command(CommandKind::CancelOp, hash, &actual, |_| {
+        EventBody::OpCancelled(OpCancelled {
+            meta: meta(hash),
+            op,
+        })
+    })? {
+        CommandResult::Replayed(ev) => Ok(ev.seq),
+        CommandResult::Live { seq, .. } => Ok(seq),
+    }
+}
+
+fn outcome(st: &ReplayState, op: OpId) -> Result<OpOutput, Failure> {
+    st.completion_outcome(op).expect("well-formed completion")
+}
+
+#[test]
+fn cancelled_sleep_waited_all_is_err_cancelled() {
+    let mut st = fresh();
+    let (op, _) = cmd(&mut st, CommandKind::Sleep, h(1)).unwrap();
+    assert_eq!(cancel(&mut st, op, h(2)).unwrap(), 2);
+    assert_eq!(
+        st.wait(&[op], WaitMode::All, h(3)).unwrap(),
+        WaitOutcome::Resolved(vec![op]),
+        "a wait on a cancelled op no longer hangs"
+    );
+    assert_eq!(st.completion_seq(op), Some(2));
+    assert_eq!(outcome(&st, op), Err(Failure::Cancelled));
+    let journal = {
+        st.take_pending();
+        st.journal().to_vec()
+    };
+
+    // Replay: same result, nothing appended.
+    let mut st = replay(journal);
+    cmd(&mut st, CommandKind::Sleep, h(1)).unwrap();
+    cancel(&mut st, op, h(2)).unwrap();
+    assert_eq!(
+        st.wait(&[op], WaitMode::All, h(3)).unwrap(),
+        WaitOutcome::Resolved(vec![op])
+    );
+    assert_eq!(outcome(&st, op), Err(Failure::Cancelled));
+    assert_eq!(st.pending_len(), 0);
+}
+
+#[test]
+fn input_before_cancel_wins() {
+    // TimerFired at seq 5, OpCancelled at seq 7: the op completes Ok(timer).
+    let mut st = fresh();
+    let (op, _) = cmd(&mut st, CommandKind::Sleep, h(1)).unwrap();
+    for n in 2..=4 {
+        cmd(&mut st, CommandKind::SetStatus, h(n)).unwrap();
+    }
+    st.take_pending();
+    st.deliver_inputs(vec![timer_fired(5, op)]).unwrap();
+    cmd(&mut st, CommandKind::SetStatus, h(6)).unwrap();
+    assert_eq!(cancel(&mut st, op, h(7)).unwrap(), 7);
+    assert_eq!(st.completion_seq(op), Some(5));
+    assert_eq!(
+        st.wait(&[op], WaitMode::All, h(8)).unwrap(),
+        WaitOutcome::Resolved(vec![op])
+    );
+    assert_eq!(outcome(&st, op), Ok(OpOutput::Timer));
+}
+
+#[test]
+fn cancel_before_input_wins_and_later_input_is_ignored() {
+    // OpCancelled at seq 5, TimerFired at seq 7: Err(cancelled).
+    let mut st = fresh();
+    let (op, _) = cmd(&mut st, CommandKind::Sleep, h(1)).unwrap();
+    let (other, _) = cmd(&mut st, CommandKind::Sleep, h(2)).unwrap();
+    for n in 3..=4 {
+        cmd(&mut st, CommandKind::SetStatus, h(n)).unwrap();
+    }
+    assert_eq!(cancel(&mut st, op, h(5)).unwrap(), 5);
+    st.take_pending();
+    st.deliver_inputs(vec![timer_fired(6, other), timer_fired(7, op)])
+        .unwrap();
+    assert_eq!(st.completion_seq(op), Some(5), "the later input is ignored");
+    // Order is completion seq: the cancel (5) before the other timer (6).
+    assert_eq!(
+        st.wait(&[other, op], WaitMode::All, h(8)).unwrap(),
+        WaitOutcome::Resolved(vec![op, other])
+    );
+    assert_eq!(outcome(&st, op), Err(Failure::Cancelled));
+    assert_eq!(outcome(&st, other), Ok(OpOutput::Timer));
+}
+
+#[test]
+fn wait_timed_out_is_err_timeout_for_signal_and_token() {
+    let mut st = fresh();
+    let (sig, _) = cmd(&mut st, CommandKind::WaitSignal, h(1)).unwrap();
+    let (tok, _) = cmd(&mut st, CommandKind::CreateAwaitToken, h(2)).unwrap();
+    st.take_pending();
+    st.deliver_inputs(vec![
+        input(3, EventBody::WaitTimedOut(WaitTimedOut { op: tok })),
+        input(4, EventBody::WaitTimedOut(WaitTimedOut { op: sig })),
+    ])
+    .unwrap();
+    assert_eq!(
+        st.wait(&[sig, tok], WaitMode::All, h(3)).unwrap(),
+        WaitOutcome::Resolved(vec![tok, sig])
+    );
+    assert_eq!(outcome(&st, sig), Err(Failure::Timeout));
+    assert_eq!(outcome(&st, tok), Err(Failure::Timeout));
+}
+
+#[test]
+fn signal_matched_completes_with_referenced_payload() {
+    let mut st = fresh();
+    // A buffered signal: its payload is journaled long before the wait exists.
+    st.deliver_inputs(vec![input(
+        1,
+        EventBody::SignalPayload(SignalPayload {
+            name: "go".into(),
+            payload: sig_payload(b"\"early\""),
+        }),
+    )])
+    .unwrap();
+    for n in 2..=20 {
+        cmd(&mut st, CommandKind::SetStatus, h(n)).unwrap();
+    }
+    let (buffered, _) = cmd(&mut st, CommandKind::WaitSignal, h(21)).unwrap();
+    let (direct, _) = cmd(&mut st, CommandKind::WaitSignal, h(22)).unwrap();
+    st.take_pending();
+    let base = st.journal().len() as u64;
+    st.deliver_inputs(vec![
+        input(
+            base,
+            EventBody::SignalMatched(SignalMatched {
+                op: buffered,
+                payload_seq: 1,
+            }),
+        ),
+        input(
+            base + 1,
+            EventBody::SignalPayload(SignalPayload {
+                name: "go".into(),
+                payload: sig_payload(b"\"late\""),
+            }),
+        ),
+        input(
+            base + 2,
+            EventBody::SignalMatched(SignalMatched {
+                op: direct,
+                payload_seq: base + 1,
+            }),
+        ),
+    ])
+    .unwrap();
+    assert_eq!(
+        st.wait(&[direct, buffered], WaitMode::All, h(23)).unwrap(),
+        WaitOutcome::Resolved(vec![buffered, direct])
+    );
+    assert_eq!(
+        outcome(&st, buffered),
+        Ok(OpOutput::Signal(sig_payload(b"\"early\"")))
+    );
+    assert_eq!(
+        outcome(&st, direct),
+        Ok(OpOutput::Signal(sig_payload(b"\"late\"")))
+    );
+    // SignalPayload events never complete an op.
+    assert_eq!(st.completion_seq(1), None);
+    assert_eq!(st.completion_seq(base + 1), None);
+}
+
+#[test]
+fn signal_matched_bad_payload_seq_is_bad_journal() {
+    // Points at a non-SignalPayload event, past the journal, or at a later event.
+    for payload_seq in [1, 3, 99] {
+        let mut st = fresh();
+        let (sig, _) = cmd(&mut st, CommandKind::WaitSignal, h(1)).unwrap();
+        st.take_pending();
+        st.deliver_inputs(vec![
+            input(
+                2,
+                EventBody::SignalMatched(SignalMatched {
+                    op: sig,
+                    payload_seq,
+                }),
+            ),
+            input(
+                3,
+                EventBody::SignalPayload(SignalPayload {
+                    name: "go".into(),
+                    payload: payload(),
+                }),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            st.wait(&[sig], WaitMode::Any, h(2)).unwrap(),
+            WaitOutcome::Resolved(vec![sig])
+        );
+        let r = st.completion_outcome(sig);
+        assert!(
+            matches!(r, Err(ReplayError::BadJournal(_))),
+            "payload_seq {payload_seq}: {r:?}"
+        );
+    }
+}
+
+/// W4: SignalPayload (96) and RunTerminated (71) are accepted as non-completing
+/// inputs; SignalMatched (97) and WaitTimedOut (70) complete. Replay matches live.
+#[test]
+fn deliver_inputs_accepts_non_completing_kinds() {
+    let mut st = fresh();
+    let (sig, _) = cmd(&mut st, CommandKind::WaitSignal, h(1)).unwrap();
+    st.take_pending();
+    assert_eq!(
+        st.wait(&[sig], WaitMode::Any, h(2)).unwrap(),
+        WaitOutcome::Pending
+    );
+    st.deliver_inputs(vec![input(
+        2,
+        EventBody::SignalPayload(SignalPayload {
+            name: "go".into(),
+            payload: payload(),
+        }),
+    )])
+    .unwrap();
+    assert_eq!(
+        st.wait(&[sig], WaitMode::Any, h(2)).unwrap(),
+        WaitOutcome::Pending,
+        "a signal payload alone completes nothing"
+    );
+    st.deliver_inputs(vec![input(
+        3,
+        EventBody::RunTerminated(RunTerminated {
+            reason: "marker".into(),
+        }),
+    )])
+    .unwrap();
+    assert_eq!(
+        st.wait(&[sig], WaitMode::Any, h(2)).unwrap(),
+        WaitOutcome::Pending,
+        "a run-terminated marker completes nothing"
+    );
+    st.deliver_inputs(vec![input(
+        4,
+        EventBody::SignalMatched(SignalMatched {
+            op: sig,
+            payload_seq: 2,
+        }),
+    )])
+    .unwrap();
+    assert_eq!(
+        st.wait(&[sig], WaitMode::Any, h(2)).unwrap(),
+        WaitOutcome::Resolved(vec![sig])
+    );
+    assert_eq!(st.completion_seq(sig), Some(4));
+    let live = outcome(&st, sig);
+    assert_eq!(live, Ok(OpOutput::Signal(payload())));
+    st.take_pending();
+    let journal = st.journal().to_vec();
+
+    let mut st = replay(journal);
+    cmd(&mut st, CommandKind::WaitSignal, h(1)).unwrap();
+    assert_eq!(
+        st.wait(&[sig], WaitMode::Any, h(2)).unwrap(),
+        WaitOutcome::Resolved(vec![sig])
+    );
+    assert_eq!(outcome(&st, sig), live);
+    assert_eq!(st.pending_len(), 0);
+
+    // A guest command is still rejected as an input.
+    let mut st = fresh();
+    assert!(matches!(
+        st.deliver_inputs(vec![input(
+            1,
+            EventBody::OpCancelled(OpCancelled {
+                meta: meta(h(9)),
+                op: 1,
+            }),
+        )]),
+        Err(ReplayError::BadJournal(_))
+    ));
+}
+
+#[test]
+fn legacy_signal_received_and_token_completed_still_complete() {
+    let mut st = fresh();
+    let (sig, _) = cmd(&mut st, CommandKind::WaitSignal, h(1)).unwrap();
+    let (tok, _) = cmd(&mut st, CommandKind::CreateAwaitToken, h(2)).unwrap();
+    st.take_pending();
+    st.deliver_inputs(vec![
+        input(
+            3,
+            EventBody::SignalReceived(SignalReceived {
+                op: sig,
+                payload: sig_payload(b"1"),
+            }),
+        ),
+        input(
+            4,
+            EventBody::TokenCompleted(TokenCompleted {
+                op: tok,
+                payload: sig_payload(b"2"),
+            }),
+        ),
+    ])
+    .unwrap();
+    assert_eq!(
+        st.wait(&[tok, sig], WaitMode::All, h(3)).unwrap(),
+        WaitOutcome::Resolved(vec![sig, tok])
+    );
+    assert_eq!(outcome(&st, sig), Ok(OpOutput::Signal(sig_payload(b"1"))));
+    assert_eq!(outcome(&st, tok), Ok(OpOutput::Token(sig_payload(b"2"))));
+}
+
+/// The completion index is filled on load, on delivery and on live appends, agrees
+/// with a first-in-journal-order scan, and answers lookups without scanning: 100k
+/// lookups over a 50k-event journal take milliseconds (a scan per lookup would be
+/// billions of event visits).
+#[test]
+fn completion_index_is_a_lookup_not_a_scan() {
+    const OPS: u64 = 25_000;
+    let mut st = fresh();
+    for i in 0..OPS {
+        let hash = CommandHash((i as u128).to_le_bytes());
+        cmd(&mut st, CommandKind::Sleep, hash).unwrap();
+    }
+    st.take_pending();
+    // Fire in reverse order so most completions sit far from their op.
+    let base = st.journal().len() as u64;
+    let fires: Vec<Event> = (0..OPS).map(|k| timer_fired(base + k, OPS - k)).collect();
+    st.deliver_inputs(fires).unwrap();
+    assert_eq!(st.journal().len() as u64, 1 + 2 * OPS);
+    let journal = st.journal().to_vec();
+
+    let scan = |op: OpId| {
+        journal
+            .iter()
+            .find(|e| completion_target(&e.body) == Some(op))
+            .map(|e| e.seq)
+    };
+    for op in [1, 2, OPS / 2, OPS - 1, OPS, OPS + 1] {
+        assert_eq!(st.completion_seq(op), scan(op), "op {op}");
+    }
+
+    // Loaded from scratch: same index.
+    let loaded = replay(journal.clone());
+    let start = std::time::Instant::now();
+    let mut hits = 0u64;
+    for k in 0..100_000u64 {
+        let op = 1 + k % OPS;
+        if loaded.completion_for(op).is_some() {
+            hits += 1;
+        }
+        assert_eq!(loaded.completion_seq(op), st.completion_seq(op));
+    }
+    assert_eq!(hits, 100_000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "100k lookups took {:?}",
+        start.elapsed()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// gather_race_prop (WF-03): random ops, input interleavings, All/Any/cancel.
+// ---------------------------------------------------------------------------
+
+/// Proptest case count: 256 by default, `OSTRO_PROP_CASES` overrides.
+fn prop_cases() -> u32 {
+    std::env::var("OSTRO_PROP_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GOp {
+    Sleep,
+    Signal,
+    Token,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Fate {
+    /// Normal completion (timer fired, signal payload + match, token completed).
+    Complete,
+    /// Signal whose payload was buffered before the op existed; other kinds: Complete.
+    Buffered,
+    /// WaitTimedOut for signal/token; sleeps fire normally.
+    TimedOut,
+    /// No input ever arrives.
+    Never,
+}
+
+#[derive(Debug, Clone)]
+enum GStep {
+    Wait(WaitMode, Vec<usize>),
+    Cancel(usize),
+}
+
+/// One arrival group (apply journals a group in one batch).
+#[derive(Debug, Clone)]
+enum Arrival {
+    Fired(usize),
+    /// SignalPayload immediately followed by its SignalMatched.
+    SignalNow(usize),
+    /// SignalMatched referencing the buffered payload of op `.0`.
+    SignalBuffered(usize),
+    Token(usize),
+    TimedOut(usize),
+    /// A signal nobody waits for (never matched).
+    Noise,
+}
+
+#[derive(Debug, Clone)]
+struct GScenario {
+    ops: Vec<(GOp, Fate)>,
+    arrivals: Vec<Arrival>,
+    steps: Vec<GStep>,
+    chunks: Vec<usize>,
+    evict: Vec<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum GTrace {
+    Resolved(Vec<OpId>, Vec<Result<OpOutput, Failure>>),
+    Cancelled(OpId),
+    Stuck(usize),
+}
+
+fn g_scenario() -> impl Strategy<Value = GScenario> {
+    let op = (0..3usize, 0..4usize).prop_map(|(k, f)| {
+        (
+            [GOp::Sleep, GOp::Signal, GOp::Token][k],
+            [Fate::Complete, Fate::Buffered, Fate::TimedOut, Fate::Never][f],
+        )
+    });
+    (prop::collection::vec(op, 1..=6), any::<u64>()).prop_flat_map(|(ops, _)| {
+        let n = ops.len();
+        let step = (0..4usize, any::<u8>()).prop_map(move |(t, mask)| {
+            let mut idx: Vec<usize> = (0..n).filter(|i| mask & (1 << i) != 0).collect();
+            if idx.is_empty() {
+                idx.push(usize::from(mask) % n);
+            }
+            match t {
+                0 => GStep::Cancel(usize::from(mask) % n),
+                1 => GStep::Wait(WaitMode::All, idx),
+                _ => GStep::Wait(WaitMode::Any, idx),
+            }
+        });
+        (
+            Just(ops),
+            // Arrival order keys, stale extras (op index, key), noise keys.
+            prop::collection::vec(any::<u32>(), n),
+            prop::collection::vec((0..n, any::<u32>()), 0..3),
+            prop::collection::vec(any::<u32>(), 0..2),
+            prop::collection::vec(step, 1..10),
+            prop::collection::vec(1..=3usize, 1..4),
+            prop::collection::vec(any::<bool>(), 1..4),
+        )
+            .prop_map(|(ops, keys, extras, noise, steps, chunks, evict)| {
+                let mut keyed: Vec<(u32, Arrival)> = Vec::new();
+                for (i, (kind, fate)) in ops.iter().enumerate() {
+                    let a = match (kind, fate) {
+                        (_, Fate::Never) => continue,
+                        (GOp::Sleep, _) => Arrival::Fired(i),
+                        (GOp::Signal, Fate::Buffered) => Arrival::SignalBuffered(i),
+                        (GOp::Signal | GOp::Token, Fate::TimedOut) => Arrival::TimedOut(i),
+                        (GOp::Signal, _) => Arrival::SignalNow(i),
+                        (GOp::Token, _) => Arrival::Token(i),
+                    };
+                    keyed.push((keys[i], a));
+                }
+                // Stale duplicates: a second completion for an op (ignored by
+                // first-completion-wins, or the first one when the op had none).
+                for (i, key) in extras {
+                    let a = match ops[i].0 {
+                        GOp::Sleep => Arrival::Fired(i),
+                        GOp::Signal | GOp::Token => Arrival::TimedOut(i),
+                    };
+                    keyed.push((key, a));
+                }
+                for key in noise {
+                    keyed.push((key, Arrival::Noise));
+                }
+                keyed.sort_by_key(|(k, _)| *k);
+                GScenario {
+                    ops,
+                    arrivals: keyed.into_iter().map(|(_, a)| a).collect(),
+                    steps,
+                    chunks,
+                    evict,
+                }
+            })
+    })
+}
+
+fn g_kind(k: GOp) -> CommandKind {
+    match k {
+        GOp::Sleep => CommandKind::Sleep,
+        GOp::Signal => CommandKind::WaitSignal,
+        GOp::Token => CommandKind::CreateAwaitToken,
+    }
+}
+
+/// Buffered signal payloads journaled right after `RunStarted` (seq 1..), one per
+/// `Fate::Buffered` signal op, in op order.
+fn g_buffered(sc: &GScenario) -> Vec<usize> {
+    sc.ops
+        .iter()
+        .enumerate()
+        .filter(|(_, (k, f))| *k == GOp::Signal && *f == Fate::Buffered)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Input events of `arrival` starting at `seq`.
+fn g_events(sc: &GScenario, ids: &[OpId], arrival: &Arrival, seq: u64) -> Vec<Event> {
+    let data = |i: usize| sig_payload(format!("{i}").as_bytes());
+    match *arrival {
+        Arrival::Fired(i) => vec![timer_fired(seq, ids[i])],
+        Arrival::SignalNow(i) => vec![
+            input(
+                seq,
+                EventBody::SignalPayload(SignalPayload {
+                    name: "go".into(),
+                    payload: data(i),
+                }),
+            ),
+            input(
+                seq + 1,
+                EventBody::SignalMatched(SignalMatched {
+                    op: ids[i],
+                    payload_seq: seq,
+                }),
+            ),
+        ],
+        Arrival::SignalBuffered(i) => {
+            let pos = g_buffered(sc)
+                .iter()
+                .position(|&b| b == i)
+                .expect("buffered");
+            vec![input(
+                seq,
+                EventBody::SignalMatched(SignalMatched {
+                    op: ids[i],
+                    payload_seq: 1 + pos as u64,
+                }),
+            )]
+        }
+        Arrival::Token(i) => vec![input(
+            seq,
+            EventBody::TokenCompleted(TokenCompleted {
+                op: ids[i],
+                payload: data(i),
+            }),
+        )],
+        Arrival::TimedOut(i) => vec![input(
+            seq,
+            EventBody::WaitTimedOut(WaitTimedOut { op: ids[i] }),
+        )],
+        Arrival::Noise => vec![input(
+            seq,
+            EventBody::SignalPayload(SignalPayload {
+                name: "nobody".into(),
+                payload: payload(),
+            }),
+        )],
+    }
+}
+
+/// Delivery state shared across live restarts.
+struct GFeed {
+    next: usize,
+    chunk_i: usize,
+    evict_i: usize,
+}
+
+/// Run the scenario's guest program on `st`. `feed = None` is a pure replay (an
+/// unsatisfied wait is `Stuck`). Live: an unsatisfied wait delivers the next chunk of
+/// arrivals and either retries in place (hot) or returns `Err(())` (evict: the caller
+/// re-runs the program on a fresh state over the committed journal).
+fn g_exec(
+    sc: &GScenario,
+    st: &mut ReplayState,
+    mut feed: Option<&mut GFeed>,
+) -> Result<Vec<GTrace>, ()> {
+    let b = g_buffered(sc).len() as u64;
+    let ids: Vec<OpId> = (0..sc.ops.len() as u64).map(|i| 1 + b + i).collect();
+    for (i, (k, _)) in sc.ops.iter().enumerate() {
+        let (seq, _) = cmd(st, g_kind(*k), hash_for(i, 0xA0)).unwrap();
+        assert_eq!(seq, ids[i]);
+        st.take_pending();
+    }
+    let mut trace = Vec::new();
+    for (si, step) in sc.steps.iter().enumerate() {
+        match step {
+            GStep::Cancel(i) => {
+                cancel(st, ids[*i], hash_for(si, 0xC0)).unwrap();
+                trace.push(GTrace::Cancelled(ids[*i]));
+            }
+            GStep::Wait(mode, idx) => {
+                let ops: Vec<OpId> = idx.iter().map(|&i| ids[i]).collect();
+                loop {
+                    match st.wait(&ops, *mode, hash_for(si, 0xB0)).unwrap() {
+                        WaitOutcome::Resolved(list) => {
+                            let outs = list
+                                .iter()
+                                .map(|&op| st.completion_outcome(op).unwrap())
+                                .collect();
+                            trace.push(GTrace::Resolved(list, outs));
+                            break;
+                        }
+                        WaitOutcome::Pending => {
+                            let Some(f) = feed.as_deref_mut() else {
+                                trace.push(GTrace::Stuck(si));
+                                return Ok(trace);
+                            };
+                            if f.next >= sc.arrivals.len() {
+                                trace.push(GTrace::Stuck(si));
+                                return Ok(trace);
+                            }
+                            st.take_pending();
+                            let k = sc.chunks[f.chunk_i % sc.chunks.len()];
+                            f.chunk_i += 1;
+                            let mut evs = Vec::new();
+                            for a in &sc.arrivals[f.next..(f.next + k).min(sc.arrivals.len())] {
+                                let seq = st.journal().len() as u64 + evs.len() as u64;
+                                evs.extend(g_events(sc, &ids, a, seq));
+                            }
+                            f.next = (f.next + k).min(sc.arrivals.len());
+                            st.deliver_inputs(evs).unwrap();
+                            let ev = sc.evict[f.evict_i % sc.evict.len()];
+                            f.evict_i += 1;
+                            if ev {
+                                return Err(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    st.finish().unwrap();
+    Ok(trace)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(prop_cases()))]
+
+    /// WF-03: live (with random hot/evict re-activations) and a replay of the produced
+    /// journal give identical `WaitResolved` lists and guest-visible results; every
+    /// resolved list is in completion-seq order and every outcome comes from the first
+    /// completion of its op in journal order.
+    #[test]
+    fn gather_race_prop(sc in g_scenario()) {
+        // Buffered signal payloads arrive before any op exists.
+        let mut st = fresh();
+        let buffered: Vec<Event> = g_buffered(&sc)
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| input(
+                1 + k as u64,
+                EventBody::SignalPayload(SignalPayload {
+                    name: "go".into(),
+                    payload: sig_payload(format!("buffered-{i}").as_bytes()),
+                }),
+            ))
+            .collect();
+        st.deliver_inputs(buffered).unwrap();
+        let mut journal = st.journal().to_vec();
+
+        let mut feed = GFeed { next: 0, chunk_i: 0, evict_i: 0 };
+        let mut restarts = 0;
+        let (live_trace, live_journal) = loop {
+            let mut st = replay(journal.clone());
+            match g_exec(&sc, &mut st, Some(&mut feed)) {
+                Ok(t) => {
+                    st.take_pending();
+                    break (t, st.journal().to_vec());
+                }
+                Err(()) => {
+                    st.take_pending();
+                    journal = st.journal().to_vec();
+                    restarts += 1;
+                    prop_assert!(restarts < 1_000);
+                }
+            }
+        };
+
+        // Replay from the produced journal: identical trace, nothing appended.
+        let mut st = replay(live_journal.clone());
+        let replay_trace = g_exec(&sc, &mut st, None).unwrap();
+        prop_assert_eq!(&replay_trace, &live_trace);
+        prop_assert_eq!(st.pending_len(), 0);
+
+        // Ordering and first-completion-wins against a journal scan.
+        let first = |op: OpId| live_journal
+            .iter()
+            .find(|e| completion_target(&e.body) == Some(op))
+            .map(|e| e.seq);
+        for t in &live_trace {
+            if let GTrace::Resolved(list, outs) = t {
+                let seqs: Vec<u64> = list.iter().map(|&op| first(op).unwrap()).collect();
+                prop_assert!(seqs.windows(2).all(|w| w[0] < w[1]), "order {seqs:?}");
+                for (&op, out) in list.iter().zip(outs) {
+                    let ev = &live_journal[first(op).unwrap() as usize];
+                    let expect_err = match &ev.body {
+                        EventBody::OpCancelled(_) => Some(Failure::Cancelled),
+                        EventBody::WaitTimedOut(_) => Some(Failure::Timeout),
+                        _ => None,
+                    };
+                    match expect_err {
+                        Some(f) => prop_assert_eq!(out, &Err(f)),
+                        None => prop_assert!(out.is_ok(), "{out:?} from {:?}", ev.body),
+                    }
+                }
+            }
+        }
+        for op in 1..live_journal.len() as u64 {
+            prop_assert_eq!(st.completion_seq(op), first(op));
+        }
+    }
+}

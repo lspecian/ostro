@@ -6,10 +6,24 @@
 //! appended (the activation is evicted and resumes when inputs arrive). Replay: the next
 //! recorded guest command must be the matching `WaitResolved`, whose recorded list is
 //! returned verbatim even if more completions exist by now.
+//!
+//! Completion rules (frozen with WIT 0.1, 05-03):
+//! - An op is completed by the **first** event in journal order that targets it
+//!   ([`completion_target`]): a committed input (`completes_op`) or the guest's own
+//!   `OpCancelled{op}` command (D5). If an input completed the op at a lower seq, the
+//!   input wins and the cancel is a no-op; if the cancel came first, every later input
+//!   for that op is ignored.
+//! - `OpCancelled` → `Err(cancelled)`, `WaitTimedOut` (70) → `Err(timeout)` (D4).
+//! - `SignalMatched{op, payload_seq}` (97) → `Ok(signal(p))`, where `p` is the payload
+//!   of the `SignalPayload` (96) event at `payload_seq` (D21). `SignalPayload` alone
+//!   completes nothing. Legacy `SignalReceived` (66) still completes its op.
+//!
+//! Lookups go through the op → completion-seq index kept by the cursor, so they never
+//! scan the journal.
 
 use ostro_types::journal::{
-    CANCELLATION_OP, CommandHash, CommandKind, CommandMeta, Event, EventBody, EventKind, HASH_VER,
-    OpId, WaitMode, WaitResolved,
+    CANCELLATION_OP, CommandHash, CommandKind, CommandMeta, Event, EventBody, EventKind, Failure,
+    HASH_VER, OpId, OpOutput, Payload, WaitMode, WaitResolved, decode_result,
 };
 
 use super::cursor::{ReplayError, ReplayState, protocol};
@@ -21,6 +35,15 @@ pub enum WaitOutcome {
     Resolved(Vec<OpId>),
     /// Not satisfied yet; nothing was appended.
     Pending,
+}
+
+/// The op `body` completes, if any: an input's `completes_op`, or the op named by a
+/// guest `OpCancelled` (D5). `CancelRequested` targets [`CANCELLATION_OP`].
+pub(super) fn completion_target(body: &EventBody) -> Option<OpId> {
+    match body {
+        EventBody::OpCancelled(c) => Some(c.op),
+        other => other.completes_op(),
+    }
 }
 
 fn is_op_scheduling(kind: EventKind) -> bool {
@@ -109,12 +132,77 @@ impl ReplayState {
                 .is_some_and(|ev| is_op_scheduling(ev.body.kind()))
     }
 
-    /// The input event completing `op` (first one in journal order), or the
-    /// `CancelRequested` event for [`CANCELLATION_OP`].
+    /// The event completing `op` (the first one in journal order: an input or the
+    /// guest's `OpCancelled`), or the `CancelRequested` event for [`CANCELLATION_OP`].
+    /// O(log n) through the completion index.
     pub fn completion_for(&self, op: OpId) -> Option<&Event> {
-        self.journal
-            .iter()
-            .find(|e| e.body.completes_op() == Some(op))
+        let seq = *self.completions.get(&op)?;
+        usize::try_from(seq).ok().and_then(|i| self.journal.get(i))
+    }
+
+    /// Seq of the event completing `op` (see [`completion_for`](Self::completion_for)).
+    pub fn completion_seq(&self, op: OpId) -> Option<u64> {
+        self.completions.get(&op).copied()
+    }
+
+    /// Guest-visible outcome of the resolved `op`, built only from its journaled
+    /// completion event (see the module doc for the rules).
+    ///
+    /// A missing completion, an undecodable recorded outcome, or a `SignalMatched` whose
+    /// `payload_seq` is not an earlier `SignalPayload` event is a bad journal (the host
+    /// traps it as a protocol violation).
+    pub fn completion_outcome(&self, op: OpId) -> Result<Result<OpOutput, Failure>, ReplayError> {
+        let ev = self.completion_for(op).ok_or_else(|| {
+            ReplayError::BadJournal(format!("resolved op {op} has no completion event"))
+        })?;
+        let bad =
+            |e| ReplayError::BadJournal(format!("outcome of op {op} at seq {}: {e:?}", ev.seq));
+        Ok(match &ev.body {
+            EventBody::TimerFired(_) => Ok(OpOutput::Timer),
+            EventBody::EffectCompleted(c) => decode_result(&c.outcome).map_err(bad)?,
+            EventBody::ChildCompleted(c) => decode_result(&c.outcome).map_err(bad)?,
+            EventBody::SignalReceived(s) => Ok(OpOutput::Signal(s.payload.clone())),
+            EventBody::SignalMatched(m) => Ok(OpOutput::Signal(
+                self.signal_payload(op, ev.seq, m.payload_seq)?.clone(),
+            )),
+            EventBody::TokenCompleted(t) => Ok(OpOutput::Token(t.payload.clone())),
+            EventBody::CancelRequested(_) => Ok(OpOutput::CancelRequested),
+            EventBody::WaitTimedOut(_) => Err(Failure::Timeout),
+            EventBody::OpCancelled(_) => Err(Failure::Cancelled),
+            other => {
+                return Err(ReplayError::BadJournal(format!(
+                    "{} at seq {} is not a completion",
+                    other.summary(),
+                    ev.seq
+                )));
+            }
+        })
+    }
+
+    /// Payload of the `SignalPayload` event at `payload_seq` referenced by the
+    /// `SignalMatched` at `matched_seq` (D21). It must exist and precede the match.
+    fn signal_payload(
+        &self,
+        op: OpId,
+        matched_seq: u64,
+        payload_seq: u64,
+    ) -> Result<&Payload, ReplayError> {
+        let ev = (payload_seq < matched_seq)
+            .then(|| usize::try_from(payload_seq).ok())
+            .flatten()
+            .and_then(|i| self.journal.get(i));
+        match ev.map(|e| &e.body) {
+            Some(EventBody::SignalPayload(p)) => Ok(&p.payload),
+            Some(other) => Err(ReplayError::BadJournal(format!(
+                "signal-matched op {op} at seq {matched_seq} references {} at seq {payload_seq}, \
+                 not a signal payload",
+                other.summary()
+            ))),
+            None => Err(ReplayError::BadJournal(format!(
+                "signal-matched op {op} at seq {matched_seq} references payload seq \
+                 {payload_seq}, which is not an earlier journal event"
+            ))),
+        }
     }
 
     /// The event that scheduled `op` (op id == its seq).
