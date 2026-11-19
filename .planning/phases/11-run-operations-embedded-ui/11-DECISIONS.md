@@ -23,7 +23,7 @@ An override can be folded into any plan that has not started yet. Ordinals alrea
 | D-P11-2 | Ordinals (RESERVATIONS de4e303, P11 block) | **Cmd 45 `DlqUpdate`** (46–49 spare). **StartRun 40 `rerun_prefix`** (repeated JournalEvent) and **41 `rerun_from_seq`** (uint64), 42–43 spare. **`JournalEvent.4 attempt`** (fixed64, submitter-set, 0 = apply-originated). **InvalidCode 29 `BadRerunPrefix`, 30 `BadDlqUpdate`**, 31 spare. **Meta ext tag 144 `OnFailure`** (WorkflowPolicy, QueuePolicy) and **145 `DlqPolicy{enabled, hook_catchup_ms}`**, 146–159 spare. The derived keyspace **`x_run_index`** (the PF-11-2 rule, frozen in 05-20). Zero RejectReason, intent, journal kind, TerminalStatus, TABLES keyspace, outbox kind, meta variant or MetaCommand. If InvalidCode 29/30 sit in a declaration-index enum that needs placeholders for unclaimed lower indices (P8 22–24, P9 25–28), add `#[doc(hidden)] ReservedP8_22..` style placeholders as Phase 7 D-W18 did. | 11-02 (code), 11-18 (flip to `exists`) |
 | D-P11-3 | Rerun mechanism (OPS-02) | **A new run with a verbatim journal prefix.** `POST /v1/runs/{id}/rerun {from_seq? \| from_step:{name, occurrence?}, version: "active"\|"source"\|N (default "active"), idempotency_key?, dry_run}`. The control plane: (1) loads the source, which must be terminal (D-P11-8); (2) resolves the cut (`cut` = the seq of the first event of the chosen step's op, `1 ≤ cut ≤` the index of the terminal event; kinds 26/27/28/71 are never copied); (3) runs the cut-safety analyzer (D-P11-4); (4) **pre-allocates the new run id** and runs the mandatory replay check against the target module with that id (D-P11-5); `dry_run` stops here; (5) submits StartRun with the new id, the copied workflow/queue/tenant/tags plus the lineage tag (D-P11-6), `rng_seed` = source, `input` = source PayloadRef, `run_started` (23) = **the source seq-0 event bytes verbatim**, `rerun_prefix` (40) = events `1..cut`, `rerun_from_seq` (41) = `cut`, `retry_of` (21) = source, target `module_sha`/`workflow_version`, dedupe key `__rerun/<source>/<key>` when a key is given. Apply (only when field 40 is non-empty, so old logs are untouched) validates and journals `0..cut` verbatim and sets `next_seq = cut` and `status_seq` (kind only). Effects inside the prefix never re-run; **effects after the cut really re-execute** (documented prominently). In-place rewind, journal editing and "skip with operator result" are rejected. | 11-07 (apply, analyzer, re-arm), 11-10 (control plane), 11-16 (UI), 11-14 (CLI) |
 | D-P11-4 | Cut-safety analyzer | Pure function `ostro_server::rerun::analyze_cut(events, cut) -> Result<CutPlan, CutUnsafe{seq, reason, nearest_safe_seq}>` over decoded events. Unsafe when the prefix holds an **open** `ChildStarted` (bound to the old parent), an open `EffectScheduled` (bridge bound to the old run), an open `AwaitTokenCreated` (the token embeds the old run id), or a `SignalPayload` (96) with no `SignalMatched` (97). Open `TimerStarted` and `SignalWaitStarted` are **allowed** and re-armed (D-P11-6). `nearest_safe_seq` is the largest safe cut below the requested one (None if none). Error: 409 `details.reason = "rerun_cut_unsafe"`. | 11-07, 11-10 |
-| D-P11-5 | Mandatory replay check; `replay_check` ownership | Every rerun (not only dry runs) replays `[0, cut)` against the target module with the **new** run id, so guest code that hashed `run-info.run_id`/`module_hash` into command args is caught. Verdict `ok_frontier` (or `ok`) passes; `diverged{seq}` → 409 `details.reason = "rerun_nondeterministic", seq, detail`; `error` → 500. **Library:** `ostro_engine::replay_check` (Phase 10 D-P10-7 module path and signature: `pub async fn replay_check(rt: &Runtime, module: &Prepared, run: RunRef, journal: &[Event]) -> ReplayVerdict` with `Ok{appended}`, `OkFrontier{appended}`, `Diverged{seq, detail}`, `Error(String)`). **Whichever phase lands first creates it** (4 arguments exactly; Phase 10 drops its `terminal` parameter) by moving the 05-12 `tests/replay_corpus.rs` logic and switching that test to the library. If it exists when 11-10 starts, 11-10 reuses it unchanged; if its shape differs from the above and does not fit, 11-10 STOPS and reports. | 11-10 |
+| D-P11-5 | Mandatory replay check; `replay_check` ownership | Every rerun (not only dry runs) replays `[0, cut)` against the target module with the **new** run id, so guest code that hashed `run-info.run_id`/`module_hash` into command args is caught. Verdict `ok_frontier` (or `ok`) passes; `diverged{seq}` → 409 `details.reason = "rerun_nondeterministic", seq, detail`; `error` → 500. **Library:** `ostro_engine::replay_check` (Phase 10 D-P10-7 module path and signature: `pub async fn replay_check(rt: &Runtime, module: &PreparedModule, run: RunRef, journal: &[Event]) -> ReplayVerdict` with `Ok{appended}`, `OkFrontier{appended}`, `Diverged{seq, detail}`, `Error(String)`). **Whichever phase lands first creates it** (4 arguments exactly; Phase 10 drops its `terminal` parameter) by moving the 05-12 `tests/replay_corpus.rs` logic and switching that test to the library. If it exists when 11-10 starts, 11-10 reuses it unchanged; if its shape differs from the above and does not fit, 11-10 STOPS and reports. | 11-10 |
 | D-P11-6 | Rerun lineage and re-arm (PF-11-4 not adopted) | The rerun carries the system tag **`__ostro/rerun_from=<cut>`** in `StartRun.tags`, and `retry_of` = source. Apply's rerun path requires exactly one such tag whose value equals field 41, else `Invalid(BadRerunPrefix)`. **Re-arm trigger (durable):** on every activation where the run carries the tag and `RunRecord.next_seq == <cut>` (no live event yet), a shared `pub(crate)` pre-activation helper (`rerun::prearm`) submits `derive::rearm_unresolved(journal)` as a zero-event `EventsAppended` before the activation; both the embedded executor and Phase 7's RemoteRunner (`workers/remote_executor.rs`) call it, so worker-queue reruns re-arm too (W1). Apply's rerun path is gated on `rerun_from_seq != 0` (W14). It is idempotent: RegisterWait is idempotent (05-08) and timers are point keys. Past-due timers fire immediately (D1). **Tag capacity:** system tags (`__ostro/` prefix) count toward the existing 64-tag cap (apply's existing validation is never changed). A rerun whose copied user tags plus the lineage tag exceed 64 fails with 400 `details{limit:"tags", max:64, actual}`. Copied tags drop any older `__ostro/rerun_from=` and `__ostro/on_failure_of=` tags. The API rejects user-supplied tags starting with `__ostro/` (400). | 11-07, 11-09, 11-10 |
 | D-P11-7 | Rerun envelope bound (open question 1) | The StartRun must fit `DEFAULT_MAX_ENVELOPE_BYTES` (4 MiB). The submitter keeps existing BlobRefs and offloads any copied event payload over 1 KiB to a blob until the encoded command is ≤ 3.5 MiB. If it still does not fit: 413 `details.reason = "rerun_prefix_too_large"`. A chunked staging command (`RerunAppend`, spare Cmd 46) is a documented post-1.0 follow-up, not built. | 11-10 |
 | D-P11-8 | Running-run rerun (open question 6) | Refused: 409 `details.reason = "run_not_terminal"` ("terminate it first"). There is no `terminate+rerun` chain in v1. Reruns of child runs are **detached** (no `StartRun.parent`; the guest still sees the source's `run-info.parent`, because RunStarted is copied verbatim). Documented. | 11-10 |
@@ -56,11 +56,11 @@ An override can be folded into any plan that has not started yet. Ordinals alrea
 
 ## Shared files (cross-phase and intra-phase)
 
-Phase 11 runs in parallel with Phases 9 and 10 (Phases 7 and 8 are complete by D-P11-1). Rule for every row:
-- Before the first edit, `git status --porcelain -- <file>` must be empty, and you build on the latest HEAD.
-- Record `base=$(git rev-parse HEAD)`. Append only, with minimal hunks; never reformat or renumber.
-- If the file is dirty (another executor is mid-edit), STOP and report the contention. Do not edit around it.
-- Before committing, check `git diff --quiet "$base" HEAD -- <file>`. If another phase committed to it meanwhile, re-apply your hunk on the new HEAD content, rebuild and re-test.
+Phase 11 runs in parallel with Phases 9 and 10 (Phases 7 and 8 are complete by D-P11-1). Rule for every row (the **clean-file rule**, revised after the re-check, B1):
+- Executors **never edit the shared checkout**. All edits, builds and tests happen in the plan's own scratch worktree under `/tmp`, created from HEAD (see "Commit procedure").
+- **Stale-blob rule (Phase 10's):** the shared checkout lags behind HEAD because every agent commits through private indexes, so `git status` there shows many stale blobs. A path counts as **contention** only if its working-tree blob in the shared checkout matches **no** recent commit: check with `git hash-object <f>` against `git rev-parse <c>:<f>` for the last 20 commits touching `<f>`. A stale blob is not contention. Contention means STOP and report.
+- Record `base=$(git -C "$REPO" rev-parse HEAD)` when the worktree is created (also written to `$(git -C "$WT" rev-parse --git-dir)/p11-base` for verify commands). Append only, with minimal hunks; never reformat or renumber.
+- Before committing, check `git -C "$REPO" diff --quiet "$base" HEAD -- <file>` for each own file. If another phase committed to it meanwhile, move the worktree to the new HEAD, re-apply the hunk, rebuild and re-test before committing.
 
 | File | Phase 11 owner(s) | Phase 9 / 10 / 14 counterpart | Rule |
 |------|-------------------|-------------------------------|------|
@@ -74,7 +74,7 @@ Phase 11 runs in parallel with Phases 9 and 10 (Phases 7 and 8 are complete by D
 | `crates/ostro-partition/src/store/values.rs`, `tests/rebuild_digest.rs` | 11-08 | 09-08 (rebuild_digest generators) | Append `DlqRow` and the `gen_dlq` generator. |
 | `docs/storage-format.md` | **11-08 only** (append "Phase 11 additions") | 09 none | Append a section under the FROZEN text; never edit frozen text. |
 | `crates/ostro-engine/src/{config,lib,error,activation}.rs`, `replay/cursor.rs` | 11-02 (`run_limits` module + config field), 11-06 (checks, AttemptFailure variant), 11-10 (`replay_check` module line, only if absent) | **09-07** (config.rs, runtime.rs); **10-11** (`replay_check`) | Never concurrently with 09-07. `activation.rs`: minimal hunk. |
-| `crates/ostro-engine/tests/replay_corpus.rs` | 11-10 (switch to the library, only if 11-10 creates it) | **10-11** | First lander moves the logic; the other reuses it. |
+| `crates/ostro-engine/{src/lib.rs, src/replay_check.rs, tests/replay_corpus.rs}` | 11-02 (`lib.rs`: `pub mod run_limits;`; `tests/replay_corpus.rs`: struct-literal fix only), 11-10 (`replay_check.rs` + `lib.rs` line + corpus switch, only if absent) | **10-11** (creates `replay_check`, switches the corpus test) | Clean-file + stale-blob rules; 11-02 re-checks on the final HEAD right before committing (W-1). First lander of `replay_check` moves the logic; the other reuses it unchanged. |
 | `crates/ostro-worker-proto` `WireOutcome` | 11-06 | P7 (landed) | Append one variant last. |
 | `crates/ostro-server/src/executor.rs` | 11-06 (LimitExceeded mapping, wave 3), 11-07 (re-arm trigger, wave 4) | P9 none; **Phase 10's 10-06** (comment-only `// clock-exempt` sweep; also `control/watch.rs`) | Clean-file rule: `git status --porcelain` empty before the first edit, re-apply on a moved HEAD, keep any `// clock-exempt` annotations intact, never move the file. Different Phase 11 waves. |
 | `crates/ostro-server/src/sink.rs` | 11-07 (`JournalEvent.attempt`) | **09-05/08/13** | Minimal hunk, clean HEAD. |
@@ -87,7 +87,7 @@ Phase 11 runs in parallel with Phases 9 and 10 (Phases 7 and 8 are complete by D
 | `crates/ostro-server/src/control/{list,history,policy}.rs` | 11-11 (list.rs index branch, history.rs `attempt`), 11-12 (policy.rs `on_failure` ext tag) | — | One branch / one field each. |
 | `crates/ostro-server/src/services/mod.rs` | 11-04 (two registration lines) | P8 (landed) | Append only. |
 | `crates/ostro-api/src/**`, `crates/ostro-api/tests/{parity,openapi}.rs` + snapshot, `crates/ostro-proto/{build.rs,src/lib.rs,proto/**}` | 11-04 (`phase11.rs` contract, `ApiExtensions`/`ApiConfig` fields + literal fix-ups), **11-09** (everything else) | **10-05** | Never concurrently with 10-05. Re-bless the OpenAPI snapshot with added lines only, plus the documented `/` change; on a moved HEAD, regenerate and confirm the diff contains only Phase 11 paths/schemas. |
-| `crates/ostro-cli/src/**`, `crates/ostro-client/**`, `crates/ostro/src/main.rs` | 11-14 | **10-03** (commands/mod.rs, output.rs variants), **10-05/10-09** (client.rs → `ostro-client`), 10-02/10-10/10-16/10-18 (main.rs) | New verb modules + appended variants and one dispatch arm. If 10-09 has landed (`ostro-cli/src/client.rs` is the `pub use ostro_client::*;` shim; 10-02's empty `ostro-client` skeleton alone does not count), client methods go in a new file `crates/ostro-client/src/p11.rs` (one `lib.rs` line), never in the shim. If it has not, they go in `ostro-cli/src/client.rs` as a contiguous appended block that 10-09 moves verbatim. |
+| `crates/ostro-cli/src/**`, `crates/ostro-client/**`, `crates/ostro/src/main.rs` | 11-14 | **10-03** (commands/mod.rs, output.rs variants), **10-02** (`lib.rs`), **10-05/10-09** (client.rs → `ostro-client`), 10-02/10-10/10-16/10-18 (main.rs) | New verb modules + appended variants and one dispatch arm. If 10-09 has landed (`ostro-cli/src/client.rs` is the `pub use ostro_client::*;` shim; 10-02's empty `ostro-client` skeleton alone does not count), client methods go in a new file `crates/ostro-client/src/p11.rs` (one `lib.rs` line), never in the shim. If it has not, they go in `ostro-cli/src/client.rs` as a contiguous appended block that 10-09 moves verbatim. |
 | `crates/ostro/tests/common/mod.rs`, `crates/ostro-server/tests/common/mod.rs` | **none** | 07/08/09/10 | Phase 11 helpers in new files `tests/common/p11.rs`, included with `#[path = "common/p11.rs"] mod p11;`. |
 | `crates/ostro-ui/**` | 11-03 (skeleton), 11-15 (foundation), 11-16 (actions), 11-17 (inventory) | — | One plan per wave; `src/lib.rs` route registration is serialised 11-15 → 11-16 → 11-17. |
 | `guests/*` | 11-06 (`p11-limits`), 11-07 (`p11-rerun`, `p11-rerun-v2`), 11-12 (`p11-hook`) | 09 (`child-*`, `conf-*`, `sdk-saga`, `exports-shape-*`) | Distinct names; `guests/Cargo.toml` uses `members = ["*"]`; `guests/Cargo.lock` is gitignored. |
@@ -99,20 +99,48 @@ Phase 11 runs in parallel with Phases 9 and 10 (Phases 7 and 8 are complete by D
 
 ## Commit procedure (every plan)
 
-Executors share one working tree with Phase 9/10 executors, so commits go through a **private index** and add only the plan's own files:
+Executors share one checkout with Phase 9/10 executors. Edits, builds and tests happen in a **scratch worktree under /tmp**, never inside the repo. Commits go through a **private index** in the main checkout and add only the plan's own files (the Phase 10 procedure).
 
 ```bash
+REPO=/home/lspecian/Development/ostro
+WT=/tmp/ostro-wt-11-NN                      # once per plan; never inside $REPO
+git -C "$REPO" worktree add --detach "$WT" HEAD
+base=$(git -C "$REPO" rev-parse HEAD); echo "$base" > "$(git -C "$WT" rev-parse --git-dir)/p11-base"
+export CARGO_TARGET_DIR=/tmp/ostro-target-11-NN   # per plan, avoids lock contention between parallel plans
+# ... edit, build, test inside "$WT" (all <verify> commands run from "$WT") ...
+cd "$REPO"; for f in <own files>; do git diff --quiet "$base" HEAD -- "$f" || echo "MOVED $f"; done   # MOVED → re-apply on the new HEAD first
 idx="$(git rev-parse --git-dir)/index-11-NN"; rm -f "$idx"
 GIT_INDEX_FILE="$idx" git read-tree HEAD
-GIT_INDEX_FILE="$idx" git add -- <this task's files, listed explicitly>
-GIT_INDEX_FILE="$idx" git commit -q -F "$msgfile"   # message ends with the Co-Authored-By line
-rm -f "$idx"; git reset -q -- <the same files>       # resync the shared index for these paths only
+for f in <this task's files, listed explicitly>; do
+  if [ -e "$WT/$f" ]; then mode=100644; [ -x "$WT/$f" ] && mode=100755
+    GIT_INDEX_FILE="$idx" git update-index --add --cacheinfo "$mode,$(git hash-object -w -- "$WT/$f"),$f"
+  else GIT_INDEX_FILE="$idx" git update-index --force-remove -- "$f"; fi
+done
+GIT_INDEX_FILE="$idx" git commit -q -F "$msgfile"     # message ends with the Co-Authored-By line
+rm -f "$idx"; git reset -q -- <the same files>        # resync the shared index for these paths only
+git show --stat HEAD                                   # exactly this task's files
+# next task: git -C "$WT" checkout -q --detach "$(git -C "$REPO" rev-parse HEAD)"; refresh p11-base
+# end of plan: git -C "$REPO" worktree remove --force "$WT"
 ```
 
-- Throwaway experiments (spikes, alternative builds, the askama/maud probe, the htmx download) run in a `/tmp` scratchpad (`mktemp -d`) or a detached scratch worktree (`git worktree add --detach /tmp/ostro-11-NN-scratch HEAD`, removed afterwards with `git worktree remove`). Never in the shared tree.
-- Never `git add -A`, `git add .`, `git add -u`, `git commit -a`, `git stash`, `git checkout -- <path>` on files you do not own, or `git reset --hard`.
+- zsh does not word-split unquoted variables: use an explicit array or run the loop under `bash`.
+- The shared checkout's working tree is never written by an executor (not even `git checkout -- <path>`), so other agents' stale blobs are left alone.
+- Never `git add -A`, `git add .`, `git add -u`, `git commit -a`, `git stash` or `git reset --hard`.
 - Messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. No remotes, no pushes, tags stay local.
 - Never run gsd-tools `state advance-plan`, `roadmap update-plan-progress`, `phase complete` or `requirements mark-complete`.
+
+## Injected clock (every plan, W-2)
+
+Server and partition logic reads time only through the injected clock (`ControlCtx.clock` / `ServiceCtx.clock` / `NodeConfig.clock`, the Phase 8 seam that Phase 10's DevClock plugs into). New `SystemTime::now()`, `SystemClock`, or `Instant::now()` reads for logic are forbidden unless the line carries `// clock-exempt: <reason>` (e.g. pure latency metrics). DLQ `at_ms` values, `episode_completed_at_ms` lookups, bulk pacing (GCRA, checkpoint cadence, backoff), hook catch-up windows, rerun timestamps and limit/EXPIRE timing all come from the injected clock.
+
+- **CLOCK_GATE_SCOPED** (plans 11-04, 11-06, 11-07, 11-10, 11-12, 11-13; checks only lines this plan added, so pre-existing hits owned by other phases do not fail it; run from `$WT`):
+```bash
+base=$(cat "$(git rev-parse --git-dir)/p11-base"); hits=$(git diff -U0 "$base" -- <the plan's server/partition source files> | grep -E "^[+]" | grep -E "SystemTime::now\(|SystemClock\b|Instant::now\(" | grep -v "clock-exempt:" || test $? -eq 1); test -z "$hits" || { echo "$hits"; exit 1; }
+```
+- **CLOCK_GATE (strict, Phase 10's exact command, 11-18 only):**
+```bash
+hits=$(grep -rnE "SystemTime::now\(|SystemClock\b|Instant::now\(" crates/ostro-server/src crates/ostro-partition/src $(ls -d crates/ostro-backup/src crates/ostro-triggers/src crates/ostro-objstore/src 2>/dev/null) | grep -v "crates/ostro-partition/src/clock.rs" | grep -v "crates/ostro-server/src/devclock.rs" | grep -v "clock-exempt:" || test $? -eq 1); test -z "$hits" || { echo "$hits"; exit 1; }
+```
 
 ## Open questions → resolution
 
