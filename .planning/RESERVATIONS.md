@@ -40,7 +40,8 @@ Sources:
 | 20–26 | (unspecified) | reserved P7 |
 | 27 | ScheduleFire | reserved P8 |
 | 28–33 | spare | reserved P8 |
-| 34–63 | — | unallocated |
+| 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9 |
+| 41–63 | — | unallocated |
 
 ## 2. `StartRun` field numbers (prost)
 
@@ -56,9 +57,20 @@ Sources:
 | 24–27 | — (P6 declared 0 needs) | reserved P6 |
 | 28–31 | — | reserved P7 |
 | 32–35 | — (P8 declared 0 needs) | reserved P8 |
-| 36+ | — | unallocated |
+| 36–39 | — | reserved P9 |
+| 40+ | — | unallocated |
 
-Other message fields: each new field on any other message is owned by the plan that adds it, within its phase. Example: `CompleteRun.resumable` = 4, planned P5 (05-01). Parallel phases must not add fields to the same message without first recording the field number here.
+Other message fields: each new field on any other message is owned by the plan that adds it, within its phase. Recorded allocations:
+
+| Message.field | Item | Status |
+|---|---|---|
+| CompleteRun.4 | resumable | planned P5 (05-01) |
+| CompleteRun.5 | parent_event (submitter-encoded ChildCompleted event bytes, D21) | planned P5 (05-01), Phase 9 PF-F1 |
+| outbox ChildCompleted.6 | event (same bytes, forwarded verbatim) | planned P5 (05-01), Phase 9 PF-F1 |
+| AttemptGranted.3 | after_failure (durable attempt_failures, F9) | planned P5 (05-01) |
+| RegisterWait.5 | at_ms (D21) | planned P5 (05-01) |
+
+State value fields (positional postcard, pre-freeze only; listed for cross-phase visibility): RunRecord gains the Phase 5 fields in 05-02, plus `continued_to` (Phase 9 PF-F2), `attempt_failures`, `status_seq` and `pause` (Phase 7 F1). Parallel phases must not add fields to the same message without first recording the field number here.
 
 ## 3. `Derived` intent oneof tags (`derived::Intent`, prost tag, inside EventsAppended)
 
@@ -79,7 +91,8 @@ Other message fields: each new field on any other message is owned by the plan t
 | 11–12 | spare | reserved P6 |
 | 13–16 | — | reserved P7 |
 | 17–18 | — (P8 declared 0 needs) | reserved P8 |
-| 19+ | — | unallocated |
+| 19–22 | — (P9 fallback intent slot) | reserved P9 |
+| 23+ | — | unallocated |
 
 ## 4. Journal `EventKind` codes (`ostro_types::journal`)
 
@@ -103,7 +116,8 @@ Rules:
 | 88–95 | — (P8 declared 0 needs) | reserved P8 |
 | 96 | SignalPayload `{name, payload}`: submitter-encoded, stored verbatim (D21) | planned P5 (05-01; allocated under rule 2 from the unallocated range) |
 | 97 | SignalMatched `{op, payload_seq}`: apply-encoded, no user data (D21) | planned P5 (05-01; rule 2) |
-| 98–127 | — | unallocated |
+| 98–105 | — | reserved P9 |
+| 106–127 | — | unallocated |
 | 128+ | — | reserved (codec) |
 
 ## 5. `TerminalStatus` enum values (prost) — partition `RunStatus` mirrors are appended in the same order
@@ -115,7 +129,8 @@ Rules:
 | 4 | TimedOut | planned P5 (05-01) |
 | 5 | ContinuedAsNew | planned P5 (05-01) |
 | 6–9 | — (P6, P8 declared 0) | reserved P7 |
-| 10+ | — | unallocated |
+| 10–11 | — | reserved P9 |
+| 12+ | — | unallocated |
 
 ## 6. State keyspaces (`Table` / `TABLES`): declaration order = digest order; the on-disk keyspace name is fixed here
 
@@ -144,7 +159,8 @@ Rules:
 | 16 | schedule_state | reserved P8 (ScheduleState) |
 | 17 | p7_a | reserved P7. **Not needed if 07-RESEARCH F1 lands** (05-02 adds `RunRecord.pause`). If F1 is rejected, rename to `run_pauses` in a docs-only commit before any placeholder is declared. |
 | 18 | p7_b | reserved P7. Not needed if F1 lands. |
-| 19+ | — | unallocated |
+| 19 | p9_a | reserved P9 (placeholder rule applies) |
+| 20+ | — | unallocated |
 
 ## 7. Apply outcome `RejectReason` (outcome code = 16 + index; folded into the state hash)
 
@@ -155,7 +171,8 @@ Rules:
 | 12–14 | — (P6 declared 0 needs) | reserved P6 |
 | 15–17 | — | reserved P7 |
 | 18–19 | — (P8 declared 0) | reserved P8 |
-| 20+ | — | unallocated |
+| 20–22 | — | reserved P9 |
+| 23+ | — | unallocated |
 
 ## 8. `InvalidCode` (declaration index; reported in Rejected(Invalid) detail)
 
@@ -170,7 +187,8 @@ Rules:
 | 18–21 | — | reserved P7 |
 | 22–23 | 1–2 schedule validation codes, names chosen by 08-01 | reserved P8 |
 | 24 | spare | reserved P8 |
-| 25+ | — | unallocated |
+| 25–28 | — (P9 spare, incl. fallback) | reserved P9 |
+| 29+ | — | unallocated |
 
 ## 9. Outbox `outbox_msg::Kind` tags (prost)
 
@@ -181,7 +199,8 @@ Rules:
 | 7 | — (P6 declared 0) | reserved P6 |
 | 8–9 | — | reserved P7 |
 | 10 | — (P8 declared 0) | reserved P8 |
-| 11+ | — | unallocated |
+| 11–12 | — (11 = P9 fallback outbox kind if PF-F1 had not landed) | reserved P9 |
+| 13+ | — | unallocated |
 
 ## 10. Meta: `MetaRecord` / `MetaKind` variant index and `MetaState` map order (postcard, positional)
 
@@ -199,7 +218,8 @@ Rules (D20):
 | 17–18 | — (P6 uses existing Secret/Grant/Connection/Egress by convention: 0 needed) | reserved P6 |
 | 19–20 | — (QueueFlow / WorkflowFlow only if F2 is rejected) | reserved P7. **Not needed if 07-RESEARCH F2 lands** (05-07 puts the Phase 7 fields in QueuePolicy/WorkflowPolicy pre-freeze) |
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
-| 22+ | — | unallocated |
+| 22–23 | — | reserved P9 |
+| 24+ | — | unallocated |
 
 META_FORMAT: bumped once pre-freeze by 05-07. The value at 05-20 is the frozen baseline. Each post-freeze bump is recorded here with its phase.
 
@@ -224,3 +244,7 @@ META_FORMAT: bumped once pre-freeze by 05-07. The value at 05-20 is the frozen b
 | Crates | `ostro-objstore` (shared P6/P8, first runner creates it; D19), `ostro-bridge` | P6 / P8 |
 | Crates | `ostro-backup`, `ostro-triggers` | P8 |
 | Git tag | `wit/ostro-runtime-v0.1.0` (local) | P5 (05-20) |
+| Crate | `ostro-conformance` (SDK conformance; Phase 12's replication suite must use a different name) | P9 |
+| Failpoint prefix | `child::` | P9 |
+| Error kinds (`error-info.kind`) | `child_terminated`, `sdk_protocol`, `invalid_string` | P9 (documented in WIT by P5 05-05) |
+| SDK dirs / packages | `sdks/python`, `sdks/ts`; package name `ostro` on PyPI and npm | P9 |

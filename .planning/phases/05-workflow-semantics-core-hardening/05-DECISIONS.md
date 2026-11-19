@@ -63,6 +63,12 @@ An override that lands before 05-20 can be folded in. An override after 05-20 is
   - F9 (from Phase 4 execution, 04-16): durable `RunRecord.attempt_failures: u32`. Apply increments it on `AttemptGranted.after_failure` (new field 3, recorded in RESERVATIONS by 05-01). The executor/dispatcher decision reads it (05-11), RetryRun resets it (05-09), and GET run exposes it as the retry count (05-13). A restart test proves the limit holds.
   - F10 (from Phase 4 execution, 04-18): `RunRecord.status_seq: Option<u64>`, set by apply from the StatusPublished event kind (no payload decode). GET run reads the published status in O(1) (05-13).
   - F4: the `run-info.attempt` doc comment corrected to say it is not replay-stable and is for logging only (05-05, mirrored in the SDK README in 05-06). D14 holds.
+- **Phase 9 pre-freeze findings (09-RESEARCH PF-*, adopted 2026-11-19):**
+  - PF-F1: `CompleteRun.parent_event` (field 5) and outbox `ChildCompleted.event` (field 6) carry the submitter-encoded ChildCompleted event bytes, so child completion follows D21 (05-01 contract and goldens; 05-02 forwards verbatim). Phase 9 wires it.
+  - PF-F2: continue-as-new keeps parent linkage. The successor's `StartRun.parent` copies the predecessor's (05-11), `CompleteRun{ContinuedAsNew}` sends no ChildCompleted, `RunRecord.continued_to` is added (05-02, set in 05-09), and CancelRun/RequestCancel are forwarded along the chain (05-08). All have tests.
+  - PF-F3: attached children get a graceful cancel when the parent reaches any terminal status. WIT doc only in 05-05; Phase 9 implements it.
+  - PF-F5: Phase 9 block added to `.planning/RESERVATIONS.md`.
+  - PF-W1..W9: WIT doc comments in 05-05 Task 3 (open-step rule, `wait` semantics, op-id/bigint, UTF-8 and lone surrogates, JSON payloads, retry/fuel portability, child contract, eviction-is-a-trap and pre-init, uuid and random streams), with verify grep markers. D14 holds.
 - **Bench harness.** `crates/ostro-server/tests/perf.rs` (`#[ignore]`), with no new crate.
 - **WIT tooling.** A new dev-tool crate, `crates/ostro-witcheck`, using `wit-component =0.261.0` (feature `semver-check`) and `wit-parser =0.261.0`.
 - **CLI transport.** REST via `reqwest =0.13.5`, promoted to a normal dependency of `ostro-cli`.
