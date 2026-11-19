@@ -9,14 +9,15 @@
 //! - [`list`]: filtered, paginated run listing across partitions (API-04) (04-18).
 //! - [`names`]: the D23 tenant-id and resource-name grammar and tenant qualification
 //!   (05-24).
+//! - [`policy`]: workflow / queue run policies in meta (D9, 05-13).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ostro_api::ApiError;
 use ostro_api::domain::{
     ActivateWorkflow, ControlPlane, HistoryPage, HistoryRequest, ListRunsRequest, ModuleInfo,
-    RunInfo, RunPage, StartRunRequest, StartRunResult, UploadModule, UploadModuleResult,
+    RunInfo, RunPage, RunPolicy, StartRunRequest, StartRunResult, UploadModule, UploadModuleResult,
     WorkflowInfo,
 };
 use ostro_blob::BlobStore;
@@ -32,6 +33,7 @@ pub mod history;
 pub mod list;
 pub mod modules;
 pub mod names;
+pub mod policy;
 pub mod runs;
 
 /// Shared state behind every API call.
@@ -46,6 +48,8 @@ pub struct ServerControlPlane {
     pub(crate) cfg: Arc<ServerConfig>,
     /// Cleared when shutdown begins (`/readyz` turns 503 before the listener closes).
     pub(crate) serving: AtomicBool,
+    /// Journal rows GET run read for the published status (F10 test probe).
+    pub(crate) status_rows_read: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for ServerControlPlane {
@@ -78,7 +82,15 @@ impl ServerControlPlane {
             runtime,
             cfg,
             serving: AtomicBool::new(true),
+            status_rows_read: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Journal rows GET run has read to find published statuses (F10: one per GET of a run
+    /// that published, none otherwise). Test probe.
+    #[doc(hidden)]
+    pub fn status_rows_read(&self) -> u64 {
+        self.status_rows_read.load(Ordering::Relaxed)
     }
 
     /// The metadata handle.
@@ -158,6 +170,26 @@ impl ControlPlane for ServerControlPlane {
 
     async fn list_runs(&self, req: ListRunsRequest) -> Result<RunPage, ApiError> {
         list::list_runs(self, req).await
+    }
+
+    async fn set_workflow_policy(
+        &self,
+        workflow: String,
+        p: RunPolicy,
+    ) -> Result<RunPolicy, ApiError> {
+        policy::set_workflow_policy(self, workflow, p).await
+    }
+
+    async fn get_workflow_policy(&self, workflow: String) -> Result<RunPolicy, ApiError> {
+        policy::get_workflow_policy(self, workflow).await
+    }
+
+    async fn set_queue_policy(&self, queue: String, p: RunPolicy) -> Result<RunPolicy, ApiError> {
+        policy::set_queue_policy(self, queue, p).await
+    }
+
+    async fn get_queue_policy(&self, queue: String) -> Result<RunPolicy, ApiError> {
+        policy::get_queue_policy(self, queue).await
     }
 
     /// Serving, meta has a leader, and every partition slot is `Ready` and not failed.

@@ -514,6 +514,7 @@ impl ControlPlane for FakeControlPlane {
                 ConflictPolicy::ReturnExisting => Ok(StartRunResult {
                     run_id: existing.clone(),
                     created: false,
+                    dry_run: req.dry_run,
                 }),
                 ConflictPolicy::Reject => Err(ApiError::conflict(format!(
                     "idempotency key already used by run {existing}"
@@ -521,6 +522,32 @@ impl ControlPlane for FakeControlPlane {
                 .with_details(serde_json::json!({ "existing_run_id": existing }))),
             };
         }
+        if req.dry_run {
+            // Validated; nothing is allocated or stored (no tick).
+            return Ok(StartRunResult {
+                run_id: String::new(),
+                created: true,
+                dry_run: true,
+            });
+        }
+        // D9 resolution without a config default: request > workflow > queue policy.
+        let queue = req
+            .queue
+            .clone()
+            .or(ver.default_queue.clone())
+            .unwrap_or_else(|| "default".to_owned());
+        let wp = st.workflow_policies.get(&req.workflow).copied();
+        let qp = st.queue_policies.get(&queue).copied();
+        let retention_ms = req
+            .retention_ms
+            .filter(|v| *v > 0)
+            .or(wp.and_then(|p| p.retention_ms).filter(|v| *v > 0))
+            .or(qp.and_then(|p| p.retention_ms).filter(|v| *v > 0));
+        let schedule_to_start_ms = req
+            .schedule_to_start_ms
+            .or(wp.and_then(|p| p.schedule_to_start_ms))
+            .or(qp.and_then(|p| p.schedule_to_start_ms))
+            .filter(|v| *v > 0);
         let now = st.tick();
         st.next_run += 1;
         let run_id = format!("run-{:06}", st.next_run);
@@ -530,11 +557,7 @@ impl ControlPlane for FakeControlPlane {
             workflow: req.workflow.clone(),
             version,
             module_sha256: ver.module_sha256.clone(),
-            queue: req
-                .queue
-                .clone()
-                .or(ver.default_queue.clone())
-                .unwrap_or_else(|| "default".to_owned()),
+            queue,
             status: if delayed {
                 RunStatus::Scheduled
             } else {
@@ -551,6 +574,9 @@ impl ControlPlane for FakeControlPlane {
             published_status_json: None,
             result_json: None,
             failure: None,
+            attempt_failures: 0,
+            retention_ms,
+            schedule_to_start_ms,
         };
         let input = String::from_utf8_lossy(&req.input_json).into_owned();
         st.history.insert(
@@ -570,6 +596,7 @@ impl ControlPlane for FakeControlPlane {
         Ok(StartRunResult {
             run_id,
             created: true,
+            dry_run: false,
         })
     }
 
@@ -914,6 +941,7 @@ mod tests {
             idempotency_key: None,
             conflict_policy: ConflictPolicy::ReturnExisting,
             concurrency_key: None,
+            ..Default::default()
         }
     }
 

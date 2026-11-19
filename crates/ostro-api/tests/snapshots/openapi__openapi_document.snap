@@ -1664,6 +1664,12 @@ expression: pretty
             "description": "Current attempt.",
             "minimum": 0
           },
+          "attempt_failures": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Durable count of retryable attempt failures: the meaningful retry count\n(`attempt` counts dispatches, including resumes).",
+            "minimum": 0
+          },
           "completed_at": {
             "type": [
               "string",
@@ -1725,9 +1731,27 @@ expression: pretty
           "result": {
             "description": "Result of a completed run (embedded JSON)."
           },
+          "retention_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Resolved retention of the terminal run, ms (absent = keep forever).",
+            "minimum": 0
+          },
           "run_id": {
             "type": "string",
             "description": "Run id."
+          },
+          "schedule_to_start_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Resolved schedule-to-start timeout, ms (absent = none).",
+            "minimum": 0
           },
           "status": {
             "$ref": "#/components/schemas/RunStatusDto",
@@ -2023,6 +2047,10 @@ expression: pretty
             "description": "Delay before the run becomes ready, ms.",
             "minimum": 0
           },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only: the same checks as a real start, nothing is submitted. The response\nreports the would-be outcome (`run_id` = the existing run for a reused idempotency\nkey, else empty)."
+          },
           "idempotency_key": {
             "type": [
               "string",
@@ -2047,6 +2075,20 @@ expression: pretty
               "null"
             ],
             "description": "Queue override."
+          },
+          "retention": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Retention override for the terminal run (friendly duration in hours or smaller\nunits, e.g. `\"168h\"`; `7d` is rejected). Unset: workflow policy, queue policy, then\nthe server's `[runs] retention`."
+          },
+          "schedule_to_start_timeout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Schedule-to-start timeout override (friendly duration, e.g. `\"30s\"`; `\"0s\"` = none).\nUnset: the workflow policy, then the queue policy."
           },
           "tags": {
             "type": "array",
@@ -2092,6 +2134,10 @@ expression: pretty
           "created": {
             "type": "boolean",
             "description": "`false` when an existing run was returned."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "`true` for a dry run (omitted otherwise). A dry run returns the existing run's id\nfor a reused idempotency key, else an empty `run_id`."
           },
           "run_id": {
             "type": "string",

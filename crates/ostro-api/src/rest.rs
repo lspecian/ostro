@@ -240,6 +240,20 @@ pub struct StartRunBody {
     /// Concurrency key.
     #[serde(default)]
     pub concurrency_key: Option<String>,
+    /// Schedule-to-start timeout override (friendly duration, e.g. `"30s"`; `"0s"` = none).
+    /// Unset: the workflow policy, then the queue policy.
+    #[serde(default)]
+    pub schedule_to_start_timeout: Option<String>,
+    /// Retention override for the terminal run (friendly duration in hours or smaller
+    /// units, e.g. `"168h"`; `7d` is rejected). Unset: workflow policy, queue policy, then
+    /// the server's `[runs] retention`.
+    #[serde(default)]
+    pub retention: Option<String>,
+    /// Validate only: the same checks as a real start, nothing is submitted. The response
+    /// reports the would-be outcome (`run_id` = the existing run for a reused idempotency
+    /// key, else empty).
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 /// Start-run result.
@@ -249,6 +263,10 @@ pub struct StartRunResponse {
     pub run_id: String,
     /// `false` when an existing run was returned.
     pub created: bool,
+    /// `true` for a dry run (omitted otherwise). A dry run returns the existing run's id
+    /// for a reused idempotency key, else an empty `run_id`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
 }
 
 /// Full run view.
@@ -294,6 +312,16 @@ pub struct RunDto {
     pub result: Option<serde_json::Value>,
     /// Failure message.
     pub failure: Option<String>,
+    /// Durable count of retryable attempt failures: the meaningful retry count
+    /// (`attempt` counts dispatches, including resumes).
+    #[serde(default)]
+    pub attempt_failures: u32,
+    /// Resolved retention of the terminal run, ms (absent = keep forever).
+    #[serde(default)]
+    pub retention_ms: Option<u64>,
+    /// Resolved schedule-to-start timeout, ms (absent = none).
+    #[serde(default)]
+    pub schedule_to_start_ms: Option<u64>,
 }
 
 /// History query.
@@ -696,6 +724,9 @@ impl From<domain::RunInfo> for RunDto {
             published_status: r.published_status_json.as_deref().map(embed_json),
             result: r.result_json.as_deref().map(embed_json),
             failure: r.failure,
+            attempt_failures: r.attempt_failures,
+            retention_ms: r.retention_ms,
+            schedule_to_start_ms: r.schedule_to_start_ms,
         }
     }
 }
@@ -934,9 +965,21 @@ async fn start_run(
             idempotency_key: b.idempotency_key,
             conflict_policy: b.conflict_policy.unwrap_or_default().into(),
             concurrency_key: b.concurrency_key,
+            schedule_to_start_ms: b
+                .schedule_to_start_timeout
+                .as_deref()
+                .map(|s| parse_friendly_ms("schedule_to_start_timeout", s))
+                .transpose()?,
+            retention_ms: b
+                .retention
+                .as_deref()
+                .map(|s| parse_friendly_ms("retention", s))
+                .transpose()?,
+            dry_run: b.dry_run,
         })
         .await?;
-    let status = if res.created {
+    // A dry run never creates anything: always 200.
+    let status = if res.created && !res.dry_run {
         StatusCode::CREATED
     } else {
         StatusCode::OK
@@ -944,6 +987,7 @@ async fn start_run(
     let dto = StartRunResponse {
         run_id: res.run_id,
         created: res.created,
+        dry_run: res.dry_run,
     };
     Ok((status, Json(dto)).into_response())
 }

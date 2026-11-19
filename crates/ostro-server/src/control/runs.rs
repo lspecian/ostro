@@ -37,14 +37,26 @@
 //! dispatch). A completed run's result is its `PAYLOAD_RESULT` (the workflow's JSON output);
 //! a failed or cancelled run's result payload is the failure JSON
 //! `{"reason_code", "kind", "message"}` and is returned as the `failure` text. The published
-//! status is the latest `StatusPublished` event, found by scanning the journal backwards in
-//! pages of event kinds (only the matching event is decoded). A `status_seq` pointer on the
-//! record would make this O(1); that is a later optimisation.
+//! status is the single event at `RunRecord.status_seq` (F10): one journal row read, however
+//! long the journal is. `attempt_failures` (F9, the durable retry count), and the resolved
+//! `retention_ms` / `schedule_to_start_ms` (0 on the record = `None`) are exposed too.
+//!
+//! # Start fields (05-13)
+//!
+//! After the D23 block, retention and schedule-to-start are resolved with
+//! [`resolve_run_policy`] (request > `WorkflowPolicy` > `QueuePolicy` > `[runs]`) on the
+//! qualified workflow/queue and submitted in `StartRun.retention_ms` /
+//! `schedule_to_start_ms`. A **dry run** runs every check above (names, version, input
+//! JSON, options, policy resolution, partition availability), reads the dedupe row for an
+//! idempotency key and reports the would-be outcome (`run_id` = the existing run, or empty
+//! for a new run; 409 under `reject`); it writes no blob and submits nothing.
 
 use bytes::Bytes;
 use ostro_api::ApiError;
 use ostro_api::domain::{ConflictPolicy, RunInfo, RunStatus, StartRunRequest, StartRunResult};
 use ostro_meta::WorkflowVersion;
+use ostro_partition::store::Table;
+use ostro_partition::store::keys::dedupe_key;
 use ostro_partition::store::values::{self, RunRecord};
 use ostro_partition::{ApplyOutcome, PartitionError, RejectReason, query};
 use ostro_types::command::{
@@ -57,12 +69,10 @@ use ostro_types::{PayloadRef, RunId};
 
 use super::ServerControlPlane;
 use super::names;
+use crate::retention::{RunPolicy, resolve_run_policy};
 
 /// Queue of runs whose request and workflow name none.
 pub const DEFAULT_QUEUE: &str = "default";
-
-/// Journal rows read per page when looking for the latest `StatusPublished`.
-const STATUS_SCAN_PAGE: u64 = 64;
 
 // ---------------------------------------------------------------------------------
 // Shared helpers (also used by history / list)
@@ -108,10 +118,12 @@ pub(crate) fn map_outcome(run: RunId, o: ApplyOutcome) -> Result<StartRunResult,
         ApplyOutcome::Accepted => Ok(StartRunResult {
             run_id: run.to_string(),
             created: true,
+            dry_run: false,
         }),
         ApplyOutcome::Duplicate { existing } => Ok(StartRunResult {
             run_id: existing.unwrap_or(run).to_string(),
             created: false,
+            dry_run: false,
         }),
         ApplyOutcome::Rejected(r) => Err(reject_error(r)),
     }
@@ -245,6 +257,18 @@ pub(crate) async fn start_run(
     };
     serde_json::from_slice::<serde::de::IgnoredAny>(&req.input_json)
         .map_err(|e| ApiError::invalid_argument(format!("input: not valid JSON ({e})")))?;
+    // 05-13 start fields (after the D23 block, on the qualified locals): D9 policy
+    // resolution request > WorkflowPolicy > QueuePolicy > `[runs]`.
+    let (retention_ms, schedule_to_start_ms) = resolve_run_policy(
+        cp.meta().view(),
+        &cp.config().runs,
+        &workflow,
+        &queue,
+        RunPolicy {
+            retention_ms: req.retention_ms,
+            schedule_to_start_ms: req.schedule_to_start_ms,
+        },
+    );
 
     let count = cp.partition_count();
     let uuid = uuid::Uuid::now_v7();
@@ -253,9 +277,51 @@ pub(crate) async fn start_run(
         Some(k) => partition_for_key(&workflow, k.as_bytes(), count),
         None => partition_for_new_run(&uuid, count),
     };
-    let run = RunId::new(p, uuid);
     let handle = cp.partition(p)?;
+    let policy = match req.conflict_policy {
+        ConflictPolicy::ReturnExisting => cmd::ConflictPolicy::ReturnExisting,
+        ConflictPolicy::Reject => cmd::ConflictPolicy::Reject,
+    };
 
+    if req.dry_run {
+        // W15: same validation, the would-be idempotency outcome from the dedupe row, and
+        // nothing written (no blob, no command).
+        let existing = match &idem {
+            Some(k) => {
+                let reader = handle.reader();
+                let dk = dedupe_key(&workflow, k.as_bytes());
+                let row = tokio::task::spawn_blocking(move || reader.get(Table::Dedupe, &dk))
+                    .await
+                    .map_err(task_error)?
+                    .map_err(store_error)?;
+                row.map(|v| {
+                    RunId::from_bytes(&v)
+                        .map_err(|e| ApiError::internal(format!("dedupe row: {e}")))
+                })
+                .transpose()?
+            }
+            None => None,
+        };
+        return match existing {
+            Some(existing) => match policy {
+                cmd::ConflictPolicy::Reject => {
+                    Err(reject_error(RejectReason::IdempotencyConflict { existing }))
+                }
+                _ => Ok(StartRunResult {
+                    run_id: existing.to_string(),
+                    created: false,
+                    dry_run: true,
+                }),
+            },
+            None => Ok(StartRunResult {
+                run_id: String::new(),
+                created: true,
+                dry_run: true,
+            }),
+        };
+    }
+
+    let run = RunId::new(p, uuid);
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed)
         .map_err(|e| ApiError::internal(format!("OS random source unavailable: {e}")))?;
@@ -265,10 +331,6 @@ pub(crate) async fn start_run(
         .map_err(partition_error)?;
 
     let now = cp.now_ms();
-    let policy = match req.conflict_policy {
-        ConflictPolicy::ReturnExisting => cmd::ConflictPolicy::ReturnExisting,
-        ConflictPolicy::Reject => cmd::ConflictPolicy::Reject,
-    };
     let start = StartRun {
         run_id: run.as_bytes().to_vec(),
         workflow,
@@ -288,11 +350,10 @@ pub(crate) async fn start_run(
         tenant: tenant.unwrap_or_default(),
         traceparent: req.traceparent.unwrap_or_default(),
         run_timeout_ms: wf.run_timeout_ms.unwrap_or(0),
-        // Phase 5 fields (05-01 contract): schedule-to-start comes with the start request in
-        // 05-13, retention is resolved in 05-11; retry/continue-as-new links are set by
-        // 05-09/05-11, never by a plain start.
-        schedule_to_start_ms: 0,
-        retention_ms: 0,
+        schedule_to_start_ms,
+        retention_ms,
+        // Retry/continue-as-new links are set by the retry path (lifecycle.rs) and the
+        // continue-as-new successor (derive), never by a plain start.
         retry_of: Vec::new(),
         continued_from: Vec::new(),
         run_started: None,
@@ -308,29 +369,30 @@ pub(crate) async fn start_run(
 // Get
 // ---------------------------------------------------------------------------------
 
-/// The latest `StatusPublished` row of `run` (scanning back from `next_seq`).
-fn latest_status_row(
+/// The published-status row of `run`: the single event at `RunRecord.status_seq` (F10,
+/// set by apply from the `StatusPublished` kind), or `None` when nothing was published.
+/// `rows_read` counts the journal rows read (the F10 test probe).
+fn status_row(
     r: &ostro_partition::store::StoreReader,
     run: &RunId,
-    next_seq: u64,
+    status_seq: Option<u64>,
+    rows_read: &std::sync::atomic::AtomicU64,
 ) -> Result<Option<(u64, u32, PayloadRef)>, ostro_partition::StoreError> {
-    let code = EventKind::StatusPublished.code();
-    let mut hi = next_seq;
-    while hi > 0 {
-        let lo = hi.saturating_sub(STATUS_SCAN_PAGE);
-        let rows = query::journal_rows(r, run, lo, (hi - lo) as usize)?;
-        if let Some(row) = rows.into_iter().rev().find(|(_, k, _)| *k == code) {
-            return Ok(Some(row));
-        }
-        hi = lo;
-    }
-    Ok(None)
+    let Some(seq) = status_seq else {
+        return Ok(None);
+    };
+    let rows = query::journal_rows(r, run, seq, 1)?;
+    rows_read.fetch_add(rows.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    Ok(rows
+        .into_iter()
+        .find(|(s, k, _)| *s == seq && *k == EventKind::StatusPublished.code()))
 }
 
 pub(crate) async fn get_run(cp: &ServerControlPlane, run_id: String) -> Result<RunInfo, ApiError> {
     let run = parse_run_id(cp, &run_id)?;
     let handle = cp.partition(run.partition())?;
     let reader = handle.reader();
+    let rows_read = std::sync::Arc::clone(&cp.status_rows_read);
     let (rec, result, status_row) = tokio::task::spawn_blocking(move || {
         let Some(rec) = query::run_record(&reader, &run)? else {
             return Ok((None, None, None));
@@ -340,7 +402,7 @@ pub(crate) async fn get_run(cp: &ServerControlPlane, run_id: String) -> Result<R
         } else {
             None
         };
-        let status_row = latest_status_row(&reader, &run, rec.next_seq)?;
+        let status_row = status_row(&reader, &run, rec.status_seq, &rows_read)?;
         Ok::<_, ostro_partition::StoreError>((Some(rec), result, status_row))
     })
     .await
@@ -403,6 +465,9 @@ pub(crate) async fn get_run(cp: &ServerControlPlane, run_id: String) -> Result<R
         published_status_json,
         result_json,
         failure,
+        attempt_failures: rec.attempt_failures,
+        retention_ms: (rec.retention_ms > 0).then_some(rec.retention_ms),
+        schedule_to_start_ms: (rec.schedule_to_start_ms > 0).then_some(rec.schedule_to_start_ms),
     })
 }
 
@@ -425,7 +490,8 @@ mod tests {
             map_outcome(r, ApplyOutcome::Accepted).expect("ok"),
             StartRunResult {
                 run_id: r.to_string(),
-                created: true
+                created: true,
+                dry_run: false,
             }
         );
         assert_eq!(
@@ -438,7 +504,8 @@ mod tests {
             .expect("dup"),
             StartRunResult {
                 run_id: other.to_string(),
-                created: false
+                created: false,
+                dry_run: false,
             }
         );
         let e = map_outcome(

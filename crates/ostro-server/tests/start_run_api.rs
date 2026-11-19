@@ -2,6 +2,9 @@
 //! runs over REST and gRPC with every option, explicit and active versions, start delays,
 //! idempotency keys (return_existing / reject, across a restart), blob-offloaded inputs,
 //! request size limits, and GET with the typed JSON result and the published status.
+//! Plan 05-13: the start fields (retention, schedule-to-start, dry_run), D9 policy
+//! resolution, workflow/queue policies over both transports (persisted in meta), GET's
+//! `attempt_failures` / resolved policy fields, and the O(1) published-status read (F10).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod common;
@@ -9,8 +12,12 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{ServerOpts, TestServer, guest_wasm, server_config, tmpfs_dir};
+use ostro_partition::Table;
+use ostro_partition::store::keys::dedupe_key;
 use ostro_proto::api::v1 as pb;
 use ostro_proto::api::v1::runs_client::RunsClient;
+use ostro_proto::api::v1::workflows_client::WorkflowsClient;
+use ostro_types::{PartitionCount, RunId, partition_for_key};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -470,5 +477,405 @@ async fn grpc_start_get_and_errors() {
         .expect_err("bad id");
     assert_eq!(e.code(), Code::InvalidArgument);
 
+    s.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------
+// 05-13: start fields, policies, dry run, GET additions
+// ---------------------------------------------------------------------------------
+
+const H: u64 = 3_600_000;
+
+async fn put_policy(s: &TestServer, path: &str, body: Value) -> (StatusCode, Value) {
+    let r = s
+        .http
+        .put(s.url(path))
+        .json(&body)
+        .send()
+        .await
+        .expect("PUT policy");
+    let st = r.status();
+    (st, r.json().await.expect("json body"))
+}
+
+async fn get_path(s: &TestServer, path: &str) -> (StatusCode, Value) {
+    let r = s.http.get(s.url(path)).send().await.expect("GET");
+    let st = r.status();
+    (st, r.json().await.expect("json body"))
+}
+
+async fn run_count(s: &TestServer) -> usize {
+    let (st, body) = get_path(s, "/v1/runs?limit=1000").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    body["runs"].as_array().expect("runs").len()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn start_fields_resolve_policies_over_both_transports() {
+    let mut s = server().await;
+    deploy(&s, "sdk-basic").await;
+    let mut wf = WorkflowsClient::new(s.channel().await);
+    let mut runs = RunsClient::new(s.channel().await);
+
+    // No policy: the server default `[runs] retention` (168h), no schedule-to-start.
+    let (st, body) = start(&s, "sdk-basic", json!({"input": {"name": "p", "n": 1}})).await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let plain = body["run_id"].as_str().expect("id").to_owned();
+    let run = wait_terminal(&s, &plain, LIMIT).await;
+    assert_eq!(run["retention_ms"], json!(168 * H), "{run}");
+    assert_eq!(run["schedule_to_start_ms"], Value::Null, "{run}");
+    assert_eq!(run["attempt_failures"], json!(0), "{run}");
+
+    // Policies over REST (workflow) and gRPC (queue).
+    let (st, body) = get_path(&s, "/v1/workflows/sdk-basic/policy").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["retention_ms"], Value::Null);
+    let (st, body) = put_policy(
+        &s,
+        "/v1/workflows/sdk-basic/policy",
+        json!({"retention": "48h", "schedule_to_start_timeout": "30s"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["retention_ms"], json!(48 * H));
+    assert_eq!(body["retention"], "48h");
+    assert_eq!(body["schedule_to_start_ms"], json!(30_000));
+    let qp = wf
+        .set_queue_policy(pb::SetQueuePolicyRequest {
+            name: "q2".into(),
+            policy: Some(pb::RunPolicy {
+                retention_ms: Some(2 * H),
+                schedule_to_start_ms: None,
+            }),
+        })
+        .await
+        .expect("set queue policy")
+        .into_inner();
+    assert_eq!(qp.retention_ms, Some(2 * H));
+    let got = wf
+        .get_policy(pb::GetWorkflowPolicyRequest {
+            name: "sdk-basic".into(),
+        })
+        .await
+        .expect("get workflow policy")
+        .into_inner();
+    assert_eq!(got.retention_ms, Some(48 * H));
+    assert_eq!(got.schedule_to_start_ms, Some(30_000));
+
+    // Workflow policy beats queue policy; the request beats both.
+    let (_, body) = start(
+        &s,
+        "sdk-basic",
+        json!({"input": {"name": "w", "n": 1}, "queue": "q2"}),
+    )
+    .await;
+    let (_, run) = get(&s, body["run_id"].as_str().expect("id")).await;
+    assert_eq!(run["retention_ms"], json!(48 * H), "{run}");
+    assert_eq!(run["schedule_to_start_ms"], json!(30_000), "{run}");
+    let (_, body) = start(
+        &s,
+        "sdk-basic",
+        json!({"input": {"name": "r", "n": 1}, "retention": "1h", "schedule_to_start_timeout": "0s"}),
+    )
+    .await;
+    let (_, run) = get(&s, body["run_id"].as_str().expect("id")).await;
+    assert_eq!(run["retention_ms"], json!(H), "{run}");
+    assert_eq!(
+        run["schedule_to_start_ms"],
+        Value::Null,
+        "explicit 0 = none: {run}"
+    );
+    let res = runs
+        .start(pb::StartRunRequest {
+            workflow: "sdk-basic".into(),
+            input_json: br#"{"name":"g","n":1}"#.to_vec(),
+            retention_ms: Some(3 * H),
+            schedule_to_start_timeout_ms: Some(5_000),
+            ..Default::default()
+        })
+        .await
+        .expect("grpc start")
+        .into_inner();
+    assert!(res.created && !res.dry_run);
+    let info = runs
+        .get(pb::GetRunRequest {
+            run_id: res.run_id.clone(),
+        })
+        .await
+        .expect("get")
+        .into_inner();
+    assert_eq!(info.retention_ms, Some(3 * H));
+    assert_eq!(info.schedule_to_start_ms, Some(5_000));
+    assert_eq!(info.attempt_failures, 0);
+
+    // Clear the workflow policy: the queue policy applies.
+    let (st, _) = put_policy(&s, "/v1/workflows/sdk-basic/policy", json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, body) = start(
+        &s,
+        "sdk-basic",
+        json!({"input": {"name": "q", "n": 1}, "queue": "q2"}),
+    )
+    .await;
+    let (_, run) = get(&s, body["run_id"].as_str().expect("id")).await;
+    assert_eq!(run["retention_ms"], json!(2 * H), "{run}");
+    assert_eq!(run["schedule_to_start_ms"], Value::Null, "{run}");
+
+    // Errors: unknown workflow 404 (both verbs, both transports), bad names / durations 400.
+    let (st, body) = put_policy(&s, "/v1/workflows/nope/policy", json!({})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    let (st, body) = get_path(&s, "/v1/workflows/nope/policy").await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    let e = wf
+        .get_policy(pb::GetWorkflowPolicyRequest {
+            name: "nope".into(),
+        })
+        .await
+        .expect_err("unknown");
+    assert_eq!(e.code(), Code::NotFound);
+    let (st, body) = put_policy(&s, "/v1/queues/x:y/policy", json!({})).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    let (st, body) = put_policy(&s, "/v1/queues/q2/policy", json!({"retention": "7d"})).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    let (st, body) = start(&s, "sdk-basic", json!({"input": {}, "retention": "7d"})).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["details"]["field"], "retention");
+    let e = wf
+        .set_queue_policy(pb::SetQueuePolicyRequest {
+            name: "__z".into(),
+            policy: None,
+        })
+        .await
+        .expect_err("bad queue");
+    assert_eq!(e.code(), Code::InvalidArgument);
+
+    // Policies persist in meta across a restart.
+    s.restart().await;
+    s.wait_ready(Duration::from_secs(5)).await;
+    let (st, body) = get_path(&s, "/v1/queues/q2/policy").await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["retention_ms"], json!(2 * H));
+    let qp = s
+        .h()
+        .meta()
+        .view()
+        .read(|st| st.queue_policy("q2").map(|v| v.value.retention_ms));
+    assert_eq!(qp, Some(Some(2 * H)));
+    s.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dry_run_start_validates_and_submits_nothing() {
+    let mut s = server().await;
+    deploy(&s, "sdk-basic").await;
+    let mut runs = RunsClient::new(s.channel().await);
+    let body = json!({"input": {"name": "d", "n": 1}, "idempotency_key": "dk-1"});
+    let (st, first) = start(&s, "sdk-basic", body.clone()).await;
+    assert_eq!(st, StatusCode::CREATED, "{first}");
+    let existing = first["run_id"].as_str().expect("id").to_owned();
+    wait_terminal(&s, &existing, LIMIT).await;
+    let runs_before = run_count(&s).await;
+    let blobs_before = blob_count(&s);
+
+    // New run: 200 (never 201), dry_run, empty run id.
+    let (st, res) = start(
+        &s,
+        "sdk-basic",
+        json!({"input": {"name": "d", "n": 1}, "dry_run": true, "idempotency_key": "dk-new"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    assert_eq!(res, json!({"run_id": "", "created": true, "dry_run": true}));
+    // Existing key: the run it maps to; reject policy: 409 with the existing id.
+    let mut dry = body.clone();
+    dry["dry_run"] = json!(true);
+    let (st, res) = start(&s, "sdk-basic", dry.clone()).await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+    assert_eq!(
+        res,
+        json!({"run_id": existing, "created": false, "dry_run": true})
+    );
+    dry["conflict_policy"] = json!("reject");
+    let (st, res) = start(&s, "sdk-basic", dry).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{res}");
+    assert_eq!(res["error"]["details"]["existing_run_id"], existing);
+    // The same 400 / 404 as a real start.
+    for (wf, b, want) in [
+        ("nope", json!({"dry_run": true}), StatusCode::NOT_FOUND),
+        (
+            "sdk-basic",
+            json!({"dry_run": true, "version": 9}),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "sdk-basic",
+            json!({"dry_run": true, "tenant": "_"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "sdk-basic",
+            json!({"dry_run": true, "queue": "x:y"}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "sdk-basic",
+            json!({"dry_run": true, "retention": "7d"}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (st, res) = start(&s, wf, b.clone()).await;
+        assert_eq!(st, want, "{b}: {res}");
+    }
+    // A large input is validated but no blob is written.
+    let big = "x".repeat(300 * 1024);
+    let (st, res) = start(
+        &s,
+        "sdk-echo",
+        json!({"input": {"big": big}, "dry_run": true}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{res}");
+
+    // gRPC.
+    let r = runs
+        .start(pb::StartRunRequest {
+            workflow: "sdk-basic".into(),
+            idempotency_key: Some("dk-1".into()),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .expect("grpc dry run")
+        .into_inner();
+    assert!(r.dry_run && !r.created);
+    assert_eq!(r.run_id, existing);
+    let e = runs
+        .start(pb::StartRunRequest {
+            workflow: "sdk-basic".into(),
+            input_json: b"{bad".to_vec(),
+            dry_run: true,
+            ..Default::default()
+        })
+        .await
+        .expect_err("bad json");
+    assert_eq!(e.code(), Code::InvalidArgument);
+
+    // Nothing was created: same run list, no blob, no dedupe row for the new key.
+    assert_eq!(run_count(&s).await, runs_before);
+    assert_eq!(blob_count(&s), blobs_before);
+    let count = PartitionCount::new(ServerOpts::default().partitions).expect("count");
+    let p = partition_for_key("sdk-basic", b"dk-new", count);
+    let row = s
+        .h()
+        .node()
+        .handle(p)
+        .expect("partition")
+        .reader()
+        .get(Table::Dedupe, &dedupe_key("sdk-basic", b"dk-new"))
+        .expect("read dedupe");
+    assert!(row.is_none(), "a dry run must not write a dedupe row");
+    // ... and the key is still free for a real start.
+    let (st, res) = start(
+        &s,
+        "sdk-basic",
+        json!({"input": {"name": "d", "n": 1}, "idempotency_key": "dk-new"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{res}");
+    s.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tenant_run_completes_and_tenant_policy_applies() {
+    // 05-24 hand-off: since 05-11 strips the tenant prefix for the journal, a tenant
+    // upload + tenant start runs to completion.
+    let mut s = server().await;
+    let wasm = guest_wasm("sdk-basic");
+    let sha = sha_hex(&wasm);
+    let r = s
+        .http
+        .put(s.url(&format!("/v1/modules/{sha}?tenant=acme")))
+        .header("content-type", "application/wasm")
+        .body(wasm)
+        .send()
+        .await
+        .expect("PUT module");
+    assert!(r.status().is_success(), "{}", r.status());
+    // `acme/sdk-basic` as one path segment (%2F) addresses the tenant's policy.
+    let (st, body) = put_policy(
+        &s,
+        "/v1/workflows/acme%2Fsdk-basic/policy",
+        json!({"retention": "5h"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (st, body) = start(
+        &s,
+        "sdk-basic",
+        json!({"input": {"name": "t", "n": 2}, "tenant": "acme"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let run = wait_terminal(&s, body["run_id"].as_str().expect("id"), LIMIT).await;
+    assert_eq!(run["status"], "completed", "{run}");
+    assert_eq!(run["workflow"], "acme/sdk-basic");
+    assert_eq!(run["queue"], "acme/default");
+    assert_eq!(run["tenant"], "acme");
+    assert_eq!(run["result"], basic_result("t", 2));
+    assert_eq!(run["retention_ms"], json!(5 * H), "{run}");
+    // The default tenant's workflow of the same name has no policy (none uploaded: 404).
+    let (st, _) = get_path(&s, "/v1/workflows/sdk-basic/policy").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    s.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn get_reads_published_status_in_one_row() {
+    let mut s = server().await;
+    deploy(&s, "sdk-basic").await;
+    let wasm = guest_wasm("trivial-steps");
+    let sha = sha_hex(&wasm);
+    let r = s
+        .http
+        .put(s.url(&format!("/v1/modules/{sha}")))
+        .header("content-type", "application/wasm")
+        .body(wasm)
+        .send()
+        .await
+        .expect("PUT module");
+    assert!(r.status().is_success());
+    let reads = || s.h().control().status_rows_read();
+
+    // A run that published a status: exactly one journal row read per GET.
+    let (_, body) = start(&s, "sdk-basic", json!({"input": {"name": "s", "n": 1}})).await;
+    let id = body["run_id"].as_str().expect("id").to_owned();
+    wait_terminal(&s, &id, LIMIT).await;
+    let before = reads();
+    let (_, run) = get(&s, &id).await;
+    assert_eq!(run["published_status"], json!({"stage": "done"}));
+    assert_eq!(reads() - before, 1, "GET must read only the status_seq row");
+
+    // A ~10k-event run: GET is not a journal scan (no status = no row read at all).
+    let (_, body) = start(&s, "trivial-steps", json!({"input": {"n": 10000}})).await;
+    let id = body["run_id"].as_str().expect("id").to_owned();
+    let run = wait_terminal(&s, &id, Duration::from_secs(120)).await;
+    assert_eq!(run["status"], "completed", "{run}");
+    let rid: RunId = id.parse().expect("run id");
+    let journal = s.journal(&rid).await;
+    assert!(
+        journal.len() >= 10_000,
+        "journal has {} events",
+        journal.len()
+    );
+    let before = reads();
+    let t = Instant::now();
+    let (_, run) = get(&s, &id).await;
+    assert_eq!(run["published_status"], Value::Null);
+    assert_eq!(reads() - before, 0);
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "GET took {:?}",
+        t.elapsed()
+    );
     s.shutdown().await;
 }

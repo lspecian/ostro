@@ -190,8 +190,8 @@ pub enum ConflictPolicy {
     Reject,
 }
 
-/// Start-run request.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Start-run request. Derives `Default` so literal sites can use `..Default::default()`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StartRunRequest {
     /// Workflow name.
     pub workflow: String,
@@ -217,15 +217,27 @@ pub struct StartRunRequest {
     pub conflict_policy: ConflictPolicy,
     /// Concurrency key.
     pub concurrency_key: Option<String>,
+    /// Schedule-to-start timeout override, ms (D2/D9; `None` = resolve from the workflow
+    /// policy, then the queue policy; `Some(0)` = none).
+    pub schedule_to_start_ms: Option<u64>,
+    /// Retention override for the terminal run, ms (D9; `None` or `0` = resolve from the
+    /// workflow policy, the queue policy, then `[runs] retention`).
+    pub retention_ms: Option<u64>,
+    /// Validate only (W15): the same checks as a real start, the would-be idempotency
+    /// outcome is reported, nothing is submitted.
+    pub dry_run: bool,
 }
 
 /// Start-run outcome.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StartRunResult {
-    /// Run id.
+    /// Run id. For a dry run: the existing run an idempotency key maps to, else empty (no
+    /// id is allocated).
     pub run_id: String,
-    /// `false` when an existing run was returned.
+    /// `false` when an existing run was returned (dry run: would be returned).
     pub created: bool,
+    /// Echo of the request flag.
+    pub dry_run: bool,
 }
 
 /// Run lifecycle status.
@@ -336,6 +348,13 @@ pub struct RunInfo {
     pub result_json: Option<Vec<u8>>,
     /// Failure message of a failed run.
     pub failure: Option<String>,
+    /// Durable count of retryable attempt failures (F9): the meaningful retry count.
+    /// `attempt` counts dispatches, including resumes.
+    pub attempt_failures: u32,
+    /// Resolved retention of the terminal run, ms (`None` = keep forever).
+    pub retention_ms: Option<u64>,
+    /// Resolved schedule-to-start timeout, ms (`None` = none).
+    pub schedule_to_start_ms: Option<u64>,
 }
 
 /// History page request.

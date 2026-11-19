@@ -172,6 +172,9 @@ fn norm_run(r: &pb::RunInfo) -> Value {
         "published_status": r.published_status_json.as_deref().map(embed),
         "result": r.result_json.as_deref().map(embed),
         "failure": r.failure,
+        "attempt_failures": r.attempt_failures,
+        "retention_ms": r.retention_ms,
+        "schedule_to_start_ms": r.schedule_to_start_ms,
     })
 }
 
@@ -195,6 +198,9 @@ fn norm_run_rest(r: &Value) -> Value {
         "published_status",
         "result",
         "failure",
+        "attempt_failures",
+        "retention_ms",
+        "schedule_to_start_ms",
     ] {
         out.insert(k.to_owned(), r[k].clone());
     }
@@ -244,6 +250,10 @@ struct Start {
     tenant: Option<String>,
     idempotency_key: Option<String>,
     reject: bool,
+    /// 05-13 start fields.
+    retention_ms: Option<u64>,
+    schedule_to_start_ms: Option<u64>,
+    dry_run: bool,
 }
 
 /// Run listing arguments.
@@ -422,11 +432,18 @@ impl Client for RestClient {
                 "tenant": s.tenant,
                 "idempotency_key": s.idempotency_key,
                 "conflict_policy": if s.reject { "reject" } else { "return_existing" },
+                "retention": s.retention_ms.map(friendly_ms),
+                "schedule_to_start_timeout": s.schedule_to_start_ms.map(friendly_ms),
+                "dry_run": s.dry_run,
             });
             self.http.post(url).json(&body)
         };
         let v = self.send(req).await?;
-        Ok(json!({ "run_id": v["run_id"], "created": v["created"] }))
+        Ok(json!({
+            "run_id": v["run_id"],
+            "created": v["created"],
+            "dry_run": v.get("dry_run").cloned().unwrap_or(json!(false)),
+        }))
     }
 
     async fn get_run(&mut self, run_id: &str) -> Out {
@@ -759,11 +776,14 @@ impl Client for GrpcClient {
                 idempotency_key: s.idempotency_key,
                 conflict_policy: conflict_policy as i32,
                 concurrency_key: None,
+                schedule_to_start_timeout_ms: s.schedule_to_start_ms,
+                retention_ms: s.retention_ms,
+                dry_run: s.dry_run,
             })
             .await
             .map_err(grpc_err)?
             .into_inner();
-        Ok(json!({ "run_id": r.run_id, "created": r.created }))
+        Ok(json!({ "run_id": r.run_id, "created": r.created, "dry_run": r.dry_run }))
     }
 
     async fn get_run(&mut self, run_id: &str) -> Out {
@@ -1098,6 +1118,41 @@ async fn scenario<C: Client>(c: &mut C, fake: &FakeControlPlane) -> Vec<(String,
         c.start(Start {
             reject: true,
             ..s1.clone()
+        })
+        .await
+    );
+    rec!(
+        "dry-run start k1 (existing)",
+        c.start(Start {
+            dry_run: true,
+            ..s1.clone()
+        })
+        .await
+    );
+    rec!(
+        "dry-run start k1 (reject)",
+        c.start(Start {
+            dry_run: true,
+            reject: true,
+            ..s1.clone()
+        })
+        .await
+    );
+    rec!(
+        "dry-run start new key",
+        c.start(Start {
+            dry_run: true,
+            idempotency_key: Some("k-dry".into()),
+            ..s1.clone()
+        })
+        .await
+    );
+    rec!(
+        "dry-run start unknown workflow",
+        c.start(Start {
+            workflow: "nope".into(),
+            dry_run: true,
+            ..Default::default()
         })
         .await
     );
@@ -1457,6 +1512,32 @@ async fn scenario<C: Client>(c: &mut C, fake: &FakeControlPlane) -> Vec<(String,
         c.set_queue_policy("batch", Policy::default()).await
     );
 
+    // 05-13 start fields: request overrides and policy resolution, visible on GET.
+    let pol = step!(
+        "start with policy (greet policy applies)",
+        c.start(Start {
+            workflow: "greet".into(),
+            ..Default::default()
+        })
+        .await
+    );
+    let pol = ok_field(&pol, "start with policy", &["run_id"]);
+    let pol = pol.as_str().expect("run id").to_owned();
+    rec!("get policy run", c.get_run(&pol).await);
+    let ovr = step!(
+        "start with overrides",
+        c.start(Start {
+            workflow: "greet".into(),
+            retention_ms: Some(2 * 3_600_000),
+            schedule_to_start_ms: Some(1_500),
+            ..Default::default()
+        })
+        .await
+    );
+    let ovr = ok_field(&ovr, "start with overrides", &["run_id"]);
+    let ovr = ovr.as_str().expect("run id").to_owned();
+    rec!("get override run", c.get_run(&ovr).await);
+
     // Lifecycle size limits mirror max_request_bytes.
     let big = Value::String("x".repeat(cfg().max_request_bytes + 1));
     rec!(
@@ -1515,8 +1596,31 @@ async fn rest_and_grpc_transcripts_are_equal() {
     assert_eq!(ok_field(&get("start k1"), "", &["run_id"]), "run-000001");
     assert_eq!(
         get("idempotent start k1").unwrap(),
-        json!({ "run_id": "run-000001", "created": false })
+        json!({ "run_id": "run-000001", "created": false, "dry_run": false })
     );
+    assert_eq!(
+        get("dry-run start k1 (existing)").unwrap(),
+        json!({ "run_id": "run-000001", "created": false, "dry_run": true })
+    );
+    assert_eq!(
+        get("dry-run start k1 (reject)").unwrap_err().0,
+        ErrorCode::Conflict
+    );
+    assert_eq!(
+        get("dry-run start new key").unwrap(),
+        json!({ "run_id": "", "created": true, "dry_run": true })
+    );
+    assert_eq!(
+        get("dry-run start unknown workflow").unwrap_err().0,
+        ErrorCode::NotFound
+    );
+    let pol = get("get policy run").unwrap();
+    assert_eq!(pol["retention_ms"], json!(168 * 3_600_000u64));
+    assert_eq!(pol["schedule_to_start_ms"], json!(30_000));
+    assert_eq!(pol["attempt_failures"], json!(0));
+    let ovr = get("get override run").unwrap();
+    assert_eq!(ovr["retention_ms"], json!(2 * 3_600_000u64));
+    assert_eq!(ovr["schedule_to_start_ms"], json!(1_500));
     assert_eq!(
         get("conflicting start k1 (reject)").unwrap_err(),
         (

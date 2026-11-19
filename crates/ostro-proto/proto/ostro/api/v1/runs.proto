@@ -43,12 +43,23 @@ message StartRunRequest {
   optional string idempotency_key = 10;
   ConflictPolicy conflict_policy = 11;
   optional string concurrency_key = 12;
+  // Schedule-to-start timeout override (ms; unset = workflow policy, then queue policy;
+  // 0 = none). Phase 5 (05-13).
+  optional uint64 schedule_to_start_timeout_ms = 13;
+  // Retention override for the terminal run (ms; unset or 0 = workflow policy, queue
+  // policy, then the server's [runs] retention). Phase 5 (05-13).
+  optional uint64 retention_ms = 14;
+  // Validate only: same checks as a real start, nothing is submitted. Phase 5 (05-13).
+  bool dry_run = 15;
 }
 
 message StartRunResponse {
+  // For a dry run: the existing run the idempotency key maps to, else empty.
   string run_id = 1;
   // False when an existing run was returned for the idempotency key.
   bool created = 2;
+  // Echo of the request flag. Phase 5 (05-13).
+  bool dry_run = 3;
 }
 
 message GetRunRequest {
@@ -73,6 +84,13 @@ message RunInfo {
   optional bytes result_json = 15;
   optional string failure = 16;
   optional string concurrency_key = 17;
+  // Durable count of retryable attempt failures (the meaningful retry count; `attempt`
+  // counts dispatches, including resumes). Phase 5 (05-13).
+  uint32 attempt_failures = 18;
+  // Resolved retention of the terminal run (ms; unset = keep forever). Phase 5 (05-13).
+  optional uint64 retention_ms = 19;
+  // Resolved schedule-to-start timeout (ms; unset = none). Phase 5 (05-13).
+  optional uint64 schedule_to_start_ms = 20;
 }
 
 message RunHistoryRequest {

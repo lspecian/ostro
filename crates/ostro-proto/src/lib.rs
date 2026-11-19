@@ -55,6 +55,9 @@ mod tests {
             idempotency_key: Some("k1".into()),
             conflict_policy: ConflictPolicy::Reject as i32,
             concurrency_key: Some("c".into()),
+            schedule_to_start_timeout_ms: Some(0),
+            retention_ms: Some(3_600_000),
+            dry_run: true,
         };
         let back = StartRunRequest::decode(req.encode_to_vec().as_slice()).expect("decode");
         assert_eq!(req, back);
@@ -62,6 +65,7 @@ mod tests {
         assert_eq!(back.version, Some(0));
         assert_eq!(back.delay_ms, Some(0));
         assert_eq!(back.tenant.as_deref(), Some(""));
+        assert_eq!(back.schedule_to_start_timeout_ms, Some(0));
         assert_eq!(back.conflict_policy(), ConflictPolicy::Reject);
 
         let unset = StartRunRequest::decode(StartRunRequest::default().encode_to_vec().as_slice())

@@ -169,6 +169,9 @@ impl From<domain::RunInfo> for pb::RunInfo {
             result_json: r.result_json,
             failure: r.failure,
             concurrency_key: r.concurrency_key,
+            attempt_failures: r.attempt_failures,
+            retention_ms: r.retention_ms,
+            schedule_to_start_ms: r.schedule_to_start_ms,
         }
     }
 }
@@ -240,6 +243,9 @@ impl TryFrom<pb::StartRunRequest> for domain::StartRunRequest {
             idempotency_key: r.idempotency_key,
             conflict_policy,
             concurrency_key: r.concurrency_key,
+            schedule_to_start_ms: r.schedule_to_start_timeout_ms,
+            retention_ms: r.retention_ms,
+            dry_run: r.dry_run,
         })
     }
 }
@@ -524,6 +530,7 @@ impl runs_server::Runs for GrpcRuns {
         Ok(Response::new(pb::StartRunResponse {
             run_id: res.run_id,
             created: res.created,
+            dry_run: res.dry_run,
         }))
     }
 
