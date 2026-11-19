@@ -58,6 +58,8 @@ An override that lands before 05-20 can be folded in. An override after 05-20 is
   - F1: `RunRecord.pause: Option<PauseMark{reason, at_ms, detail}>` (05-02; stored, never set in Phase 5).
   - F3: `ReadyValue{concurrency_key, workflow, tenant}`, carried on `ReadyEntryRow` and `Action::EnqueueReady` (05-02).
   - F2: Phase 7 flow/placement/pause/auto-pause fields in `QueuePolicy` and `WorkflowPolicy`, placed before the trailing `ext` (05-07). No D20 bump is needed for Phase 7.
+  - F7: `ReadyValue.first`, set from `next_seq == 0` and carried as `first_activation` on `ReadyEntryRow`/`Action::EnqueueReady` (05-02, tested).
+  - F8: meta `ApiToken.expires_at_ms: Option<u64>`, appended last (05-07, meta golden). Stored only; the expiry check is Phase 7's, since no Phase 5 plan verifies API tokens.
   - F4: the `run-info.attempt` doc comment corrected to say it is not replay-stable and is for logging only (05-05, mirrored in the SDK README in 05-06). D14 holds.
 - **Bench harness.** `crates/ostro-server/tests/perf.rs` (`#[ignore]`), with no new crate.
 - **WIT tooling.** A new dev-tool crate, `crates/ostro-witcheck`, using `wit-component =0.261.0` (feature `semver-check`) and `wit-parser =0.261.0`.
