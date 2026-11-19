@@ -13,9 +13,19 @@ path = "src/main.rs"
 [dependencies]
 mimalloc.workspace = true
 clap.workspace = true
-ostro-engine = { path = "../ostro-engine" }
-ostro-partition = { path = "../ostro-partition" }
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+ostro-server = { path = "../ostro-server" }
 ostro-api = { path = "../ostro-api" }
+
+[dev-dependencies]
+# spawned-binary tests (04-19): REST + gRPC health against the real binary
+tokio.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+tonic.workspace = true
+ostro-proto = { path = "../ostro-proto" }
 
 [lints]
 workspace = true

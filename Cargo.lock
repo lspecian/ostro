@@ -1847,8 +1847,14 @@ dependencies = [
  "clap",
  "mimalloc",
  "ostro-api",
- "ostro-engine",
- "ostro-partition",
+ "ostro-proto",
+ "ostro-server",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
