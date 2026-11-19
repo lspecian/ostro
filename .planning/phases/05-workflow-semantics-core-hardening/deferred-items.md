@@ -14,6 +14,8 @@ Out-of-scope discoveries logged by executors (not fixed in the plan that found t
   an exclusive lock, e.g. a `flock` on `<data_dir>/LOCK` at startup with a clear error.
   Two writers on one WAL/state dir is a corruption risk. Candidate owner: the Phase 12 /
   ops hardening plans.
+  **Resolved by 05-26:** `Server::start` holds `flock(LOCK_EX|LOCK_NB)` on `<data>/LOCK`;
+  a second process fails with `ServerError::DataDirInUse`.
 - **Executor-site faults are not logged at WARN.** `executor::before_append` /
   `after_append_before_done` faults on engine appends surface as `Unavailable` and the
   executor re-activates without a WARN line; only the RunStarted path logs one. So the
