@@ -20,10 +20,14 @@ thiserror.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 metrics.workspace = true
+fail = { workspace = true, optional = true }
 
 [features]
 # Exposes the in-memory fake ActivationSink and test helpers (plan 03-08).
 testkit = []
+# Fault injection (plan 05-18): the `aot::write` failpoint in the AOT disk cache
+# (tests/aot_failpoints.rs, `--test-threads=1`).
+failpoints = ["dep:fail", "fail/failpoints"]
 
 [dev-dependencies]
 ostro-engine = { path = ".", features = ["testkit"] }
@@ -38,6 +42,10 @@ prost.workspace = true
 bytes.workspace = true
 serde_json.workspace = true
 toml = "1.2"
+
+[[test]]
+name = "aot_failpoints"
+required-features = ["failpoints"]
 
 [lints]
 workspace = true

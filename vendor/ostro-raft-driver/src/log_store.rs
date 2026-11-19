@@ -254,7 +254,11 @@ impl Core {
         }
         let mut file = OpenOptions::new().write(true).open(&seg.path)?;
         file.seek(SeekFrom::Start(seg.len))?;
-        if let Err(e) = file.write_all(&buf).and_then(|_| if self.opts.sync { file.sync_data() } else { Ok(()) }) {
+        // Ostro P2: `meta::log_append` / `meta::fsync` failpoints (feature `failpoints`).
+        let written = failpoint_append(&mut file, &buf)
+            .and_then(|_| file.write_all(&buf))
+            .and_then(|_| if self.opts.sync { failpoint_fsync().and_then(|_| file.sync_data()) } else { Ok(()) });
+        if let Err(e) = written {
             // Leave the file as memory describes it; a partial write would
             // otherwise be read back as a torn tail at the next open, or worse,
             // be followed by records appended after it.
@@ -734,11 +738,64 @@ fn write_atomically(dir: &Path, name: &str, data: &[u8], sync: bool) -> io::Resu
         let mut f = File::create(&tmp)?;
         f.write_all(data)?;
         if sync {
+            failpoint_fsync()?;
             f.sync_all()?;
         }
     }
     fs::rename(&tmp, dir.join(name))?;
     sync_dir(dir, sync)
+}
+
+// Ostro P2: failpoints for the Phase 5 crash campaign, compiled out without the
+// feature `failpoints`. The names carry the `meta::` prefix because ostro-meta is the
+// only user of this store (RESERVATIONS.md section 11).
+//
+// - `meta::log_append`: an entry-batch append fails before the write with EIO;
+//   `return(enospc)` first writes half of the batch (a torn write) and then fails with
+//   ENOSPC. `write_entries` cuts the segment back to its last good length either way.
+// - `meta::fsync`: the fsync of an append, or of the state / snapshot temp file in
+//   `write_atomically`, fails with EIO; `return(enospc)` fails it with ENOSPC.
+//
+// Either error stops the driver (`RaftStatus::failed`), as a real I/O error does.
+#[cfg(feature = "failpoints")]
+fn injected(arg: Option<String>) -> io::Error {
+    if arg.as_deref() == Some("enospc") {
+        io::Error::from_raw_os_error(libc::ENOSPC)
+    } else {
+        io::Error::from_raw_os_error(libc::EIO)
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn failpoint_append(file: &mut File, buf: &[u8]) -> io::Result<()> {
+    if let Some(arg) = fail::eval("meta::log_append", |arg| arg) {
+        if arg.as_deref() == Some("enospc") {
+            file.write_all(&buf[..buf.len() / 2])?;
+            file.flush()?;
+        }
+        return Err(injected(arg));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "failpoints"))]
+#[inline(always)]
+fn failpoint_append(_file: &mut File, _buf: &[u8]) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn failpoint_fsync() -> io::Result<()> {
+    match fail::eval("meta::fsync", |arg| arg) {
+        Some(arg) => Err(injected(arg)),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(feature = "failpoints"))]
+#[inline(always)]
+fn failpoint_fsync() -> io::Result<()> {
+    Ok(())
 }
 
 fn sync_dir(dir: &Path, sync: bool) -> io::Result<()> {

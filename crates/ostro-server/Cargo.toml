@@ -35,6 +35,22 @@ ostro-api = { path = "../ostro-api" }
 axum.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+fail = { workspace = true, optional = true }
+
+[features]
+# Fault injection (plan 05-18): the executor's own failpoints (executor::before_append,
+# executor::after_append_before_done) plus every failpoint underneath: dispatcher, state,
+# WAL and blob (ostro-partition / ostro-log / ostro-blob), meta (ostro-meta) and AOT
+# (ostro-engine). The `ostro` binary forwards its `failpoints` feature here.
+failpoints = [
+    "dep:fail",
+    "fail/failpoints",
+    "ostro-partition/failpoints",
+    "ostro-log/failpoints",
+    "ostro-blob/failpoints",
+    "ostro-meta/failpoints",
+    "ostro-engine/failpoints",
+]
 
 [dev-dependencies]
 ostro-engine = { path = "../ostro-engine", features = ["testkit"] }
@@ -43,6 +59,10 @@ ostro-testkit.workspace = true
 reqwest.workspace = true
 tonic.workspace = true
 ostro-proto = { path = "../ostro-proto" }
+
+[[test]]
+name = "failpoints_phase5"
+required-features = ["failpoints"]
 
 [lints]
 workspace = true

@@ -320,6 +320,7 @@ impl DiskCache {
         ));
         let write = || -> io::Result<()> {
             let mut f = std::fs::File::create(&tmp)?;
+            failpoint_write(&mut f, cwasm)?;
             f.write_all(cwasm)?;
             f.write_all(&tag)?;
             f.sync_all()?;
@@ -333,6 +334,31 @@ impl DiskCache {
         }
         res
     }
+}
+
+/// `aot::write` failpoint (plan 05-18, feature `failpoints`): the artefact write fails
+/// with EIO before writing; `return(enospc)` first writes half of the artefact to the temp
+/// file, then fails with ENOSPC. Either way `put` removes the temp file and the caller
+/// logs the error and uses the in-memory compile (a later load recompiles).
+#[cfg(feature = "failpoints")]
+fn failpoint_write(f: &mut std::fs::File, cwasm: &[u8]) -> io::Result<()> {
+    // POSIX errno values (identical on Linux and macOS).
+    const EIO: i32 = 5;
+    const ENOSPC: i32 = 28;
+    if let Some(arg) = fail::eval("aot::write", |arg| arg) {
+        if arg.as_deref() == Some("enospc") {
+            f.write_all(&cwasm[..cwasm.len() / 2])?;
+            return Err(io::Error::from_raw_os_error(ENOSPC));
+        }
+        return Err(io::Error::from_raw_os_error(EIO));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "failpoints"))]
+#[inline(always)]
+fn failpoint_write(_f: &mut std::fs::File, _cwasm: &[u8]) -> io::Result<()> {
+    Ok(())
 }
 
 type Flight = Arc<tokio::sync::OnceCell<Result<Component, String>>>;

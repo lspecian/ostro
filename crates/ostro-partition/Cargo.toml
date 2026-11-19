@@ -8,7 +8,8 @@ publish.workspace = true
 
 [features]
 # Fault-injection suites (tests/fatal_io_state.rs): state-store failpoints
-# (state::commit, state::persist) plus the WAL/blob failpoints underneath.
+# (state::commit, state::persist), the dispatcher's (dispatcher::before_grant,
+# dispatcher::before_ack, plan 05-18) plus the WAL/blob failpoints underneath.
 failpoints = ["dep:fail", "fail/failpoints", "ostro-log/failpoints", "ostro-blob/failpoints"]
 
 [dependencies]
@@ -37,6 +38,11 @@ toml = "1.2"
 
 [[test]]
 name = "fatal_io_state"
+required-features = ["failpoints"]
+
+# dispatcher::before_grant / dispatcher::before_ack (plan 05-18)
+[[test]]
+name = "dispatcher_failpoints"
 required-features = ["failpoints"]
 
 [lints]

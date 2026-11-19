@@ -66,13 +66,24 @@ enum Command {
     Client(Box<ostro_cli::ClientCommand>),
 }
 
+/// `build-info` suffix of a failpoint-enabled build (the crash campaign checks it).
+#[cfg(feature = "failpoints")]
+const FAILPOINTS_INFO: &str = " failpoints=on";
+#[cfg(not(feature = "failpoints"))]
+const FAILPOINTS_INFO: &str = "";
+
 fn main() -> ExitCode {
+    // Plan 05-18: a `--features failpoints` build reads the FAILPOINTS env var
+    // (`name=action;...`, e.g. `executor::before_append=return(enospc)`) and keeps the
+    // scenario for the whole process. Without the feature no failpoint code is compiled.
+    #[cfg(feature = "failpoints")]
+    let _failpoints = ::fail::FailScenario::setup();
     let started = Instant::now();
     let cli = Cli::parse();
     match cli.command {
         Some(Command::BuildInfo) => {
             println!(
-                "ostro {} target={} allocator=mimalloc",
+                "ostro {} target={} allocator=mimalloc{FAILPOINTS_INFO}",
                 env!("CARGO_PKG_VERSION"),
                 env!("OSTRO_TARGET")
             );

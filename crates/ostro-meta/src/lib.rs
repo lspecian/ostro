@@ -43,6 +43,11 @@ pub use ostro_raft_driver::{
 
 use ostro_raft_driver::raft::eraftpb::Message;
 
+// `fail` is used by the failpoint test suite only (feature `failpoints`); the sites
+// themselves live in the vendored raft log store.
+#[cfg(feature = "failpoints")]
+use fail as _;
+
 /// An [`Outbox`] that drops every message. Correct only for a single-voter
 /// group, where raft never needs to send to a peer.
 #[derive(Debug, Default, Clone, Copy)]

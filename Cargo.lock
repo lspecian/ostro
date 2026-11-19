@@ -1845,6 +1845,7 @@ name = "ostro"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "fail",
  "insta",
  "mimalloc",
  "ostro-api",
@@ -1934,6 +1935,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chacha20",
+ "fail",
  "hmac",
  "insta",
  "metrics",
@@ -1975,6 +1977,7 @@ dependencies = [
 name = "ostro-meta"
 version = "0.1.0"
 dependencies = [
+ "fail",
  "ostro-raft-driver",
  "postcard",
  "proptest",
@@ -2026,6 +2029,8 @@ name = "ostro-raft-driver"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "fail",
+ "libc",
  "ostro-raft-rs",
  "prost",
  "serde_json",
@@ -2073,6 +2078,7 @@ dependencies = [
  "axum",
  "bytes",
  "config",
+ "fail",
  "getrandom 0.4.3",
  "jiff",
  "ostro-api",

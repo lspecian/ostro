@@ -88,6 +88,24 @@
 //! is `resumable` (D1: trap, fuel, memory, nondeterminism, protocol violation, exhaustion
 //! are executor-level failures); module / record failures are not.
 //!
+//! # Failpoints (plan 05-18, feature `failpoints`)
+//!
+//! Both sites are evaluated around every executor append: the `RunStarted` append and every
+//! engine append ([`EngineSink`]).
+//!
+//! - `executor::before_append`: before the append is submitted. `return` makes it fail with
+//!   `AppendError::Unavailable` naming EIO (`return(enospc)`: ENOSPC) and nothing is
+//!   appended: the activation is evicted (`External`) and the run re-activated with the
+//!   same token, so the work is redone with no duplicate events.
+//! - `executor::after_append_before_done`: after the append was accepted (applied, on
+//!   disk) and before its result reaches the engine. `return` reports the accepted append
+//!   as `Unavailable`: the run is re-activated and replays the appended events from the
+//!   journal instead of appending them again.
+//!
+//! `sleep(ms)` widens either window (it blocks one runtime worker thread) and `panic`
+//! panics the job task (the dispatcher retries the run). The kill campaign (05-19) combines
+//! them with `kill -9`.
+//!
 //! **Test hook (WF-08):** [`ExecutorHooks::module_override`] makes a run execute on another
 //! module than `RunRecord.module_sha` (the patching proof after a restart).
 
@@ -523,9 +541,11 @@ impl ActivationSink for EngineSink {
         if self.cancel.is_cancelled() {
             return Err(AppendError::Fenced);
         }
+        failpoint("executor::before_append")?;
         let r = self.inner.append(run, attempt, from_seq, events).await;
         if let Ok(next) = r {
             self.engine_end.store(next, Ordering::Release);
+            failpoint("executor::after_append_before_done")?;
         }
         r
     }
@@ -537,6 +557,50 @@ impl ActivationSink for EngineSink {
     async fn done(&self, run: &RunRef, attempt: u32, outcome: ActivationOutcome) {
         self.inner.done(run, attempt, outcome).await;
     }
+}
+
+// ------------------------------------------------------------------- failpoints
+
+/// An executor failpoint (module docs): `Ok` unless it is configured with `return`, which
+/// yields `AppendError::Unavailable` naming EIO (or, with `return(enospc)`, ENOSPC).
+#[cfg(feature = "failpoints")]
+fn failpoint(name: &str) -> Result<(), AppendError> {
+    // POSIX errno values (identical on Linux and macOS).
+    const EIO: i32 = 5;
+    const ENOSPC: i32 = 28;
+    match fail::eval(name, |arg| arg) {
+        None => Ok(()),
+        Some(arg) => {
+            let errno = if arg.as_deref() == Some("enospc") {
+                ENOSPC
+            } else {
+                EIO
+            };
+            Err(AppendError::Unavailable(format!(
+                "{name} (injected): {}",
+                std::io::Error::from_raw_os_error(errno)
+            )))
+        }
+    }
+}
+
+#[cfg(not(feature = "failpoints"))]
+#[inline(always)]
+fn failpoint(_name: &str) -> Result<(), AppendError> {
+    Ok(())
+}
+
+/// The `RunStarted` append (seq 0) through both executor failpoints.
+async fn failpointed_append(
+    sink: &PartitionSink,
+    rref: &RunRef,
+    attempt: u32,
+    events: Vec<Event>,
+) -> Result<u64, AppendError> {
+    failpoint("executor::before_append")?;
+    let next = sink.append(rref, attempt, 0, events).await?;
+    failpoint("executor::after_append_before_done")?;
+    Ok(next)
 }
 
 // ------------------------------------------------------------------- the job
@@ -670,7 +734,7 @@ impl EngineExecutor {
         // 2. RunStarted on the first activation.
         if sink.next_seq() == 0 {
             match self.run_started(handle, run, record, &sha).await {
-                Ok(evs) => match sink.append(rref, token.n, 0, evs).await {
+                Ok(evs) => match failpointed_append(sink, rref, token.n, evs).await {
                     Ok(_) => {}
                     Err(AppendError::Fenced) => return (None, ExecOutcome::Fenced),
                     Err(AppendError::Conflict { .. }) => return (None, ExecOutcome::Reactivate),

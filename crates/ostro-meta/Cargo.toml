@@ -13,10 +13,20 @@ serde.workspace = true
 postcard.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+fail = { workspace = true, optional = true }
+
+[features]
+# Fault injection (plan 05-18): the vendored raft log store's `meta::log_append` /
+# `meta::fsync` failpoints (tests/meta_failpoints.rs, `--test-threads=1`).
+failpoints = ["dep:fail", "fail/failpoints", "ostro-raft-driver/failpoints"]
 
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+
+[[test]]
+name = "meta_failpoints"
+required-features = ["failpoints"]
 
 [lints]
 workspace = true

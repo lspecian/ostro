@@ -16,6 +16,12 @@ tokio = { version = "1.54", features = ["sync"] }
 tracing = "0.1"
 slog = "2.7"
 slog-stdlog = "4.1"
+# Ostro P2: failpoints for the Phase 5 crash campaign (compiled out without the feature)
+fail = { version = "0.5.1", optional = true }
+libc = { version = "0.2", optional = true }
+
+[features]
+failpoints = ["dep:fail", "fail/failpoints", "dep:libc"]
 
 [dev-dependencies]
 tokio = { version = "1.54", features = ["full", "test-util"] }

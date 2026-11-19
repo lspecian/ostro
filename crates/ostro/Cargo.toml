@@ -10,6 +10,13 @@ publish.workspace = true
 name = "ostro"
 path = "src/main.rs"
 
+[features]
+# Fault injection for the crash campaign (plans 05-18 / 05-19): compiles in every failpoint
+# (ostro-server and everything under it) and calls `fail::FailScenario::setup()` in `main`,
+# so the FAILPOINTS env var configures them. Build it out of the way of the release binary:
+#   cargo build --release -p ostro --features failpoints --target-dir target/failpoints
+failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints"]
+
 [dependencies]
 mimalloc.workspace = true
 clap.workspace = true
@@ -20,6 +27,7 @@ ostro-server = { path = "../ostro-server" }
 ostro-api = { path = "../ostro-api" }
 # CLI-06 client verbs (05-14)
 ostro-cli = { path = "../ostro-cli" }
+fail = { workspace = true, optional = true }
 
 [dev-dependencies]
 # spawned-binary tests (04-19): REST + gRPC health against the real binary

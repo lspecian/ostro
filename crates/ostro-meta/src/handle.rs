@@ -17,6 +17,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 /// Retries of a proposal whose outcome is unknown (leadership lost mid-flight).
 const OUTCOME_UNKNOWN_RETRIES: u32 = 5;
 const OUTCOME_UNKNOWN_BACKOFF: Duration = Duration::from_millis(50);
+/// How long a proposal failed with `Stopped` waits for the driver to publish why.
+const STOPPED_REASON_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MetaError {
@@ -139,8 +141,39 @@ impl MetaHandle {
                     tracing::warn!(attempt, "metadata proposal outcome unknown; retrying");
                     tokio::time::sleep(OUTCOME_UNKNOWN_BACKOFF).await;
                 }
+                Err(ProposeError::Stopped) => {
+                    return Err(MetaError::Propose(self.stopped_reason().await));
+                }
                 Err(e) => return Err(MetaError::Propose(e.to_string())),
             }
+        }
+    }
+
+    /// The driver's storage failure, if it stopped on one (`RaftStatus::failed`, e.g.
+    /// `raft storage: No space left on device (os error 28)`). A stopped metadata group
+    /// never recovers in place: the node must restart, which re-opens the log.
+    pub fn failure(&self) -> Option<String> {
+        self.raft.status().failed
+    }
+
+    /// `"stopped"`, plus the storage failure that stopped the driver when there is one.
+    /// The driver fails pending proposals just before it publishes the failure, so this
+    /// waits briefly for it (the status channel closes when the driver thread exits).
+    async fn stopped_reason(&self) -> String {
+        let mut rx = self.raft.subscribe();
+        let failed = async {
+            loop {
+                if let Some(f) = rx.borrow_and_update().failed.clone() {
+                    return Some(f);
+                }
+                if rx.changed().await.is_err() {
+                    return rx.borrow().failed.clone();
+                }
+            }
+        };
+        match tokio::time::timeout(STOPPED_REASON_WAIT, failed).await {
+            Ok(Some(f)) => format!("{}: {f}", ProposeError::Stopped),
+            _ => ProposeError::Stopped.to_string(),
         }
     }
 
