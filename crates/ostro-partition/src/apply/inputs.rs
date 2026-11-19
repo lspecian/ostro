@@ -63,11 +63,10 @@ pub(crate) fn journal_input(
 
 /// Journals submitter-encoded event bytes verbatim at `rec.next_seq` (D21).
 ///
-/// First callers: 05-08 (SignalRun / inbound Signal `SignalPayload`, CompleteToken
-/// `TokenCompleted`); `allow(dead_code)` goes away with them. With `wake`, the
+/// Callers: inbound `Signal` (`waits::inbound_signal`); 05-08 adds SignalRun and
+/// CompleteToken (`TokenCompleted`). With `wake`, the
 /// run is woken; a `Scheduled` run becomes ready at `rec.created_at_ms` (apply cannot read the
 /// ts inside `event`, and the earliest ready time keeps it at the front of its priority).
-#[allow(dead_code)]
 pub(crate) fn journal_encoded(
     b: &mut ApplyBatch<'_>,
     run: &RunId,

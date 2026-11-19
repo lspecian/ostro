@@ -7,9 +7,10 @@ use ostro_partition::apply::{
     Action, ApplyOutcome, Cursor, InvalidCode, RejectReason, START_DELAY_OP, apply_command,
 };
 use ostro_partition::store::keys::{
-    children_key, dedupe_key, event_key, outbox_key, outbox_prefix, ready_key, run_key, timer_key,
+    children_key, decode_signal_inbox_key, dedupe_key, event_key, outbox_key, outbox_prefix,
+    ready_key, run_key, timer_key,
 };
-use ostro_partition::store::values::{self, InboxMsg, RunRecord, RunStatus};
+use ostro_partition::store::values::{self, InboxMsg, RunRecord, RunStatus, SignalSlot};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
     AttemptGranted, AttemptTokenMsg, CancelRun, CompleteRun, ConflictPolicy, CronStart, Derived,
@@ -88,10 +89,28 @@ impl H {
             .map(|v| values::decode(&v).expect("decode run"))
     }
 
+    /// Legacy inbox rows (`InboxMsg`: child completions, cancel requests).
     fn inbox(&self, id: &RunId) -> Vec<InboxMsg> {
         self.rows(Table::Inbox, id.as_bytes())
             .into_iter()
+            .filter(|(k, _)| decode_signal_inbox_key(k).is_none())
             .map(|(_, v)| values::decode(&v).expect("decode inbox"))
+            .collect()
+    }
+
+    /// Buffered signals (plan 05-02 `SignalSlot` rows), in arrival order.
+    fn signals(&self, id: &RunId) -> Vec<(String, SignalSlot)> {
+        let mut rows: Vec<(u64, String, SignalSlot)> = self
+            .rows(Table::Inbox, id.as_bytes())
+            .into_iter()
+            .filter_map(|(k, v)| {
+                decode_signal_inbox_key(&k)
+                    .map(|(_, name, n)| (n, name, values::decode(&v).expect("decode slot")))
+            })
+            .collect();
+        rows.sort_by_key(|(n, _, _)| *n);
+        rows.into_iter()
+            .map(|(_, name, slot)| (name, slot))
             .collect()
     }
 
@@ -283,23 +302,27 @@ fn inbound_outbox_exactly_once() {
     }
     let batch = inbound(0, src.outbox_msgs(5));
     assert_eq!(dst.apply(&batch), ApplyOutcome::Accepted);
-    assert_eq!(dst.inbox(&t).len(), 3);
+    // Plan 05-02: inbound signals are buffered as SignalSlot rows keyed by name. The target
+    // has an empty journal, so each slot is Pending and holds the sender's encoded event.
+    assert_eq!(dst.signals(&t).len(), 3);
+    assert!(dst.inbox(&t).is_empty());
     assert_eq!(dst.cur.inbound_seen.get(&0), Some(&3));
     let signal_names: Vec<_> = dst
-        .inbox(&t)
+        .signals(&t)
         .into_iter()
-        .map(|m| match m {
-            InboxMsg::Signal { name, payload } => {
-                assert_eq!(
-                    PayloadRef::decode(&*payload).unwrap(),
-                    inline(b"p").unwrap()
-                );
-                name
-            }
-            other => panic!("unexpected inbox entry {other:?}"),
+        .map(|(name, slot)| {
+            assert_eq!(
+                slot,
+                SignalSlot::Pending {
+                    event: inline(b"p").unwrap(),
+                    sent_at_ms: 0
+                }
+            );
+            name
         })
         .collect();
     assert_eq!(signal_names, vec!["a", "b", "c"]);
+    assert_eq!(dst.run(&t).expect("run").next_seq, 0, "nothing journaled");
     assert_eq!(dst.run(&t).expect("run").inbox_next, 3);
 
     // Re-delivery of the same batch: duplicate, nothing written.
@@ -318,7 +341,7 @@ fn inbound_outbox_exactly_once() {
     let msgs: Vec<_> = src.outbox_msgs(5).into_iter().skip(1).collect();
     assert_eq!(msgs.iter().map(|m| m.seq).collect::<Vec<_>>(), [2, 3, 4]);
     assert_eq!(dst.apply(&inbound(0, msgs)), ApplyOutcome::Accepted);
-    assert_eq!(dst.inbox(&t).len(), 4);
+    assert_eq!(dst.signals(&t).len(), 4);
     assert_eq!(dst.cur.inbound_seen.get(&0), Some(&4));
 }
 
@@ -354,7 +377,7 @@ fn inbound_gap() {
         })
     );
     assert_eq!(dst.data(), before);
-    assert_eq!(dst.inbox(&t).len(), 1);
+    assert_eq!(dst.signals(&t).len(), 1);
     assert_eq!(dst.cur.inbound_seen.get(&0), Some(&1));
     assert_eq!(
         dst.store.read_meta().unwrap().inbound_seen.get(&0),
@@ -431,7 +454,7 @@ fn inbound_signal_wakes_scheduled_run() {
     assert_eq!(o, ApplyOutcome::Accepted);
     assert!(a.is_empty());
     assert_eq!(dst.rows(Table::Ready, &[]).len(), 1);
-    assert_eq!(dst.inbox(&t).len(), 2);
+    assert_eq!(dst.signals(&t).len(), 2);
 }
 
 #[test]

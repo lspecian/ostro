@@ -237,17 +237,13 @@ mod payload_ref_bytes {
 
 /// Value of a legacy inbox row (`inbox_key(run, n)`, name-length sentinel `0xFFFF`).
 ///
-/// Signals move to [`SignalSlot`] rows keyed by name (05-08). Until 05-08 replaces the inbound
-/// paths, inbound `Signal` and `CancelRun` still write `Signal`/`CancelRequested` rows here
-/// (the Phase 2 shuffler exactly-once suites observe them), and inbound `ChildCompleted`
-/// keeps writing `ChildCompleted` until Phase 9 journals it as an input.
+/// Signals are [`SignalSlot`] rows keyed by name since plan 05-02 (the `Signal` variant was
+/// removed). Inbound `CancelRun` still writes `CancelRequested` until 05-08 journals it, and
+/// inbound `ChildCompleted` keeps writing `ChildCompleted` until Phase 9 journals it as an
+/// input. `TimerFired` is never written (04-13); it stays because the 04-13 regression test
+/// (`tests/timers.rs`) matches on it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InboxMsg {
-    Signal {
-        name: String,
-        /// prost-encoded `PayloadRef`.
-        payload: Vec<u8>,
-    },
     ChildCompleted {
         child: [u8; 18],
         op: u64,

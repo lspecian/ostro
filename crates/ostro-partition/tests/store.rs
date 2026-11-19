@@ -619,10 +619,6 @@ fn value_round_trips() {
     assert!(RunStatus::Failed.is_terminal());
     assert!(RunStatus::Cancelled.is_terminal());
     assert!(!RunStatus::Running.is_terminal());
-    round_trip(&InboxMsg::Signal {
-        name: "s".into(),
-        payload: vec![1],
-    });
     round_trip(&InboxMsg::ChildCompleted {
         child: [1; 18],
         op: 3,

@@ -129,15 +129,13 @@ fn dispatch(
         Cmd::TimerFired(t) => timer::apply_timer_fired(b, cur, t, actions),
         Cmd::InboundBatch(ib) => inbound::apply_inbound_batch(b, cur, ib, actions),
         Cmd::OutboxTruncated(t) => outbox::apply_outbox_truncated(b, cur, t),
-        // Phase 5: implemented in 05-08 (SignalRun, RequestCancel, CompleteToken) and 05-09
-        // (TerminateRun, RetryRun). Rejected until then.
-        Cmd::SignalRun(_)
-        | Cmd::RequestCancel(_)
-        | Cmd::TerminateRun(_)
-        | Cmd::RetryRun(_)
-        | Cmd::CompleteToken(_) => Ok(ApplyOutcome::Rejected(RejectReason::Invalid(
-            InvalidCode::BadIntent,
-        ))),
+        // Phase 5 (plan 05-02 seams): `waits.rs` is filled by 05-08, `lifecycle.rs` by 05-09.
+        // The stubs reject with Invalid(BadIntent) until then.
+        Cmd::SignalRun(s) => waits::signal_run(b, cur, s, actions),
+        Cmd::RequestCancel(r) => waits::request_cancel(b, cur, r, actions),
+        Cmd::CompleteToken(c) => waits::complete_token(b, cur, c, actions),
+        Cmd::TerminateRun(t) => lifecycle::terminate_run(b, cur, t, actions),
+        Cmd::RetryRun(r) => lifecycle::retry_run(b, cur, r, actions),
     }
 }
 

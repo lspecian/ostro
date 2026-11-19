@@ -3,6 +3,8 @@
 #![allow(dead_code, clippy::disallowed_methods, clippy::disallowed_types)]
 
 pub mod flaky_router;
+pub mod gen_lifecycle;
+pub mod gen_waits;
 pub mod manual_hw;
 
 use std::path::Path;
@@ -17,8 +19,22 @@ use ostro_partition::{
     PartitionHealth, PartitionStore, PendingAcks, StoreConfig, apply_chunk,
 };
 use ostro_types::command::{ConflictPolicy, StartRun};
-use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId, PayloadRef, RunId};
+use ostro_types::{
+    AttemptToken, Command, Epoch, Offset, PartitionCount, PartitionId, PayloadRef, RunId,
+};
 use tokio::time::timeout;
+
+/// Driver view of one run, handed to the `rebuild_digest` generator hooks
+/// ([`gen_waits`], [`gen_lifecycle`]). `next_seq` is re-read from live state just before the
+/// hook runs (inputs journaled by apply move it).
+#[derive(Clone, Debug)]
+pub struct GenRun {
+    pub partition: u16,
+    pub id: RunId,
+    /// The driver's last granted token (`None` = never granted by the driver).
+    pub token: Option<AttemptToken>,
+    pub next_seq: u64,
+}
 
 /// Generous timeout for anything that should happen "soon".
 pub const T: Duration = Duration::from_secs(10);
@@ -331,34 +347,48 @@ pub async fn submit_ok(node: &ostro_partition::Node, p: PartitionId, cmds: Vec<C
     }
 }
 
-/// Decoded inbox entries of `run`.
+/// Decoded legacy inbox entries (`InboxMsg`, key run ‖ 0xFFFF ‖ n) of `run`, in inbox order.
+/// Signal rows (plan 05-02 `SignalSlot`) are skipped: see [`signal_names`].
 pub fn inbox(
     node: &ostro_partition::Node,
     run: &RunId,
 ) -> Vec<ostro_partition::store::values::InboxMsg> {
+    use ostro_partition::store::keys::decode_signal_inbox_key;
     handle_of(node, run.partition())
         .reader()
         .prefix(ostro_partition::Table::Inbox, run.as_bytes(), usize::MAX)
         .expect("inbox")
         .into_iter()
+        .filter(|(k, _)| decode_signal_inbox_key(k).is_none())
         .map(|(_, v)| ostro_partition::store::values::decode(&v).expect("decode inbox"))
         .collect()
 }
 
-/// Signal names in `run`'s inbox, in inbox order.
+/// Names of the signals delivered to `run` and not yet matched by a wait, in arrival order:
+/// the run's `SignalSlot` inbox rows (plan 05-02; `Pending` before seq 0, else `Journaled`)
+/// ordered by their inbox counter `n`. Exactly one row per delivered signal, so the
+/// shuffler exactly-once suites can count them.
 pub fn signal_names(node: &ostro_partition::Node, run: &RunId) -> Vec<String> {
-    inbox(node, run)
+    use ostro_partition::store::keys::decode_signal_inbox_key;
+    let mut rows: Vec<(u64, String)> = handle_of(node, run.partition())
+        .reader()
+        .prefix(ostro_partition::Table::Inbox, run.as_bytes(), usize::MAX)
+        .expect("inbox")
         .into_iter()
-        .filter_map(|m| match m {
-            ostro_partition::store::values::InboxMsg::Signal { name, .. } => Some(name),
-            _ => None,
-        })
-        .collect()
+        .filter_map(|(k, _)| decode_signal_inbox_key(&k).map(|(_, name, n)| (n, name)))
+        .collect();
+    rows.sort();
+    rows.into_iter().map(|(_, name)| name).collect()
 }
 
-/// Number of `CancelRequested` inbox entries of `run`.
+/// How many cancel requests took effect on `run`: legacy `CancelRequested` inbox rows plus
+/// journaled `CancelRequested` events (kind 69, the 05-08 path). 05-08 journals nothing for
+/// a run whose journal is empty (`next_seq == 0`, only the flag is set), so a cancelled run
+/// with neither counts once.
 pub fn cancel_count(node: &ostro_partition::Node, run: &RunId) -> usize {
-    inbox(node, run)
+    use ostro_types::journal::EventKind;
+    let h = handle_of(node, run.partition());
+    let legacy = inbox(node, run)
         .into_iter()
         .filter(|m| {
             matches!(
@@ -366,7 +396,17 @@ pub fn cancel_count(node: &ostro_partition::Node, run: &RunId) -> usize {
                 ostro_partition::store::values::InboxMsg::CancelRequested { .. }
             )
         })
-        .count()
+        .count();
+    let journaled = ostro_partition::query::journal_rows(&h.reader(), run, 0, usize::MAX)
+        .expect("journal")
+        .into_iter()
+        .filter(|(_, kind, _)| *kind == EventKind::CancelRequested.code())
+        .count();
+    let rec = h.read_run(run).expect("read run");
+    match (legacy + journaled, rec) {
+        (0, Some(r)) if r.cancel_requested && r.next_seq == 0 => 1,
+        (n, _) => n,
+    }
 }
 
 /// Outbox rows over every ready partition.

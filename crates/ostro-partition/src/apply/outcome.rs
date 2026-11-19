@@ -21,6 +21,9 @@
 //! | `Rejected(PayloadTooLarge)`          | 24   |
 //! | `Rejected(WrongPartition)`           | 25   |
 //! | `Rejected(Invalid(_))` (any code)    | 26   |
+//! | `Rejected(RunCompleted)`             | 27   |
+//!
+//! Indices come only from `.planning/RESERVATIONS.md` §7 (`RunCompleted` = 11, Phase 5).
 //!
 //! The [`InvalidCode`] detail is not part of the hash code (the command
 //! bytes are folded anyway, and they determine the detail). `InvalidCode`
@@ -47,17 +50,31 @@ pub enum ApplyOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RejectReason {
-    StaleEpoch { current: Epoch },
-    Fenced { current: Option<AttemptToken> },
-    SeqMismatch { expected: u64 },
-    SeqGap { expected: u64, found: u64 },
+    StaleEpoch {
+        current: Epoch,
+    },
+    Fenced {
+        current: Option<AttemptToken>,
+    },
+    SeqMismatch {
+        expected: u64,
+    },
+    SeqGap {
+        expected: u64,
+        found: u64,
+    },
     RunNotFound,
     RunTerminal,
     RunExists,
-    IdempotencyConflict { existing: RunId },
+    IdempotencyConflict {
+        existing: RunId,
+    },
     PayloadTooLarge,
     WrongPartition,
     Invalid(InvalidCode),
+    /// The run completed successfully and cannot be retried (`RetryRun` on a `Completed` run,
+    /// D1; the API maps it to 409 `run_completed`). Phase 5 (05-02), index 11.
+    RunCompleted,
 }
 
 /// Detail of a `Rejected(Invalid)` outcome.
@@ -109,6 +126,7 @@ impl RejectReason {
             RejectReason::PayloadTooLarge => 8,
             RejectReason::WrongPartition => 9,
             RejectReason::Invalid(_) => 10,
+            RejectReason::RunCompleted => 11,
         }
     }
 }
@@ -168,4 +186,84 @@ pub enum Action {
         run: RunId,
         seq: u64,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every outcome code is frozen (folded into the rolling hash); see the module table.
+    #[test]
+    fn outcome_codes_are_pinned() {
+        let run = RunId::from_bytes(&[0; 18]).expect("run id");
+        let cases = [
+            (ApplyOutcome::Accepted, 0),
+            (ApplyOutcome::Duplicate { existing: None }, 1),
+            (
+                ApplyOutcome::Duplicate {
+                    existing: Some(run),
+                },
+                1,
+            ),
+            (
+                ApplyOutcome::Rejected(RejectReason::StaleEpoch { current: Epoch(1) }),
+                16,
+            ),
+            (
+                ApplyOutcome::Rejected(RejectReason::Fenced { current: None }),
+                17,
+            ),
+            (
+                ApplyOutcome::Rejected(RejectReason::SeqMismatch { expected: 1 }),
+                18,
+            ),
+            (
+                ApplyOutcome::Rejected(RejectReason::SeqGap {
+                    expected: 1,
+                    found: 2,
+                }),
+                19,
+            ),
+            (ApplyOutcome::Rejected(RejectReason::RunNotFound), 20),
+            (ApplyOutcome::Rejected(RejectReason::RunTerminal), 21),
+            (ApplyOutcome::Rejected(RejectReason::RunExists), 22),
+            (
+                ApplyOutcome::Rejected(RejectReason::IdempotencyConflict { existing: run }),
+                23,
+            ),
+            (ApplyOutcome::Rejected(RejectReason::PayloadTooLarge), 24),
+            (ApplyOutcome::Rejected(RejectReason::WrongPartition), 25),
+            (
+                ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::Decode)),
+                26,
+            ),
+            (
+                ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::NotRunning)),
+                26,
+            ),
+            (ApplyOutcome::Rejected(RejectReason::RunCompleted), 27),
+        ];
+        for (o, code) in cases {
+            assert_eq!(o.code(), code, "{o:?}");
+        }
+        // InvalidCode declaration order (RESERVATIONS §8); NotImplemented exists at 6.
+        let order = [
+            InvalidCode::Decode,
+            InvalidCode::Empty,
+            InvalidCode::BadRunId,
+            InvalidCode::MissingToken,
+            InvalidCode::EventsNotContiguous,
+            InvalidCode::MissingField,
+            InvalidCode::NotImplemented,
+            InvalidCode::BadIntent,
+            InvalidCode::FieldTooLong,
+            InvalidCode::BadSource,
+            InvalidCode::TruncateBeyondEnd,
+            InvalidCode::BadLength,
+            InvalidCode::NotRunning,
+        ];
+        for (i, c) in order.into_iter().enumerate() {
+            assert_eq!(c as usize, i, "{c:?}");
+        }
+    }
 }

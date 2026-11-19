@@ -21,7 +21,7 @@
 
 use ostro_types::RunId;
 use ostro_types::command::{
-    CancelRun, ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg, Signal, outbox_msg,
+    CancelRun, ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg, outbox_msg,
 };
 use prost::Message;
 
@@ -29,6 +29,7 @@ use super::cursor::Cursor;
 use super::outbox::{emit, msg_oversize};
 use super::outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
 use super::run::{enqueue_ready, load_run, local_run, start_run, store_run, terminal_status};
+use super::{lifecycle, waits};
 use crate::store::keys::{children_key, children_prefix, inbox_key};
 use crate::store::values::{self, InboxMsg, RunRecord, RunStatus};
 use crate::store::{ApplyBatch, StoreError, Table};
@@ -139,19 +140,18 @@ fn apply_msg(
         }
         Kind::CronStart(c) => cron_start(b, cur, c, actions)?,
         Kind::ChildCompleted(c) => child_completed(b, cur, c, actions)?,
-        Kind::Signal(s) => signal(b, cur, s, actions)?,
+        // Phase 5 seams (plan 05-02): signals go to `waits.rs` (05-08 adds wait matching),
+        // continue-as-new successor starts to `lifecycle.rs` (05-09; consumed with no effect
+        // until then, like the other per-message deterministic drops).
+        Kind::Signal(s) => waits::inbound_signal(b, cur, s, actions)?,
         Kind::CancelRun(c) => cancel_run(b, cur, c, actions)?,
-        // Phase 5: implemented in 05-09 (`lifecycle::inbound_start_run`). Until then the
-        // message is consumed with no effect, like the other per-message deterministic drops
-        // (a missing or terminal target run): the batch stays accepted and the source's
-        // outbox still truncates.
-        Kind::StartRun(_) => {}
+        Kind::StartRun(s) => lifecycle::inbound_start_run(b, cur, s, actions)?,
     }
     Ok(())
 }
 
 /// Loads a live (non-terminal) target run; `None` = deterministic drop.
-fn live_run(
+pub(crate) fn live_run(
     b: &mut ApplyBatch<'_>,
     cur: &Cursor,
     bytes: &[u8],
@@ -239,35 +239,6 @@ fn child_completed(
     let at = rec.created_at_ms;
     make_ready(b, &parent, &mut rec, at, actions);
     store_run(b, &parent, &rec);
-    Ok(())
-}
-
-fn signal(
-    b: &mut ApplyBatch<'_>,
-    cur: &Cursor,
-    s: &Signal,
-    actions: &mut Vec<Action>,
-) -> Result<(), StoreError> {
-    let Some((run, mut rec)) = live_run(b, cur, &s.target_run)? else {
-        return Ok(());
-    };
-    let payload = s
-        .payload
-        .as_ref()
-        .map(Message::encode_to_vec)
-        .unwrap_or_default();
-    push_inbox(
-        b,
-        &run,
-        &mut rec,
-        &InboxMsg::Signal {
-            name: s.name.clone(),
-            payload,
-        },
-    );
-    let at = rec.created_at_ms;
-    make_ready(b, &run, &mut rec, at, actions);
-    store_run(b, &run, &rec);
     Ok(())
 }
 

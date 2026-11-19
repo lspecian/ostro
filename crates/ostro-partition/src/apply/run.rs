@@ -409,16 +409,16 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
             Intent::CancelTimer(t) if is_reserved_op(t.op) => {
                 return Err(invalid(InvalidCode::BadIntent));
             }
-            // Phase 5: implemented in 05-08. Rejected until then.
-            Intent::RegisterWait(_) | Intent::CancelWait(_) => {
-                return Err(invalid(InvalidCode::BadIntent));
-            }
+            // Phase 5 seams: validated by `waits.rs` (05-08; stubs reject until then).
+            Intent::RegisterWait(w) => waits::check_register_wait(cur, w)?,
+            Intent::CancelWait(w) => waits::check_cancel_wait(cur, w)?,
             Intent::ScheduleTimer(_) | Intent::CancelTimer(_) => {}
             Intent::EnqueueReady(_) => enqueued = true,
             Intent::SendMessage(m) => {
                 let msg = m.msg.as_ref().ok_or(invalid(InvalidCode::MissingField))?;
-                // Phase 5: continue-as-new successor start, implemented in 05-09 (with
-                // CompleteRun{ContinuedAsNew}). Rejected until then.
+                // The continue-as-new successor start belongs to batches ending in
+                // CompleteRun{ContinuedAsNew}, which `lifecycle::complete_continued_as_new`
+                // (05-09) handles whole. Anywhere else it is rejected.
                 if matches!(msg.kind, Some(outbox_msg::Kind::StartRun(_))) {
                     return Err(invalid(InvalidCode::BadIntent));
                 }
@@ -428,8 +428,8 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
                 match terminal_status(c.status) {
                     Some(RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled) => {}
                     // Terminated/TimedOut are set by apply-side paths only (05-09); executors
-                    // must never send them. ContinuedAsNew: Phase 5, implemented in 05-09
-                    // (arms the outbox successor start). Rejected until then.
+                    // must never send them. ContinuedAsNew is valid only as the last intent,
+                    // where `apply_events_appended` routes the whole command to 05-09.
                     _ => return Err(invalid(InvalidCode::BadIntent)),
                 }
                 completed = true;
@@ -573,8 +573,8 @@ pub(crate) fn apply_events_appended(
                 remove_ready(b, &run, &mut rec);
                 rec.status = RunStatus::Scheduled;
             }
-            // Rejected by check_intents (Phase 5: implemented in 05-08).
-            Intent::RegisterWait(_) | Intent::CancelWait(_) => {}
+            Intent::RegisterWait(w) => waits::register_wait(b, &run, &mut rec, w, actions)?,
+            Intent::CancelWait(w) => waits::cancel_wait(b, &run, &mut rec, w, actions)?,
             Intent::CompleteRun(c) => {
                 let status = terminal_status(c.status)
                     .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;

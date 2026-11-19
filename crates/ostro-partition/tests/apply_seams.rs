@@ -11,16 +11,20 @@ use ostro_partition::apply::{
 };
 use ostro_partition::query::journal_rows;
 use ostro_partition::store::keys::{
-    run_key, run_prefix, timer_key, wait_key, wait_name_key, wait_prefixes,
+    decode_signal_inbox_key, event_key, run_key, run_prefix, timer_key, wait_key, wait_name_key,
+    wait_prefixes,
 };
-use ostro_partition::store::values::{self, RunRecord, RunStatus, WaitKind, WaitRow};
+use ostro_partition::store::values::{self, RunRecord, RunStatus, SignalSlot, WaitKind, WaitRow};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
 use ostro_types::command::{
-    self, AttemptGranted, AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EventsAppended,
-    JournalEvent, StartRun, TerminalStatus, TimerFired, derived, encode_command,
+    self, AttemptGranted, AttemptTokenMsg, CompleteRun, CompleteToken, ConflictPolicy, Derived,
+    EventsAppended, InboundBatch, InboundMsg, JournalEvent, OutboxMsg, RequestCancel, RetryRun,
+    Signal, SignalRun, StartRun, TerminalStatus, TerminateRun, TimerFired, WaitKind as CmdWaitKind,
+    derived, encode_command, outbox_msg,
 };
 use ostro_types::payload::INLINE_PAYLOAD_LIMIT;
 use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
+use prost::Message;
 
 // ---------------------------------------------------------------- helpers
 
@@ -99,6 +103,24 @@ impl H {
 
     fn digest(&self) -> [u8; 32] {
         self.store.digest().expect("digest")
+    }
+
+    /// Every data row (all tables except `meta` and `inbound_seen`, which move with every
+    /// command).
+    fn data(&self) -> Vec<(Table, ostro_partition::store::Rows)> {
+        ostro_partition::TABLES
+            .into_iter()
+            .filter(|t| !matches!(t, Table::Meta | Table::InboundSeen))
+            .map(|t| {
+                (
+                    t,
+                    self.store
+                        .reader()
+                        .prefix(t, &[], usize::MAX)
+                        .expect("rows"),
+                )
+            })
+            .collect()
     }
 }
 
@@ -474,4 +496,195 @@ fn guest_timer_still_journals_timer_fired() {
         rows[0].1,
         ostro_types::journal::EventKind::TimerFired.code()
     );
+}
+
+// ---------------------------------------------------------------- dispatch stubs
+
+#[test]
+fn phase5_commands_reach_their_stubs_and_change_nothing() {
+    // waits.rs (05-08): SignalRun, RequestCancel, CompleteToken; lifecycle.rs (05-09):
+    // TerminateRun, RetryRun.
+    let mut h = H::new();
+    let r = running(&mut h, 1);
+    let id = r.as_bytes().to_vec();
+    let event = Some(PayloadRef::inline(Bytes::from_static(b"\x01ev")));
+    let cmds = [
+        Command::signal_run(SignalRun {
+            run_id: id.clone(),
+            name: "go".into(),
+            event: event.clone(),
+            request_id: b"req".to_vec(),
+            sent_at_ms: 5,
+        }),
+        Command::request_cancel(RequestCancel {
+            run_id: id.clone(),
+            reason: "stop".into(),
+            requested_at_ms: 5,
+        }),
+        Command::complete_token(CompleteToken {
+            run_id: id.clone(),
+            op: 1,
+            event,
+            completed_at_ms: 5,
+        }),
+        Command::terminate_run(TerminateRun {
+            run_id: id.clone(),
+            reason: "ops".into(),
+            terminated_at_ms: 5,
+        }),
+        Command::retry_run(RetryRun {
+            run_id: id,
+            requested_at_ms: 5,
+        }),
+    ];
+    for c in &cmds {
+        let before = h.data();
+        let (out, actions, _) = h.apply_full(c);
+        assert_eq!(out, bad_intent(), "{}", c.kind_name());
+        assert!(actions.is_empty(), "{}", c.kind_name());
+        assert_eq!(h.data(), before, "{}", c.kind_name());
+    }
+}
+
+#[test]
+fn phase5_intents_reach_their_stubs_and_change_nothing() {
+    let mut h = H::new();
+    let r = running(&mut h, 1);
+    for d in [
+        Derived::register_wait(1, CmdWaitKind::Signal, "go", 500, 10),
+        Derived::register_wait(1, CmdWaitKind::Token, "", 0, 10),
+        Derived::cancel_wait(1),
+    ] {
+        let before = h.data();
+        assert_eq!(h.apply(&append(&r, 0, 1, vec![d])), bad_intent());
+        assert_eq!(h.data(), before);
+    }
+}
+
+// ---------------------------------------------------------------- inbound Signal
+
+fn inbound_signal(seq: u64, target: &RunId, name: &str, event: PayloadRef) -> Command {
+    Command::inbound_batch(InboundBatch {
+        src: 7,
+        msgs: vec![InboundMsg {
+            seq,
+            msg: Some(OutboxMsg {
+                kind: Some(outbox_msg::Kind::Signal(Signal {
+                    target_run: target.as_bytes().to_vec(),
+                    name: name.into(),
+                    payload: Some(event),
+                })),
+            }),
+        }],
+    })
+}
+
+/// `(name, slot)` of the run's signal inbox rows, in arrival order.
+fn slots(h: &H, r: &RunId) -> Vec<(String, SignalSlot)> {
+    let mut rows: Vec<(u64, String, SignalSlot)> = h
+        .store
+        .reader()
+        .prefix(Table::Inbox, &run_prefix(r), usize::MAX)
+        .expect("inbox")
+        .into_iter()
+        .filter_map(|(k, v)| {
+            decode_signal_inbox_key(&k)
+                .map(|(_, name, n)| (n, name, values::decode(&v).expect("slot")))
+        })
+        .collect();
+    rows.sort_by_key(|(n, _, _)| *n);
+    rows.into_iter().map(|(_, n, s)| (n, s)).collect()
+}
+
+/// Tripwire: 05-08 adds the wait match in front of this "no wait" branch (no wait can exist
+/// before 05-08, because RegisterWait is rejected).
+#[test]
+fn inbound_signal_buffers_without_waits_until_implemented() {
+    let mut h = H::new();
+    let r = running(&mut h, 1);
+    // Empty journal (B1): a Pending slot with the sender's encoded event; nothing journaled.
+    let early = PayloadRef::inline(Bytes::from_static(b"\x01early"));
+    let (out, actions, reads) = h.apply_full(&inbound_signal(1, &r, "go", early.clone()));
+    assert_eq!(out, ApplyOutcome::Accepted);
+    assert!(
+        actions.is_empty(),
+        "Running run: no wake-up without a journaled input"
+    );
+    assert_eq!(reads, 1, "the run record only");
+    assert_eq!(
+        slots(&h, &r),
+        vec![(
+            "go".to_string(),
+            SignalSlot::Pending {
+                event: early,
+                sent_at_ms: 0
+            }
+        )]
+    );
+    assert_eq!(h.run(&r).next_seq, 0);
+    assert_eq!(h.run(&r).inbox_next, 1);
+
+    // Journal started: the 1 MiB blob-backed event is journaled verbatim (D21, no blob
+    // read) and the slot points at it.
+    assert_eq!(h.apply(&append(&r, 0, 2, vec![])), ApplyOutcome::Accepted);
+    let big = PayloadRef::blob([0x42; 32], 1 << 20);
+    let (out, actions, reads) = h.apply_full(&inbound_signal(2, &r, "go", big.clone()));
+    assert_eq!(out, ApplyOutcome::Accepted);
+    assert_eq!(reads, 1);
+    assert_eq!(actions, vec![Action::InputAppended { run: r, seq: 2 }]);
+    let row = h.get(Table::Events, &event_key(&r, 2)).expect("event row");
+    assert_eq!(
+        JournalEvent::decode(row.as_slice()).expect("journal event"),
+        JournalEvent {
+            seq: 2,
+            kind: ostro_types::journal::EventKind::SignalPayload.code(),
+            payload: Some(big),
+        }
+    );
+    assert_eq!(
+        slots(&h, &r)[1],
+        (
+            "go".to_string(),
+            SignalSlot::Journaled {
+                payload_seq: 2,
+                sent_at_ms: 0
+            }
+        )
+    );
+    let rec = h.run(&r);
+    assert_eq!((rec.next_seq, rec.inbox_next), (3, 2));
+
+    // Terminal or unknown targets, a missing event and an over-long name are dropped.
+    let before = h.data();
+    let mut long = Signal {
+        target_run: r.as_bytes().to_vec(),
+        name: "n".repeat(command::MAX_SIGNAL_NAME_LEN + 1),
+        payload: Some(PayloadRef::inline(Bytes::from_static(b"x"))),
+    };
+    let drop = |seq: u64, s: Signal| {
+        Command::inbound_batch(InboundBatch {
+            src: 7,
+            msgs: vec![InboundMsg {
+                seq,
+                msg: Some(OutboxMsg {
+                    kind: Some(outbox_msg::Kind::Signal(s)),
+                }),
+            }],
+        })
+    };
+    assert_eq!(h.apply(&drop(3, long.clone())), ApplyOutcome::Accepted);
+    long.name = "ok".into();
+    long.payload = None;
+    assert_eq!(h.apply(&drop(4, long)), ApplyOutcome::Accepted);
+    assert_eq!(
+        h.apply(&inbound_signal(
+            5,
+            &rid(99),
+            "go",
+            PayloadRef::inline(Bytes::from_static(b"x"))
+        )),
+        ApplyOutcome::Accepted
+    );
+    assert_eq!(h.data(), before);
+    assert_eq!(h.cur.inbound_seen.get(&7), Some(&5));
 }

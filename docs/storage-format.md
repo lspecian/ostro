@@ -129,7 +129,7 @@ There are 16 fjall keyspaces per partition (13 in Phase 2; `running` added by 04
 | 3 | `payloads` | run ‖ kind u8 (0 = input, 1 = result) | prost `PayloadRef` |
 | 4 | `ready` | str queue ‖ !(priority as u32 ^ 0x8000_0000) u32 (higher priority first) ‖ ready_at_ms u64 ‖ run | postcard `ReadyValue { concurrency_key }` |
 | 5 | `timers` | due_at_ms u64 ‖ run ‖ op u64 (op `u64::MAX` = delayed run start) | empty |
-| 6 | `inbox` | two shapes (§13): legacy run ‖ `0xFFFF` u16 ‖ n u64, and signal run ‖ str name ‖ n u64 | legacy: postcard `InboxMsg` (Signal / ChildCompleted / CancelRequested / TimerFired; TimerFired is no longer written since 04-13); signal: postcard `SignalSlot` |
+| 6 | `inbox` | two shapes (§13): legacy run ‖ `0xFFFF` u16 ‖ n u64, and signal run ‖ str name ‖ n u64 | legacy: postcard `InboxMsg` (ChildCompleted / CancelRequested / TimerFired; TimerFired is no longer written since 04-13); signal: postcard `SignalSlot` |
 | 7 | `dedupe` | str workflow ‖ idempotency key (raw, rest of key); cron: str `"__cron/<schedule_id>"` ‖ fire_time_ms u64 | run id (18) |
 | 8 | `outbox` | target u16 ‖ seq u64 (seqs start at 1) | prost `OutboxMsg` |
 | 9 | `inbound_seen` | source partition u16 | highest applied seq u64 BE |
@@ -328,7 +328,8 @@ The `inbox` keyspace now has two key shapes. Both use `RunRecord.inbox_next` for
 - `SignalSlot` (postcard enum, variant order is the encoding):
   - `Journaled { payload_seq u64, sent_at_ms u64 }`: the signal's `SignalPayload{name, payload}` event (kind 96) is already journaled at `payload_seq`. A later match journals `SignalMatched{op, payload_seq}` (kind 97). The slot holds no payload bytes (D21).
   - `Pending { event PayloadRef, sent_at_ms u64 }` (B1): the signal arrived while the run's journal was empty (`next_seq == 0`), so its submitter-encoded `SignalPayload` event bytes are kept here. `event` is the prost encoding of a `PayloadRef` (inline ≤ 256 KiB, or a blob), stored as a postcard byte string. The seq-0 batch (`EventsAppended` with `from_seq == 0`, or `StartRun.run_started` from 05-16) journals each pending event right after its own events and before its intents, and converts the slot to `Journaled`.
-- Legacy rows: inbound `ChildCompleted` keeps writing `InboxMsg::ChildCompleted` until Phase 9 journals it as an input. Until plan 05-08 replaces the inbound signal and cancel paths, inbound `Signal` and `CancelRun` keep their Phase 2 legacy rows (`InboxMsg::Signal`, `InboxMsg::CancelRequested`). `InboxMsg::TimerFired` has not been written since 04-13.
+- Inbound outbox `Signal` (its `payload` is the sender-encoded `SignalPayload` event, D21) writes a signal row: `Pending{event, sent_at_ms: 0}` while `next_seq == 0`, else it journals the event verbatim and stores `Journaled{payload_seq, sent_at_ms: 0}` (the outbox message carries no send time). Plan 05-08 adds the wait match in front of this branch.
+- Legacy rows (`InboxMsg`, variant order is the encoding: `ChildCompleted`, `CancelRequested`, `TimerFired`; the Phase 2 `Signal` variant was removed by 05-02): inbound `ChildCompleted` keeps writing `ChildCompleted` until Phase 9 journals it as an input. Inbound `CancelRun` keeps writing `CancelRequested` until plan 05-08 journals it. `TimerFired` has not been written since 04-13.
 
 ### `RunRecord` trailing fields
 

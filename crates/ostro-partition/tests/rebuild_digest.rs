@@ -14,7 +14,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use bytes::Bytes;
-use common::{T, copy_dir, run_on, start_run};
+use common::gen_lifecycle::LifecycleOp;
+use common::gen_waits::WaitOp;
+use common::{GenRun, T, copy_dir, run_on, start_run};
 use ostro_log::ReplicatedLog;
 use ostro_partition::{ApplyOutcome, MachineConfig, Node, NodeConfig, PartitionSlot, StartMode};
 use ostro_types::command::{
@@ -99,6 +101,10 @@ enum Op {
         event: bool,
         timer: Option<u64>,
     },
+    /// Plan 05-02 hook: wait/signal/token/cancel commands from `common::gen_waits` (05-08).
+    Waits(Option<WaitOp>),
+    /// Plan 05-02 hook: lifecycle commands from `common::gen_lifecycle` (05-09).
+    Lifecycle(Option<LifecycleOp>),
 }
 
 fn cfg_strategy() -> impl Strategy<Value = Cfg> {
@@ -148,6 +154,9 @@ fn op_strategy() -> impl Strategy<Value = Op> {
             proptest::option::weighted(0.4, 0u64..10_000),
         )
             .prop_map(|(p, i, mode, event, timer)| Op::Suspend { p, i, mode, event, timer }),
+        // Plan 05-02 generator hooks (05-08 / 05-09 fill them; `None` = no command).
+        2 => common::gen_waits::strategy().prop_map(Op::Waits),
+        2 => common::gen_lifecycle::strategy().prop_map(Op::Lifecycle),
     ]
 }
 
@@ -220,6 +229,38 @@ async fn submit(node: &Node, p: u16, c: Command) -> ApplyOutcome {
         .await
         .expect("submit timed out")
         .expect("submit")
+}
+
+/// The run's live `next_seq` (apply-journaled inputs such as signals move it past the
+/// driver's model); `fallback` if the run is unknown.
+fn live_next_seq(node: &Node, p: u16, id: &RunId, fallback: u64) -> u64 {
+    node.handle(PartitionId(p))
+        .expect("ready")
+        .read_run(id)
+        .ok()
+        .flatten()
+        .map_or(fallback, |r| r.next_seq)
+}
+
+/// Driver view of every run for the generator hooks, `next_seq` re-read from live state.
+fn gen_view(node: &Node, runs: &[Vec<RunModel>]) -> Vec<GenRun> {
+    runs.iter()
+        .enumerate()
+        .flat_map(|(p, rs)| rs.iter().map(move |r| (p as u16, r)))
+        .map(|(p, r)| GenRun {
+            partition: p,
+            id: r.id,
+            token: r.token,
+            next_seq: live_next_seq(node, p, &r.id, r.next_seq),
+        })
+        .collect()
+}
+
+/// Submits generator-hook commands (outcomes are free: rejections are deterministic too).
+async fn submit_all(node: &Node, cmds: Vec<(u16, Command)>) {
+    for (p, c) in cmds {
+        submit(node, p, c).await;
+    }
 }
 
 /// Run every op against a live node under `dir`; graceful shutdown at the end.
@@ -299,6 +340,7 @@ async fn drive(dir: &Path, sc: &Scenario) {
                     None => None,
                 };
                 let r = &mut runs[pi][k];
+                r.next_seq = live_next_seq(&node, *p, &r.id, r.next_seq);
                 let base = r.token.unwrap_or(AttemptToken {
                     epoch: ostro_types::Epoch(1),
                     n: 1,
@@ -412,6 +454,7 @@ async fn drive(dir: &Path, sc: &Scenario) {
                 }
                 let k = i % rs.len();
                 let r = &mut rs[k];
+                r.next_seq = live_next_seq(&node, *p, &r.id, r.next_seq);
                 let base = r.token.unwrap_or(AttemptToken {
                     epoch: ostro_types::Epoch(1),
                     n: 1,
@@ -458,6 +501,18 @@ async fn drive(dir: &Path, sc: &Scenario) {
                 // Not Running (never granted, already suspended, terminal): rejected, fine.
                 if submit(&node, *p, c).await == ApplyOutcome::Accepted {
                     r.next_seq = from + added;
+                }
+            }
+            Op::Waits(w) => {
+                if let Some(w) = w {
+                    let view = gen_view(&node, &runs);
+                    submit_all(&node, common::gen_waits::commands(w, &view, n)).await;
+                }
+            }
+            Op::Lifecycle(l) => {
+                if let Some(l) = l {
+                    let view = gen_view(&node, &runs);
+                    submit_all(&node, common::gen_lifecycle::commands(l, &view, n)).await;
                 }
             }
         }
