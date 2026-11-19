@@ -18,8 +18,10 @@
 //!    first activation (05-08 journals nothing while the journal is empty).
 //!    A run whose `StartRun` carried `run_started` (tag 23, 05-16) already has it at seq 0
 //!    (`next_seq == 1`, journaled by apply, which also journals a later cancel directly), so
-//!    the append is skipped. The server's own start paths leave the field empty (D3: a run
-//!    that never started keeps an empty journal), so this append is the normal path.
+//!    the append is skipped. Since 05-25 (D24) the API start and retry-restart paths set the
+//!    field, so this append is the path for starts that arrive without it: today the
+//!    continue-as-new successor (inbound outbox `StartRun`, `derive::successor_start`), and
+//!    child starts once they exist (Phase 9).
 //!    With the pipelined grant (05-16) `Job.record` is the dispatcher's pre-grant read
 //!    patched with the job's token: the grant may not be applied yet when the job starts,
 //!    but every append of the job lands after it in the log.
