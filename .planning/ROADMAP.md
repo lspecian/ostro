@@ -384,7 +384,25 @@ Plans:
   3. Exceeding a published limit (payload size, history length, children per run) produces a clear, documented error rather than undefined behaviour.
   4. The embedded UI, served from the binary, shows the run list with filters/tags, a history timeline with replay markers and published status. It also shows modules, versions, queues, schedules, workers and partition health.
   5. From the UI an operator can cancel, terminate, retry, rerun-from-step, pause/resume, requeue from the DLQ, and run bulk operations.
-**Plans**: TBD
+**Plans**: 16 plans (7 waves; 11-01 is the PHASE-11 GATE requiring Phase 7 AND Phase 8 complete (all 07-*/08-* SUMMARYs + VERIFICATION passed, or human_needed with by-design items only) and the Phase 5 freeze (wit/FROZEN.toml + local tag, limit_exceeded/payload_too_large in runtime.wit, the x_ derived-keyspace rule); ordinals from the RESERVATIONS P11 block (Cmd 45 DlqUpdate, StartRun 40/41, JournalEvent.4, InvalidCode 29/30, ext tags 144/145, derived keyspace x_run_index); PF-11-4 not adopted, so rerun lineage uses the __ostro/rerun_from=<seq> system tag; decisions D-P11-1..D-P11-27 adopted in 11-DECISIONS.md (D-P11-3/8 rerun semantics, D-P11-13 limit defaults, D-P11-14 askama =0.16.1 + vendored htmx 2.0.11 (maud fallback), D-P11-17 UI exposure flagged USER REVIEW), user may override; runs in parallel with Phases 9 and 10 under the 11-DECISIONS shared-file rules: Cargo files and the server seam only 11-02, ostro-api/proto/OpenAPI only 11-07 (never concurrently with 10-03), CLI only 11-12 (client methods in ostro-client/src/p11.rs once 10-06 lands), replay_check created by whichever of 11-08/10-08 lands first; real-browser checks human_needed, no Node)
+
+Plans:
+- [ ] 11-01-PLAN.md — PHASE-11 GATE (Phase 7 + Phase 8 complete, Phase 5 freeze, seams, code vs RESERVATIONS) + Phase 11 name rows + decisions D-P11-1..27 and coordination rules to STATE (all) (W1)
+- [ ] 11-02-PLAN.md — Contract + Wave 0: StartRun 40/41, Cmd 45, JournalEvent.4, InvalidCode 29/30, apply stubs, RunLimits; all Cargo edits + ostro-ui skeleton + vendored htmx 2.0.11 (askama/maud decision); OpsApi/InventoryApi contract, [limits]/[ui]/[bulk]/[dlq] config, final p11.rs seam + controller/service stubs (all) (W2)
+- [ ] 11-03-PLAN.md — Derived run index x_run_index: apply hooks, rebuild, snapshot install, newest-first index_page, index == scan proptest (OPS-05) (W3)
+- [ ] 11-04-PLAN.md — Live-only engine limits (history, children, payload) → resumable limit_exceeded, WireOutcome + worker EngineLimits, docs/limits.md (OPS-07) (W3)
+- [ ] 11-05-PLAN.md — Rerun below the control plane: verbatim prefix apply, cut-safety analyzer, durable re-arm trigger + kill test, exact attempt stamps, rerun guests (OPS-02, UI-01) (W4)
+- [ ] 11-06-PLAN.md — DlqUpdate apply + DlqRow marks, rebuild_digest generator, storage-format "Phase 11 additions" (OPS-04) (W3)
+- [ ] 11-07-PLAN.md — API surface (single owner): REST + gRPC RunOps/Inventory, search params, history attempt, on_failure policy DTO, limit validation with uniform details, fakes, parity, OpenAPI re-bless (/ → 303 /ui/) (OPS-02..07, UI-03) (W3)
+- [ ] 11-08-PLAN.md — Rerun control plane: cut resolution, mandatory replay_check with the new run id (creates ostro_engine::replay_check if absent), envelope fitting, idempotency, rerun-cuts, DLQ rerun requeue (OPS-02) (W5)
+- [ ] 11-09-PLAN.md — Indexed search with scan fallback, inventory (modules/queues/partitions) and limits endpoints, API-cap e2e, docs/limits.md sync test, history attempts (OPS-05, OPS-07, UI-03) (W4)
+- [ ] 11-10-PLAN.md — DLQ server (view, requeue, dismiss) + on_failure hook service (ext 144/145, exactly-once, loop guard, catch-up, metrics) (OPS-04) (W4)
+- [ ] 11-11-PLAN.md — Bulk operations: snapshot bound, Phase 7 GCRA pacing, backpressure, per-run idempotency, checkpoints + crash resume (OPS-03) (W6)
+- [ ] 11-12-PLAN.md — CLI: ostro rerun, dlq, bulk, limits, ls --tag/--newest/--dlq (CLI-06 contract; Phase 10 client coordination) (OPS-02..05, OPS-07) (W6)
+- [ ] 11-13-PLAN.md — UI foundation: security layer (CSP, CSRF, Host allowlist), embedded assets, run list/filters/tags/DLQ tab, run detail + published status, timeline with replay markers, logs (UI-01) (W4)
+- [ ] 11-14-PLAN.md — UI actions: cancel/terminate/retry/signal/pause/resume, rerun-from-step with preview, DLQ requeue/dismiss, bulk create/progress/cancel (UI-02) (W5)
+- [ ] 11-15-PLAN.md — UI inventory: modules, workflows/versions, queues (+pause/resume), schedules (+pause/resume/trigger), workers (+drain), partition health (UI-03, UI-02) (W6)
+- [ ] 11-16-PLAN.md — PHASE-11 GATE: spawned-binary SC1–SC5 e2e (ops_e2e, ui_e2e), kill tests, rerun corpus entries, docs/operations.md + docs/ui.md, binary size vs NFR-2.1, full ci-local, RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION + human_needed browser checklist (all) (W7)
 
 ### Phase 12: Replicated Partition Logs
 **Goal**: Partition logs replicate across nodes with no acknowledged-write loss. Chronik's pure algorithms are ported behind the existing `ReplicatedLog`, and the conformance suite gates everything.
