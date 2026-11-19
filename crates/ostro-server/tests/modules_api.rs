@@ -262,15 +262,15 @@ async fn rest_modules_and_workflows() {
         2
     );
 
-    // Runs are 04-18's: the placeholder answers 503.
+    // Runs start on the active version (04-18; covered in start_run_api.rs).
     let r = s
         .http
         .post(s.url("/v1/workflows/sdk-basic/runs"))
-        .json(&json!({"input": {}}))
+        .json(&json!({"input": {"name": "m", "n": 1}}))
         .send()
         .await
         .expect("POST run");
-    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.status(), StatusCode::CREATED);
 
     s.shutdown().await;
 }
