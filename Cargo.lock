@@ -2046,10 +2046,17 @@ dependencies = [
 name = "ostro-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "config",
  "getrandom 0.4.3",
  "jiff",
+ "ostro-blob",
  "ostro-engine",
+ "ostro-log",
+ "ostro-partition",
+ "ostro-testkit",
+ "ostro-types",
  "serde",
  "serde_json",
  "tempfile",

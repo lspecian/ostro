@@ -20,6 +20,17 @@ tempfile.workspace = true
 # OS RNG for run rng_seed / token key (04-17)
 getrandom.workspace = true
 ostro-engine = { path = "../ostro-engine" }
+# storage <-> engine seam (04-15): PartitionSink, derive, journal_io
+ostro-types.workspace = true
+ostro-partition = { path = "../ostro-partition" }
+ostro-log = { path = "../ostro-log" }
+ostro-blob = { path = "../ostro-blob" }
+bytes.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+ostro-engine = { path = "../ostro-engine", features = ["testkit"] }
+ostro-testkit.workspace = true
 
 [lints]
 workspace = true
