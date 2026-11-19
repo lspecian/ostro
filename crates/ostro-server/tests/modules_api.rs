@@ -18,7 +18,10 @@ use sha2::{Digest, Sha256};
 use tonic::Code;
 
 fn sha_hex(b: &[u8]) -> String {
-    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
 }
 
 /// `wasm` plus a trailing custom section: a different sha, the same `describe()`.
@@ -167,6 +170,29 @@ async fn rest_modules_and_workflows() {
         .await
         .expect("GET");
     assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    // A component preamble followed by garbage fails in the compiler: still 400.
+    let mut bad = vec![0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+    bad.extend_from_slice(b"\xff\xffgarbage section");
+    let (st, body) = put_module(&s, &sha_hex(&bad), bad).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .starts_with("invalid Wasm component"),
+        "{body}"
+    );
+    // A core module (not a component) -> 400 with the engine's message.
+    let core = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+    let (st, body) = put_module(&s, &sha_hex(&core), core).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("not a component"),
+        "{body}"
+    );
 
     // A different module describing (sdk-basic, 1) -> 409 naming the existing sha.
     let dup = with_custom_section(&v1);
@@ -204,10 +230,20 @@ async fn rest_modules_and_workflows() {
     let rv = basic["record_version"].as_u64().expect("record_version");
 
     // CAS activation: stale -> 412, current -> 200, omitted -> 200, unknown version -> 404.
-    let (st, body) = activate(&s, "sdk-basic", json!({"version": 2, "expected_version": rv - 1})).await;
+    let (st, body) = activate(
+        &s,
+        "sdk-basic",
+        json!({"version": 2, "expected_version": rv - 1}),
+    )
+    .await;
     assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{body}");
     assert_eq!(body["error"]["details"]["record_version"], rv);
-    let (st, body) = activate(&s, "sdk-basic", json!({"version": 2, "expected_version": rv})).await;
+    let (st, body) = activate(
+        &s,
+        "sdk-basic",
+        json!({"version": 2, "expected_version": rv}),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["active_version"], 2);
     assert_eq!(body["record_version"], rv + 1);
@@ -221,7 +257,10 @@ async fn rest_modules_and_workflows() {
     assert_eq!(st, StatusCode::NOT_FOUND);
     let (st, _) = activate(&s, "no-such-workflow", json!({"version": 1})).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    assert_eq!(workflow(&workflows(&s).await, "sdk-basic")["active_version"], 2);
+    assert_eq!(
+        workflow(&workflows(&s).await, "sdk-basic")["active_version"],
+        2
+    );
 
     // Runs are 04-18's: the placeholder answers 503.
     let r = s
@@ -255,7 +294,10 @@ fn refs(m: &pb::ModuleInfo) -> Vec<(String, u32)> {
         .collect()
 }
 
-async fn grpc_workflow(c: &mut WorkflowsClient<tonic::transport::Channel>, name: &str) -> pb::WorkflowInfo {
+async fn grpc_workflow(
+    c: &mut WorkflowsClient<tonic::transport::Channel>,
+    name: &str,
+) -> pb::WorkflowInfo {
     c.list(pb::ListWorkflowsRequest {})
         .await
         .expect("list")
@@ -287,7 +329,10 @@ async fn grpc_modules_and_workflows() {
         refs(&m),
         vec![("sdk-basic".to_string(), 1), ("sdk-echo".to_string(), 1)]
     );
-    assert_eq!(grpc_workflow(&mut wf, "sdk-basic").await.active_version, Some(1));
+    assert_eq!(
+        grpc_workflow(&mut wf, "sdk-basic").await.active_version,
+        Some(1)
+    );
 
     let stats = s.h().runtime().cache_stats().expect("aot cache");
     let r = modules
@@ -388,7 +433,12 @@ async fn grpc_modules_and_workflows() {
 // Persistence
 // ---------------------------------------------------------------------------------
 
-type Snapshot = (Vec<(String, u64)>, Vec<(String, u32, u64)>, Vec<(String, u32, u64)>, Option<u64>);
+type Snapshot = (
+    Vec<(String, u64)>,
+    Vec<(String, u32, u64)>,
+    Vec<(String, u32, u64)>,
+    Option<u64>,
+);
 
 fn snapshot(s: &TestServer) -> Snapshot {
     s.h().meta().view().read(|m| {
@@ -414,9 +464,18 @@ async fn metadata_survives_restart() {
     let mut s = server().await;
     let v1 = guest_wasm("sdk-basic");
     let v2 = guest_wasm("sdk-basic-v2");
-    assert_eq!(put_module(&s, &sha_hex(&v1), v1.clone()).await.0, StatusCode::CREATED);
-    assert_eq!(put_module(&s, &sha_hex(&v2), v2).await.0, StatusCode::CREATED);
-    assert_eq!(activate(&s, "sdk-basic", json!({"version": 2})).await.0, StatusCode::OK);
+    assert_eq!(
+        put_module(&s, &sha_hex(&v1), v1.clone()).await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        put_module(&s, &sha_hex(&v2), v2).await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        activate(&s, "sdk-basic", json!({"version": 2})).await.0,
+        StatusCode::OK
+    );
     let res = s
         .h()
         .meta()
