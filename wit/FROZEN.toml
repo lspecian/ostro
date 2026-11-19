@@ -1,0 +1,9 @@
+# WIT freeze pins (WIT-07). Enforced by crates/ostro-witcheck/tests/wit_freeze.rs
+# (`frozen_0_1_0_is_byte_identical`): the whole file, comments included, is byte-pinned.
+# Never edit a frozen package; add `wit/ostro-runtime-0.1.N/` instead (checked additive by
+# `runtime_0_1_chain_is_additive`). Local tag: wit/ostro-runtime-v0.1.0 (plan 05-20).
+
+[ostro-runtime-0_1_0]
+sha256 = "611d2982b88e0884d55f0acb8f47691edbcc4c4b2a8918efaad4a7092d6bd98e"
+frozen_at = "2026-11-19"
+rule = "additive only via new 0.1.N package checked by ostro-witcheck"

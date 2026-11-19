@@ -48,6 +48,7 @@ interface types {
     ///   `connection_unknown`, `sql_not_transactional`, `sql_exactly_once_violated`,
     ///   `unsupported_op`, `http_transport`.
     /// - Children and SDKs (Phase 9): `child_terminated`, `sdk_protocol`, `invalid_string`.
+    /// - Run operations (Phase 11): `limit_exceeded`, `payload_too_large`.
     record error-info {
         kind: string,
         message: string,
@@ -107,7 +108,9 @@ interface types {
         /// lease expiry, worker loss, restart) and is not stable across replays. Use it only
         /// for logging and metrics, never for control flow.
         attempt: u32,
-        /// Hash of the module executing this activation.
+        /// Hash of the module executing this activation. May change between activations
+        /// when an operator re-pins the run (`ostro migrate-runs`, Phase 13); use for logging
+        /// and metrics, never for control flow.
         module-hash: string,
         /// The run's tenant; `none` for the default tenant. Immutable for the run and
         /// inherited by children, continue-as-new successors and retries.
@@ -197,6 +200,11 @@ interface journal {
         /// Journal sequence number assigned to this step.
         seq: func() -> u64;
         /// Record the step outcome.
+        ///
+        /// A step retry is a cancellation point: while a graceful cancel the guest has not
+        /// yet observed is journaled, a failed step is not retried but resolves
+        /// `err(cancelled)` (the activation may be evicted inside `complete`; replay then
+        /// returns the recorded outcome).
         complete: func(outcome: result<payload, failure>) -> completion-ack;
     }
 

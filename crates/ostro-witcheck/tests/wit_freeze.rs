@@ -1,15 +1,15 @@
 //! WIT 0.1 freeze pins (plan 05-05, WIT-07).
 //!
 //! - `frozen_0_1_0_is_byte_identical`: `wit/ostro-runtime-0.1.0/runtime.wit` must hash to the
-//!   sha256 recorded in `wit/FROZEN.toml`. **Pre-freeze mode:** until 05-20 creates
-//!   `wit/FROZEN.toml`, the test only prints the current hash. Comments count: the whole
-//!   file is pinned, so doc-comment edits must land before the freeze.
+//!   sha256 recorded in `wit/FROZEN.toml`. **Enforced** since plan 05-20 (2026-11-19) created
+//!   `wit/FROZEN.toml`. Comments count: the whole file is pinned, so even a doc-comment edit
+//!   fails this test. (Before the freeze, a missing `FROZEN.toml` only printed the hash.)
 //! - `runtime_0_1_chain_is_additive`: every `wit/ostro-runtime-0.1.N` package is additive over
 //!   `0.1.(N-1)` ([`ostro_witcheck::check_chain`]). Today only 0.1.0 exists, so it checks
 //!   nothing; `chain_check_on_fixture_trees` proves the mechanism on fixture trees.
 //!
-//! 05-20 creates `wit/FROZEN.toml` (format below) and tags `wit/ostro-runtime-v0.1.0`. After
-//! that the 0.1.0 pin never changes; new surface goes into a new `0.1.N` directory, which the
+//! 05-20 created `wit/FROZEN.toml` (format below) and the local tag `wit/ostro-runtime-v0.1.0`.
+//! The 0.1.0 pin never changes; new surface goes into a new `0.1.N` directory, which the
 //! chain test then checks.
 //!
 //! ```toml

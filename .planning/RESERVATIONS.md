@@ -9,7 +9,7 @@
 4. Each phase's gate plan (Phase 5: 05-01 and 05-20) verifies the code against this file. Every ordinal present in code must appear here as `exists`, or as allocated to the phase that added it.
 5. Status values:
    - `exists`: in code today.
-   - `planned` followed by the phase tag and owning plan (e.g. for Phase 5: "planned", then "P5", then the plan id): allocated to that phase's plan. 05-20 flips its rows to `exists`.
+   - `planned` followed by the phase tag and owning plan (e.g. for Phase 5: "planned", then "P5", then the plan id): allocated to that phase's plan. 05-20 flips its rows to `exists`. **Done 2026-11-19 (05-20): every Phase 5 row was verified against the code at the freeze and now reads `exists (P5, <plan>)`.**
    - `reserved P6/P7/P8`: block held for that phase.
    - `unallocated`: free for a later phase to claim per rule 2.
 
@@ -30,11 +30,11 @@ Sources:
 | 5 | TimerFired | exists (P2, frozen) |
 | 6 | InboundBatch | exists (P2, frozen) |
 | 7 | OutboxTruncated | exists (P2, frozen) |
-| 8 | SignalRun | planned P5 (05-01) |
-| 9 | RequestCancel | planned P5 (05-01) |
-| 10 | TerminateRun | planned P5 (05-01) |
-| 11 | RetryRun | planned P5 (05-01) |
-| 12 | CompleteToken | planned P5 (05-01) |
+| 8 | SignalRun | exists (P5, 05-01) |
+| 9 | RequestCancel | exists (P5, 05-01) |
+| 10 | TerminateRun | exists (P5, 05-01) |
+| 11 | RetryRun | exists (P5, 05-01) |
+| 12 | CompleteToken | exists (P5, 05-01) |
 | 13 | CompleteEffect | reserved P6 |
 | 14–19 | spare | reserved P6 |
 | 20–26 | (unspecified) | reserved P7 |
@@ -54,11 +54,11 @@ Sources:
 |--------|-------|--------|
 | 1–13 | run_id … rng_seed | exists (P2) |
 | 14–18 | module_sha, tags, tenant, traceparent, run_timeout_ms | exists (P4, 04-09) |
-| 19 | schedule_to_start_ms | planned P5 (05-01) |
-| 20 | retention_ms | planned P5 (05-01) |
-| 21 | retry_of | planned P5 (05-01) |
-| 22 | continued_from | planned P5 (05-01) |
-| 23 | run_started (optional JournalEvent) | planned P5 (05-01) |
+| 19 | schedule_to_start_ms | exists (P5, 05-01) |
+| 20 | retention_ms | exists (P5, 05-01) |
+| 21 | retry_of | exists (P5, 05-01) |
+| 22 | continued_from | exists (P5, 05-01) |
+| 23 | run_started (optional JournalEvent) | exists (P5, 05-01; apply 05-16, set by the API 05-25, D24; in the format corpus) |
 | 24–27 | — (P6 declared 0 needs) | reserved P6 |
 | 28–31 | — | reserved P7 |
 | 32–35 | — (P8 declared 0 needs) | reserved P8 |
@@ -72,11 +72,11 @@ Other message fields: each new field on any other message is owned by the plan t
 
 | Message.field | Item | Status |
 |---|---|---|
-| CompleteRun.4 | resumable | planned P5 (05-01) |
-| CompleteRun.5 | parent_event (submitter-encoded ChildCompleted event bytes, D21) | planned P5 (05-01), Phase 9 PF-F1 |
-| outbox ChildCompleted.6 | event (same bytes, forwarded verbatim) | planned P5 (05-01), Phase 9 PF-F1 |
-| AttemptGranted.3 | after_failure (durable attempt_failures, F9) | planned P5 (05-01) |
-| RegisterWait.5 | at_ms (D21) | planned P5 (05-01) |
+| CompleteRun.4 | resumable | exists (P5, 05-01) |
+| CompleteRun.5 | parent_event (submitter-encoded ChildCompleted event bytes, D21) | exists (P5, 05-01), Phase 9 PF-F1 |
+| outbox ChildCompleted.6 | event (same bytes, forwarded verbatim) | exists (P5, 05-01), Phase 9 PF-F1 |
+| AttemptGranted.3 | after_failure (durable attempt_failures, F9) | exists (P5, 05-01) |
+| RegisterWait.5 | at_ms (D21) | exists (P5, 05-01) |
 | JournalEvent.4 | attempt (fixed64, submitter-set; 0 = apply-originated; PF-11-5 apply stamping was NOT adopted) | reserved P11 |
 
 State value fields (positional postcard, pre-freeze only; listed for cross-phase visibility): RunRecord gains the Phase 5 fields in 05-02, plus `continued_to` (Phase 9 PF-F2), `attempt_failures`, `status_seq` and `pause` (Phase 7 F1). Parallel phases must not add fields to the same message without first recording the field number here.
@@ -93,8 +93,8 @@ State value fields (positional postcard, pre-freeze only; listed for cross-phase
 | 4 | EnqueueReady | exists (P2) |
 | 5 | CompleteRun | exists (P2) |
 | 6 | Suspend | exists (P4, 04-09; per 04-12 plan) |
-| 7 | RegisterWait | planned P5 (05-01) |
-| 8 | CancelWait | planned P5 (05-01) |
+| 7 | RegisterWait | exists (P5, 05-01) |
+| 8 | CancelWait | exists (P5, 05-01) |
 | 9 | RegisterEffect `{op, kind u8, scheduled_at_ms}` | reserved P6 |
 | 10 | CancelEffect `{op}` | reserved P6 |
 | 11–12 | spare | reserved P6 |
@@ -118,13 +118,13 @@ Rules:
 | 29 | StepAttemptFailed | exists (P4, 04-04) |
 | 30–63 | — (guest-command range) | unallocated |
 | 64–69 | TimerFired, EffectCompleted, SignalReceived, ChildCompleted, TokenCompleted, CancelRequested | exists (P3). From P5 on, SignalReceived (66) stays decodable but is never produced (D21) |
-| 70 | WaitTimedOut | planned P5 (05-01) |
-| 71 | RunTerminated | planned P5 (05-01) |
+| 70 | WaitTimedOut | exists (P5, 05-01) |
+| 71 | RunTerminated | exists (P5, 05-01) |
 | 72–79 | — (P6 declared 0 needs) | reserved P6 |
 | 80–87 | — | reserved P7 |
 | 88–95 | — (P8 declared 0 needs) | reserved P8 |
-| 96 | SignalPayload `{name, payload}`: submitter-encoded, stored verbatim (D21) | planned P5 (05-01; allocated under rule 2 from the unallocated range) |
-| 97 | SignalMatched `{op, payload_seq}`: apply-encoded, no user data (D21) | planned P5 (05-01; rule 2) |
+| 96 | SignalPayload `{name, payload}`: submitter-encoded, stored verbatim (D21) | exists (P5, 05-01; allocated under rule 2 from the unallocated range) |
+| 97 | SignalMatched `{op, payload_seq}`: apply-encoded, no user data (D21) | exists (P5, 05-01; rule 2) |
 | 98–105 | — | reserved P9 |
 | 106–127 | — | unallocated |
 | 128+ | — | reserved (codec) |
@@ -134,9 +134,9 @@ Rules:
 | Value | Item | Status |
 |-------|------|--------|
 | 0–2 | Completed, Failed, Cancelled | exists (P2) |
-| 3 | Terminated | planned P5 (05-01) |
-| 4 | TimedOut | planned P5 (05-01) |
-| 5 | ContinuedAsNew | planned P5 (05-01) |
+| 3 | Terminated | exists (P5, 05-01) |
+| 4 | TimedOut | exists (P5, 05-01) |
+| 5 | ContinuedAsNew | exists (P5, 05-01) |
 | 6–9 | — (P6, P8 declared 0) | reserved P7 |
 | 10–11 | — | reserved P9 |
 | 12+ | — | unallocated |
@@ -163,8 +163,8 @@ Rules:
 | 11 | dlq | exists (P2) |
 | 12 | effects | exists (P2, no rows). **P6 writes rows** (`run ‖ op BE → EffectRow{kind, scheduled_at_ms}`). 0 new keyspaces for P6. |
 | 13 | running | exists (P4; per 04-12 plan) |
-| 14 | waits | planned P5 (05-02) |
-| 15 | signal_seen | planned P5 (05-02) |
+| 14 | waits | exists (P5, 05-02) |
+| 15 | signal_seen | exists (P5, 05-02) |
 | 16 | schedule_state | reserved P8 (ScheduleState) |
 | 17 | p7_a | reserved P7. **Not needed if 07-RESEARCH F1 lands** (05-02 adds `RunRecord.pause`). If F1 is rejected, rename to `run_pauses` in a docs-only commit before any placeholder is declared. |
 | 18 | p7_b | reserved P7. Not needed if F1 lands. |
@@ -177,7 +177,7 @@ Rules:
 | Index | Item | Status |
 |-------|------|--------|
 | 0–10 | StaleEpoch, Fenced, SeqMismatch, SeqGap, RunNotFound, RunTerminal, RunExists, IdempotencyConflict, PayloadTooLarge, WrongPartition, Invalid | exists (P2) |
-| 11 | RunCompleted | planned P5 (05-02) |
+| 11 | RunCompleted | exists (P5, 05-02) |
 | 12–14 | — (P6 declared 0 needs) | reserved P6 |
 | 15–17 | — | reserved P7 |
 | 18–19 | — (P8 declared 0) | reserved P8 |
@@ -209,7 +209,7 @@ Rules:
 | Tag | Item | Status |
 |-----|------|--------|
 | 1–5 | StartChild, ChildCompleted, Signal, CancelRun, CronStart (CronStart stays valid but unused by P8) | exists (P2) |
-| 6 | StartRun (continue-as-new) | planned P5 (05-01) |
+| 6 | StartRun (continue-as-new) | exists (P5, 05-01) |
 | 7 | — (P6 declared 0) | reserved P6 |
 | 8–9 | — | reserved P7 |
 | 10 | — (P8 declared 0) | reserved P8 |
@@ -225,10 +225,10 @@ Rules (D20):
 | Index | Variant (MetaState map) | Status |
 |-------|------------------------|--------|
 | 0–13 | Cluster, Member, Partition, Module, Workflow, Active, Queue, Schedule, Token, Tenant, Secret, Grant, Connection, Egress | exists (P4, 04-01) |
-| — | `Schedule` gains timezone, overlap, catchup, catchup_window_ms, start_at_ms, end_at_ms, created_at_ms, ext | planned P5 (05-07), pre-freeze, for P8 F2(a) |
-| 14 | WorkflowPolicy (`workflow_policies`) | planned P5 (05-07) |
-| 15 | QueuePolicy (`queue_policies`) | planned P5 (05-07) |
-| 16 | Webhook (`webhooks`) | planned P5 (05-07), pre-freeze, for P8 F3 |
+| — | `Schedule` gains timezone, overlap, catchup, catchup_window_ms, start_at_ms, end_at_ms, created_at_ms, ext | exists (P5, 05-07), pre-freeze, for P8 F2(a) |
+| 14 | WorkflowPolicy (`workflow_policies`) | exists (P5, 05-07) |
+| 15 | QueuePolicy (`queue_policies`) | exists (P5, 05-07) |
+| 16 | Webhook (`webhooks`) | exists (P5, 05-07), pre-freeze, for P8 F3 |
 | 17–18 | — (P6 uses existing Secret/Grant/Connection/Egress by convention: 0 needed) | reserved P6 |
 | 19–20 | — (QueueFlow / WorkflowFlow only if F2 is rejected) | reserved P7. **Not needed if 07-RESEARCH F2 lands** (05-07 puts the Phase 7 fields in QueuePolicy/WorkflowPolicy pre-freeze) |
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
@@ -237,7 +237,7 @@ Rules (D20):
 | 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12 |
 | 27+ | — | unallocated |
 
-META_FORMAT: bumped once pre-freeze by 05-07. The value at 05-20 is the frozen baseline. Each post-freeze bump is recorded here with its phase.
+META_FORMAT: bumped once pre-freeze by 05-07. **Frozen baseline: `META_FORMAT = 2`** (verified by 05-20 at the freeze, 2026-11-19; `crates/ostro-meta/src/command.rs`, golden `crates/ostro-meta/tests/golden/meta_v2.txt` pinned in `golden_frozen.rs`; format 1 = pre-Phase-5 dev format, rejected). Each post-freeze bump is recorded here with its phase.
 
 ### 10a. `MetaCommand` variant order (postcard, Raft entries)
 

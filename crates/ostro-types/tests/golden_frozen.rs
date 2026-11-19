@@ -11,11 +11,15 @@
 //! lines), so a new journal kind lands in the middle of the file; each section is pinned as
 //! its own prefix. `commands.txt` and `routing.txt` are pinned as whole-file prefixes.
 //!
-//! Pinned at the post-05-01 contents (plan 05-05: 21 command vectors, 27 event lines for 25
-//! kinds, the last being `event 97 signal_matched`). **05-20 re-pins** these to the final
-//! freeze line counts (and creates `wit/FROZEN.toml` for the WIT byte-identity test). After
-//! the freeze, a pin may only be **extended** (larger `line_count` over a file whose old
-//! prefix is unchanged), never changed.
+//! First pinned at the post-05-01 contents (plan 05-05: 21 command vectors, 27 event lines for
+//! 25 kinds, the last being `event 97 signal_matched`). **Re-pinned at the Phase 5 freeze
+//! (05-20, 2026-11-19)** to the final line counts: no Phase 5 plan appended to the
+//! `ostro-types` goldens after 05-05, so their counts and hashes are unchanged, and every line
+//! of every file is now pinned. 05-20 also added the meta golden
+//! (`crates/ostro-meta/tests/golden/meta_v2.txt`, META_FORMAT 2, D20), pinned per section
+//! (`#`, `record`, `command`, `snapshot`) because new meta variants land mid-file. After the
+//! freeze, a pin may only be **extended** (larger `line_count` over a file whose old prefix is
+//! unchanged), never changed.
 
 use sha2::{Digest, Sha256};
 
@@ -39,6 +43,7 @@ struct Pin {
 const COMMANDS: &str = include_str!("golden/commands.txt");
 const JOURNAL: &str = include_str!("golden/journal_v1.txt");
 const ROUTING: &str = include_str!("golden/routing.txt");
+const META: &str = include_str!("../../ostro-meta/tests/golden/meta_v2.txt");
 
 const PINS: &[Pin] = &[
     Pin {
@@ -82,6 +87,34 @@ const PINS: &[Pin] = &[
         section: Section::All,
         line_count: 49, // header + 48 routing vectors
         sha256: "6464da2ec8394f66e0ea8a52a4af9b188756df35df96c06605eb6324e3a84848",
+    },
+    Pin {
+        file: "meta_v2.txt",
+        content: META,
+        section: Section::Prefix("#"),
+        line_count: 1,
+        sha256: "9f1fa5db8cf0db6c156ca6550f8cf6ca72a36fcf25ec6d819402573268c2cb3a",
+    },
+    Pin {
+        file: "meta_v2.txt",
+        content: META,
+        section: Section::Prefix("record"),
+        line_count: 17, // MetaRecord variants 0..=16, last = webhook
+        sha256: "9f34a651ec7a96e1943f3a49f5ed125cb8702c7827729516fc7497c7aaf90ee6",
+    },
+    Pin {
+        file: "meta_v2.txt",
+        content: META,
+        section: Section::Prefix("command"),
+        line_count: 4, // MetaCommand variants 0..=3
+        sha256: "bea76988136918f6de3b161df4a54521bf54f498ba6c88c9cf206e5e01266de9",
+    },
+    Pin {
+        file: "meta_v2.txt",
+        content: META,
+        section: Section::Prefix("snapshot"),
+        line_count: 2, // empty + full MetaState
+        sha256: "bfea23ef414a8bb46d17c4c2b87d8a87a63e8201f8d37ea924c75836bc5ca272",
     },
 ];
 

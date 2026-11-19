@@ -1,8 +1,8 @@
-# Ostro on-disk format (Phase 2, with Phase 4 additions in §12 and Phase 5 additions in §13)
+# Ostro on-disk format (Phase 2, with Phase 4 additions in §12, Phase 5 additions in §13 and the freeze rules in §14)
 
-Status: fixed at the end of Phase 2 (plan 02-16). This document describes what the code writes today. Each section names the source file that defines the format, and the golden files and tests that pin it.
+**Status: FROZEN v0.1 (2026-11-19, plan 05-20).** First fixed at the end of Phase 2 (plan 02-16). This document describes what the code writes today. Each section names the source file that defines the format, and the golden files and tests that pin it. The frozen sources of truth, the evolution rules and the mixed-version rules are in **§14**; the on-disk corpus that pins this format is `tests/format-corpus/v0.1` (`crates/ostro-partition/tests/format_corpus.rs`). Ordinals and reserved names come only from `.planning/RESERVATIONS.md`.
 
-**Freeze policy:** the format is **frozen at the end of Phase 5**. After that, only additive changes are allowed: new command fields, new oneof variants, new enum values, new keyspaces, new meta keys, new outcome codes appended at the end. Field numbers, tags, codes and key layouts are never reused or renumbered. Until Phase 5 ends, any incompatible change must bump the relevant version (`node.toml` `format_version`, meta `format_ver`, envelope `codec_ver`, value format byte) and update this document in the same commit.
+**Freeze policy:** the format is **frozen** (FROZEN v0.1). From now on only additive changes are allowed: new command fields, new oneof variants, new enum values, new keyspaces, new meta keys, new outcome codes appended at the end, new meta variants or ext tags under D20 (§14). Field numbers, tags, codes and key layouts are never reused or renumbered. An incompatible change to a versioned format bumps its version (`node.toml` `format_version`, `META_FORMAT`, envelope `codec_ver`, value format byte), ships the decoders or migrators §14 requires, and updates this document in the same commit.
 
 All multi-byte integers are **little-endian in the log** (WAL frame, envelope) and **big-endian in state keys** (so byte order equals numeric order).
 
@@ -190,7 +190,8 @@ Order (`Node::open`, `crates/ostro-partition/src/node.rs`):
 1. `node.toml` (format and partition count).
 2. Open every state store in parallel. Its `applied_offset` is the partition's durable floor. An unreadable store gets floor `u64::MAX`, so its log tail is never cut.
 3. Recover every log in parallel (`crates/ostro-log/src/recovery.rs`): list segments, read and verify every record (§2–§3), classify the first failure, then make the log durable.
-4. Validate: `applied > LEO` is "state ahead of log" (fatal for the partition). `applied < log_start` is "snapshot required".
+   **Empty-log anchoring (Phase 12 F3, plan 05-21).** If a partition's log has no records (no segment files, only empty ones, or nothing left after a torn-tail cut) and its state store is readable, the log is anchored at the state's applied offset: `log_start = LEO = HW = applied_offset`, and the next append is assigned offset `applied_offset`. The log epoch cache, which is otherwise derived from envelope epochs, is seeded from `cursor.epoch_history` (`Rf1Log::seed_epochs`, called by `Node::open` before catch-up), so the new term's epoch is above every applied `LeaderAnnounced` epoch. No bytes are written by anchoring. An unreadable state (floor sentinel `u64::MAX`) anchors at 0. A **non-empty** log with `applied > LEO` stays fatal ("state ahead of log"), and `applied < log_start` stays "snapshot required". Anchoring does not change the torn-tail rule: with no verified record before it, a bad first record counts as above the floor only when `applied_offset == 0`.
+4. Validate: for a non-empty log, `applied > LEO` is "state ahead of log" (fatal for the partition); `applied < log_start` is "snapshot required". An empty log is anchored (above) and always validates.
 5. Replay from the state's **own `applied_offset`** (not `checkpointed_offset`), up to the HW. Then the epoch bump, `LeaderAnnounced{e+1}` as the first entry of the new term, readiness barrier, leader services.
 
 Any per-partition failure marks only that partition `Failed`.
@@ -299,7 +300,7 @@ Tags still free: `Derived` oneof 7, `StartRun` 19 and `Command` 8. Phase 5 reser
 
 ## 13. Phase 5 additions (pre-freeze, plan 05-02)
 
-Plan 05-02 changed the state format before the Phase 5 freeze. The command-set and journal additions (Cmd 8..12, StartRun 19..23, Derived 7..8, statuses 3..5, outbox kind 6, journal kinds 70/71/96/97) are additive and pinned by the appended goldens of plan 05-01. The state changes below are **not** additive: this is a pre-freeze positional change with **no migration** and no `VALUE_FORMAT` bump. **Delete dev data dirs created before Phase 5**: an old `runs` row fails to decode (`StoreError::Codec`). Plan 05-20 marks this document FROZEN v0.1; until then this section may still change. Empty-log anchoring is documented by plan 05-21 in §10.
+Plan 05-02 changed the state format before the Phase 5 freeze. The command-set and journal additions (Cmd 8..12, StartRun 19..23, Derived 7..8, statuses 3..5, outbox kind 6, journal kinds 70/71/96/97) are additive and pinned by the appended goldens of plan 05-01. The state changes below are **not** additive: this is a pre-freeze positional change with **no migration** and no `VALUE_FORMAT` bump. **Delete dev data dirs created before Phase 5**: an old `runs` row fails to decode (`StoreError::Codec`). Plan 05-20 marked this document FROZEN v0.1 (2026-11-19); this section is now frozen like the rest (§14). Empty-log anchoring (plan 05-21) is in §10.
 
 Ordinals and names (keyspaces, outcome codes, `InvalidCode` details, commands, journal kinds) come only from `.planning/RESERVATIONS.md`. Its **placeholder rule** binds keyspaces: a phase that lands a keyspace above a reserved slot that does not exist yet also declares the lower slot as an empty keyspace with the name fixed there, so the digest order is the same whatever order the phases land in. An empty keyspace adds only `name + row_count 0` to the digest.
 
@@ -380,6 +381,8 @@ The hot path keeps at most one keyspace read per command (`range_prefix` counts 
 
 ### On-disk freeze policy (amended D18)
 
+(Superseded in detail by §14, which is the frozen text; kept here as written by 05-02.)
+
 - **Frozen sources of truth:** the log (WAL frame, envelope, `Command` prost encoding, journal event codec, command hash), `node.toml`, the blob layout, and the meta Raft log and snapshot encoding.
 - **`node.toml`**: readers ignore unknown keys, and new keys are additive (Phase 8 F6, Phase 12 `node_id`/`cluster_id`). An existing key never changes meaning.
 - **Partition state-store values are derived** while the full log is retained: deleting `state/pNNNN` rebuilds them from the log. That is why pre-freeze value changes (this section, §12) need no migration.
@@ -387,3 +390,62 @@ The hot path keeps at most one keyspace read per command (`range_prefix` counts 
 - **BlobRef invariant** (Phase 8 F5): a `BlobRef` appears only in a `PayloadRef` field of a prost message (log commands included) or of a documented state value (postcard `SignalSlot::Pending.event`, the prost `PayloadRef` rows of `payloads`, the prost `JournalEvent` rows of `events`), **never inside opaque payload bytes**. Blob GC and backups can therefore find every reference without decoding journal payloads.
 - Node open, backup/restore and blob GC ignore unknown data-dir entries (Phase 14 F8, e.g. `<data>/audit/`).
 - **`<data>/LOCK`** (plan 05-26): the data-dir lock file. `ostro dev` / `ostro server` hold `flock(LOCK_EX|LOCK_NB)` on it for the server's lifetime, taken before any other disk work; a second process on the same directory fails with `data dir <data> is in use by another ostro process (lock <data>/LOCK)`. The content is unused (empty) and not part of the format. The lock belongs to the open descriptor, so a `LOCK` file left by a killed process does not block the next start. Tools that open `Node` / meta directly (Inspect mode, `export_run`, the format-corpus generator) do not take it and must run on a copy or a stopped directory. Older code ignores the entry (F8).
+
+## 14. FROZEN v0.1 (2026-11-19, plan 05-20)
+
+This section is the frozen text. It binds every later phase. Where it and an earlier section disagree, this section wins. Ordinals and reserved names come only from `.planning/RESERVATIONS.md`, and pinned bytes come only from the goldens and corpora listed here.
+
+### 14.1 Frozen sources of truth and their pins
+
+| Source of truth | Defined in | Pinned by |
+|---|---|---|
+| WAL frame (vendored `ostro-wal` V2) | §2 | `crates/ostro-log` tests, format corpus |
+| Envelope (32-byte LE header + CRC32C, `codec_ver`) | §3, `crates/ostro-types/src/envelope.rs` | format corpus |
+| Partition `Command` prost encoding (Cmd tags 1–12, `StartRun` 1–23, `Derived` 1–8, outbox kinds 1–6) | §4, §12, §13, `crates/ostro-types/src/command.rs` | `crates/ostro-types/tests/golden/commands.txt` (22 lines) |
+| Journal event codec (`EVENT_CODEC_VER` 1) and the per-kind command hash | `crates/ostro-types/src/journal.rs` | `journal_v1.txt` (27 event, 14 result, 14 hash lines) |
+| Ids and routing | §5 | `routing.txt` (49 lines) |
+| Meta Raft log and `MetaState` snapshot (postcard, positional), **`META_FORMAT = 2`** (D20 frozen baseline; the pre-Phase-5 format 1 is rejected explicitly) | `crates/ostro-meta/src/{command,records,state,ext}.rs` | `crates/ostro-meta/tests/golden/meta_v2.txt` (17 record, 4 command, 2 snapshot lines) |
+| `node.toml` | §1, §14.4 | `crates/ostro-partition` node tests |
+| Blob layout (`blobs/<hh>/<sha256>`) | §1, `crates/ostro-blob` | format corpus (one blob) |
+
+Every golden above is pinned as an append-only prefix by `crates/ostro-types/tests/golden_frozen.rs` (line count + sha256 per section). A pin may only be extended over an unchanged prefix, never changed. `wit/FROZEN.toml` byte-pins `wit/ostro-runtime-0.1.0/runtime.wit` the same way (WIT-07).
+
+**Format corpus.** `tests/format-corpus/v0.1/{data/, format.toml}` is a P=2 data dir (48 runs, about 410 KiB, WAL rotation 4096 bytes, several segments, one blob). It covers every command kind, every outbox kind and every `Derived` intent, including `StartRun.run_started` (tag 23, D24) with an inline and a blob `PayloadRef`. `format_corpus.rs` opens a copy in Inspect mode, compares `state_hash`, LEO, applied and every recorded per-table digest with `format.toml`, rebuilds a second copy from the log alone and compares again. The corpus is never re-generated. **Versioning (D18 caveat):** per-table digests pin *derived* state values. A later `STATE_FORMAT`/`VALUE_FORMAT` change that ships a row migrator changes the digests of a rebuilt store, so it adds a new `tests/format-corpus/v0.N/` next to `v0.1` (generated at that change) and keeps `v0.1` verifying through the migrator: `v0.1` must still open, its log must still decode, and its migrated state must equal a rebuild from its log. `v0.1` itself is never edited.
+
+### 14.2 Evolution rules (amended D18, amended D20)
+
+- **Additive only.** New prost fields, oneof variants, enum values, keyspaces (appended to `TABLES` in RESERVATIONS order, placeholder rule §13), meta keys and outcome codes. Nothing is ever reused or renumbered; a removed item is `retired`. `Cmd` tags 1–7 were frozen in Phase 2; journal kinds are append-only; `EVENT_CODEC_VER` stays 1.
+- **Partition state-store values are derived only while the full log is retained.** Deleting `state/pNNNN` rebuilds them from the log. **Once Phase 8 enables log trimming, snapshot rows become a source of truth: every `STATE_FORMAT`/`VALUE_FORMAT` change must then ship a row migrator (vN → vN+1)**, applied at snapshot install and at store open. Snapshots carry `state_format`, and readers accept every older snapshot format (also for Phase 12 follower install and Phase 13 N/N-1 upgrades).
+- **Meta (D20, amended by Phase 14 F2 and Phase 12 F8).** Meta records and the snapshot are positional postcard, so fields are never added to an existing meta struct. A post-freeze meta change is either (a) a **registered ext tag** on an existing record, or (b) a new `MetaRecord` variant appended in RESERVATIONS §10 order **plus a `META_FORMAT` bump** with decoders for every older format. Every meta record ends with `ext: Vec<u8>` in one TLV codec (`crates/ostro-meta/src/ext.rs`): `varint(tag u32) ‖ varint(len u32) ‖ postcard(value)`, tags strictly increasing, tag 0 invalid, unknown tags preserved on read-modify-write and ignored by readers. Tags are one global space registered in RESERVATIONS §10b (15 = golden/test only; 96–102 registered for Phase 13; 144–145 for Phase 11). An ext tag is the **bump-free extension path**: no new variant, no META_FORMAT bump. Appending a `MetaCommand` variant changes no existing encoding and needs no bump either.
+- **BlobRef invariant** (Phase 8 F5, Phase 12 F11). A `BlobRef` appears only in a `PayloadRef` field of a prost message or of a documented state value (postcard `SignalSlot::Pending.event`, the prost `PayloadRef` rows of `payloads`, the prost `JournalEvent` rows of `events`), **never inside opaque payload bytes**. This covers log commands too: every BlobRef in a log command sits in a `PayloadRef` field of the prost `Command` tree, so a follower can fetch the blobs before acknowledging, and blob GC and backups find every reference without decoding journal payloads.
+- **Qualified names (D23).** Resources are stored as `<tenant>/<name>`; the default tenant is unqualified. `StartRun.workflow` (and queue) carry the qualified form, so dedupe, routing, cron and webhook keys are tenant-scoped with no format change. The grammar is validated at the API, never in apply. `RunStarted.workflow` stays unqualified, with the tenant in `RunStarted.tenant`.
+- **Derived keyspaces (Phase 11 PF-11-2).** A keyspace whose on-disk name starts with `x_` is **not** in `TABLES` and not in the digest; it is not exported in OSNP snapshots and not visited by blob GC; it is rebuilt from digest state when its version marker is missing or stale, including after a snapshot install; older binaries ignore it. `x_run_index` is reserved (Phase 11).
+
+### 14.3 Data directory
+
+- **Unknown entries are ignored (Phase 14 F8).** Node open, backup/restore and blob GC ignore unknown top-level data-dir entries such as `<data>/audit/`, and never delete or rewrite them. Node open is tested (`format_corpus.rs::unknown_data_dir_entries_ignored`: Inspect open, rebuild from the log and a Leader start on a corpus copy with `<data>/audit/x` and `<data>/unknown_dir/`). Backup/restore and blob GC (Phase 8) inherit the obligation.
+- **`<data>/LOCK` (plan 05-26).** The data-dir lock file, described in §13 (last bullet of the freeze policy): `ostro dev`/`ostro server` hold `flock(LOCK_EX|LOCK_NB)` on it for the process lifetime, taken before any other disk work, and a second process on the same directory fails to start. Its content is unused and **not part of the format**; a stale `LOCK` left by a killed process never blocks the next start. Offline tooling that opens `Node` or meta directly (Inspect mode, `export_run`, the format-corpus generator) does not take it and must run on a stopped directory or a copy. Older binaries ignore it (F8).
+
+### 14.4 `node.toml`
+
+- Readers ignore unknown keys; new keys are additive (Phase 8 F6); an existing key never changes meaning.
+- **Reserved keys `node_id` and `cluster_id` (Phase 12 F6).** Absent: adopted and written durably (tmp + fsync + rename + dir fsync). Present: a mismatch with the cluster is fatal. `node_id = 0` means "no leader" and is never a node's id. Peers live in config (`[[cluster.peers]]`), never in `node.toml`.
+- **First boot (Phase 13 P13-F4).** `node_id` and `cluster_id` are written at the **first boot, single-node included**, not only at the first cluster start. From Phase 13 on, `[[cluster.peers]]` is only a **bootstrap seed list**; membership lives in meta.
+
+### 14.5 Replication and epochs (Phase 12 F1, F2, F5)
+
+- **F1.** Replication carries envelopes **verbatim**: followers never re-encode them. The envelope epoch is the meta-assigned leader epoch. `DEFAULT_MAX_ENVELOPE_BYTES` (4 MiB, `crates/ostro-types/src/envelope.rs`) is cluster-uniform.
+- **F2.** In a cluster, meta assigns the term epoch. `next_term_epoch` (`crates/ostro-partition/src/leadership.rs`) is the RF=1 bootstrap rule only, and `LeaderAnnounced.node_id` is the meta leader for that epoch.
+- **F3.** Empty-log anchoring: §10, step 3.
+- **F5.** The cursor row is unchanged. Cursor history holds the applied `LeaderAnnounced` epochs; the log epoch cache holds envelope epochs and is seeded from the cursor after an install or an anchoring.
+
+### 14.6 Mixed-version and downgrade rules (Phase 13 P13-F1)
+
+These rules govern how a binary treats data written by a newer one. The rule text is frozen now; the code lands in Phase 13.
+
+1. New commands, fields, ext tags and versioned formats are emitted only when the cluster's **finalized feature level** (meta `ClusterInfo` ext tag 98) allows them.
+2. An unknown `Cmd` tag, unknown fields in a command or record, or an unknown `MetaCommand` variant → **fail-stop**, never reject-and-continue. The partition or meta replica halts with a clear "newer data, upgrade the binary" error.
+3. Every versioned format is written at the **finalized level's version** until a newer level is finalized.
+4. The apply semantics of existing commands never change.
+5. **Ext tag values are never validated at apply time.** TLV structure (ordering, lengths) may be checked; tag contents never are, so old and new voters cannot diverge.
+6. Meta and the cluster version (the downgrade fence) are checked **before `Node::open` touches partition data**.

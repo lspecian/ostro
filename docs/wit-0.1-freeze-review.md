@@ -1,6 +1,6 @@
 # WIT 0.1 pre-freeze review (D14)
 
-**Status: adopted default, USER REVIEW.** The planner adopted this on 2026-11-19 under YOLO/auto-advance; see [05-DECISIONS.md](../.planning/phases/05-workflow-semantics-core-hardening/05-DECISIONS.md), D14. A user override that lands before the 05-20 freeze flip can still be folded in. After 05-20, `wit/ostro-runtime-0.1.0/runtime.wit` is byte-pinned (`wit/FROZEN.toml`), and every change goes into a new `ostro:runtime@0.1.N` package that `ostro-witcheck` proves additive.
+**Status: adopted default, USER REVIEW. FROZEN by 05-20 (2026-11-19): `wit/FROZEN.toml` pins the sha256 and the local tag `wit/ostro-runtime-v0.1.0` marks the freeze; no user override arrived before the flip.** The planner adopted this on 2026-11-19 under YOLO/auto-advance; see [05-DECISIONS.md](../.planning/phases/05-workflow-semantics-core-hardening/05-DECISIONS.md), D14. A user override that lands before the 05-20 freeze flip can still be folded in. After 05-20, `wit/ostro-runtime-0.1.0/runtime.wit` is byte-pinned (`wit/FROZEN.toml`), and every change goes into a new `ostro:runtime@0.1.N` package that `ostro-witcheck` proves additive.
 
 **Outcome: no record, variant or enum shape changes in Phase 5.** Every candidate need from Phases 6–9 and 14 either fits the current shapes, or takes the additive path later: a new function or interface in a `0.1.N` package. The Phase 5 edits to `runtime.wit` (plan 05-05) are doc comments only. Verification: with comment lines removed, the file is byte-identical to the plan's base commit (`target/05-05-base.sha`).
 
@@ -56,7 +56,8 @@ Every row is a `///` (or header `//`) comment in `wit/ostro-runtime-0.1.0/runtim
 | Step-local RNG keyed on the step seq, fresh stream per attempt | `context.random-bytes` (+ `context` interface header) | D7 (USER REVIEW) |
 | Await token one-shot; later completions rejected; timeout → `failure::timeout`; token waits always evict | `effects.create-await-token`, `effects.await-token` | D4, 05-03 |
 | `run-info.deadline` = creation + run timeout; hard stop, no cleanup | `types.run-info.deadline` | D2 |
-| `run-info.module-hash` = hash of the executing module | `types.run-info.module-hash` | 05-05 |
+| `run-info.module-hash` = hash of the executing module; may change between activations after an operator re-pin (`ostro migrate-runs`, Phase 13), so logging/metrics only, never control flow (P13-F3, outcome: doc comment only) | `types.run-info.module-hash` | 05-05; P13-F3 (05-20) |
+| A step retry is a cancellation point: while a graceful cancel the guest has not yet observed is journaled, a failed step is not retried but resolves `err(cancelled)`; the activation may be evicted inside `complete` and replay returns the recorded outcome (outcome: doc comment only; no journal-kind, codec or apply change) | `journal.step.complete` | D25, 05-27 (05-20) |
 | SDK cancellation surfacing is SDK policy | `effects.cancellation` | D11 (SDK-only; no WIT change) |
 | D12 (`ostro deploy`) | — (no WIT surface) | D12 |
 
@@ -93,6 +94,16 @@ Every row is a `///` (or header `//`) comment in `wit/ostro-runtime-0.1.0/runtim
 | PF-F3 attached children get a graceful cancel at any parent terminal status | `effects.start-child` |
 | PF-W8 fresh instance per activation, trap-ends-activation (no finalizers), no imports during pre-init, `describe` pure + unique | `workflows` interface doc; `workflows.describe` |
 | PF-W9 `uuid-v7` lowercase 8-4-4-4-12; `random-u64`/`random-bytes` share a stream, `uuid-v7` has its own | `context.uuid-v7`, `context.random-u64`, `context` interface doc |
+
+### Phase 11 (11-RESEARCH PF-11-1), Phase 13 (13-RESEARCH P13-F3) and D25 (05-27), landed by 05-20 before the sha
+
+| Item | Location in runtime.wit | Outcome |
+|---|---|---|
+| PF-11-1 reserved error kinds `limit_exceeded`, `payload_too_large` ("Run operations (Phase 11)") | `types.error-info` | doc comment only |
+| P13-F3 `module-hash` may change after `ostro migrate-runs`; logging/metrics only, never control flow | `types.run-info.module-hash` | doc comment only |
+| D25 a step retry is a cancellation point (unobserved graceful cancel → failed step resolves `err(cancelled)`, no retry; eviction inside `complete` possible, replay returns the recorded outcome) | `journal.step.complete` | doc comment only |
+
+All three edits were verified comment-only against `target/05-20-wit-base.sha` (comments stripped, diff empty) before `wit/FROZEN.toml` was computed.
 
 ### Phase 14 (14-RESEARCH P14-F10, D23)
 
