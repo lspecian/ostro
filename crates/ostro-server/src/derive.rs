@@ -324,10 +324,10 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
                             due_at_ms: ceil_ms(t.fire_at_nanos),
                         })));
                     }
-                    EventBody::SignalWaitStarted(_) | EventBody::AwaitTokenCreated(_) => {
-                        if !terminal_batch {
-                            out.push(Derived::cancel_wait(c.op));
-                        }
+                    EventBody::SignalWaitStarted(_) | EventBody::AwaitTokenCreated(_)
+                        if !terminal_batch =>
+                    {
+                        out.push(Derived::cancel_wait(c.op));
                     }
                     // Effects and children: Phase 6/9.
                     _ => {}

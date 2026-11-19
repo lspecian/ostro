@@ -3,10 +3,24 @@
 //! The executor (04-16) appends it through the sink before the first activation when the
 //! run's journal is empty (`RunRecord.next_seq == 0`). Every field comes from the record
 //! that `StartRun` wrote, so a re-dispatch after a crash synthesises identical bytes.
+//!
+//! Phase 5 (05-11):
+//! - **D23 journal form.** `RunRecord.workflow` is the tenant-qualified storage key
+//!   (`<tenant>/<name>`). `RunStarted.workflow` is the **unqualified** module-local name
+//!   (the engine passes it to the guest's `run(name, ...)`), with the tenant in
+//!   `RunStarted.tenant`. The prefix is stripped with the API's own rule
+//!   ([`crate::control::names::split_qualified`]).
+//! - `RunStarted.continued_from` is the predecessor of a continue-as-new successor.
+//! - [`first_events`]: a run whose cancel was requested before its first activation
+//!   (`RunRecord.cancel_requested`; apply journals nothing while `next_seq == 0`, 05-08)
+//!   gets `CancelRequested{cancel_reason}` at seq 1 in the same flush as `RunStarted`, so the
+//!   guest's `cancellation()` resolves.
 
 use ostro_partition::store::values::RunRecord;
 use ostro_types::RunId;
-use ostro_types::journal::{Event, EventBody, Payload, RngSeed, RunStarted};
+use ostro_types::journal::{CancelRequested, Event, EventBody, Payload, RngSeed, RunStarted};
+
+use crate::control::names::split_qualified;
 
 /// Content type of run inputs and outputs (WF-01: typed JSON in/out). The partition stores
 /// only payload bytes, so the input's content type is fixed here.
@@ -35,8 +49,9 @@ pub fn input_payload(bytes: impl Into<Vec<u8>>) -> Payload {
 /// - `deadline_nanos` = accepted + `run_timeout_ms * 1e6` when the record has a timeout
 /// - `module_hash` = `module_hash_hex` (lowercase hex of `rec.module_sha`, passed by the
 ///   caller, which has already resolved the module)
-/// - `tenant` from the record; `parent_run_id` = the parent's run id string;
-///   `continued_from` = None (continue-as-new is Phase 5)
+/// - `workflow` = the module-local part of `rec.workflow` (D23); `tenant` = the record's
+///   tenant, else the qualified name's prefix; `parent_run_id` = the parent's run id string;
+///   `continued_from` = the predecessor's run id string
 pub fn build_run_started(
     rec: &RunRecord,
     input: Payload,
@@ -59,22 +74,46 @@ pub fn build_run_started(
     let deadline = rec
         .run_timeout_ms
         .map(|ms| accepted.saturating_add(ms.saturating_mul(1_000_000)));
+    let (prefix, workflow) = split_qualified(&rec.workflow);
+    let tenant = rec.tenant.clone().or_else(|| prefix.map(str::to_owned));
     Ok(Event {
         seq: 0,
         ts_nanos: accepted,
         body: EventBody::RunStarted(RunStarted {
-            workflow: rec.workflow.clone(),
+            workflow: workflow.to_owned(),
             workflow_version: rec.workflow_version,
             input,
             rng_seed: RngSeed(seed),
             accepted_at_nanos: accepted,
             deadline_nanos: deadline,
             module_hash: module_hash_hex.to_string(),
-            tenant: rec.tenant.clone(),
+            tenant,
             parent_run_id,
-            continued_from: None,
+            continued_from: rec.continued_from.map(|r| r.to_string()),
         }),
     })
+}
+
+/// The first flush of a run: `RunStarted` (seq 0), plus `CancelRequested{cancel_reason}` at
+/// seq 1 (same ts) when the cancel was requested before the first activation.
+pub fn first_events(
+    rec: &RunRecord,
+    input: Payload,
+    module_hash_hex: &str,
+) -> Result<Vec<Event>, RunStartedError> {
+    let started = build_run_started(rec, input, module_hash_hex)?;
+    let ts = started.ts_nanos;
+    let mut out = vec![started];
+    if rec.cancel_requested {
+        out.push(Event {
+            seq: 1,
+            ts_nanos: ts,
+            body: EventBody::CancelRequested(CancelRequested {
+                reason: rec.cancel_reason.clone(),
+            }),
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -158,6 +197,68 @@ mod tests {
         assert_eq!(rs.parent_run_id, Some(parent.to_string()));
         assert_eq!(rs.input.content_type, "application/json");
         assert_eq!(rs.continued_from, None);
+    }
+
+    #[test]
+    fn qualified_workflow_is_stripped_to_the_module_local_name() {
+        let mut rec = record();
+        rec.workflow = "acme/w".into();
+        rec.tenant = Some("acme".into());
+        let EventBody::RunStarted(rs) = build_run_started(&rec, input_payload(vec![]), "h")
+            .unwrap()
+            .body
+        else {
+            panic!("not RunStarted")
+        };
+        assert_eq!(rs.workflow, "w");
+        assert_eq!(rs.tenant.as_deref(), Some("acme"));
+        // A record without a tenant takes it from the qualified name.
+        rec.tenant = None;
+        let EventBody::RunStarted(rs) = build_run_started(&rec, input_payload(vec![]), "h")
+            .unwrap()
+            .body
+        else {
+            panic!("not RunStarted")
+        };
+        assert_eq!(
+            (rs.workflow.as_str(), rs.tenant.as_deref()),
+            ("w", Some("acme"))
+        );
+        // Default-tenant names are unchanged; a non-tenant prefix is not stripped.
+        for name in ["w", "Bad/w"] {
+            rec.workflow = name.into();
+            let EventBody::RunStarted(rs) = build_run_started(&rec, input_payload(vec![]), "h")
+                .unwrap()
+                .body
+            else {
+                panic!("not RunStarted")
+            };
+            assert_eq!((rs.workflow.as_str(), rs.tenant.as_deref()), (name, None));
+        }
+    }
+
+    #[test]
+    fn continued_from_and_cancel_before_start() {
+        let mut rec = record();
+        let pred = RunId::new_v7(PartitionId(1));
+        rec.continued_from = Some(pred);
+        let evs = first_events(&rec, input_payload(vec![]), "h").unwrap();
+        assert_eq!(evs.len(), 1);
+        let EventBody::RunStarted(rs) = &evs[0].body else {
+            panic!("not RunStarted")
+        };
+        assert_eq!(rs.continued_from, Some(pred.to_string()));
+        rec.cancel_requested = true;
+        rec.cancel_reason = "user".into();
+        let evs = first_events(&rec, input_payload(vec![]), "h").unwrap();
+        assert_eq!(evs.len(), 2);
+        assert_eq!((evs[1].seq, evs[1].ts_nanos), (1, evs[0].ts_nanos));
+        assert_eq!(
+            evs[1].body,
+            EventBody::CancelRequested(CancelRequested {
+                reason: "user".into()
+            })
+        );
     }
 
     #[test]

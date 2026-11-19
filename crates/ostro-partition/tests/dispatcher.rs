@@ -1,7 +1,10 @@
 //! Dispatcher leader service (plan 04-14: DISP-01, DISP-02, DISP-07) driven by a fake
 //! `Executor`: rebuild on leadership, action-driven wake-ups (no polling), concurrency key
 //! carried end to end, slot bound, outcome handling, soft leases (renew, expiry -> revoke +
-//! re-grant, stale outcomes ignored) and shutdown revocation.
+//! re-grant, stale outcomes ignored) and shutdown revocation. Plan 05-11: hard stops
+//! (Terminated / TimedOut) revoke the lease of a running job, retries are counted durably
+//! (`AttemptGranted{after_failure}` at once, job after the delay), and a zero-permit slot
+//! semaphore holds runs un-granted.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod common;
@@ -21,7 +24,7 @@ use ostro_partition::{
     NodeConfig, PartitionHandle, SystemClock,
 };
 use ostro_types::command::{
-    AttemptTokenMsg, Derived, EnqueueReady, EventsAppended, StartRun, derived,
+    AttemptTokenMsg, Derived, EnqueueReady, EventsAppended, StartRun, TerminateRun, derived,
 };
 use ostro_types::{AttemptToken, Command, PartitionCount, PartitionId, RunId};
 use tokio::sync::Semaphore;
@@ -116,6 +119,8 @@ struct Opts {
     fake: Arc<Fake>,
     lease_ttl: Duration,
     slots: usize,
+    /// Explicit slot semaphore (overrides `slots`; the test keeps a clone).
+    sem: Option<Arc<Semaphore>>,
     stats: Arc<DispatcherStats>,
 }
 
@@ -125,6 +130,7 @@ impl Opts {
             fake: Arc::clone(fake),
             lease_ttl: Duration::from_secs(30),
             slots: 64,
+            sem: None,
             stats: Arc::new(DispatcherStats::default()),
         }
     }
@@ -138,7 +144,10 @@ async fn open(dir: &Path, opts: Option<&Opts>) -> Node {
         cfg.leader.dispatcher = Some(DispatcherConfig {
             executor,
             lease_ttl: o.lease_ttl,
-            slots: Arc::new(Semaphore::new(o.slots)),
+            slots: o
+                .sem
+                .clone()
+                .unwrap_or_else(|| Arc::new(Semaphore::new(o.slots))),
             stats: Some(Arc::clone(&o.stats)),
         });
     }
@@ -405,6 +414,19 @@ async fn retry_grants_a_new_attempt_after_the_delay() {
     let h = h(&node);
     let run = run_on(0);
     submit_all(h, vec![start(&run, 0, "")]).await;
+    // F9: the re-grant is logged (and counted) right after the failure, before the delay.
+    fake.wait_jobs(1, T).await;
+    let deadline = Instant::now() + T;
+    loop {
+        let rec = h.read_run(&run).expect("read").expect("run");
+        if rec.attempt_failures == 1 {
+            assert_eq!(rec.current_attempt, Some((h.epoch().0, 2)));
+            break;
+        }
+        assert!(Instant::now() < deadline, "after_failure grant not seen");
+        sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(fake.seen().len(), 1, "the job waits for the retry delay");
     let seen = fake.wait_jobs(3, T).await;
     let ns: Vec<(u32, u32)> = seen.iter().map(|s| (s.token.n, s.failures)).collect();
     assert_eq!(ns, vec![(1, 0), (2, 1), (3, 2)]);
@@ -601,4 +623,118 @@ async fn shutdown_revokes_every_lease_and_waits_for_jobs() {
         3,
         "jobs not revoked/awaited"
     );
+}
+
+/// An executor that holds every job until its lease is revoked, recording when.
+fn holding(revoked_at: Arc<Mutex<Vec<(RunId, Instant)>>>) -> Arc<Fake> {
+    Fake::new(move |job, _| {
+        let revoked_at = Arc::clone(&revoked_at);
+        boxed(async move {
+            let mut r = job.revoked.clone();
+            let _ = r.wait_for(|v| *v).await;
+            revoked_at
+                .lock()
+                .expect("lock")
+                .push((job.run, Instant::now()));
+            ExecOutcome::Released
+        })
+    })
+}
+
+async fn wait_revoked(revoked_at: &Mutex<Vec<(RunId, Instant)>>, run: &RunId) -> Instant {
+    let deadline = Instant::now() + T;
+    loop {
+        if let Some((_, at)) = revoked_at
+            .lock()
+            .expect("lock")
+            .iter()
+            .find(|(r, _)| r == run)
+        {
+            return *at;
+        }
+        assert!(Instant::now() < deadline, "lease of {run} never revoked");
+        sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminate_revokes_the_running_jobs_lease() {
+    let tmp = ostro_testkit::fs::tempdir();
+    let revoked_at = Arc::new(Mutex::new(Vec::new()));
+    let fake = holding(Arc::clone(&revoked_at));
+    let o = Opts::new(&fake);
+    let node = open(tmp.path(), Some(&o)).await;
+    let h = h(&node);
+    let run = run_on(0);
+    submit_all(h, vec![start(&run, 0, "")]).await;
+    fake.wait_jobs(1, T).await;
+    let t0 = Instant::now();
+    submit_all(
+        h,
+        vec![Command::terminate_run(TerminateRun {
+            run_id: run.as_bytes().to_vec(),
+            reason: "operator".into(),
+            terminated_at_ms: now_ms(),
+        })],
+    )
+    .await;
+    let at = wait_revoked(&revoked_at, &run).await;
+    assert!(at.duration_since(t0) < Duration::from_secs(1));
+    assert_eq!(status(h, &run), RunStatus::Terminated);
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(fake.seen().len(), 1, "a terminated run is not re-granted");
+    node.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_timeout_revokes_the_running_jobs_lease() {
+    let tmp = ostro_testkit::fs::tempdir();
+    let revoked_at = Arc::new(Mutex::new(Vec::new()));
+    let fake = holding(Arc::clone(&revoked_at));
+    let o = Opts::new(&fake);
+    let node = open(tmp.path(), Some(&o)).await;
+    let h = h(&node);
+    let run = run_on(0);
+    let now = now_ms();
+    submit_all(
+        h,
+        vec![Command::start_run(StartRun {
+            ready_at_ms: now,
+            requested_at_ms: now,
+            run_timeout_ms: 300,
+            ..start_run(&run)
+        })],
+    )
+    .await;
+    fake.wait_jobs(1, T).await;
+    let at = wait_revoked(&revoked_at, &run).await;
+    let rec = h.read_run(&run).expect("read").expect("run");
+    assert_eq!(rec.status, RunStatus::TimedOut);
+    assert_eq!(rec.terminal_reason, "run_timeout");
+    assert!(at.elapsed() < Duration::from_secs(5));
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(fake.seen().len(), 1, "a timed-out run is not re-granted");
+    node.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zero_slots_hold_ready_runs_ungranted() {
+    let tmp = ostro_testkit::fs::tempdir();
+    let fake = Fake::releasing();
+    let mut o = Opts::new(&fake);
+    let sem = Arc::new(Semaphore::new(0));
+    o.sem = Some(Arc::clone(&sem));
+    let node = open(tmp.path(), Some(&o)).await;
+    let h = h(&node);
+    let run = run_on(0);
+    submit_all(h, vec![start(&run, 0, "")]).await;
+    sleep(Duration::from_millis(300)).await;
+    assert!(fake.seen().is_empty(), "no slot: nothing is dispatched");
+    assert_eq!(status(h, &run), RunStatus::Ready);
+    assert_eq!(attempt(h, &run), None, "never granted");
+    // Capacity arrives: the run is dispatched without any other wake-up.
+    sem.add_permits(1);
+    let seen = fake.wait_jobs(1, T).await;
+    assert_eq!(seen[0].token.n, 1);
+    node.shutdown().await.expect("shutdown");
 }

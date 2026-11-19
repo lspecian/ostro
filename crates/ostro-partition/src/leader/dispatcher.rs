@@ -12,7 +12,19 @@
 //!   first-activation flag (Phase 7 F3/F7; carried only, consumed in Phase 7). Queues are
 //!   served round-robin.
 //! - Leases: `run -> Lease{generation, token, deadline, revoked, inputs, slot permit}`.
-//! - Consecutive retryable failures per run (`Job::failures`).
+//!
+//! Retryable attempt failures are counted durably, not here (F9, plan 05-11): on
+//! [`ExecOutcome::Retry`] the dispatcher keeps the lease (phase *Granting*), grants the next
+//! attempt **at once** with `AttemptGranted{after_failure: true}` (apply increments
+//! `RunRecord.attempt_failures` in the same batch), and starts the job only after the retry
+//! delay. The count is therefore on disk the moment the failure is known, so a restart
+//! during the backoff cannot lose it; [`Job::failures`] is the record's
+//! `attempt_failures`. The slot stays taken during the backoff (bounded by
+//! [`ExecOutcome::Retry`]'s delay); a hard stop or shutdown during it revokes the lease.
+//!
+//! **No capacity (test hook, 05-11):** a [`DispatcherConfig::slots`] semaphore with 0
+//! permits (`executor.slots = 0`) dispatches nothing: every run stays `Ready` and
+//! un-granted (schedule-to-start tests); `add_permits` later releases them.
 //!
 //! # Rebuild, wake-ups, no polling
 //!
@@ -79,7 +91,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use ostro_log::Rf1Log;
-use ostro_types::{AttemptToken, PartitionId, RunId};
+use ostro_types::command::{AttemptGranted, AttemptTokenMsg};
+use ostro_types::{AttemptToken, Command, PartitionId, RunId};
 use tokio::sync::broadcast::{
     self,
     error::{RecvError, TryRecvError},
@@ -90,7 +103,7 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use super::LeaderCtx;
-use crate::apply::{Action, RejectReason};
+use crate::apply::{Action, ApplyOutcome, RejectReason};
 use crate::handle::{PartitionError, PartitionHandle};
 use crate::query;
 use crate::store::values::RunRecord;
@@ -122,7 +135,7 @@ pub struct Job {
     pub revoked: watch::Receiver<bool>,
     /// `renew() -> bool` (false once revoked).
     pub lease: LeaseRenewer,
-    /// Consecutive `Retry` outcomes of this run (in memory).
+    /// Durable count of retryable attempt failures (`record.attempt_failures`, F9).
     pub failures: u32,
 }
 
@@ -340,7 +353,6 @@ struct State {
     leases: BTreeMap<RunId, Lease>,
     /// Lease checks `(deadline ms since base, run)`.
     checks: BTreeSet<(u64, RunId)>,
-    failures: BTreeMap<RunId, u32>,
     next_generation: u64,
     /// Last queue served (round-robin cursor).
     last_queue: Option<String>,
@@ -356,7 +368,6 @@ impl State {
             delayed: BTreeSet::new(),
             leases: BTreeMap::new(),
             checks: BTreeSet::new(),
-            failures: BTreeMap::new(),
             next_generation: 0,
             last_queue: None,
             base: Instant::now(),
@@ -571,9 +582,10 @@ impl State {
                     }
                 }
                 Action::RunCompleted { run, .. } => {
+                    // Any terminal status, hard stops (Terminated / TimedOut) included:
+                    // revoking the lease cancels a live activation (05-09/05-11).
                     self.drop_lease(run);
                     self.unqueue(run);
-                    self.failures.remove(run);
                 }
                 _ => {}
             }
@@ -785,7 +797,7 @@ impl Dispatcher {
     /// Hand a job for `run` (lease in phase Executing) to the executor.
     fn start_job(&mut self, run: RunId, record: RunRecord) {
         self.st.refresh_lease(&run);
-        let failures = self.st.failures.get(&run).copied().unwrap_or(0);
+        let failures = record.attempt_failures;
         let base = self.st.base;
         let ttl = self.st.ttl;
         let Some(l) = self.st.leases.get_mut(&run) else {
@@ -911,21 +923,10 @@ impl Dispatcher {
             return;
         }
         match outcome {
-            ExecOutcome::Released => {
-                self.st.drop_lease(&run);
-                self.st.failures.remove(&run);
-            }
-            ExecOutcome::Fenced => {
+            ExecOutcome::Released | ExecOutcome::Fenced => {
                 self.st.drop_lease(&run);
             }
-            ExecOutcome::Retry { after_ms } => {
-                if let Some(l) = self.st.drop_lease(&run) {
-                    *self.st.failures.entry(run).or_default() += 1;
-                    let now = self.now_ms();
-                    self.st
-                        .enqueue(run, l.entry.at(now.saturating_add(after_ms)), now);
-                }
-            }
+            ExecOutcome::Retry { after_ms } => self.regrant_after_failure(run, after_ms),
             ExecOutcome::Reactivate => match self.ctx.handle.read_run(&run) {
                 Ok(Some(rec)) if !rec.status.is_terminal() => {
                     self.stats.reactivated.fetch_add(1, Ordering::Relaxed);
@@ -944,6 +945,43 @@ impl Dispatcher {
                 }
             },
         }
+    }
+
+    /// F9 (see the module docs): grant the next attempt now with `after_failure = true`,
+    /// then hand the job over after `after_ms`, keeping the lease (phase *Granting*, so it
+    /// does not expire). A revoke (hard stop, shutdown) ends the wait early; the result is
+    /// then ignored like any result of a dropped lease.
+    fn regrant_after_failure(&mut self, run: RunId, after_ms: u64) {
+        let Some(l) = self.st.leases.get_mut(&run) else {
+            return;
+        };
+        l.phase = Phase::Granting;
+        let generation = l.generation;
+        let mut revoked = l.revoked.subscribe();
+        let h = self.ctx.handle.clone();
+        let id = self
+            .joins
+            .spawn(async move {
+                let res = async {
+                    let token = grant_after_failure(&h, run).await?;
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_millis(after_ms)) => {}
+                        _ = revoked.wait_for(|v| *v) => {}
+                    }
+                    let rec = h
+                        .read_run(&run)?
+                        .ok_or(PartitionError::Rejected(RejectReason::RunNotFound))?;
+                    Ok((token, Box::new(rec)))
+                }
+                .await;
+                Done::Granted {
+                    run,
+                    generation,
+                    res,
+                }
+            })
+            .id();
+        self.tasks.insert(id, (run, generation));
     }
 
     fn on_join_error(&mut self, e: &JoinError) {
@@ -1086,6 +1124,31 @@ impl Dispatcher {
     }
 }
 
+/// [`PartitionHandle::grant_attempt`] with `after_failure = true` (F9): the next attempt
+/// `n + 1` of the current epoch, counted in `RunRecord.attempt_failures` by apply.
+async fn grant_after_failure(
+    h: &PartitionHandle<Rf1Log>,
+    run: RunId,
+) -> Result<AttemptToken, PartitionError> {
+    let epoch = h.epoch();
+    let n = match h.read_run(&run)?.and_then(|r| r.current_attempt) {
+        Some((e, n)) if e == epoch.0 => n.saturating_add(1),
+        _ => 1,
+    };
+    let cmd = Command::attempt_granted(AttemptGranted {
+        run_id: run.as_bytes().to_vec(),
+        token: Some(AttemptTokenMsg { epoch: epoch.0, n }),
+        after_failure: true,
+    });
+    match h.submit_one(cmd).await? {
+        ApplyOutcome::Accepted => Ok(AttemptToken { epoch, n }),
+        ApplyOutcome::Rejected(r) => Err(PartitionError::Rejected(r)),
+        ApplyOutcome::Duplicate { .. } => Err(PartitionError::Rejected(RejectReason::Fenced {
+            current: None,
+        })),
+    }
+}
+
 async fn sleep_until_opt(at: Option<Instant>) {
     match at {
         Some(t) => tokio::time::sleep_until(t).await,
@@ -1202,11 +1265,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_completed_drops_lease_entry_and_failures() {
+    async fn run_completed_drops_lease_and_entry() {
         let mut st = State::new(Duration::from_secs(30));
         let (a, b) = (run(), run());
         let _rx = leased(&mut st, a);
-        st.failures.insert(a, 2);
+        let revoked = st.leases[&a].revoked.subscribe();
         st.enqueue(b, entry("q", 0, 0, ""), 0);
         st.on_actions(
             &[
@@ -1221,7 +1284,8 @@ mod tests {
             ],
             0,
         );
-        assert!(st.leases.is_empty() && st.entries.is_empty() && st.failures.is_empty());
+        assert!(st.leases.is_empty() && st.entries.is_empty());
+        assert!(*revoked.borrow(), "a completed run's lease is revoked");
         assert!(!st.has_ready());
     }
 

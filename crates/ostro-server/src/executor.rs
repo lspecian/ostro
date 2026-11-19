@@ -13,13 +13,26 @@
 //! 2. **Sink:** one [`PartitionSink`] holding the job's token; every accepted append renews
 //!    the lease.
 //! 3. **First activation:** when the journal is empty (`next_seq == 0`) the executor
-//!    appends `RunStarted` (seq 0) built from the run record (`build_run_started`).
+//!    appends `RunStarted` (seq 0) built from the run record (`first_events`), followed by
+//!    `CancelRequested{cancel_reason}` at seq 1 when the cancel was requested before the
+//!    first activation (05-08 journals nothing while the journal is empty).
+//!    **Resume re-arm (B2, 05-11):** on the first job after a `RetryRun` resume
+//!    (`RunRecord.resumed_count` above the count this executor last re-armed for, kept in
+//!    memory per run), the executor loads the journal and submits
+//!    [`derive::rearm_unresolved`] as a zero-event `EventsAppended` at the journal end before
+//!    activating: `ScheduleTimer` for open sleeps and `RegisterWait` for open signal / token
+//!    waits, with their original due times (past-due ones fire on the next timer tick).
+//!    `Conflict` re-activates. After a restart the marker is gone and the re-arm runs once
+//!    more, which is harmless: `RegisterWait` is idempotent (05-08) and timer rows are keyed
+//!    by `(due, run, op)`.
 //! 4. **Journal:** read from the store on every job (inputs sent between jobs are not
 //!    replayed by the dispatcher), then `repair_unsupported`.
 //! 5. **Inputs (ordered bridge):** the dispatcher's `InputAppended` seqs and the sink's own
 //!    unsupported completions are both only *wake-ups*. One bridge task reads the journal
 //!    strictly in seq order from the end of the loaded journal and forwards every input
-//!    event (`completes_op()`) to `Activate.inputs`, exactly once and in order. This closes
+//!    event (`completes_op()`, plus the non-completing apply-written `SignalPayload` and
+//!    `RunTerminated`, which the engine needs to keep the journal contiguous) to
+//!    `Activate.inputs`, exactly once and in order. This closes
 //!    the 04-15 race (a dispatcher-forwarded `TimerFired` and a sink completion sent out of
 //!    seq order made the engine report `BadJournal`), and skips inputs that are already in
 //!    the loaded journal (journaled between `AttemptGranted` and the load).
@@ -32,6 +45,9 @@
 //!    submitted. A self-fenced job then waits for the dispatcher to revoke the lease (it
 //!    is no longer renewed, so that happens within the dispatcher's TTL) before returning;
 //!    outcomes of revoked leases are ignored by the dispatcher, which re-grants `n + 1`.
+//!    A hard stop (`Terminated` / `TimedOut`, 05-09) emits `Action::RunCompleted`, on which
+//!    the dispatcher revokes the lease: the activation is cancelled at once and the job ends
+//!    `Released` with nothing more submitted.
 //!
 //! # Outcome state machine
 //!
@@ -43,8 +59,8 @@
 //! | `Evicted{StepBackoff{retry_at}}` | `EnqueueReady{ceil_ms(retry_at)}` CAS likewise | `Released`; `Conflict` -> `Reactivate` |
 //! | `Evicted{HotWaitElapsed \| BudgetPressure \| AppendConflict \| StepInterrupted}` | - | `Reactivate` |
 //! | `Evicted{External}` without revoke (flush `Unavailable`) | short pause | `Reactivate` |
-//! | `AttemptFailed(f)`, `f.retryable()` and `failures + 1 < max_attempt_failures` | - | `Retry{after_ms}` |
-//! | `AttemptFailed(f)` otherwise (incl. NonDeterminism / ProtocolViolation) | `CompleteRun{Failed, failure JSON}` | `Released` |
+//! | `AttemptFailed(f)`, `f.retryable()` and `attempt_failures + 1 < max_attempt_failures` | - | `Retry{after_ms}` |
+//! | `AttemptFailed(f)` otherwise (incl. NonDeterminism / ProtocolViolation) | `CompleteRun{Failed, failure JSON, resumable}` | `Released` |
 //! | `Fenced` | - | `Fenced` |
 //!
 //! The CAS `from_seq` is the journal end as the **engine** saw it (initially the loaded
@@ -58,7 +74,17 @@
 //! 1 and 2 are retried and the third failure completes the run `Failed` (no journal event;
 //! the reason is the run result `{"reason_code", "kind", "message"}`).
 //! The retry delay is `retry_backoff * 2^failures`, capped at [`MAX_RETRY_BACKOFF`].
+//!
+//! **F9 (05-11):** `failures` is the durable `RunRecord.attempt_failures` (apply counts every
+//! `AttemptGranted{after_failure}`; the dispatcher re-grants with `after_failure = true` right
+//! after a `Retry`), so the limit holds across restarts. Every attempt-failure completion
+//! is `resumable` (D1: trap, fuel, memory, nondeterminism, protocol violation, exhaustion
+//! are executor-level failures); module / record failures are not.
+//!
+//! **Test hook (WF-08):** [`ExecutorHooks::module_override`] makes a run execute on another
+//! module than `RunRecord.module_sha` (the patching proof after a restart).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -70,7 +96,7 @@ use ostro_engine::runtime::{Prepared, Runtime};
 use ostro_engine::sink::{Activate, ActivationOutcome, ActivationSink, AppendError, RunRef};
 use ostro_partition::{ExecOutcome, Executor, Job, LeaseRenewer, PartitionHandle, query};
 use ostro_types::command::{CompleteRun, Derived, EnqueueReady, TerminalStatus, derived::Intent};
-use ostro_types::journal::Event;
+use ostro_types::journal::{Event, EventBody};
 use ostro_types::{AttemptToken, RunId};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -78,9 +104,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::derive;
+use crate::derive::{self, InheritPolicy, ModuleResolver, NoModules, PolicyResolver};
 use crate::journal_io;
-use crate::run_started::{build_run_started, input_payload};
+use crate::run_started::{first_events, input_payload};
 use crate::sink::{PartitionSink, RenewFn};
 
 /// Upper bound of the attempt retry delay.
@@ -153,6 +179,34 @@ pub struct JobRecord {
     pub self_fenced: bool,
 }
 
+/// `run -> module sha` override (see [`ExecutorHooks::module_override`]).
+#[doc(hidden)]
+pub type ModuleOverride = Arc<dyn Fn(&RunId) -> Option<[u8; 32]> + Send + Sync>;
+
+/// Holder of the optional [`ModuleOverride`].
+#[doc(hidden)]
+#[derive(Default)]
+pub struct ModuleOverrideSlot(Mutex<Option<ModuleOverride>>);
+
+impl std::fmt::Debug for ModuleOverrideSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let set = self.0.lock().map(|g| g.is_some()).unwrap_or(true);
+        f.debug_tuple("ModuleOverrideSlot").field(&set).finish()
+    }
+}
+
+impl ModuleOverrideSlot {
+    /// Install (`Some`) or clear (`None`) the override.
+    pub fn set(&self, f: Option<ModuleOverride>) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = f;
+    }
+
+    fn get(&self, run: &RunId) -> Option<[u8; 32]> {
+        let f = self.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        f.and_then(|f| f(run))
+    }
+}
+
 /// Test hooks (not part of the product surface).
 #[doc(hidden)]
 #[derive(Debug, Default)]
@@ -171,6 +225,10 @@ pub struct ExecutorHooks {
     pub only_attempt: AtomicU32,
     /// One record per finished job.
     pub jobs: Mutex<Vec<JobRecord>>,
+    /// WF-08 only (05-11): when it returns `Some(sha)` for a run, the executor loads that
+    /// module instead of `RunRecord.module_sha` (a run "re-pinned" after a restart; there is
+    /// no re-pin API before Phase 13). `None` = no override.
+    pub module_override: ModuleOverrideSlot,
 }
 
 impl ExecutorHooks {
@@ -205,6 +263,10 @@ pub struct EngineExecutor {
     runtime: Arc<Runtime>,
     cfg: ExecutorConfig,
     hooks: Arc<ExecutorHooks>,
+    modules: Arc<dyn ModuleResolver>,
+    policy: Arc<dyn PolicyResolver>,
+    /// `resumed_count` each run was last re-armed for (B2; in memory only).
+    rearmed: Arc<Mutex<HashMap<RunId, u32>>>,
 }
 
 impl std::fmt::Debug for EngineExecutor {
@@ -221,7 +283,32 @@ impl EngineExecutor {
             runtime,
             cfg,
             hooks: Arc::new(ExecutorHooks::default()),
+            modules: Arc::new(NoModules),
+            policy: Arc::new(InheritPolicy),
+            rearmed: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Continue-as-new resolvers for every job's sink (the server wires the meta-backed
+    /// [`derive::MetaModules`] / [`crate::retention::MetaPolicies`]; without them a
+    /// successor on the run's own workflow and version reuses its module and retention).
+    pub fn with_resolvers(
+        mut self,
+        modules: Arc<dyn ModuleResolver>,
+        policy: Arc<dyn PolicyResolver>,
+    ) -> Self {
+        self.modules = modules;
+        self.policy = policy;
+        self
+    }
+
+    fn lock_rearmed(&self) -> MutexGuard<'_, HashMap<RunId, u32>> {
+        self.rearmed.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Whether `run` (resumed `resumed_count` times) still needs its re-arm.
+    fn rearm_due(&self, run: &RunId, resumed_count: u32) -> bool {
+        resumed_count > 0 && self.lock_rearmed().get(run).copied().unwrap_or(0) < resumed_count
     }
 
     /// Share `hooks` (tests).
@@ -372,7 +459,7 @@ pub async fn input_bridge(
             Ok(events) => {
                 for ev in events {
                     next = ev.seq + 1;
-                    if ev.body.completes_op().is_some() && tx.send(ev).is_err() {
+                    if is_input(&ev.body) && tx.send(ev).is_err() {
                         return;
                     }
                 }
@@ -384,6 +471,18 @@ pub async fn input_bridge(
             }
         }
     }
+}
+
+/// Journal events the engine accepts as delivered inputs (its `deliver_inputs` rule): the
+/// completing kinds plus `SignalPayload` (96, referenced by a later `SignalMatched`) and
+/// `RunTerminated` (71, a history marker). Skipping those two would leave a seq gap the
+/// engine rejects as a bad journal.
+fn is_input(body: &EventBody) -> bool {
+    body.completes_op().is_some()
+        || matches!(
+            body,
+            EventBody::SignalPayload(_) | EventBody::RunTerminated(_)
+        )
 }
 
 // ------------------------------------------------------------------- engine sink wrapper
@@ -460,12 +559,14 @@ impl EngineExecutor {
             inputs: seqs,
             revoked,
             lease,
-            failures,
             ..
         } = job;
         if record.status.is_terminal() {
+            self.lock_rearmed().remove(&run);
             return ExecOutcome::Released;
         }
+        // F9: the durable count (not the dispatcher's memory).
+        let failures = record.attempt_failures;
         let cancel = CancellationToken::new();
         let st = Arc::new(LeaseState {
             lease,
@@ -488,13 +589,10 @@ impl EngineExecutor {
             renew_st.renew();
         });
         let (sink_tx, sink_rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(PartitionSink::new(
-            handle.clone(),
-            run,
-            token,
-            Some(sink_tx),
-            Some(on_renew),
-        ));
+        let sink = Arc::new(
+            PartitionSink::new(handle.clone(), run, token, Some(sink_tx), Some(on_renew))
+                .with_resolvers(Arc::clone(&self.modules), Arc::clone(&self.policy)),
+        );
         let rref = RunRef {
             partition: run.partition().0,
             run_id: run.to_string(),
@@ -510,6 +608,9 @@ impl EngineExecutor {
 
         let is_revoked = *revoked.borrow();
         let self_fenced = st.self_fenced.load(Ordering::Acquire);
+        if sink.is_terminal() {
+            self.lock_rearmed().remove(&run);
+        }
         let outcome = if sink.is_terminal() {
             ExecOutcome::Released
         } else if is_revoked || self_fenced || cancel.is_cancelled() {
@@ -550,9 +651,11 @@ impl EngineExecutor {
         guard: &mut TaskGuard,
     ) -> (Option<ActivationOutcome>, ExecOutcome) {
         // 1. Module.
-        let (prepared, sha) = match self.module(record, sink).await {
+        let (prepared, sha) = match self.module(run, record, sink).await {
             Prep::Ready(p, sha) => (p, sha),
-            Prep::Fail(code, msg) => return (None, self.fail_run(sink, code, code, &msg).await),
+            Prep::Fail(code, msg) => {
+                return (None, self.fail_run(sink, code, code, &msg, false).await);
+            }
         };
         if cancel.is_cancelled() {
             return (None, ExecOutcome::Released);
@@ -560,7 +663,7 @@ impl EngineExecutor {
         // 2. RunStarted on the first activation.
         if sink.next_seq() == 0 {
             match self.run_started(handle, run, record, &sha).await {
-                Ok(ev) => match sink.append(rref, token.n, 0, vec![ev]).await {
+                Ok(evs) => match sink.append(rref, token.n, 0, evs).await {
                     Ok(_) => {}
                     Err(AppendError::Fenced) => return (None, ExecOutcome::Fenced),
                     Err(AppendError::Conflict { .. }) => return (None, ExecOutcome::Reactivate),
@@ -572,7 +675,7 @@ impl EngineExecutor {
                 },
                 Err(StartErr::Fatal(msg)) => {
                     let out = self
-                        .fail_run(sink, REASON_BAD_RECORD, REASON_BAD_RECORD, &msg)
+                        .fail_run(sink, REASON_BAD_RECORD, REASON_BAD_RECORD, &msg, false)
                         .await;
                     return (None, out);
                 }
@@ -581,6 +684,16 @@ impl EngineExecutor {
                     tokio::time::sleep(UNAVAILABLE_PAUSE).await;
                     return (None, ExecOutcome::Reactivate);
                 }
+            }
+        }
+        // 2b. Resume re-arm (B2), before the journal the activation sees is loaded.
+        if self.rearm_due(&run, record.resumed_count) {
+            if let Err(out) = self.rearm(handle, run, sink).await {
+                return (None, out);
+            }
+            self.lock_rearmed().insert(run, record.resumed_count);
+            if cancel.is_cancelled() {
+                return (None, ExecOutcome::Released);
             }
         }
         // 3. Journal (+ repair of unsupported completions).
@@ -706,8 +819,48 @@ impl EngineExecutor {
                 after_ms: u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
             };
         }
-        self.fail_run(sink, f.reason_code(), f.reason_code(), &f.dlq_reason())
-            .await
+        // D1: executor-level failures are resumed in place by RetryRun.
+        self.fail_run(
+            sink,
+            f.reason_code(),
+            f.reason_code(),
+            &f.dlq_reason(),
+            true,
+        )
+        .await
+    }
+
+    /// Re-arm the unresolved ops of a resumed run (B2): one zero-event `EventsAppended` at
+    /// the journal end as read. `Err` = the job's outcome.
+    async fn rearm(
+        &self,
+        handle: &PartitionHandle<ostro_log::Rf1Log>,
+        run: RunId,
+        sink: &PartitionSink,
+    ) -> Result<(), ExecOutcome> {
+        let journal = match journal_io::read_journal(handle, &run).await {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(%run, error = %e, "re-arm: journal load failed");
+                tokio::time::sleep(UNAVAILABLE_PAUSE).await;
+                return Err(ExecOutcome::Reactivate);
+            }
+        };
+        let intents = derive::rearm_unresolved(&journal);
+        if intents.is_empty() {
+            return Ok(());
+        }
+        debug!(%run, n = intents.len(), "re-arming unresolved ops after resume");
+        match sink.submit_intents_at(journal.len() as u64, intents).await {
+            Ok(_) => Ok(()),
+            Err(AppendError::Conflict { .. }) => Err(ExecOutcome::Reactivate),
+            Err(AppendError::Fenced) => Err(ExecOutcome::Fenced),
+            Err(AppendError::Unavailable(e)) => {
+                warn!(%run, error = %e, "re-arm submit failed; re-activating");
+                tokio::time::sleep(UNAVAILABLE_PAUSE).await;
+                Err(ExecOutcome::Reactivate)
+            }
+        }
     }
 
     /// Complete the run `Failed` with a JSON reason (no journal event).
@@ -717,6 +870,7 @@ impl EngineExecutor {
         reason_code: &str,
         kind: &str,
         message: &str,
+        resumable: bool,
     ) -> ExecOutcome {
         let bytes = derive::failure_json(reason_code, kind, message);
         let result = match sink
@@ -737,7 +891,7 @@ impl EngineExecutor {
                 status: TerminalStatus::Failed as i32,
                 result: Some(result.clone()),
                 completed_at_ms,
-                resumable: false,
+                resumable,
                 parent_event: None,
             }));
             match sink.submit_intents(vec![d]).await {
@@ -757,10 +911,11 @@ impl EngineExecutor {
 
     async fn module(
         &self,
+        run: RunId,
         record: &ostro_partition::store::values::RunRecord,
         sink: &PartitionSink,
     ) -> Prep {
-        let Some(sha) = record.module_sha else {
+        let Some(sha) = self.hooks.module_override.get(&run).or(record.module_sha) else {
             return Prep::Fail(REASON_NO_MODULE, "no module pinned".to_string());
         };
         if let Some(p) = self.runtime.prepared(&sha) {
@@ -790,7 +945,7 @@ impl EngineExecutor {
         run: RunId,
         record: &ostro_partition::store::values::RunRecord,
         sha: &[u8; 32],
-    ) -> Result<Event, StartErr> {
+    ) -> Result<Vec<Event>, StartErr> {
         let reader = handle.reader();
         let pref = tokio::task::spawn_blocking(move || {
             query::run_payload(&reader, &run, query::PAYLOAD_INPUT)
@@ -806,7 +961,7 @@ impl EngineExecutor {
                 .to_vec(),
             None => Vec::new(),
         };
-        build_run_started(record, input_payload(bytes), &ostro_blob::hex(sha))
+        first_events(record, input_payload(bytes), &ostro_blob::hex(sha))
             .map_err(|e| StartErr::Fatal(e.to_string()))
     }
 
