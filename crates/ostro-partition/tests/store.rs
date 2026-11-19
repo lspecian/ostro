@@ -600,6 +600,7 @@ fn value_round_trips() {
     round_trip(&ReadyValue::default());
     round_trip(&ReadyValue {
         concurrency_key: "ck".into(),
+        ..Default::default()
     });
     for s in [
         RunStatus::Scheduled,
@@ -636,6 +637,7 @@ fn value_round_trips() {
 fn decode_rejects_unknown_format_byte() {
     let mut bytes = values::encode(&ReadyValue {
         concurrency_key: "ck".into(),
+        ..Default::default()
     });
     bytes[0] = 2;
     assert!(matches!(

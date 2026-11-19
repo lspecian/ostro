@@ -19,6 +19,16 @@
 //! `EventsAppended` already passes is the compare-and-set: an input journaled
 //! after the executor's last flush moves `next_seq` (04-13), so the Suspend is
 //! rejected `SeqMismatch` and the executor re-activates.
+//!
+//! **Plan 05-22 (pre-freeze):**
+//! - Ready rows and `Action::EnqueueReady` carry the run's workflow, tenant and
+//!   first-activation flag (`current_attempt.is_none()`), so a dispatcher rebuild needs no
+//!   run-record reads (Phase 7 F3/F7).
+//! - `AttemptGranted{after_failure}` increments `RunRecord.attempt_failures` (F9).
+//! - `EventsAppended` points `RunRecord.status_seq` at the batch's last `StatusPublished`
+//!   event, read from `JournalEvent.kind` only (F10).
+//! - `CompleteRun.parent_event` is forwarded verbatim into the outbox `ChildCompleted.event`
+//!   (Phase 9 PF-F1, D21; never decoded).
 
 use ostro_types::command::{
     AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, JournalEvent, MAX_RUN_TAG_LEN,
@@ -125,7 +135,9 @@ pub(crate) fn leave_running(b: &mut ApplyBatch<'_>, run: &RunId, rec: &RunRecord
     }
 }
 
-/// Inserts the ready row, marks the run Ready and emits `EnqueueReady`.
+/// Inserts the ready row, marks the run Ready and emits `EnqueueReady`. The row and the
+/// action carry workflow, tenant and `first = current_attempt.is_none()` (F3/F7; not
+/// `next_seq == 0`, which stops holding once StartRun writes RunStarted, 05-16).
 pub(crate) fn enqueue_ready(
     b: &mut ApplyBatch<'_>,
     run: &RunId,
@@ -133,6 +145,7 @@ pub(crate) fn enqueue_ready(
     ready_at_ms: u64,
     actions: &mut Vec<Action>,
 ) {
+    let first = rec.current_attempt.is_none();
     leave_running(b, run, rec);
     remove_ready(b, run, rec);
     b.insert(
@@ -140,6 +153,9 @@ pub(crate) fn enqueue_ready(
         ready_key(&rec.queue, rec.priority, ready_at_ms, run),
         values::encode(&ReadyValue {
             concurrency_key: rec.concurrency_key.clone(),
+            workflow: rec.workflow.clone(),
+            tenant: rec.tenant.clone(),
+            first,
         }),
     );
     rec.ready = Some(ReadySlot {
@@ -153,6 +169,9 @@ pub(crate) fn enqueue_ready(
         priority: rec.priority,
         ready_at_ms,
         concurrency_key: rec.concurrency_key.clone(),
+        workflow: rec.workflow.clone(),
+        tenant: rec.tenant.clone(),
+        first_activation: first,
     });
 }
 

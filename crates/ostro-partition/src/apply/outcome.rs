@@ -157,6 +157,12 @@ pub enum Action {
         priority: i32,
         ready_at_ms: u64,
         concurrency_key: String,
+        /// `ReadyValue.workflow` (Phase 7 F3).
+        workflow: String,
+        /// `ReadyValue.tenant` (Phase 7 F3).
+        tenant: Option<String>,
+        /// `ReadyValue.first` (Phase 7 F7).
+        first_activation: bool,
     },
     ScheduleTimer {
         due_at_ms: u64,

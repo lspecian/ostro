@@ -28,7 +28,9 @@ pub const PAYLOAD_RESULT: u8 = run::PAYLOAD_RESULT;
 
 const RUN_LEN: usize = 18;
 
-/// One decoded `ready` row.
+/// One decoded `ready` row: the key fields plus the [`ReadyValue`] (workflow, tenant and
+/// first activation included, so a rebuild needs no run-record read). `Default` (all
+/// fields empty, run id all zero bytes) lets literal sites use `..Default::default()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadyEntryRow {
     pub queue: String,
@@ -36,6 +38,25 @@ pub struct ReadyEntryRow {
     pub ready_at_ms: u64,
     pub run: RunId,
     pub concurrency_key: String,
+    pub workflow: String,
+    pub tenant: Option<String>,
+    pub first_activation: bool,
+}
+
+impl Default for ReadyEntryRow {
+    fn default() -> Self {
+        Self {
+            queue: String::new(),
+            priority: 0,
+            ready_at_ms: 0,
+            // An 18-byte slice always parses.
+            run: RunId::from_bytes(&[0; RUN_LEN]).unwrap_or_else(|_| unreachable!()),
+            concurrency_key: String::new(),
+            workflow: String::new(),
+            tenant: None,
+            first_activation: false,
+        }
+    }
 }
 
 fn codec(what: &str, e: impl std::fmt::Display) -> StoreError {
@@ -80,6 +101,9 @@ pub fn ready_entries(r: &StoreReader, limit: usize) -> Result<Vec<ReadyEntryRow>
                 ready_at_ms,
                 run,
                 concurrency_key: rv.concurrency_key,
+                workflow: rv.workflow,
+                tenant: rv.tenant,
+                first_activation: rv.first,
             })
         })
         .collect()

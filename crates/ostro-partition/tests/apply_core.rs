@@ -413,7 +413,10 @@ fn start_run_delayed() {
             queue: "q".into(),
             priority: 5,
             ready_at_ms: 100,
-            concurrency_key: "ck".into()
+            concurrency_key: "ck".into(),
+            workflow: "wf".into(),
+            tenant: None,
+            first_activation: true,
         }]
     );
     let input = h.get(Table::Payloads, &payload_key(&r2, 0)).expect("input");
@@ -540,7 +543,10 @@ fn enqueue_ready_intent() {
             queue: "q".into(),
             priority: 5,
             ready_at_ms: 77,
-            concurrency_key: "ck".into()
+            concurrency_key: "ck".into(),
+            workflow: "wf".into(),
+            tenant: None,
+            first_activation: false,
         }]
     );
     // A new grant takes it again and removes the ready row.

@@ -818,7 +818,10 @@ fn timer_delayed_start() {
             queue: "q".into(),
             priority: 5,
             ready_at_ms: 5000,
-            concurrency_key: "ck".into()
+            concurrency_key: "ck".into(),
+            workflow: "wf".into(),
+            tenant: None,
+            first_activation: true,
         }]
     );
     let run = h.run(&r).unwrap();

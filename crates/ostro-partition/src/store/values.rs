@@ -158,11 +158,20 @@ pub struct PauseMark {
     pub detail: String,
 }
 
-/// Value of a `ready` row. Derives `Default` (literal sites use `..Default::default()`);
-/// 05-22 appends the Phase 7 F3/F7 fields.
+/// Value of a `ready` row. Derives `Default` (literal sites use `..Default::default()`).
+///
+/// Carries everything the dispatcher needs to queue the run, so a leader rebuild over the
+/// `ready` keyspace needs no run-record point reads (Phase 7 F3/F7, plan 05-22).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyValue {
     pub concurrency_key: String,
+    /// `RunRecord.workflow` (F3).
+    pub workflow: String,
+    /// `RunRecord.tenant` (F3; `None` = no tenant).
+    pub tenant: Option<String>,
+    /// `true` when no attempt was ever granted (`RunRecord.current_attempt.is_none()` at
+    /// enqueue time), i.e. the next activation is the run's first (F7).
+    pub first: bool,
 }
 
 /// What a `waits` row waits for (mirrors `ostro_types::command::WaitKind`).

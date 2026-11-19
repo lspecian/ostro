@@ -8,7 +8,9 @@
 //!
 //! - Ready queues: `queue -> {(Reverse(priority), ready_at, run)}`, plus a delay set for
 //!   entries whose `ready_at` is still in the future. Every entry carries the run's
-//!   concurrency key (DISP-02; not enforced until Phase 7). Queues are served round-robin.
+//!   concurrency key (DISP-02; not enforced until Phase 7), workflow, tenant and
+//!   first-activation flag (Phase 7 F3/F7; carried only, consumed in Phase 7). Queues are
+//!   served round-robin.
 //! - Leases: `run -> Lease{generation, token, deadline, revoked, inputs, slot permit}`.
 //! - Consecutive retryable failures per run (`Job::failures`).
 //!
@@ -258,6 +260,10 @@ struct Entry {
     priority: i32,
     ready_at_ms: u64,
     concurrency_key: String,
+    /// Phase 7 F3/F7 placement inputs, from the ready row / action (no record read).
+    workflow: String,
+    tenant: Option<String>,
+    first_activation: bool,
 }
 
 impl Entry {
@@ -267,6 +273,21 @@ impl Entry {
             priority: r.priority,
             ready_at_ms,
             concurrency_key: r.concurrency_key.clone(),
+            workflow: r.workflow.clone(),
+            tenant: r.tenant.clone(),
+            first_activation: r.current_attempt.is_none(),
+        }
+    }
+
+    fn from_ready_row(row: query::ReadyEntryRow) -> Self {
+        Self {
+            queue: row.queue,
+            priority: row.priority,
+            ready_at_ms: row.ready_at_ms,
+            concurrency_key: row.concurrency_key,
+            workflow: row.workflow,
+            tenant: row.tenant,
+            first_activation: row.first_activation,
         }
     }
 
@@ -521,6 +542,9 @@ impl State {
                     priority,
                     ready_at_ms,
                     concurrency_key,
+                    workflow,
+                    tenant,
+                    first_activation,
                 } => {
                     if let Some(l) = self.leases.get(run) {
                         if l.phase == Phase::Granting {
@@ -535,6 +559,9 @@ impl State {
                         priority: *priority,
                         ready_at_ms: *ready_at_ms,
                         concurrency_key: concurrency_key.clone(),
+                        workflow: workflow.clone(),
+                        tenant: tenant.clone(),
+                        first_activation: *first_activation,
                     };
                     self.enqueue(*run, e, now_ms);
                 }
@@ -574,13 +601,8 @@ impl State {
                 }
                 self.drop_lease(&row.run);
             }
-            let e = Entry {
-                queue: row.queue,
-                priority: row.priority,
-                ready_at_ms: row.ready_at_ms,
-                concurrency_key: row.concurrency_key,
-            };
-            self.enqueue(row.run, e, now_ms);
+            let run = row.run;
+            self.enqueue(run, Entry::from_ready_row(row), now_ms);
         }
         for (run, e) in running {
             if self.leases.contains_key(&run) || self.entries.contains_key(&run) {
@@ -1091,6 +1113,9 @@ mod tests {
             priority,
             ready_at_ms: at,
             concurrency_key: ck.into(),
+            workflow: String::new(),
+            tenant: None,
+            first_activation: false,
         }
     }
 
@@ -1101,6 +1126,9 @@ mod tests {
             priority,
             ready_at_ms: at,
             concurrency_key: ck.into(),
+            workflow: String::new(),
+            tenant: None,
+            first_activation: false,
         }
     }
 
@@ -1209,6 +1237,7 @@ mod tests {
                     ready_at_ms: 7,
                     run: a,
                     concurrency_key: "ck-ready".into(),
+                    ..Default::default()
                 }],
                 running: vec![(b, Some(entry("q2", 3, 55, "ck-run")))],
             },
@@ -1216,6 +1245,77 @@ mod tests {
         );
         assert_eq!(st.entries[&a].concurrency_key, "ck-ready");
         assert_eq!(st.entries[&b], entry("q2", 3, 0, "ck-run"));
+    }
+
+    /// Phase 7 F3/F7: the rebuild takes workflow, tenant and first activation from the ready
+    /// rows alone (`apply_scan` gets no store handle, so it cannot read a run record), and
+    /// `EnqueueReady` actions carry them the same way.
+    #[tokio::test]
+    async fn ready_rows_and_actions_carry_workflow_tenant_and_first_activation() {
+        let mut st = State::new(Duration::from_secs(30));
+        let (a, b, c) = (run(), run(), run());
+        st.apply_scan(
+            Scan {
+                ready: vec![
+                    query::ReadyEntryRow {
+                        queue: "q".into(),
+                        run: a,
+                        workflow: "wf-a".into(),
+                        tenant: Some("acme".into()),
+                        first_activation: true,
+                        ..Default::default()
+                    },
+                    query::ReadyEntryRow {
+                        queue: "q".into(),
+                        run: b,
+                        workflow: "wf-b".into(),
+                        ..Default::default()
+                    },
+                ],
+                running: vec![],
+            },
+            100,
+        );
+        let ea = &st.entries[&a];
+        assert_eq!(
+            (
+                ea.workflow.as_str(),
+                ea.tenant.as_deref(),
+                ea.first_activation
+            ),
+            ("wf-a", Some("acme"), true)
+        );
+        let eb = &st.entries[&b];
+        assert_eq!(
+            (
+                eb.workflow.as_str(),
+                eb.tenant.as_deref(),
+                eb.first_activation
+            ),
+            ("wf-b", None, false)
+        );
+        st.on_actions(
+            &[Action::EnqueueReady {
+                run: c,
+                queue: "q".into(),
+                priority: 0,
+                ready_at_ms: 0,
+                concurrency_key: String::new(),
+                workflow: "wf-c".into(),
+                tenant: Some("t".into()),
+                first_activation: true,
+            }],
+            100,
+        );
+        let ec = &st.entries[&c];
+        assert_eq!(
+            (
+                ec.workflow.as_str(),
+                ec.tenant.as_deref(),
+                ec.first_activation
+            ),
+            ("wf-c", Some("t"), true)
+        );
     }
 
     #[tokio::test]

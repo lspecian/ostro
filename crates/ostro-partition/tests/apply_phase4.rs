@@ -711,6 +711,10 @@ mod query_helpers {
             ready_at_ms: 100,
             run,
             concurrency_key: ck.into(),
+            // 05-22 (Phase 7 F3/F7): the ready row carries workflow, tenant and first.
+            workflow: "wf".into(),
+            first_activation: true,
+            ..Default::default()
         };
         // Key order: queue key (u16 length prefix first, so "beta" < "alpha"), then higher
         // priority first.
