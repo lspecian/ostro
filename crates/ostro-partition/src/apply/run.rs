@@ -35,6 +35,7 @@ use ostro_types::command::{
     MAX_RUN_TAGS, MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, StartRun,
     TerminalStatus, derived::Intent, is_reserved_op, outbox_msg,
 };
+use ostro_types::journal::EventKind;
 use ostro_types::{AttemptToken, Epoch, PayloadRef, RunId};
 use prost::Message;
 
@@ -389,6 +390,11 @@ pub(crate) fn apply_attempt_granted(
     }
     rec.current_attempt = Some((t.epoch.0, t.n));
     rec.status = RunStatus::Running;
+    if g.after_failure {
+        // F9: durable count of attempts granted after a retryable failure (05-11 reads it,
+        // RetryRun resets it in 05-09). Same batch as the grant.
+        rec.attempt_failures = rec.attempt_failures.saturating_add(1);
+    }
     remove_ready(b, &run, &mut rec);
     // Blind insert (overwrites the previous attempt's row): no extra read.
     b.insert(
@@ -538,8 +544,13 @@ pub(crate) fn apply_events_appended(
     }
 
     // All checks passed: write.
+    let status_kind = EventKind::StatusPublished.code();
     for ev in &e.events {
         put_event(b, &run, ev);
+        if ev.kind == status_kind {
+            // F10: O(1) published-status pointer, from the kind code only (no decode).
+            rec.status_seq = Some(ev.seq);
+        }
     }
     rec.next_seq = new_next;
     if e.from_seq == 0 && n > 0 {
@@ -622,9 +633,10 @@ pub(crate) fn apply_events_appended(
                             op,
                             status: c.status,
                             result: c.result.clone(),
-                            // Phase 5: 05-02 forwards CompleteRun.parent_event here verbatim
-                            // (D21 / Phase 9 PF-F1), with its oversize check.
-                            event: None,
+                            // PF-F1 / D21: the submitter-encoded ChildCompleted event bytes,
+                            // forwarded verbatim (inline <= 256 KiB, checked by
+                            // `any_oversize`, or a blob ref). Never decoded or fetched.
+                            event: c.parent_event.clone(),
                         })),
                     };
                     emit(b, cur, &msg, actions)?;
