@@ -6,6 +6,12 @@
 //!
 //! Retry behaviour of `sdk-retry` is exercised end to end by the server tests (04-07);
 //! here it only has to validate, describe and run its non-retrying modes.
+//!
+//! D11 (05-06): SDK waits now include the cancellation op (`wait([op, CANCELLATION],
+//! any)`, and `join!` waits `any` in rounds), which changes every SDK wait's command hash
+//! and can add the cancellation op to `WaitResolved.completed`. No assertion here depends
+//! on the wait op list; the counts below (steps, timers) are unchanged. Cancellation
+//! behaviour itself is proven in `sdk_cancellation.rs` with the `sdk-cancel` guest.
 
 mod common;
 
@@ -97,11 +103,12 @@ async fn assert_replays(p: &Prepared, d: &Drive) {
 
 #[tokio::test]
 async fn sdk_guests_validate_and_describe() {
-    let expected: [(&str, &[(&str, u32)]); 4] = [
+    let expected: [(&str, &[(&str, u32)]); 5] = [
         ("sdk-basic", &[("sdk-basic", 1), ("sdk-echo", 1)]),
         ("sdk-basic-v2", &[("sdk-basic", 2)]),
         ("sdk-retry", &[("sdk-retry", 1)]),
         ("sdk-native", &[("sdk-native", 1)]),
+        ("sdk-cancel", &[("sdk-cancel", 1)]),
     ];
     for (module, want) in expected {
         let p = guest(module).await;
