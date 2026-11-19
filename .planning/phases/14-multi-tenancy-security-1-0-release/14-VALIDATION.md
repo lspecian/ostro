@@ -10,7 +10,7 @@ created: 2026-11-19
 # Phase 14: Validation Strategy
 
 > This is the per-phase validation contract for feedback sampling during execution.
-> Source: 14-RESEARCH.md § Validation Architecture, mapped onto plans 14-01..14-27. Adopted decisions: 14-DECISIONS.md (D-P14-1..D-P14-36).
+> Source: 14-RESEARCH.md § Validation Architecture, mapped onto plans 14-01, 14-01b, 14-02..14-27 (28 plans, 7 waves; revised after the plan check). Adopted decisions: 14-DECISIONS.md (D-P14-1..D-P14-40).
 
 ---
 
@@ -46,6 +46,15 @@ created: 2026-11-19
 
 | Wave | Plans | Exclusive shared files |
 |------|-------|------------------------|
+| 1 | 14-01 gate + inventories + contracts + **all manifests**; then 14-01b (sequential) seam + stubs + call sites + config + CLI/client stubs + fuzz bins + tools + CI | 14-01: **Cargo files**, `fuzz/Cargo.toml`/toolchain, new-crate skeletons, RESERVATIONS, STATE, `ostro-types` audit/compat, meta `ext.rs`, ostro-api `auth`/`phase14`/`error`, bridge `audited.rs`. 14-01b: **server.rs / config.rs / main.rs / p14/mod.rs**, all `p14/*`/`audit/*` stubs, hook call sites in `control/{runs,modules,migrate,signals,tokens,lifecycle}.rs` + `rerun.rs`, worker sites, client/CLI stubs, `fuzz/fuzz_targets/*`, `scripts/fetch-tools.sh`, CI sync |
+| 2 | 14-02 API surface; 14-03 tokens/authn/bootstrap/guard; 14-04 audit journal; 14-05 signature verifiers; 14-06 dispatch quotas; 14-08 Wasm fuzz targets; 14-09 Jepsen core; 14-11 release binaries + install + release.yml; 14-12 image; 14-13 Helm; 14-14 migration guides | 14-02: **ostro-api / ostro-proto / OpenAPI**. 14-03: `p14/{tokens,authn,bootstrap,guard}`. 14-04: `audit/*`. 14-05: `p14/signing.rs`. 14-06: `leader/fair.rs`, `flow/tenant.rs`, `p14/quota_view.rs`, **`executor.rs`**. 14-08: `evil_guest.rs`, `smith.rs`, Wasm corpora. 14-09: `ostro-jepsen` workload/history/run/report/checkers/partition+kill. 14-11: `install.sh`, release scripts, `release.yml`. 14-12: `deploy/image`, `build-image.sh`, NOTICE. 14-13: `deploy/helm/**`, helm scripts. 14-14: `docs/migrations/**` |
+| 3 | 14-07 fuzz infra + 13 targets; 14-10 fault knobs; 14-15 scopes; 14-16 tenant scoping; 14-17 tenant/token admin; 14-18 audit capture; 14-19 signed modules | 14-07: fuzz target modules, `corpus_replay.rs`, non-Wasm corpora/regressions, `fuzz-smoke.sh`, `fuzz.yml`, `fuzz/Cargo.lock`. 14-10: `clock.rs`, `p14/test_hooks.rs`, nemesis clock/disk. 14-15: `p14/{authz,principal_fwd}`, `route/peer.rs`, node-API ingest. 14-16: `p14/{tenant_scope,upload_tenant}`, `control/list.rs`, index file, trigger files. 14-17: `p14/{tenants_api,tokens_api}`, client/CLI tenant+auth. 14-18: `p14/{audit_hooks,audit_api}`, bridge `audited.rs`, client/CLI audit. 14-19: `p14/{module_sign,security_api,reseal}`, client/CLI security, CLI `deploy.rs` |
+| 4 | 14-20 ingress quotas; 14-21 UI auth; 14-22 Jepsen runs | 14-20: `p14/ingress.rs`. 14-21: `ostro-ui/**`, `p14/ui_auth.rs`. 14-22: Jepsen smoke/gate, `jepsen-run.sh` |
+| 5 | 14-23 benchmarks + soak (after 14-22); 14-24 threat model + packet; 14-25 docs set | 14-23: `bench.rs`, `soak.rs`, `ostro-soak`, tests, `docs/soak.md`, `docs/benchmarks.md`. 14-24: `docs/security/**`, `docs/security-model.md`, `security-packet.sh`. 14-25: `README.md`, `docs/README.md`, guides, docs-check scripts |
+| 6 | 14-26 cross-feature integration + suite green (sole) | `scenarios/p14.rs`, `p14_integration.rs`, `p14_regressions.rs`, fixes across Phase 14 files |
+| 7 | 14-27 gate + 1.0.0-rc.1 | ci files, version fields + Cargo.lock, Chart version, release checklist, CHANGELOG, tracking files |
+
+------|-------|------------------------|
 | 1 | 14-01 gate (Phase 13 + 5–12 complete) + contracts + seam + deps + tool pins | **Cargo files**, `fuzz/Cargo.toml`/toolchain, RESERVATIONS, STATE, every `lib.rs`/`mod.rs` line, `ostro-types` audit/compat, meta `ext.rs`, ostro-api `auth`/`phase14`/`error`, **server.rs / config.rs / main.rs / p14/mod.rs**, hook call sites in `control/*`, bridge + worker sites, CLI variants, client stubs, `scripts/fetch-tools.sh` |
 | 2 | 14-02 API surface; 14-03 tokens/authn/bootstrap/guard; 14-04 audit journal; 14-05 signature verifiers; 14-06 dispatch quotas; 14-07 fuzz infra + 13 targets; 14-08 Wasm fuzz targets; 14-09 Jepsen core; 14-11 release binaries + install + release.yml; 14-12 image; 14-13 Helm; 14-14 migration guides | 14-02: **ostro-api / ostro-proto / OpenAPI**. 14-03: `p14/{tokens,authn,bootstrap,guard}`. 14-04: `audit/*`. 14-05: `p14/signing.rs`. 14-06: `leader/fair.rs`, `flow/tenant.rs`, `p14/quota_view.rs`, **`executor.rs`**. 14-07: fuzz target modules, `corpus_replay.rs`, non-Wasm corpora/regressions, `fuzz-smoke.sh`, `fuzz.yml`, `fuzz/Cargo.lock`. 14-08: `evil_guest.rs`, `smith.rs`, Wasm corpora/regressions. 14-09: `ostro-jepsen` workload/history/run/report/checkers/partition+kill nemeses. 14-11: `install.sh`, release scripts, `release.yml`. 14-12: `deploy/image`, `build-image.sh`, NOTICE. 14-13: `deploy/helm/**`, `helm-check.sh`, `crd2jsonschema.py`. 14-14: `docs/migrations/**` |
 | 3 | 14-10 clock/disk fault knobs; 14-15 scopes + principal propagation; 14-16 tenant scoping + index + triggers; 14-17 tenant/token admin + CLI; 14-18 audit capture + query + CLI; 14-19 signed-module enforcement + policy + reseal; 14-20 ingress quotas | 14-10: `ostro-partition/src/clock.rs`, `p14/test_hooks.rs`, nemesis clock/disk. 14-15: `p14/{authz,principal_fwd}`, `route/peer.rs`, node-API ingest. 14-16: `p14/{tenant_scope,upload_tenant}`, `control/list.rs`, partition index file, trigger driver files. 14-17: `p14/{tenants_api,tokens_api}`, client tenants/api_tokens, CLI tenant/auth. 14-18: `p14/{audit_hooks,audit_api}`, bridge `audited.rs`, client/CLI audit. 14-19: `p14/{module_sign,security_api,reseal}`, client/CLI security, CLI `deploy.rs`. 14-20: `p14/ingress.rs` |
@@ -59,23 +68,26 @@ created: 2026-11-19
 
 | Task ID | Plan | Wave | Requirements | Task | Automated command(s) | Status |
 |---------|------|------|--------------|------|----------------------|--------|
-| 14-01-01 | 01 | 1 | all | Phase 13 (+5–12) gate, seam + method inventory, RESERVATIONS rows, STATE decisions | `grep / doc checks` (SUMMARYs, VERIFICATION status, RoutedControlPlane, STATE/RESERVATIONS rows) | ⬜ pending |
-| 14-01-02 | 01 | 1 | all | Contracts: audit sink, P14 features, ext 112–117, ostro_api::auth + phase14 + auth codes, audited resolver stub | `cargo build --workspace --all-targets` warning-free; `cargo test -p ostro-types / -p ostro-meta / -p ostro-api --lib / -p ostro-bridge --lib`; goldens append-only | ⬜ pending |
-| 14-01-03 | 01 | 1 | all | Seam + call sites, config, CLI/client stubs, ostro-fuzz-targets + fuzz/ + ostro-jepsen skeletons, deps, tool pins, CI sync | `cargo deny check`; failpoints build; forbidden-crate check; list diff; nightly fuzz build; `fetch-tools.sh kubeconform crane`; `--test config`, `--test p14_skeleton`, `-p ostro-jepsen --test skeleton`, `-p ostro-fuzz-targets`, `-p ostro-cli` | ⬜ pending |
+| 14-01-01 | 01 | 1 | all | Phases 5–13 gate (SUMMARYs + every VERIFICATION), seam/method/tenant-field inventories, lease clock source, RESERVATIONS rows, STATE | `grep / doc checks` over 05–13 SUMMARY/VERIFICATION, STATE/RESERVATIONS rows incl. W15 names | ⬜ pending |
+| 14-01-02 | 01 | 1 | all | Contracts: audit sink, P14 features, ext 112–117 (fingerprint), auth (Anonymous default), phase14 traits, auth codes, audited resolver | workspace build warning-free; `-p ostro-types/-p ostro-meta/-p ostro-api --lib/-p ostro-bridge --lib`; goldens append-only | ⬜ pending |
+| 14-01-03 | 01 | 1 | all | Dependency matrix + every manifest + new-crate skeletons + fuzz manifest/nightly | `cargo deny check`; forbidden crates; per-manifest dependency greps; `cargo tree` wasm-smith 0.261.0; 15 `[[bin]]`; skeleton tests | ⬜ pending |
+| 14-01b-01 | 01b | 1 | all | p14 seam + stubs + config | `--test config`, `--test p14_skeleton`; version_gate/metrics_tenant_labels/head_export_interval greps | ⬜ pending |
+| 14-01b-02 | 01b | 1 | all | Call sites (upload before existing-sha, version_gate, ingress, audit, workers), main.rs intercepts, CLI/client stubs | call-site greps + order check; `-p ostro-server/-p ostro-cli/-p ostro-client` tests | ⬜ pending |
+| 14-01b-03 | 01b | 1 | all | Fuzz bins, tool pins, CI sync | nightly fuzz build; fetch-tools; FAILPOINT list diff; no manifest diff; CLOCK_GATE_SCOPED | ⬜ pending |
 | 14-02-01 | 02 | 2 | SEC-02..04, DISP-06 | Protos + wire tests | `cargo test -p ostro-proto --test p14_wire` | ⬜ pending |
 | 14-02-02 | 02 | 2 | SEC-02 | Authentication layer + interceptor | `cargo test -p ostro-api --test p14_authn` | ⬜ pending |
 | 14-02-03 | 02 | 2 | SEC-02..04 | Adapters, signature carriage, tenant hooks, fakes, OpenAPI, parity | `cargo test -p ostro-api --test p14_routes --test parity --test openapi`; OpenAPI diff additive | ⬜ pending |
 | 14-03-01 | 03 | 2 | SEC-02 | Token codec | `cargo test -p ostro-server --test p14_tokens` | ⬜ pending |
 | 14-03-02 | 03 | 2 | SEC-02 | MetaAuthenticator + bootstrap (online/offline) | `cargo test -p ostro-server --test p14_authn` (+ failpoints) ; CLOCK_GATE_SCOPED | ⬜ pending |
-| 14-03-03 | 03 | 2 | SEC-02 | Guard decorator (final) | `cargo test -p ostro-server --test p14_guard`; `cargo test -p ostro-server` | ⬜ pending |
+| 14-03-03 | 03 | 2 | SEC-02 | Guard decorator (final); call outside any scope denied | `cargo test -p ostro-server --test p14_guard`; `cargo test -p ostro-server` | ⬜ pending |
 | 14-04-01 | 04 | 2 | SEC-04 | Record/chain/segment/verify/retention (TDD) | `cargo test -p ostro-server --test audit_journal -- chain tamper rotate torn retention ignored_by` | ⬜ pending |
 | 14-04-02 | 04 | 2 | SEC-04 | Writer, fail closed, coalescing, OTLP export, crash test | `--test audit_journal` (+ failpoints); `OSTRO_AUDIT_CRASH_ITERS=10 --release --test audit_crash -- --ignored` | ⬜ pending |
 | 14-05-01 | 05 | 2 | SEC-03 | minisign + cosign keyed verification, interop vectors (TDD) | `cargo test -p ostro-server --test p14_signing`; no secret key fixture; no sigstore | ⬜ pending |
 | 14-06-01 | 06 | 2 | DISP-06 | Tenant level in fair.rs + model tests | `cargo test -p ostro-partition --test fair_tenant`; `--lib -- fair`; `rebuild_digest` | ⬜ pending |
 | 14-06-02 | 06 | 2 | DISP-06 | Quota view + TenantFlow + executor charge | `cargo test -p ostro-server --lib -- flow::tenant p14::quota_view`; CLOCK_GATE_SCOPED | ⬜ pending |
 | 14-06-03 | 06 | 2 | DISP-06 | Server quota + fairness tests (×3) | `cargo test -p ostro-server --test tenant_quotas` ×3 | ⬜ pending |
-| 14-07-01 | 07 | 2 | SEC-05 | 13 target bodies + seeds + stable replay | `cargo test -p ostro-fuzz-targets --test corpus_replay`; ≥ 65 seeds; clippy | ⬜ pending |
-| 14-07-02 | 07 | 2 | SEC-05 | fuzz-smoke, nightly lockfile, scheduled workflow, triage | `OSTRO_FUZZ_SECS=20 bash scripts/fuzz-smoke.sh …`; fuzz.yml parse + SHA pins | ⬜ pending |
+| 14-07-01 | 07 | 3 | SEC-05 | 13 target bodies + seeds + stable replay | `cargo test -p ostro-fuzz-targets --test corpus_replay`; ≥ 65 seeds; clippy | ⬜ pending |
+| 14-07-02 | 07 | 3 | SEC-05 | fuzz-smoke, nightly lockfile, scheduled workflow, triage | `OSTRO_FUZZ_SECS=20 bash scripts/fuzz-smoke.sh …`; fuzz.yml parse + SHA pins | ⬜ pending |
 | 14-08-01 | 08 | 2 | SEC-05 | evil_guest | `cargo test -p ostro-fuzz-targets --test wasm_targets -- evil` | ⬜ pending |
 | 14-08-02 | 08 | 2 | SEC-05 | smith_component + smoke | `--test wasm_targets`; `cargo +nightly fuzz run smith_component -- -max_total_time=20` | ⬜ pending |
 | 14-09-01 | 09 | 2 | QA-05 | History + checkers + self-tests | `cargo test -p ostro-jepsen --test checker_selftest` | ⬜ pending |
@@ -91,35 +103,35 @@ created: 2026-11-19
 | 14-13-02 | 13 | 2 | DIST-02 | KEDA schemas + helm-check (kubeconform) | `bash scripts/helm-check.sh` (0 invalid/skipped) | ⬜ pending |
 | 14-14-01 | 14 | 2 | DIST-03 | Cron/queue-table guide + index | keyword + marker checks | ⬜ pending |
 | 14-14-02 | 14 | 2 | DIST-03 | Temporal + Restate guides | keyword + marker checks | ⬜ pending |
-| 14-15-01 | 15 | 3 | SEC-02 | Scope table + route × scope matrix + export | `OSTRO_EXPORT_AUTH_MATRIX=… cargo test -p ostro-server --test auth_scopes` | ⬜ pending |
+| 14-15-01 | 15 | 3 | SEC-02 | Scope table + matrix (fakes in P14 slots; gRPC from descriptor set; exact key set) + export | `OSTRO_EXPORT_AUTH_MATRIX=… cargo test -p ostro-server --test auth_scopes` | ⬜ pending |
 | 14-15-02 | 15 | 3 | SEC-02 | Principal propagation over forwarding | `cargo test -p ostro-server --test auth_forwarding`; CLOCK_GATE_SCOPED | ⬜ pending |
-| 14-16-01 | 16 | 3 | SEC-02 | Tenant scoping + per-tenant module registration | `cargo test -p ostro-server --test tenant_isolation` | ⬜ pending |
+| 14-16-01 | 16 | 3 | SEC-02 | Tenant scoping, tenant-field force/reject, foreign-tenant upload leaves no records, W11 cases | `cargo test -p ostro-server --test tenant_isolation` | ⬜ pending |
 | 14-16-02 | 16 | 3 | SEC-02 | Tenant index + tenant-correct triggers | `--test tenant_triggers`; `rebuild_digest`, `format_corpus` | ⬜ pending |
 | 14-17-01 | 17 | 3 | SEC-02, DISP-06 | Tenants + tokens admin services | `cargo test -p ostro-server --test p14_admin_api` | ⬜ pending |
 | 14-17-02 | 17 | 3 | SEC-02, DISP-06 | Client + CLI verbs | `cargo test -p ostro-cli --test p14_cli`; `--help` checks | ⬜ pending |
-| 14-18-01 | 18 | 3 | SEC-04 | Guard audit hooks, fail closed, worker/auth events | `cargo test -p ostro-server --test audit_log` (+ failpoints) | ⬜ pending |
+| 14-18-01 | 18 | 3 | SEC-04 | Guard audit hooks (wave-3 actions), fail closed, audit_commit_failed, worker/auth events | `cargo test -p ostro-server --test audit_log` (+ failpoints) | ⬜ pending |
 | 14-18-02 | 18 | 3 | SEC-04 | Coalesced secret-access audit | `--test audit_log -- secret_access`; CLOCK_GATE_SCOPED | ⬜ pending |
 | 14-18-03 | 18 | 3 | SEC-04 | Cluster audit query + CLI | `--test audit_cluster`; `-p ostro-cli --test p14_audit_cli` | ⬜ pending |
-| 14-19-01 | 19 | 3 | SEC-03 | Upload/activation gates, cluster-wide policy | `cargo test -p ostro-server --test signed_modules` | ⬜ pending |
+| 14-19-01 | 19 | 3 | SEC-03 | Upload/activation/version gates (upload before existing-sha; fingerprint re-verify), cluster-wide policy; start-with-version, migrate-to-unsigned, cross-tenant unsigned re-upload → 403 | `cargo test -p ostro-server --test signed_modules` | ⬜ pending |
 | 14-19-02 | 19 | 3 | SEC-03 | Security API, config seed, reseal | `--test p14_reseal`; CLOCK_GATE_SCOPED | ⬜ pending |
 | 14-19-03 | 19 | 3 | SEC-03 | Client + CLI + deploy --signature | `cargo test -p ostro-cli --test p14_security_cli`; `deploy --help` | ⬜ pending |
-| 14-20-01 | 20 | 3 | DISP-06 | admit_ingress unit tests | `cargo test -p ostro-server --lib -- p14::ingress` | ⬜ pending |
-| 14-20-02 | 20 | 3 | DISP-06 | Server ingress tests | `--test tenant_ingress`; CLOCK_GATE_SCOPED | ⬜ pending |
+| 14-20-01 | 20 | 4 | DISP-06 | admit_ingress unit tests | `cargo test -p ostro-server --lib -- p14::ingress` | ⬜ pending |
+| 14-20-02 | 20 | 4 | DISP-06 | Server ingress tests | `--test tenant_ingress`; CLOCK_GATE_SCOPED | ⬜ pending |
 | 14-21-01 | 21 | 4 | SEC-02 | TokenUiAuth + session codec | `cargo test -p ostro-server --lib -- p14::ui_auth` | ⬜ pending |
 | 14-21-02 | 21 | 4 | SEC-02 | UI login/logout, gating, e2e | `-p ostro-ui --test p14_ui_auth`; `-p ostro-server --test p14_ui_e2e`; template grep | ⬜ pending |
 | 14-22-01 | 22 | 4 | QA-05 | Jepsen smoke (all faults, auth + audit) | `OSTRO_JEPSEN_SECS=180 OSTRO_JEPSEN_SEED=1401 --release --test jepsen_smoke -- --ignored` | ⬜ pending |
 | 14-22-02 | 22 | 4 | QA-05 | Jepsen gate + runner | `OSTRO_JEPSEN_SECS=300 --test jepsen_gate -- --ignored` (task); `jepsen-run.sh gate` (2 × 30 min, recorded) | ⬜ pending |
-| 14-23-01 | 23 | 4 | QA-04 | Bytes-on-disk benchmarks | `--release --test bench_single --test bench_rf3 -- --ignored` | ⬜ pending |
-| 14-23-02 | 23 | 4 | QA-05 | Soak criteria (pre-registered), driver, smoke | criteria commit precedes driver commit; `OSTRO_SOAK_SECS=300 --test soak_smoke -- --ignored` | ⬜ pending |
-| 14-24-01 | 24 | 4 | SEC-05 | Threat model, security model, fuzzing doc, findings tracker | STRIDE keyword + evidence-reference checks | ⬜ pending |
-| 14-24-02 | 24 | 4 | SEC-05 | Auth matrix + review packet | `bash scripts/security-packet.sh --update-docs`; secret scan | ⬜ pending |
-| 14-25-01 | 25 | 4 | DIST-03 | docs-check + getting started ×3 | `bash scripts/docs-check.sh docs/getting-started docs/migrations` | ⬜ pending |
-| 14-25-02 | 25 | 4 | DIST-03 | Remaining guides + README + index | `bash scripts/docs-check.sh <own files + migrations>` | ⬜ pending |
-| 14-26-01 | 26 | 5 | SEC-02..04, DISP-06 | Cross-feature + race scenarios (tier B) + fixes | `cargo test -p ostro-repl-conformance --test p14_integration` (+ failpoints `audit_stall`) | ⬜ pending |
-| 14-26-02 | 26 | 5 | all | Full suite ×3, full-tree docs-check, smoke re-runs | `cargo test --workspace` ×3; `docs-check.sh`; `helm-check.sh` | ⬜ pending |
-| 14-27-01 | 27 | 6 | all | Permanent CI steps + gate run + final measurements | step greps; list diff; SHA pins; deploy/scripts kubectl grep; gate reports present | ⬜ pending |
-| 14-27-02 | 27 | 6 | all | 1.0.0-rc.1 bump, local tag, checklist, CHANGELOG | version + `--version`; compat tests; deny; tag exists; checklist keywords | ⬜ pending |
-| 14-27-03 | 27 | 6 | all | RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION, STATE, DECISIONS | `grep / doc checks` | ⬜ pending |
+| 14-23-01 | 23 | 5 | QA-04 | Bytes-on-disk benchmarks | `--release --test bench_single --test bench_rf3 -- --ignored` | ⬜ pending |
+| 14-23-02 | 23 | 5 | QA-05 | Soak criteria (pre-registered), driver, smoke | criteria commit precedes driver commit; `OSTRO_SOAK_SECS=300 --test soak_smoke -- --ignored` | ⬜ pending |
+| 14-24-01 | 24 | 5 | SEC-05 | Threat model, security model, fuzzing doc, findings tracker | STRIDE keyword + evidence-reference checks | ⬜ pending |
+| 14-24-02 | 24 | 5 | SEC-05 | Auth matrix + review packet | `bash scripts/security-packet.sh --update-docs`; secret scan | ⬜ pending |
+| 14-25-01 | 25 | 5 | DIST-03 | docs-check + getting started ×3 | `bash scripts/docs-check.sh docs/getting-started docs/migrations` | ⬜ pending |
+| 14-25-02 | 25 | 5 | DIST-03 | Remaining guides + README + index | `bash scripts/docs-check.sh <own files + migrations>` | ⬜ pending |
+| 14-26-01 | 26 | 6 | SEC-02..04, DISP-06 | Cross-feature + race scenarios (tier B), full D-P14-13 audit table, fixes | `cargo test -p ostro-repl-conformance --test p14_integration` (+ failpoints `audit_stall`) | ⬜ pending |
+| 14-26-02 | 26 | 6 | all | Full suite ×3, full-tree docs-check, smoke re-runs | `cargo test --workspace` ×3; `docs-check.sh`; `helm-check.sh` | ⬜ pending |
+| 14-27-01 | 27 | 7 | all | Permanent CI steps + gate run + final measurements | step greps; list diff; SHA pins; deploy/scripts kubectl grep; gate reports present | ⬜ pending |
+| 14-27-02 | 27 | 7 | all | 1.0.0-rc.1 bump, local tag, checklist, CHANGELOG | version + `--version`; compat tests; deny; tag exists; checklist keywords | ⬜ pending |
+| 14-27-03 | 27 | 7 | all | RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION, STATE, DECISIONS | `grep / doc checks` | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -139,10 +151,11 @@ created: 2026-11-19
 
 ## Wave 0 Requirements
 
-- [ ] `ostro_api::auth` (Principal, scopes, Method inventory, Authenticator, PRINCIPAL), `ostro_api::phase14` traits, ext structs 112–117, `ostro_types::audit`, the `p14/` seam with call sites, `crates/ostro-server/tests/p14_skeleton.rs` — 14-01
-- [ ] `crates/ostro-fuzz-targets` (dispatch table + stubs), `fuzz/` workspace with 15 target bins on the pinned nightly — 14-01
+- [ ] `ostro_api::auth` (Principal with Anonymous default, scopes, Method inventory, Authenticator, PRINCIPAL), `ostro_api::phase14` traits, ext structs 112–117, `ostro_types::audit`, all manifests — 14-01
+- [ ] the `p14/` seam with call sites, `crates/ostro-server/tests/p14_skeleton.rs` — 14-01b
+- [ ] `crates/ostro-fuzz-targets` (dispatch table + stubs) and `fuzz/` manifest + nightly — 14-01; 15 target bins — 14-01b
 - [ ] `crates/ostro-jepsen` skeleton (`tests/skeleton.rs`, `ostro-soak` bin stub) — 14-01
-- [ ] `scripts/fetch-tools.sh` (kubeconform, crane, shellcheck, rsign2, cargo-fuzz, rcodesign) — 14-01
+- [ ] `scripts/fetch-tools.sh` (kubeconform, crane, shellcheck, rsign2, cargo-fuzz, rcodesign) — 14-01b
 - [ ] Test files created by their feature plans before implementation (TDD order): `p14_tokens`, `p14_authn`, `p14_guard` (14-03); `audit_journal`, `audit_crash` (14-04); `p14_signing` (14-05); `fair_tenant`, `tenant_quotas` (14-06); `corpus_replay` (14-07); `wasm_targets` (14-08); `checker_selftest` (14-09); `auth_scopes` (14-15); `tenant_isolation` (14-16); `audit_log` (14-18); `signed_modules` (14-19)
 
 ---
