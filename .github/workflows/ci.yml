@@ -140,6 +140,14 @@ jobs:
           cargo build --manifest-path sdks/rust/Cargo.toml --target wasm32-wasip2
           cargo build --release --target wasm32-wasip2 --manifest-path guests/Cargo.toml --target-dir target/guests
       - if: matrix.name == 'linux-x86_64-gnu'
+        name: order-saga example (fmt + wasm32-wasip2 build + clippy)
+        # standalone example project (no committed lock); keep in sync with
+        # check_order_saga in scripts/ci-local.sh
+        run: |
+          cargo fmt --manifest-path examples/order-saga/Cargo.toml --check
+          cargo build --release --target wasm32-wasip2 --manifest-path examples/order-saga/Cargo.toml --target-dir target/order-saga
+          cargo clippy --target wasm32-wasip2 --manifest-path examples/order-saga/Cargo.toml --target-dir target/order-saga -- -D warnings
+      - if: matrix.name == 'linux-x86_64-gnu'
         name: Failpoint suites
         # keep in sync with FAILPOINT_CRATES in scripts/ci-local.sh
         run: |

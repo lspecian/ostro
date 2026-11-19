@@ -1,0 +1,32 @@
+# Order saga: an example Ostro workflow built with the Rust SDK.
+#
+# A standalone cargo project (its own workspace, not part of the Ostro repository's
+# workspaces). Build the workflow component with plain cargo, no cargo-component:
+#   rustup target add wasm32-wasip2
+#   cargo build --release --target wasm32-wasip2
+# Output: target/wasm32-wasip2/release/order_saga.wasm
+#
+# Versions are pinned exactly (matching ostro-sdk); Cargo.lock is not committed.
+[package]
+name = "order-saga"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Example Ostro workflow: order saga with retries, a timer, an approval signal and compensations"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ostro-sdk = { path = "../../sdks/rust/ostro-sdk" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

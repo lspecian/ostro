@@ -128,6 +128,20 @@ check_guests() {
     --manifest-path guests/Cargo.toml --target-dir target/guests
 }
 
+# Example workflow project (plan 05-10): examples/order-saga is a standalone cargo project
+# (own [workspace], path dependency on sdks/rust/ostro-sdk, no committed lock, so no
+# --locked). It must stay fmt-clean and build/lint warning-free for wasm32-wasip2. Keep in
+# sync with the "order-saga example" step of .github/workflows/ci.yml.
+ORDER_SAGA_MANIFEST="examples/order-saga/Cargo.toml"
+
+check_order_saga() {
+  cargo fmt --manifest-path "$ORDER_SAGA_MANIFEST" --check || return 1
+  cargo build --release --target wasm32-wasip2 \
+    --manifest-path "$ORDER_SAGA_MANIFEST" --target-dir target/order-saga || return 1
+  cargo clippy --target wasm32-wasip2 \
+    --manifest-path "$ORDER_SAGA_MANIFEST" --target-dir target/order-saga -- -D warnings
+}
+
 check_forbidden_crates() {
   local hits
   hits="$(cargo tree --workspace -e normal --locked | grep -E 'chronik|tokio-uring|prometheus ' || true)"
@@ -210,6 +224,7 @@ step "cargo build (warning-free)" check_build
 step "sdk workspace fmt + clippy" check_sdk_lint
 step "sdk workspace test + wasm build" check_sdk_test
 step "guests build (wasm32-wasip2)" check_guests
+step "order-saga example" check_order_saga
 step "cargo test" cargo test --workspace --locked
 step "failpoint suites" check_failpoints
 step "cargo deny check" cargo deny check
