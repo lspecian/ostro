@@ -26,6 +26,8 @@ reqwest.workspace = true
 tempfile.workspace = true
 tonic.workspace = true
 ostro-proto = { path = "../ostro-proto" }
+# e2e (04-20): module sha256 for PUT /v1/modules/{sha256}
+sha2.workspace = true
 
 [lints]
 workspace = true

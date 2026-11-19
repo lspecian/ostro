@@ -271,3 +271,279 @@ pub fn min_median(mut v: Vec<Duration>) -> (Duration, Duration) {
     v.sort();
     (v[0], v[v.len() / 2])
 }
+
+// ---------------------------------------------------------------------------------
+// End-to-end helpers (plan 04-20): SDK guest build, module upload, run start/get over
+// REST and gRPC, history and list, all against a spawned binary's address.
+// ---------------------------------------------------------------------------------
+
+use std::sync::OnceLock;
+
+use ostro_proto::api::v1 as pb;
+use ostro_proto::api::v1::runs_client::RunsClient;
+use reqwest::StatusCode;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+/// Repository root (`crates/ostro/../..`).
+pub fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Build the `guests/` workspace once per process and return the named guest's `.wasm`
+/// (copy of ostro-engine's / ostro-server's helper: a dev-dep on test helpers is not
+/// possible).
+pub fn guest_wasm(name: &str) -> Vec<u8> {
+    static BUILT: OnceLock<()> = OnceLock::new();
+    let root = repo_root();
+    let target_dir = root.join("target/guests");
+    BUILT.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let out = Command::new(cargo)
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "--manifest-path",
+            ])
+            .arg(root.join("guests/Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&target_dir)
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_TARGET")
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("RUSTC_WRAPPER")
+            .output()
+            .expect("failed to spawn cargo for guests build");
+        if !out.status.success() {
+            panic!(
+                "guests build failed:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    });
+    let file = format!("{}.wasm", name.replace('-', "_"));
+    let path = target_dir.join("wasm32-wasip2/release").join(&file);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// Lowercase hex sha256.
+pub fn sha_hex(b: &[u8]) -> String {
+    Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
+}
+
+/// Terminal REST run statuses.
+pub fn is_terminal(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+/// A REST + gRPC client pair for one server address.
+pub struct Api {
+    pub addr: SocketAddr,
+    pub http: reqwest::Client,
+}
+
+impl Api {
+    pub fn new(addr: SocketAddr) -> Self {
+        Self { addr, http: http() }
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
+    }
+
+    /// A tonic `Runs` client on the same port.
+    pub async fn runs(&self) -> RunsClient<tonic::transport::Channel> {
+        let ch = tonic::transport::Channel::from_shared(format!("http://{}", self.addr))
+            .expect("uri")
+            .connect()
+            .await
+            .expect("grpc connect");
+        RunsClient::new(ch)
+    }
+
+    /// `GET path` -> (status, JSON body).
+    pub async fn get(&self, path: &str) -> (StatusCode, Value) {
+        let r = self
+            .http
+            .get(self.url(path))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        let st = r.status();
+        (st, r.json().await.expect("json body"))
+    }
+
+    /// `PUT /v1/modules/{sha}` with the wasm bytes -> (status, body).
+    pub async fn upload(&self, wasm: &[u8]) -> (StatusCode, Value) {
+        let sha = sha_hex(wasm);
+        let r = self
+            .http
+            .put(self.url(&format!("/v1/modules/{sha}")))
+            .header("content-type", "application/wasm")
+            .body(wasm.to_vec())
+            .send()
+            .await
+            .expect("PUT module");
+        let st = r.status();
+        (st, r.json().await.expect("json body"))
+    }
+
+    /// The `GET /v1/workflows` entry for `name`.
+    pub async fn workflow(&self, name: &str) -> Value {
+        let (st, wf) = self.get("/v1/workflows").await;
+        assert_eq!(st, StatusCode::OK, "{wf}");
+        wf["workflows"]
+            .as_array()
+            .expect("workflows")
+            .iter()
+            .find(|w| w["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("workflow {name} missing: {wf}"))
+    }
+
+    /// `PUT /v1/workflows/{name}/active {version}` -> status.
+    pub async fn activate(&self, name: &str, version: u32) -> StatusCode {
+        self.http
+            .put(self.url(&format!("/v1/workflows/{name}/active")))
+            .json(&json!({ "version": version }))
+            .send()
+            .await
+            .expect("PUT active")
+            .status()
+    }
+
+    /// `POST /v1/workflows/{workflow}/runs` -> (status, body).
+    pub async fn start_http(&self, workflow: &str, body: Value) -> (StatusCode, Value) {
+        let r = self
+            .http
+            .post(self.url(&format!("/v1/workflows/{workflow}/runs")))
+            .json(&body)
+            .send()
+            .await
+            .expect("POST run");
+        let st = r.status();
+        (st, r.json().await.expect("json body"))
+    }
+
+    /// Start over REST and return the new run id (asserts 201).
+    pub async fn start_new(&self, workflow: &str, body: Value) -> String {
+        let (st, b) = self.start_http(workflow, body).await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        b["run_id"].as_str().expect("run_id").to_owned()
+    }
+
+    /// gRPC `Runs.Start`.
+    pub async fn start_grpc(
+        &self,
+        req: pb::StartRunRequest,
+    ) -> Result<pb::StartRunResponse, tonic::Status> {
+        self.runs().await.start(req).await.map(|r| r.into_inner())
+    }
+
+    /// gRPC `Runs.Get`.
+    pub async fn get_grpc(&self, run_id: &str) -> pb::RunInfo {
+        self.runs()
+            .await
+            .get(pb::GetRunRequest {
+                run_id: run_id.to_owned(),
+            })
+            .await
+            .expect("grpc get")
+            .into_inner()
+    }
+
+    /// `GET /v1/runs/{id}` (asserts 200).
+    pub async fn run(&self, run_id: &str) -> Value {
+        let (st, b) = self.get(&format!("/v1/runs/{run_id}")).await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        b
+    }
+
+    /// Poll GET every 20 ms until `f(run)` holds.
+    pub async fn wait_run(
+        &self,
+        run_id: &str,
+        limit: Duration,
+        f: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = Instant::now() + limit;
+        loop {
+            let b = self.run(run_id).await;
+            if f(&b) {
+                return b;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "run {run_id} wait timed out: {b}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Poll GET until the run is terminal.
+    pub async fn wait_terminal(&self, run_id: &str, limit: Duration) -> Value {
+        self.wait_run(run_id, limit, |b| {
+            b["status"].as_str().is_some_and(is_terminal)
+        })
+        .await
+    }
+
+    /// The full history (every page) over REST.
+    pub async fn history(&self, run_id: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        let mut from = 0u64;
+        loop {
+            let (st, p) = self
+                .get(&format!(
+                    "/v1/runs/{run_id}/history?from_seq={from}&limit=100"
+                ))
+                .await;
+            assert_eq!(st, StatusCode::OK, "{p}");
+            out.extend(p["events"].as_array().expect("events").iter().cloned());
+            match p["next_from_seq"].as_u64() {
+                Some(n) => from = n,
+                None => return out,
+            }
+        }
+    }
+
+    /// Run ids of `GET /v1/runs?<query>` across every page.
+    pub async fn list(&self, query: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut path = format!("/v1/runs?{query}&limit=50");
+            if let Some(t) = &token {
+                path.push_str(&format!("&page_token={t}"));
+            }
+            let (st, p) = self.get(&path).await;
+            assert_eq!(st, StatusCode::OK, "{p}");
+            for r in p["runs"].as_array().expect("runs") {
+                out.push(r["run_id"].as_str().expect("run_id").to_owned());
+            }
+            match p["next_page_token"].as_str() {
+                Some(t) => token = Some(t.to_owned()),
+                None => return out,
+            }
+        }
+    }
+}
+
+/// History events of `kind`.
+pub fn events_of<'a>(history: &'a [Value], kind: &str) -> Vec<&'a Value> {
+    history.iter().filter(|e| e["kind"] == kind).collect()
+}
+
+/// Number of `step_completed` events for step `name`.
+pub fn step_completions(history: &[Value], name: &str) -> usize {
+    history
+        .iter()
+        .filter(|e| e["kind"] == "step_completed" && e["details"]["name"] == name)
+        .count()
+}
