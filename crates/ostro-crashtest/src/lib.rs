@@ -37,6 +37,13 @@ use ostro_types::{Offset, PartitionCount, PartitionId, RunId};
 /// Generous limit for node opens and target startup.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Limit for the two opens in [`rebuild_and_compare`]. The stateless copy replays the whole
+/// log, which for a 500-kill campaign shard (~6,000 runs, ~375 MB) takes ~14 s on a quiet
+/// machine and exceeded [`OPEN_TIMEOUT`] when several shards rebuilt at once under a load
+/// average of ~35 (05-20 gate, shards 8-10: the rebuilt state then compared equal). The
+/// bound only catches hangs; a mismatch is still reported by the comparison.
+pub const REBUILD_OPEN_TIMEOUT: Duration = Duration::from_secs(600);
+
 // ------------------------------------------------------------------------------ PRNG
 
 /// Tiny seeded xorshift64* PRNG (no `rand` dependency).
@@ -274,12 +281,22 @@ pub fn run_and_kill_with(
 
 /// Open `dir` with `p` partitions in `mode` (default configs otherwise).
 pub async fn open_node(dir: &Path, p: u16, mode: StartMode) -> Result<Node, String> {
+    open_node_within(dir, p, mode, OPEN_TIMEOUT).await
+}
+
+/// [`open_node`] with an explicit time limit.
+pub async fn open_node_within(
+    dir: &Path,
+    p: u16,
+    mode: StartMode,
+    limit: Duration,
+) -> Result<Node, String> {
     let mut cfg = NodeConfig::new(
         dir.to_path_buf(),
         PartitionCount::new(p).ok_or("zero partitions")?,
     );
     cfg.mode = mode;
-    match tokio::time::timeout(OPEN_TIMEOUT, Node::open(cfg)).await {
+    match tokio::time::timeout(limit, Node::open(cfg)).await {
         Ok(Ok(n)) => Ok(n),
         Ok(Err(e)) => Err(format!("open {}: {e}", dir.display())),
         Err(_) => Err(format!("open {} timed out", dir.display())),
@@ -436,8 +453,15 @@ fn state_of(node: &Node, p: u16) -> Result<([u8; 32], [u8; 32], u64), String> {
 /// open by anyone else.
 pub async fn rebuild_and_compare(data_dir: &Path, p: u16) -> Result<(), String> {
     let copy = stateless_copy(data_dir)?;
-    let live = open_node(data_dir, p, StartMode::Inspect).await?;
-    let rebuilt = match open_node(&copy.path().join("data"), p, StartMode::Inspect).await {
+    let live = open_node_within(data_dir, p, StartMode::Inspect, REBUILD_OPEN_TIMEOUT).await?;
+    let rebuilt = match open_node_within(
+        &copy.path().join("data"),
+        p,
+        StartMode::Inspect,
+        REBUILD_OPEN_TIMEOUT,
+    )
+    .await
+    {
         Ok(n) => n,
         Err(e) => {
             let _ = live.shutdown().await;
