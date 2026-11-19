@@ -291,7 +291,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-06 | Phase 9 | Pending |
 | WF-07 | Phase 4 (Rust) / Phase 9 (Py, TS) | Pending |
 | WF-08 | Phase 5 | Pending |
-| WF-09 | Phase 5 | Pending |
+| WF-09 | Phase 5 | Pending (apply timeouts: 05-09; derive/executor: 05-11; e2e: 05-15) |
 | WF-10 | Phase 9 | Pending |
 | DISP-01 | Phase 4 | Complete |
 | DISP-02 | Phase 4 | Complete |
@@ -304,7 +304,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | API-02 | Phase 4 | Complete |
 | API-03 | Phase 4 | Complete |
 | API-04 | Phase 4 | Complete |
-| API-05 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply signal/cancel: 05-08; server: 05-13) |
+| API-05 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply signal/cancel: 05-08; apply terminate/retry: 05-09; server: 05-13) |
 | API-06 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
 | API-07 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; apply CompleteToken: 05-08; server: 05-13) |
 | API-08 | Phase 13 | Pending |
@@ -336,7 +336,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | OPS-03 | Phase 11 | Pending |
 | OPS-04 | Phase 11 | Pending |
 | OPS-05 | Phase 11 | Pending |
-| OPS-06 | Phase 5 | Pending |
+| OPS-06 | Phase 5 | Pending (apply expiry incl. dedupe: 05-09; policy resolution + [runs] config: 05-11; API: 05-13) |
 | OPS-07 | Phase 11 | Pending |
 | SDK-01 | Phase 4 | Complete |
 | SDK-02 | Phase 9 | Pending |
