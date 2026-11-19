@@ -93,20 +93,28 @@ A **worker** is the "Embedded executor" box alone, connected over the network.
 
 ### 2.2 Log commands (partition journal)
 
-Every state change is a command appended to the partition log and applied deterministically by every replica.
+Every state change is a command appended to the partition log and applied deterministically by every replica. The frozen encodings (field numbers, enums, goldens) are in [storage-format.md](storage-format.md) §4, §12 and §13; tags come only from `.planning/RESERVATIONS.md`.
 
-| Command | Appended by | Effect on state |
-|---|---|---|
-| `RunStarted{run, workflow, version, module_sha, input, opts}` | API (via leader) | create run, enqueue ready, dedupe index |
-| `EventsAppended{run, attempt, from_seq, events[]}` | executor (via leader) | append journal events; derive timers/effects/waits; update status |
-| `TimerFired{run, op}` | leader timer wheel | append `timer_fired` event, enqueue ready |
-| `SignalReceived{run, name, payload}` | API | inbox; enqueue ready if run waits on it |
-| `CancelRequested{run, mode}` | API | mark cancelling; enqueue ready |
-| `RunTerminated{run, outcome}` | executor | completed/failed/cancelled; DLQ entry on failure |
-| `RunsExpired{runs[]}` | leader retention task | delete run + events |
-| `ScheduleFired{schedule, fire_time}` | leader of the schedule's partition | exactly-once cron start (idempotency key = schedule ‖ fire_time) |
+| Tag | Command | Appended by | Effect on state |
+|---|---|---|---|
+| 1 | `LeaderAnnounced{epoch, node_id}` | new partition leader | leader epoch boundary; fences older epochs |
+| 2 | `StartRun{run, workflow, version, module_sha, input, idempotency_key, …, run_started}` | API (via leader), outbox (child, continue-as-new successor) | create run, dedupe index, ready entry, run-timeout / schedule-to-start / start-delay timers. With D24 the API pre-encodes `RunStarted` (field 23) and apply journals it at seq 0 |
+| 3 | `AttemptGranted{run, token}` | dispatcher | new attempt token (fencing), `running` row |
+| 4 | `EventsAppended{run, token, from_seq, events[], derived[]}` | executor (via leader) | append journal events; derived intents: timers, outbox messages, ready, waits, `CompleteRun`, `Suspend` |
+| 5 | `TimerFired{run, op, due_at, fired_at}` | leader timer service | journal `timer_fired` (guest timers), `wait_timed_out` (wait timeouts), or route a reserved op (below) |
+| 6 | `InboundBatch{src, msgs[]}` | shuffler (other partitions' outboxes) | child start / child completed / signal / cancel / continue-as-new start, exactly once per source seq |
+| 7 | `OutboxTruncated{target, upto_seq}` | shuffler | drop delivered outbox rows |
+| 8 | `SignalRun{run, name, event, request_id}` | API | journal `SignalPayload` verbatim (D21); match the oldest open wait (`SignalMatched`) or buffer in `inbox`; `request_id` dedupe (`signal_seen`) |
+| 9 | `RequestCancel{run, reason}` | API | journal `CancelRequested` once and wake the run (graceful, D11); forwarded to attached children and continue-as-new successors |
+| 10 | `TerminateRun{run, reason}` | API | hard stop → `Terminated`, `RunTerminated{reason}` marker, children get a graceful cancel (D3) |
+| 11 | `RetryRun{run}` | API | resume a `resumable` terminal run in place (D1); the restart mode is a new `StartRun` with `retry_of` |
+| 12 | `CompleteToken{run, op, event}` | API | journal `TokenCompleted` verbatim (D21), first completion wins |
 
-Leases are **soft state** on the leader (not logged). Fencing: `EventsAppended` carries `attempt` and `from_seq`; the leader rejects it unless `attempt == run.current_attempt` and `from_seq == run.next_seq`. A new leader bumps the attempt of every run that was in flight, so zombie executors are fenced after failover.
+Phase 5 replaced two design-era commands. **There is no batch `RunsExpired` command**: retention is a per-run reserved timer (`EXPIRE_OP`, below) armed at the terminal transition, so expiry is an ordinary `TimerFired` that deletes one run's rows and its dedupe key. **There is no `CancelRequested` command with a mode**: graceful cancel is `RequestCancel` (tag 9) and the hard stop is `TerminateRun` (tag 10). Run completion is the `CompleteRun` intent inside `EventsAppended`, not a separate command. Cron (`ScheduleFired`) arrives in Phase 8 as the outbox `CronStart` message with the dedupe key `"__cron/<schedule>"` ‖ fire_time_ms (storage-format §6).
+
+**Reserved timer ops.** Ops `u64::MAX - 15 ..= u64::MAX` are owned by apply and never allocated to guest operations (a guest intent naming one is rejected `BadIntent`): `START_DELAY_OP` (`u64::MAX`, delayed start), `RUN_TIMEOUT_OP` (`u64::MAX - 1`, hard stop → `TimedOut`, reason `run_timeout`), `SCHEDULE_TO_START_OP` (`u64::MAX - 2`, initial start only, reason `schedule_to_start`) and `EXPIRE_OP` (`u64::MAX - 3`, retention expiry). `TimerFired` routes them before the terminal-run check, because expiry acts on terminal runs.
+
+Leases are **soft state** on the leader (not logged). Fencing: `EventsAppended` carries the attempt token and `from_seq`; apply rejects it unless the token is the run's current attempt and `from_seq == run.next_seq`. A new leader re-grants every run that was in flight in its new epoch, so zombie executors are fenced after failover. The `from_seq` check is also the compare-and-set that keeps a `Suspend` from losing a wake-up.
 
 ### 2.3 Journal event kinds (inside `EventsAppended`)
 
@@ -121,10 +129,16 @@ Leases are **soft state** on the leader (not logged). Fencing: `EventsAppended` 
 | `wait_resolved` | **ordered** list of op-ids returned by `wait` (determinism anchor for concurrency) |
 | `clock_read` / `patch_marker` | logical time observations / versioning markers |
 | `run_completed` / `run_failed` | terminal |
+| `wait_timed_out` | a signal / token wait's timeout expired (input, journaled by apply; D4) |
+| `run_terminated` | terminate or timeout marker, `reason` = operator reason, `run_timeout` or `schedule_to_start` (D3) |
+| `signal_payload` / `signal_matched` | a signal's payload (journaled on arrival) / its match to a wait op, pointing back at the payload (D21; replaces `signal_consumed`, and `signal_received` is no longer produced) |
+| `token_completed` / `cancel_requested` / `run_continued_as_new` | await-token completion / graceful cancel request / continue-as-new terminal |
+
+The current kind numbers and payloads are defined in `crates/ostro-types/src/journal.rs`; the REST history uses the snake_case names above.
 
 ### 2.4 Partition state (fjall keyspaces)
 
-One fjall database per partition at `state/pNNNN/`, one keyspace per table (fjall replaced redb after spike S3). The table below is the design view; the frozen key and value encodings (13 keyspaces, big-endian keys, postcard values, meta keys) are in [storage-format.md](storage-format.md).
+One fjall database per partition at `state/pNNNN/`, one keyspace per table (fjall replaced redb after spike S3). The table below is the design view; the frozen key and value encodings (16 keyspaces `meta` … `signal_seen`, big-endian keys, postcard values, meta keys) are in [storage-format.md](storage-format.md) §6 and §13.
 
 | Table | Key → Value | Purpose |
 |---|---|---|
@@ -132,12 +146,17 @@ One fjall database per partition at `state/pNNNN/`, one keyspace per table (fjal
 | `events` | (run_id, seq) → event | per-run journal for replay (log segments can be truncated after snapshot) |
 | `payloads` | (run_id, kind) → bytes | input/output; large values offloaded to blob/object store |
 | `ready` | (queue, priority, ready_at, run_id) → () | dispatcher queue (rebuilt into memory on leadership) |
-| `timers` | (due_at, run_id, op_id) → () | timer wheel source |
+| `timers` | (due_at, run_id, op_id) → () | timer wheel source: guest timers, wait timeouts and the reserved ops (§2.2) |
 | `effects` | (run_id, op_id) → status | in-flight effects (observability; replay re-drives them) |
-| `inbox` | (run_id, name, n) → payload | signals not yet consumed |
-| `dedupe` | (workflow, idem_key) → run_id | start idempotency |
+| `inbox` | (run_id, name, n) → `SignalSlot` | **only unmatched signals**: a signal that arrives while a wait for its name is open is matched at once and never buffered. The slot points at the already journaled `SignalPayload` (`payload_seq`), or holds the event bytes while the journal is still empty (B1) |
+| `waits` | (run_id, op) → `WaitRow`; (run_id, name, op) → () | open signal / token waits and the per-name FIFO index (oldest wait first) |
+| `signal_seen` | (run_id, request_id) → () | signal dedupe (D13), deleted with the run |
+| `running` | run_id → attempt token | exactly the runs in `Running`; a new leader rebuilds its in-flight set from it |
+| `dedupe` | (qualified workflow, idem_key) → run_id | start idempotency (tenant-scoped through the qualified name, D23); freed when the run expires |
 | `dlq` | (failed_at, run_id) → reason | dead letters |
 | `meta` | `applied_offset`, `leader_epoch_history`, format version | recovery |
+
+**Inputs are journaled by apply.** Timer firings, wait timeouts, signal payloads and matches, token completions and cancel requests are written into `events` by apply at the run's `next_seq` (moving it by one), then the run is woken: `Scheduled` → `Ready`, `Running` → `InputAppended` to the hot activation. The executor never invents inputs, so live execution and replay see the same order. Events carrying user-sized data are encoded by the submitter and journaled verbatim (D21); apply never decodes payloads.
 
 The state store is derived: deleting it and replaying the log (or restoring a snapshot + log tail) must reproduce it byte-for-byte. A **state-hash check** (rolling hash of applied commands) compared across replicas detects apply divergence.
 
@@ -145,20 +164,25 @@ The state store is derived: deleting it and replaying the log (or restoring a sn
 
 ## 3. Storage layout
 
+The single-node data directory as it exists today (`ostro dev` uses `./.ostro`, `ostro server` `./ostro-data`; [storage-format.md](storage-format.md) §1 is authoritative):
+
 ```
-/var/lib/ostro/
-├── node.toml                  # format_version, fixed partition count (later: node id, cluster id)
+<data>/
+├── node.toml                  # format_version = 1, partitions = P (Phase 12/13 add node_id, cluster_id)
 ├── meta/                      # metadata Raft log + snapshot (chronik-raft RaftLogStore)
 │   ├── state                  # HardState + ConfState (tmp+fsync+rename)
 │   ├── snapshot
 │   └── log/<index>.seg        # [len u32][crc32 u32][entry]
-├── wal/p/7/wal_7_<seg>.log     # partition 7's log: vendored WAL segments (wal/p/<id>/wal_<id>_<seg>.log),
-│                              #   one OSTR envelope per record, leader epoch in every envelope
-├── state/p0007/               # partition 7's state machine: one fjall database (13 keyspaces)
-├── blobs/<sha256[0:2]>/<sha256>    # uploaded components (zstd), large payloads
-├── cache/aot/<key>.cwasm           # Wasmtime AOT artefacts (rebuildable; HMAC'd)
+├── wal/p/<id>/wal_<id>_<seg>.log   # partition <id>'s log (vendored ostro-wal, one shared group-commit
+│                              #   WAL per node, topic `p`); one OSTR envelope per record, leader epoch in
+│                              #   every envelope; e.g. wal/p/7/wal_7_0.log
+├── state/pNNNN/               # partition NNNN's state machine: one fjall database (16 keyspaces)
+├── blobs/<hh>/<sha256>        # content-addressed: uploaded components and payloads > 256 KiB
+├── cache/aot/                 # Wasmtime AOT artefacts (rebuildable; HMAC-keyed)
 └── tmp/                       # in-flight blob writes (renamed into blobs/ when complete)
 ```
+
+Retention expiry (§2.2, `EXPIRE_OP`) deletes a run from `state/` only. Its WAL records stay on disk until Phase 8 trims the log behind snapshots (`snapshot_floor = 0` until then), and blobs referenced by expired runs are not garbage-collected in Phase 5. Node open, backup/restore and blob GC ignore unknown data-dir entries (for example a future `<data>/audit/`).
 
 The frozen Phase 2 on-disk format (directory layout, WAL record and envelope bytes, command field numbers, keyspaces and key encodings, outcome codes, rolling hash and digest, recovery rules) is specified in [storage-format.md](storage-format.md). The leader-epoch history is not stored separately: recovery rebuilds it from the epochs in the envelopes.
 
