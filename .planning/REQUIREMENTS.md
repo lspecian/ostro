@@ -304,9 +304,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | API-02 | Phase 4 | Complete |
 | API-03 | Phase 4 | Complete |
 | API-04 | Phase 4 | Complete |
-| API-05 | Phase 5 | Pending |
-| API-06 | Phase 5 | Pending |
-| API-07 | Phase 5 | Pending |
+| API-05 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
+| API-06 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
+| API-07 | Phase 5 | Pending (REST+gRPC adapters vs fake: 05-04; server: 05-13) |
 | API-08 | Phase 13 | Pending |
 | TRIG-01 | Phase 8 | Pending |
 | TRIG-02 | Phase 8 | Pending |
