@@ -1,6 +1,7 @@
 //! Lazy windowed timer service (plan 02-14, STOR-13): timers fire once via `TimerFired`, the
 //! in-memory window stays bounded, overdue timers fire after a restart, and a duplicate
-//! `TimerFired` has no effect.
+//! `TimerFired` has no effect. Since plan 04-13 a fired timer is a journal event, not an inbox
+//! row.
 #![allow(clippy::disallowed_methods)]
 
 mod common;
@@ -13,6 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use common::{T, run_on, start_run};
 use ostro_partition::leader::timers::{TimerConfig, TimerStats};
+use ostro_partition::query::journal_rows;
 use ostro_partition::store::keys::{ready_prefix, run_key};
 use ostro_partition::store::values::{self, InboxMsg, RunRecord, RunStatus};
 use ostro_partition::{ApplyOutcome, ManualClock, Node, NodeConfig, PartitionHandle, Table};
@@ -20,6 +22,8 @@ use ostro_types::command::{
     AttemptTokenMsg, CancelTimer, Derived, EventsAppended, JournalEvent, ScheduleTimer, TimerFired,
     derived,
 };
+use ostro_types::journal::{Event, EventBody, EventKind, decode_event};
+use ostro_types::payload::payload_ref;
 use ostro_types::{Command, PartitionCount, PartitionId, PayloadRef, RunId};
 use tokio::time::{sleep, timeout};
 
@@ -98,18 +102,37 @@ fn events(run: &RunId, t: AttemptTokenMsg, seq: u64, derived: Vec<Derived>) -> C
     })
 }
 
-/// `(op, fired_at_ms)` of every `TimerFired` in the run's inbox.
-fn inbox_fired(h: &Handle, run: &RunId) -> Vec<(u64, u64)> {
-    h.reader()
-        .prefix(Table::Inbox, &run_key(run), usize::MAX)
-        .expect("inbox")
-        .iter()
-        .filter_map(
-            |(_, v)| match values::decode::<InboxMsg>(v).expect("inbox msg") {
-                InboxMsg::TimerFired { op, fired_at_ms } => Some((op, fired_at_ms)),
-                _ => None,
-            },
-        )
+/// `(op, fired_at_ms)` of every `TimerFired` journaled for the run (plan 04-13: timer inputs
+/// are journal events, not inbox rows). Also asserts the inbox holds no timer.
+fn journal_fired(h: &Handle, run: &RunId) -> Vec<(u64, u64)> {
+    assert!(
+        h.reader()
+            .prefix(Table::Inbox, &run_key(run), usize::MAX)
+            .expect("inbox")
+            .iter()
+            .all(|(_, v)| !matches!(
+                values::decode::<InboxMsg>(v).expect("inbox msg"),
+                InboxMsg::TimerFired { .. }
+            )),
+        "timer in inbox"
+    );
+    journal_rows(&h.reader(), run, 0, usize::MAX)
+        .expect("journal")
+        .into_iter()
+        .filter(|(_, kind, _)| *kind == EventKind::TimerFired.code())
+        .map(|(seq, kind, p)| {
+            let Some(payload_ref::Kind::Inline(bytes)) = p.kind else {
+                panic!("inline payload expected");
+            };
+            match decode_event(seq, kind, &bytes).expect("decode event") {
+                Event {
+                    ts_nanos,
+                    body: EventBody::TimerFired(f),
+                    ..
+                } => (f.op, ts_nanos / 1_000_000),
+                e => panic!("unexpected event {e:?}"),
+            }
+        })
         .collect()
 }
 
@@ -153,14 +176,14 @@ async fn timer_fires_once_and_row_is_removed() {
         ApplyOutcome::Accepted
     );
     sleep(Duration::from_millis(200)).await;
-    assert!(inbox_fired(h, &run).is_empty(), "fired before due");
+    assert!(journal_fired(h, &run).is_empty(), "fired before due");
     clock.advance(1_000);
     eventually(Duration::from_secs(2), "timer fired", || {
-        !inbox_fired(h, &run).is_empty()
+        !journal_fired(h, &run).is_empty()
     })
     .await;
     sleep(Duration::from_millis(200)).await;
-    assert_eq!(inbox_fired(h, &run), vec![(1, START + 1_000)]);
+    assert_eq!(journal_fired(h, &run), vec![(1, START + 1_000)]);
     assert_eq!(timer_rows(h), 0);
     assert_eq!(stats.fired.load(Ordering::Relaxed), 1);
     node.shutdown().await.expect("shutdown");
@@ -185,7 +208,7 @@ async fn cancelled_timer_never_fires() {
     );
     clock.advance(5_000);
     sleep(Duration::from_secs(1)).await;
-    assert!(inbox_fired(h, &run).is_empty());
+    assert!(journal_fired(h, &run).is_empty());
     assert_eq!(timer_rows(h), 0);
     assert_eq!(stats.fired.load(Ordering::Relaxed), 0);
     node.shutdown().await.expect("shutdown");
@@ -243,11 +266,11 @@ async fn overdue_timer_fires_once_after_restart() {
     let node = open(tmp.path(), &clock, cfg).await;
     let h = h(&node);
     eventually(Duration::from_secs(2), "overdue timer fired", || {
-        !inbox_fired(h, &run).is_empty()
+        !journal_fired(h, &run).is_empty()
     })
     .await;
     sleep(Duration::from_millis(300)).await;
-    assert_eq!(inbox_fired(h, &run), vec![(7, START + 10_000)]);
+    assert_eq!(journal_fired(h, &run), vec![(7, START + 10_000)]);
     assert_eq!(stats.fired.load(Ordering::Relaxed), 1);
     assert_eq!(timer_rows(h), 0);
     node.shutdown().await.expect("shutdown");
@@ -267,7 +290,7 @@ async fn duplicate_timer_fired_has_no_effect() {
     );
     clock.advance(100);
     eventually(Duration::from_secs(2), "timer fired", || {
-        !inbox_fired(h, &run).is_empty()
+        !journal_fired(h, &run).is_empty()
     })
     .await;
     let dup = Command::timer_fired(TimerFired {
@@ -280,10 +303,12 @@ async fn duplicate_timer_fired_has_no_effect() {
         submit(h, dup).await,
         ApplyOutcome::Duplicate { .. }
     ));
-    assert_eq!(inbox_fired(h, &run), vec![(3, START + 100)]);
-    // Only the rolling hash / applied offset move; the tables are unchanged.
+    assert_eq!(journal_fired(h, &run), vec![(3, START + 100)]);
+    // Only the rolling hash / applied offset move; the tables are unchanged: event 0 plus the
+    // one journaled timer input.
     let rec: RunRecord = h.read_run(&run).expect("read").expect("run");
-    assert_eq!(rec.inbox_next, 1);
+    assert_eq!(rec.next_seq, 2);
+    assert_eq!(rec.inbox_next, 0);
     node.shutdown().await.expect("shutdown");
 }
 
@@ -312,7 +337,7 @@ async fn timers_sharing_the_cutoff_due_all_fire() {
     );
     clock.advance(1_000);
     eventually(Duration::from_secs(3), "early timer fired", || {
-        !inbox_fired(h, &run).is_empty()
+        !journal_fired(h, &run).is_empty()
     })
     .await;
     clock.advance(1_000);
@@ -321,7 +346,10 @@ async fn timers_sharing_the_cutoff_due_all_fire() {
     })
     .await;
     sleep(Duration::from_millis(200)).await;
-    let mut ops: Vec<u64> = inbox_fired(h, &run).into_iter().map(|(op, _)| op).collect();
+    let mut ops: Vec<u64> = journal_fired(h, &run)
+        .into_iter()
+        .map(|(op, _)| op)
+        .collect();
     ops.sort_unstable();
     let want: Vec<u64> = (0..5).chain(100..125).collect();
     assert_eq!(ops, want);
@@ -382,7 +410,7 @@ async fn hundred_thousand_timers_bounded_window_large() {
     assert_eq!(stats.fired.load(Ordering::Relaxed), N);
     assert!(stats.max_window_len.load(Ordering::Relaxed) <= 1_000);
     assert_eq!(timer_rows(h), 0);
-    let fired = inbox_fired(h, &run);
+    let fired = journal_fired(h, &run);
     assert_eq!(fired.len() as u64, N);
     let mut ops: Vec<u64> = fired.into_iter().map(|(op, _)| op).collect();
     ops.sort_unstable();

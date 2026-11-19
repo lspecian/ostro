@@ -103,7 +103,12 @@ impl H {
         ostro_partition::TABLES
             .into_iter()
             .filter(|t| !matches!(t, Table::Meta))
-            .map(|t| self.store.reader().prefix(t, &[], usize::MAX).expect("scan"))
+            .map(|t| {
+                self.store
+                    .reader()
+                    .prefix(t, &[], usize::MAX)
+                    .expect("scan")
+            })
             .collect()
     }
 
@@ -174,7 +179,9 @@ fn sched(op: u64, due: u64) -> Derived {
 }
 
 fn enqueue(at: u64) -> Derived {
-    intent(derived::Intent::EnqueueReady(EnqueueReady { ready_at_ms: at }))
+    intent(derived::Intent::EnqueueReady(EnqueueReady {
+        ready_at_ms: at,
+    }))
 }
 
 fn complete() -> Derived {
@@ -210,7 +217,10 @@ fn with_timer(extra: Vec<Derived>) -> (H, RunId) {
     assert_eq!(h.apply(&grant(&r, 1)), ApplyOutcome::Accepted);
     let mut d = vec![sched(7, 1000)];
     d.extend(extra);
-    assert_eq!(h.apply(&events(&r, 0, vec![ev(0)], d)), ApplyOutcome::Accepted);
+    assert_eq!(
+        h.apply(&events(&r, 0, vec![ev(0)], d)),
+        ApplyOutcome::Accepted
+    );
     assert_eq!(h.run(&r).next_seq, 1);
     (h, r)
 }

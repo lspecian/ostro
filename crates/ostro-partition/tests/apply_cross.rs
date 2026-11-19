@@ -7,7 +7,7 @@ use ostro_partition::apply::{
     Action, ApplyOutcome, Cursor, InvalidCode, RejectReason, START_DELAY_OP, apply_command,
 };
 use ostro_partition::store::keys::{
-    children_key, dedupe_key, outbox_key, outbox_prefix, ready_key, run_key, timer_key,
+    children_key, dedupe_key, event_key, outbox_key, outbox_prefix, ready_key, run_key, timer_key,
 };
 use ostro_partition::store::values::{self, InboxMsg, RunRecord, RunStatus};
 use ostro_partition::{PartitionStore, StoreConfig, Table};
@@ -16,7 +16,9 @@ use ostro_types::command::{
     EnqueueReady, EventsAppended, InboundBatch, InboundMsg, OutboxMsg, OutboxTruncated, ParentRef,
     SendMessage, Signal, StartRun, TerminalStatus, derived, encode_command, outbox_msg,
 };
-use ostro_types::command::{CancelTimer, ScheduleTimer, TimerFired};
+use ostro_types::command::{CancelTimer, JournalEvent, ScheduleTimer, TimerFired};
+use ostro_types::journal::{self, Event, EventBody, EventKind, decode_event};
+use ostro_types::payload::payload_ref;
 use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
 use prost::Message;
 
@@ -712,18 +714,31 @@ fn timer_fire_once() {
     let (o, a, reads) = h.apply_full(&fired(&r, 7, 1000, 1003));
     assert_eq!(o, ApplyOutcome::Accepted);
     assert!(reads <= 2, "TimerFired reads: {reads}");
-    assert!(a.is_empty(), "Running run: no new ready row ({a:?})");
+    // Plan 04-13: a timer input is journaled at next_seq (not an inbox row);
+    // a Running run gets InputAppended, no new ready row.
+    assert_eq!(a, vec![Action::InputAppended { run: r, seq: 0 }]);
     assert!(h.get(Table::Timers, &timer_key(1000, &r, 7)).is_none());
+    assert!(h.inbox(&r).is_empty());
+    let row = h
+        .get(Table::Events, &event_key(&r, 0))
+        .expect("journal row");
+    let je = JournalEvent::decode(&*row).expect("journal event");
+    assert_eq!(je.kind, EventKind::TimerFired.code());
+    let Some(payload_ref::Kind::Inline(bytes)) = je.payload.and_then(|p| p.kind) else {
+        panic!("inline payload expected");
+    };
     assert_eq!(
-        h.inbox(&r),
-        vec![InboxMsg::TimerFired {
-            op: 7,
-            fired_at_ms: 1003
-        }]
+        decode_event(0, je.kind, &bytes).expect("decode event"),
+        Event {
+            seq: 0,
+            ts_nanos: 1_003_000_000,
+            body: EventBody::TimerFired(journal::TimerFired { op: 7 }),
+        }
     );
     let run = h.run(&r).unwrap();
     assert_eq!(run.status, RunStatus::Running);
-    assert_eq!(run.inbox_next, 1);
+    assert_eq!(run.next_seq, 1);
+    assert_eq!(run.inbox_next, 0);
 
     // A new leader re-fires the same timer: Duplicate, state unchanged.
     let before = h.data();

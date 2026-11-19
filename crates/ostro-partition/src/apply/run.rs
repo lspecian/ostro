@@ -21,9 +21,9 @@
 //! rejected `SeqMismatch` and the executor re-activates.
 
 use ostro_types::command::{
-    AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, MAX_RUN_TAG_LEN, MAX_RUN_TAGS,
-    MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, StartRun, TerminalStatus,
-    derived::Intent, outbox_msg,
+    AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, JournalEvent, MAX_RUN_TAG_LEN,
+    MAX_RUN_TAGS, MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, StartRun,
+    TerminalStatus, derived::Intent, outbox_msg,
 };
 use ostro_types::{AttemptToken, Epoch, PayloadRef, RunId};
 use prost::Message;
@@ -76,6 +76,12 @@ pub(crate) fn load_run(
 
 pub(crate) fn store_run(b: &mut ApplyBatch<'_>, run: &RunId, rec: &RunRecord) {
     b.insert(Table::Runs, run_key(run), values::encode(rec));
+}
+
+/// Writes one journal row: key `run ‖ seq`, value the prost [`JournalEvent`]
+/// (the format `query::journal_rows` decodes). Blind write.
+pub(crate) fn put_event(b: &mut ApplyBatch<'_>, run: &RunId, ev: &JournalEvent) {
+    b.insert(Table::Events, event_key(run, ev.seq), ev.encode_to_vec());
 }
 
 fn token_of(t: (u32, u32)) -> AttemptToken {
@@ -444,7 +450,7 @@ pub(crate) fn apply_events_appended(
 
     // All checks passed: write.
     for ev in &e.events {
-        b.insert(Table::Events, event_key(&run, ev.seq), ev.encode_to_vec());
+        put_event(b, &run, ev);
     }
     rec.next_seq = new_next;
     for d in &e.derived {

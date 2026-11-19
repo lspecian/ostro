@@ -105,6 +105,8 @@ pub enum InboxMsg {
     CancelRequested {
         reason: String,
     },
+    /// No longer written since plan 04-13 (timer inputs are journal events).
+    /// Kept so the postcard variant indices stay stable.
     TimerFired {
         op: u64,
         fired_at_ms: u64,
