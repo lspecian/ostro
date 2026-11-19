@@ -160,7 +160,7 @@ Plans:
 - [x] 04-16-PLAN.md — EngineExecutor + lease heartbeat/self-fence + DISP-07 zombie fencing suite (DISP-07, WF-02)
 - [x] 04-17-PLAN.md — Server bootstrap (meta -> runtime -> node -> API), MetaLeadership, ephemeral, modules/workflows ControlPlane (META-01/03, API-02, CLI-01)
 - [x] 04-18-PLAN.md — Runs ControlPlane: start (idempotency), get, history, list (API-03/04, WF-01)
-- [ ] 04-19-PLAN.md — `ostro dev` / `ostro server` / `ostro openapi` binary + startup/config tests (CLI-01/02)
+- [x] 04-19-PLAN.md — `ostro dev` / `ostro server` / `ostro openapi` binary + startup/config tests (CLI-01/02)
 - [ ] 04-20-PLAN.md — End-to-end success-criteria tests (spawned `ostro dev` + full server) + ci-local gate
 
 ### Phase 5: Workflow Semantics & Core Hardening
@@ -390,7 +390,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 1. Foundation, Vendoring & Spikes | 8/8 | Complete (FOUND-05 remote CI legs human_needed after first push) | 2026-11-18 |
 | 2. Durable Partition Log & State Machine | 16/16 | Complete | 2026-11-19 |
 | 3. Deterministic Wasm Engine & WIT 0.1 | 12/12 | Complete | 2026-11-18 |
-| 4. Single-Node Server & Rust MVP | 18/20 | In Progress | - |
+| 4. Single-Node Server & Rust MVP | 19/20 | In Progress | - |
 | 5. Workflow Semantics & Core Hardening | 0/TBD | Not started | - |
 | 6. Effects Bridge, Connectors & Secrets | 0/TBD | Not started | - |
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
