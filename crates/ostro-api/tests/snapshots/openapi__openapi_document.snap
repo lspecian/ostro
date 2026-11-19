@@ -241,6 +241,88 @@ expression: pretty
         }
       }
     },
+    "/v1/queues/{name}/policy": {
+      "get": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "A queue's run policy.",
+        "operationId": "get_queue_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored policy (all null when never set)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPolicyDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "Replace a queue's run policy (future runs only).",
+        "operationId": "set_queue_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunPolicyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPolicyDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid duration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs": {
       "get": {
         "tags": [
@@ -390,6 +472,89 @@ expression: pretty
         }
       }
     },
+    "/v1/runs/{run_id}/cancel": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Request graceful cancellation of a run (idempotent).",
+        "operationId": "cancel_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; an empty body means no reason, not a dry run",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cancellation requested (already_requested on repeats)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Run already terminal (details.reason = run_terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{run_id}/history": {
       "get": {
         "tags": [
@@ -443,6 +608,394 @@ expression: pretty
           },
           "404": {
             "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/result": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Long-poll a run's outcome.",
+        "operationId": "run_result",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "description": "Maximum wait as a friendly duration (`30s`, `500ms`); default 0 (answer now),\ncapped at 60s.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "follow_continuations",
+            "in": "query",
+            "description": "Follow continue-as-new successors to the last run of the chain.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current outcome; completed = false when the wait ended first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResultDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid wait duration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/retry": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Retry a terminal run: resume in place when resumable, else restart as a new run.",
+        "operationId": "retry_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; an empty body is not a dry run",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Run resumed or restarted (or the would-be mode, for dry_run)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetryResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Run completed successfully (details.reason = run_completed) or is not terminal (run_not_terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/signals/{name}": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Send a named signal to a run.",
+        "operationId": "signal_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Signal name (1..=256 bytes)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignalBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signal accepted (or validated, for dry_run)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Run already terminal (details.reason = run_terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/terminate": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Hard-stop a run (status `terminated`; no guest cleanup).",
+        "operationId": "terminate_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; an empty body means no reason, not a dry run",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Run terminated (or validated, for dry_run)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerminateResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Run already terminal (details.reason = run_terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tokens/complete": {
+      "post": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Complete an await token.",
+        "operationId": "complete_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteTokenBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Token completed (or validated, for dry_run)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteTokenResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or unverifiable token (details.reason = token_invalid)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The token's run no longer exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Token already completed (token_already_completed) or run terminal (run_terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
             "content": {
               "application/json": {
                 "schema": {
@@ -548,6 +1101,108 @@ expression: pretty
           },
           "412": {
             "description": "Record version mismatch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{name}/policy": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "A workflow's run policy.",
+        "operationId": "get_workflow_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored policy (all null when never set)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPolicyDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown workflow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Replace a workflow's run policy (future runs only).",
+        "operationId": "set_workflow_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunPolicyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPolicyDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid duration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown workflow",
             "content": {
               "application/json": {
                 "schema": {
@@ -689,6 +1344,68 @@ expression: pretty
         },
         "additionalProperties": false
       },
+      "CancelResponseDto": {
+        "type": "object",
+        "description": "Cancel result.",
+        "required": [
+          "already_requested",
+          "dry_run"
+        ],
+        "properties": {
+          "already_requested": {
+            "type": "boolean",
+            "description": "Cancellation had already been requested."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Echo of the request flag."
+          }
+        }
+      },
+      "CompleteTokenBody": {
+        "type": "object",
+        "description": "Await-token completion body. The token travels only here, never in a URL.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only (format, MAC, op still open); nothing is submitted."
+          },
+          "payload": {
+            "description": "Completion payload (any JSON value; defaults to null)."
+          },
+          "token": {
+            "type": "string",
+            "description": "The `ot1_...` token."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CompleteTokenResponseDto": {
+        "type": "object",
+        "description": "Await-token completion result.",
+        "required": [
+          "run_id",
+          "accepted",
+          "dry_run"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "description": "The completion was (or would be) accepted."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Echo of the request flag."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The run the token belongs to."
+          }
+        }
+      },
       "ConflictPolicyDto": {
         "type": "string",
         "description": "Idempotency-key collision policy.",
@@ -720,7 +1437,7 @@ expression: pretty
         "properties": {
           "code": {
             "type": "string",
-            "description": "snake_case code: invalid_argument, not_found, conflict, precondition_failed,\npayload_too_large, unavailable, internal."
+            "description": "snake_case code: invalid_argument, not_found, conflict, precondition_failed,\npayload_too_large, unavailable, internal, unimplemented."
           },
           "details": {
             "description": "Structured details, when present."
@@ -859,6 +1576,48 @@ expression: pretty
               "$ref": "#/components/schemas/WorkflowRefDto"
             },
             "description": "Exported workflows."
+          }
+        }
+      },
+      "RetryBody": {
+        "type": "object",
+        "description": "Retry body (the whole body is optional).",
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only; reports the mode the retry would use."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RetryModeDto": {
+        "type": "string",
+        "description": "How a retry was carried out.",
+        "enum": [
+          "resumed",
+          "restarted"
+        ]
+      },
+      "RetryResponseDto": {
+        "type": "object",
+        "description": "Retry result.",
+        "required": [
+          "mode",
+          "run_id",
+          "dry_run"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Echo of the request flag."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/RetryModeDto",
+            "description": "Resume or restart."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The resumed run, or the new run (`restarted`; the original id for dry_run)."
           }
         }
       },
@@ -1012,6 +1771,94 @@ expression: pretty
           }
         }
       },
+      "RunPolicyBody": {
+        "type": "object",
+        "description": "Run policy body: friendly durations (`168h`, `30s`; write days as hours).\nOmitted fields are cleared (PUT replaces the whole policy).",
+        "properties": {
+          "retention": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Retention of terminal runs and their journals."
+          },
+          "schedule_to_start_timeout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Schedule-to-start timeout for the initial start."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RunPolicyDto": {
+        "type": "object",
+        "description": "A stored run policy (unset = no override at this level).",
+        "properties": {
+          "retention": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Retention as a friendly duration."
+          },
+          "retention_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Retention in ms.",
+            "minimum": 0
+          },
+          "schedule_to_start_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Schedule-to-start timeout in ms.",
+            "minimum": 0
+          },
+          "schedule_to_start_timeout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Schedule-to-start timeout as a friendly duration."
+          }
+        }
+      },
+      "RunResultDto": {
+        "type": "object",
+        "description": "Long-poll result (200 whether or not the run is terminal).",
+        "required": [
+          "run_id",
+          "status",
+          "completed"
+        ],
+        "properties": {
+          "completed": {
+            "type": "boolean",
+            "description": "True when `status` is terminal."
+          },
+          "failure": {
+            "description": "Failure of a failed run (absent otherwise)."
+          },
+          "result": {
+            "description": "Result of a completed run (absent otherwise)."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The run answered for (the last successor when following continuations)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatusDto",
+            "description": "Current status."
+          }
+        }
+      },
       "RunStatusDto": {
         "type": "string",
         "description": "Run status.",
@@ -1080,6 +1927,50 @@ expression: pretty
           "workflow": {
             "type": "string",
             "description": "Workflow."
+          }
+        }
+      },
+      "SignalBody": {
+        "type": "object",
+        "description": "Signal body.",
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only; nothing is submitted."
+          },
+          "payload": {
+            "description": "Signal payload (any JSON value; defaults to null)."
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional dedupe id (<= 64 bytes): a repeat is acknowledged with\n`duplicate: true` and not delivered again."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SignalResponseDto": {
+        "type": "object",
+        "description": "Signal result.",
+        "required": [
+          "accepted",
+          "duplicate",
+          "dry_run"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "description": "The signal was (or would be) accepted."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Echo of the request flag."
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "`request_id` was already seen for this run."
           }
         }
       },
@@ -1187,6 +2078,42 @@ expression: pretty
           "run_id": {
             "type": "string",
             "description": "Run id."
+          }
+        }
+      },
+      "StopRunBody": {
+        "type": "object",
+        "description": "Cancel / terminate body (the whole body is optional).",
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only; nothing is submitted."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reason (<= 1024 bytes), recorded in history."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TerminateResponseDto": {
+        "type": "object",
+        "description": "Terminate result.",
+        "required": [
+          "status",
+          "dry_run"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Echo of the request flag."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatusDto",
+            "description": "Status afterwards (`terminated`)."
           }
         }
       },
@@ -1320,6 +2247,14 @@ expression: pretty
     {
       "name": "runs",
       "description": "Starting and inspecting runs"
+    },
+    {
+      "name": "tokens",
+      "description": "Await-token completion"
+    },
+    {
+      "name": "queues",
+      "description": "Queue run policies"
     },
     {
       "name": "health",

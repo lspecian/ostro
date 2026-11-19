@@ -17,7 +17,8 @@ pub use error::{ApiError, ErrorCode};
 pub use openapi::openapi;
 
 use ostro_proto::api::v1::{
-    modules_server::ModulesServer, runs_server::RunsServer, workflows_server::WorkflowsServer,
+    modules_server::ModulesServer, runs_server::RunsServer, tokens_server::TokensServer,
+    workflows_server::WorkflowsServer,
 };
 use ostro_proto::health::v1::{
     CheckRequest, CheckResponse,
@@ -75,12 +76,14 @@ pub fn ui_shell_html() -> String {
 
 /// Build the combined one-port router: REST (`/v1/...`), `/openapi.json`, `/healthz`,
 /// `/readyz`, the UI shell at `/`, and the tonic gRPC services (`ostro.health.v1.Health`,
-/// `ostro.api.v1.{Modules,Workflows,Runs}`) under their `/<package>.<Service>/` paths.
+/// `ostro.api.v1.{Modules,Workflows,Runs,Tokens}`) under their `/<package>.<Service>/`
+/// paths.
 ///
 /// gRPC size limits mirror REST: the Modules server's decode limit is raised from
 /// tonic's 4 MiB default to `cfg.max_module_bytes` (plus framing headroom; the module
-/// bytes themselves are checked exactly by [`grpc::GrpcModules`]); Workflows and Runs
-/// use `cfg.max_request_bytes`. Over-limit messages answer `RESOURCE_EXHAUSTED`.
+/// bytes themselves are checked exactly by [`grpc::GrpcModules`]);
+/// Workflows, Runs and Tokens use `cfg.max_request_bytes`. Over-limit messages answer
+/// `RESOURCE_EXHAUSTED`.
 pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
     let (rest, _doc) = rest::api_routes(cfg.max_module_bytes).split_for_parts();
     let grpc = tonic::service::Routes::new(HealthServer::new(HealthSvc))
@@ -96,6 +99,10 @@ pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
         )
         .add_service(
             RunsServer::new(grpc::GrpcRuns(cp.clone()))
+                .max_decoding_message_size(cfg.max_request_bytes),
+        )
+        .add_service(
+            TokensServer::new(grpc::GrpcTokens(cp.clone()))
                 .max_decoding_message_size(cfg.max_request_bytes),
         )
         .into_axum_router()

@@ -381,9 +381,230 @@ pub struct RunListResponse {
     pub next_page_token: Option<String>,
 }
 
+// --- Phase 5 lifecycle (API-05/06/07) and run policies -----------------------------
+
+/// Signal body.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SignalBody {
+    /// Signal payload (any JSON value; defaults to null).
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    /// Optional dedupe id (<= 64 bytes): a repeat is acknowledged with
+    /// `duplicate: true` and not delivered again.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Validate only; nothing is submitted.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Signal result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SignalResponseDto {
+    /// The signal was (or would be) accepted.
+    pub accepted: bool,
+    /// `request_id` was already seen for this run.
+    pub duplicate: bool,
+    /// Echo of the request flag.
+    pub dry_run: bool,
+}
+
+/// Cancel / terminate body (the whole body is optional).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StopRunBody {
+    /// Reason (<= 1024 bytes), recorded in history.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Validate only; nothing is submitted.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Cancel result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CancelResponseDto {
+    /// Cancellation had already been requested.
+    pub already_requested: bool,
+    /// Echo of the request flag.
+    pub dry_run: bool,
+}
+
+/// Terminate result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct TerminateResponseDto {
+    /// Status afterwards (`terminated`).
+    pub status: RunStatusDto,
+    /// Echo of the request flag.
+    pub dry_run: bool,
+}
+
+/// Retry body (the whole body is optional).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetryBody {
+    /// Validate only; reports the mode the retry would use.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// How a retry was carried out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryModeDto {
+    /// The same run resumes from its journal.
+    Resumed,
+    /// A new run linked to the old one was started.
+    Restarted,
+}
+
+impl From<domain::RetryMode> for RetryModeDto {
+    fn from(m: domain::RetryMode) -> Self {
+        match m {
+            domain::RetryMode::Resumed => RetryModeDto::Resumed,
+            domain::RetryMode::Restarted => RetryModeDto::Restarted,
+        }
+    }
+}
+
+/// Retry result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RetryResponseDto {
+    /// Resume or restart.
+    pub mode: RetryModeDto,
+    /// The resumed run, or the new run (`restarted`; the original id for dry_run).
+    pub run_id: String,
+    /// Echo of the request flag.
+    pub dry_run: bool,
+}
+
+/// Long-poll query.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ResultQuery {
+    /// Maximum wait as a friendly duration (`30s`, `500ms`); default 0 (answer now),
+    /// capped at 60s.
+    pub wait: Option<String>,
+    /// Follow continue-as-new successors to the last run of the chain.
+    pub follow_continuations: Option<bool>,
+}
+
+/// Long-poll result (200 whether or not the run is terminal).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RunResultDto {
+    /// The run answered for (the last successor when following continuations).
+    pub run_id: String,
+    /// Current status.
+    pub status: RunStatusDto,
+    /// True when `status` is terminal.
+    pub completed: bool,
+    /// Result of a completed run (absent otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// Failure of a failed run (absent otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<serde_json::Value>,
+}
+
+/// Await-token completion body. The token travels only here, never in a URL.
+#[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteTokenBody {
+    /// The `ot1_...` token.
+    pub token: String,
+    /// Completion payload (any JSON value; defaults to null).
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    /// Validate only (format, MAC, op still open); nothing is submitted.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+impl std::fmt::Debug for CompleteTokenBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompleteTokenBody")
+            .field("token", &"<redacted>")
+            .field("dry_run", &self.dry_run)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Await-token completion result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CompleteTokenResponseDto {
+    /// The run the token belongs to.
+    pub run_id: String,
+    /// The completion was (or would be) accepted.
+    pub accepted: bool,
+    /// Echo of the request flag.
+    pub dry_run: bool,
+}
+
+/// Run policy body: friendly durations (`168h`, `30s`; write days as hours).
+/// Omitted fields are cleared (PUT replaces the whole policy).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunPolicyBody {
+    /// Retention of terminal runs and their journals.
+    #[serde(default)]
+    pub retention: Option<String>,
+    /// Schedule-to-start timeout for the initial start.
+    #[serde(default)]
+    pub schedule_to_start_timeout: Option<String>,
+}
+
+/// A stored run policy (unset = no override at this level).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunPolicyDto {
+    /// Retention as a friendly duration.
+    pub retention: Option<String>,
+    /// Retention in ms.
+    pub retention_ms: Option<u64>,
+    /// Schedule-to-start timeout as a friendly duration.
+    pub schedule_to_start_timeout: Option<String>,
+    /// Schedule-to-start timeout in ms.
+    pub schedule_to_start_ms: Option<u64>,
+}
+
+impl From<domain::RunPolicy> for RunPolicyDto {
+    fn from(p: domain::RunPolicy) -> Self {
+        RunPolicyDto {
+            retention: p.retention_ms.map(friendly_ms),
+            retention_ms: p.retention_ms,
+            schedule_to_start_timeout: p.schedule_to_start_ms.map(friendly_ms),
+            schedule_to_start_ms: p.schedule_to_start_ms,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Conversions
 // ---------------------------------------------------------------------------------
+
+static SPAN_PARSER: jiff::fmt::friendly::SpanParser = jiff::fmt::friendly::SpanParser::new();
+static SPAN_PRINTER: jiff::fmt::friendly::SpanPrinter = jiff::fmt::friendly::SpanPrinter::new();
+
+/// Parse a friendly duration (`"30s"`, `"500ms"`, `"168h"`, `"1m 30s"`) to whole ms,
+/// with the same jiff parser `ServerConfig` uses. Calendar units (`7d`) are rejected;
+/// sub-millisecond parts are truncated.
+pub fn parse_friendly_ms(field: &str, s: &str) -> Result<u64, ApiError> {
+    let d = SPAN_PARSER.parse_unsigned_duration(s.trim()).map_err(|e| {
+        ApiError::invalid_argument(format!(
+            "{field}: invalid duration {s:?} (expected e.g. \"30s\", \"500ms\", \"168h\"): {e}"
+        ))
+        .with_details(serde_json::json!({ "field": field }))
+    })?;
+    u64::try_from(d.as_millis()).map_err(|_| {
+        ApiError::invalid_argument(format!("{field}: duration {s:?} is too large"))
+            .with_details(serde_json::json!({ "field": field }))
+    })
+}
+
+/// Friendly rendering of a ms duration (`604800000` -> `"168h"`).
+pub fn friendly_ms(ms: u64) -> String {
+    SPAN_PRINTER.unsigned_duration_to_string(&std::time::Duration::from_millis(ms))
+}
 
 /// RFC 3339 rendering of a ms-since-epoch timestamp.
 pub fn rfc3339_ms(ms: u64) -> String {
@@ -500,6 +721,19 @@ fn body_rejection(status: StatusCode, text: String) -> ApiError {
 fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     body.map(|Json(v)| v)
         .map_err(|r| body_rejection(r.status(), r.body_text()))
+}
+
+/// JSON body that may be omitted entirely (empty body = `T::default()`). Used by the
+/// lifecycle POSTs whose every field is optional, so `curl -X POST .../cancel` works.
+fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
+    body: Result<Bytes, BytesRejection>,
+) -> Result<T, ApiError> {
+    let bytes = body.map_err(|r| body_rejection(r.status(), r.body_text()))?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| ApiError::invalid_argument(format!("invalid JSON body: {e}")))
 }
 
 fn query<T>(q: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
@@ -810,6 +1044,311 @@ async fn list_runs(
     }))
 }
 
+/// Send a named signal to a run.
+#[utoipa::path(
+    post,
+    path = "/v1/runs/{run_id}/signals/{name}",
+    tag = "runs",
+    params(
+        ("run_id" = String, Path, description = "Run id"),
+        ("name" = String, Path, description = "Signal name (1..=256 bytes)"),
+    ),
+    request_body = SignalBody,
+    responses(
+        (status = 200, description = "Signal accepted (or validated, for dry_run)", body = SignalResponseDto),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 404, description = "Unknown run", body = ErrorBody),
+        (status = 409, description = "Run already terminal (details.reason = run_terminal)", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+    )
+)]
+async fn signal_run(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path((run_id, name)): Path<(String, String)>,
+    body: Result<Json<SignalBody>, JsonRejection>,
+) -> Result<Json<SignalResponseDto>, ApiError> {
+    let b = json_body(body)?;
+    let r = cp
+        .signal_run(domain::SignalRequest {
+            run_id,
+            name,
+            payload: b.payload,
+            request_id: b.request_id,
+            dry_run: b.dry_run,
+        })
+        .await?;
+    Ok(Json(SignalResponseDto {
+        accepted: r.accepted,
+        duplicate: r.duplicate,
+        dry_run: r.dry_run,
+    }))
+}
+
+/// Request graceful cancellation of a run (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/runs/{run_id}/cancel",
+    tag = "runs",
+    params(("run_id" = String, Path, description = "Run id")),
+    request_body(content = StopRunBody, description = "Optional; an empty body means no reason, not a dry run"),
+    responses(
+        (status = 200, description = "Cancellation requested (already_requested on repeats)", body = CancelResponseDto),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 404, description = "Unknown run", body = ErrorBody),
+        (status = 409, description = "Run already terminal (details.reason = run_terminal)", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+    )
+)]
+async fn cancel_run(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(run_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<CancelResponseDto>, ApiError> {
+    let b: StopRunBody = optional_json_body(body)?;
+    let r = cp
+        .cancel_run(domain::CancelRequest {
+            run_id,
+            reason: b.reason,
+            dry_run: b.dry_run,
+        })
+        .await?;
+    Ok(Json(CancelResponseDto {
+        already_requested: r.already_requested,
+        dry_run: r.dry_run,
+    }))
+}
+
+/// Hard-stop a run (status `terminated`; no guest cleanup).
+#[utoipa::path(
+    post,
+    path = "/v1/runs/{run_id}/terminate",
+    tag = "runs",
+    params(("run_id" = String, Path, description = "Run id")),
+    request_body(content = StopRunBody, description = "Optional; an empty body means no reason, not a dry run"),
+    responses(
+        (status = 200, description = "Run terminated (or validated, for dry_run)", body = TerminateResponseDto),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 404, description = "Unknown run", body = ErrorBody),
+        (status = 409, description = "Run already terminal (details.reason = run_terminal)", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+    )
+)]
+async fn terminate_run(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(run_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<TerminateResponseDto>, ApiError> {
+    let b: StopRunBody = optional_json_body(body)?;
+    let r = cp
+        .terminate_run(domain::TerminateRequest {
+            run_id,
+            reason: b.reason,
+            dry_run: b.dry_run,
+        })
+        .await?;
+    Ok(Json(TerminateResponseDto {
+        status: r.status.into(),
+        dry_run: r.dry_run,
+    }))
+}
+
+/// Retry a terminal run: resume in place when resumable, else restart as a new run.
+#[utoipa::path(
+    post,
+    path = "/v1/runs/{run_id}/retry",
+    tag = "runs",
+    params(("run_id" = String, Path, description = "Run id")),
+    request_body(content = RetryBody, description = "Optional; an empty body is not a dry run"),
+    responses(
+        (status = 200, description = "Run resumed or restarted (or the would-be mode, for dry_run)", body = RetryResponseDto),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 404, description = "Unknown run", body = ErrorBody),
+        (status = 409, description = "Run completed successfully (details.reason = run_completed) or is not terminal (run_not_terminal)", body = ErrorBody),
+    )
+)]
+async fn retry_run(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(run_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<RetryResponseDto>, ApiError> {
+    let b: RetryBody = optional_json_body(body)?;
+    let r = cp
+        .retry_run(domain::RetryRequest {
+            run_id,
+            dry_run: b.dry_run,
+        })
+        .await?;
+    Ok(Json(RetryResponseDto {
+        mode: r.mode.into(),
+        run_id: r.run_id,
+        dry_run: r.dry_run,
+    }))
+}
+
+/// Long-poll a run's outcome.
+#[utoipa::path(
+    get,
+    path = "/v1/runs/{run_id}/result",
+    tag = "runs",
+    params(("run_id" = String, Path, description = "Run id"), ResultQuery),
+    responses(
+        (status = 200, description = "Current outcome; completed = false when the wait ended first", body = RunResultDto),
+        (status = 400, description = "Invalid wait duration", body = ErrorBody),
+        (status = 404, description = "Unknown run", body = ErrorBody),
+    )
+)]
+async fn run_result(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(run_id): Path<String>,
+    q: Result<Query<ResultQuery>, QueryRejection>,
+) -> Result<Json<RunResultDto>, ApiError> {
+    let q = query(q)?;
+    let wait_ms = q
+        .wait
+        .as_deref()
+        .map(|w| parse_friendly_ms("wait", w))
+        .transpose()?
+        .unwrap_or(0);
+    let r = cp
+        .await_result(domain::AwaitResultRequest {
+            run_id,
+            wait_ms: domain::effective_wait_ms(wait_ms),
+            follow_continuations: q.follow_continuations.unwrap_or(false),
+        })
+        .await?;
+    Ok(Json(RunResultDto {
+        run_id: r.run_id,
+        status: r.status.into(),
+        completed: r.completed,
+        result: r.result,
+        failure: r.failure,
+    }))
+}
+
+/// Complete an await token.
+#[utoipa::path(
+    post,
+    path = "/v1/tokens/complete",
+    tag = "tokens",
+    request_body = CompleteTokenBody,
+    responses(
+        (status = 200, description = "Token completed (or validated, for dry_run)", body = CompleteTokenResponseDto),
+        (status = 400, description = "Malformed or unverifiable token (details.reason = token_invalid)", body = ErrorBody),
+        (status = 404, description = "The token's run no longer exists", body = ErrorBody),
+        (status = 409, description = "Token already completed (token_already_completed) or run terminal (run_terminal)", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+    )
+)]
+async fn complete_token(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    body: Result<Json<CompleteTokenBody>, JsonRejection>,
+) -> Result<Json<CompleteTokenResponseDto>, ApiError> {
+    let b = json_body(body)?;
+    let r = cp
+        .complete_token(domain::CompleteTokenRequest {
+            token: b.token,
+            payload: b.payload,
+            dry_run: b.dry_run,
+        })
+        .await?;
+    Ok(Json(CompleteTokenResponseDto {
+        run_id: r.run_id,
+        accepted: r.accepted,
+        dry_run: r.dry_run,
+    }))
+}
+
+fn policy_from_body(b: RunPolicyBody) -> Result<domain::RunPolicy, ApiError> {
+    Ok(domain::RunPolicy {
+        retention_ms: b
+            .retention
+            .as_deref()
+            .map(|s| parse_friendly_ms("retention", s))
+            .transpose()?,
+        schedule_to_start_ms: b
+            .schedule_to_start_timeout
+            .as_deref()
+            .map(|s| parse_friendly_ms("schedule_to_start_timeout", s))
+            .transpose()?,
+    })
+}
+
+/// Replace a workflow's run policy (future runs only).
+#[utoipa::path(
+    put,
+    path = "/v1/workflows/{name}/policy",
+    tag = "workflows",
+    params(("name" = String, Path, description = "Workflow name")),
+    request_body = RunPolicyBody,
+    responses(
+        (status = 200, description = "Stored policy", body = RunPolicyDto),
+        (status = 400, description = "Invalid duration", body = ErrorBody),
+        (status = 404, description = "Unknown workflow", body = ErrorBody),
+    )
+)]
+async fn set_workflow_policy(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+    body: Result<Json<RunPolicyBody>, JsonRejection>,
+) -> Result<Json<RunPolicyDto>, ApiError> {
+    let p = policy_from_body(json_body(body)?)?;
+    Ok(Json(cp.set_workflow_policy(name, p).await?.into()))
+}
+
+/// A workflow's run policy.
+#[utoipa::path(
+    get,
+    path = "/v1/workflows/{name}/policy",
+    tag = "workflows",
+    params(("name" = String, Path, description = "Workflow name")),
+    responses(
+        (status = 200, description = "Stored policy (all null when never set)", body = RunPolicyDto),
+        (status = 404, description = "Unknown workflow", body = ErrorBody),
+    )
+)]
+async fn get_workflow_policy(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<RunPolicyDto>, ApiError> {
+    Ok(Json(cp.get_workflow_policy(name).await?.into()))
+}
+
+/// Replace a queue's run policy (future runs only).
+#[utoipa::path(
+    put,
+    path = "/v1/queues/{name}/policy",
+    tag = "queues",
+    params(("name" = String, Path, description = "Queue name")),
+    request_body = RunPolicyBody,
+    responses(
+        (status = 200, description = "Stored policy", body = RunPolicyDto),
+        (status = 400, description = "Invalid duration", body = ErrorBody),
+    )
+)]
+async fn set_queue_policy(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+    body: Result<Json<RunPolicyBody>, JsonRejection>,
+) -> Result<Json<RunPolicyDto>, ApiError> {
+    let p = policy_from_body(json_body(body)?)?;
+    Ok(Json(cp.set_queue_policy(name, p).await?.into()))
+}
+
+/// A queue's run policy.
+#[utoipa::path(
+    get,
+    path = "/v1/queues/{name}/policy",
+    tag = "queues",
+    params(("name" = String, Path, description = "Queue name")),
+    responses((status = 200, description = "Stored policy (all null when never set)", body = RunPolicyDto))
+)]
+async fn get_queue_policy(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<RunPolicyDto>, ApiError> {
+    Ok(Json(cp.get_queue_policy(name).await?.into()))
+}
+
 /// Liveness: always 200.
 #[utoipa::path(
     get,
@@ -880,6 +1419,8 @@ async fn ui_shell() -> Html<String> {
         (name = "modules", description = "Wasm module storage"),
         (name = "workflows", description = "Workflow versions and activation"),
         (name = "runs", description = "Starting and inspecting runs"),
+        (name = "tokens", description = "Await-token completion"),
+        (name = "queues", description = "Queue run policies"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )
@@ -902,6 +1443,14 @@ pub fn api_routes(max_module_bytes: usize) -> OpenApiRouter<CpState> {
         .routes(routes!(list_runs))
         .routes(routes!(get_run))
         .routes(routes!(run_history))
+        .routes(routes!(signal_run))
+        .routes(routes!(cancel_run))
+        .routes(routes!(terminate_run))
+        .routes(routes!(retry_run))
+        .routes(routes!(run_result))
+        .routes(routes!(complete_token))
+        .routes(routes!(set_workflow_policy, get_workflow_policy))
+        .routes(routes!(set_queue_policy, get_queue_policy))
         .routes(routes!(healthz))
         .routes(routes!(readyz))
         .routes(routes!(openapi_json))
