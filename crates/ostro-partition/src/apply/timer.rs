@@ -20,20 +20,29 @@
 //! is not touched); `Ready` only gets the event. Because `next_seq` moves, any
 //! `EventsAppended` built before the input was seen, a `Suspend` included, is
 //! rejected `SeqMismatch`: the lost-wake-up window is closed by the existing
-//! `from_seq` compare-and-set.
+//! `from_seq` compare-and-set. The journaling and wake-up live in
+//! [`super::inputs::journal_input`] since plan 05-02 (same behaviour).
+//!
+//! **Reserved-op routing (plan 05-02).** After the timer row is removed and the run record
+//! read, apply routes by op before any status check (expiry acts on terminal runs):
+//! `RUN_TIMEOUT_OP` / `SCHEDULE_TO_START_OP` → `lifecycle::on_reserved_timer`, `EXPIRE_OP` →
+//! `retention::on_expire` (05-09), any other reserved op → no effect. `START_DELAY_OP` keeps
+//! its Phase 2 path. Every other op is a guest op: on a live run `waits::try_wait_timeout`
+//! (05-08) gets the first chance (`WaitTimedOut`), then the ordinary `TimerFired` journal path.
 
-use bytes::Bytes;
-use ostro_types::PayloadRef;
-use ostro_types::command::{JournalEvent, TimerFired};
-use ostro_types::journal::{self, Event, EventBody, encode_event};
+use ostro_types::command::{
+    EXPIRE_OP, RUN_TIMEOUT_OP, SCHEDULE_TO_START_OP, TimerFired, is_reserved_op,
+};
+use ostro_types::journal::{self, EventBody};
 
 use super::START_DELAY_OP;
 use super::cursor::Cursor;
 use super::inbound::make_ready;
+use super::inputs::journal_input;
 use super::outcome::{Action, ApplyOutcome};
-use super::run::{load_run, local_run, put_event, store_run};
+use super::run::{load_run, local_run, store_run};
+use super::{lifecycle, retention, waits};
 use crate::store::keys::timer_key;
-use crate::store::values::RunStatus;
 use crate::store::{ApplyBatch, StoreError, Table};
 
 pub(crate) fn apply_timer_fired(
@@ -51,14 +60,26 @@ pub(crate) fn apply_timer_fired(
         return Ok(ApplyOutcome::Duplicate { existing: None });
     }
     b.remove(Table::Timers, tk);
+    let rec = load_run(b, &run)?;
 
-    let Some(mut rec) = load_run(b, &run)? else {
+    // Reserved ops (apply-owned, never guest ops), routed before the status checks.
+    match t.op {
+        RUN_TIMEOUT_OP | SCHEDULE_TO_START_OP => {
+            return lifecycle::on_reserved_timer(b, cur, &run, rec, t, actions);
+        }
+        EXPIRE_OP => return retention::on_expire(b, cur, &run, rec, t, actions),
+        START_DELAY_OP => {}
+        op if is_reserved_op(op) => return Ok(ApplyOutcome::Accepted),
+        _ => {}
+    }
+
+    let Some(mut rec) = rec else {
         // Orphan timer row: removing it is the whole effect.
         return Ok(ApplyOutcome::Accepted);
     };
     if rec.status.is_terminal() {
-        // CompleteRun does not delete pending timers; firing one is a no-op
-        // beyond removing its row.
+        // Terminal transitions delete wait timers (`terminal::on_terminal`); any other
+        // pending timer firing on a terminal run is a no-op beyond removing its row.
         return Ok(ApplyOutcome::Accepted);
     }
     if t.op == START_DELAY_OP {
@@ -66,29 +87,17 @@ pub(crate) fn apply_timer_fired(
         // run already woken early (by an inbound message) stays as it is.
         make_ready(b, &run, &mut rec, t.due_at_ms, actions);
     } else {
-        let seq = rec.next_seq;
-        let (kind, bytes) = encode_event(&Event {
-            seq,
-            ts_nanos: t.fired_at_ms.saturating_mul(1_000_000),
-            body: EventBody::TimerFired(journal::TimerFired { op: t.op }),
-        });
-        put_event(
+        if let Some(out) = waits::try_wait_timeout(b, cur, &run, &mut rec, t, actions) {
+            return out;
+        }
+        journal_input(
             b,
             &run,
-            &JournalEvent {
-                seq,
-                kind,
-                payload: Some(PayloadRef::inline(Bytes::from(bytes))),
-            },
-        );
-        // u64 seqs cannot be exhausted in practice; saturating keeps apply
-        // total (EventsAppended rejects at the same bound).
-        rec.next_seq = seq.saturating_add(1);
-        match rec.status {
-            RunStatus::Scheduled => make_ready(b, &run, &mut rec, t.fired_at_ms, actions),
-            RunStatus::Running => actions.push(Action::InputAppended { run, seq }),
-            _ => {}
-        }
+            &mut rec,
+            t.fired_at_ms,
+            EventBody::TimerFired(journal::TimerFired { op: t.op }),
+            actions,
+        )?;
     }
     store_run(b, &run, &rec);
     Ok(ApplyOutcome::Accepted)

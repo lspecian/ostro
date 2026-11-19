@@ -30,7 +30,11 @@
 
 use ostro_types::{AttemptToken, Epoch, PartitionId, RunId};
 
+use crate::store::StoreError;
 use crate::store::values::RunStatus;
+
+/// Result of an apply handler: the outcome, or a fatal store error.
+pub(crate) type ApplyResult = Result<ApplyOutcome, StoreError>;
 
 /// Result of applying one command. Rejections are deterministic no-ops that
 /// still consume their offset.

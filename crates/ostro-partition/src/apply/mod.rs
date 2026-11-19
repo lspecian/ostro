@@ -26,10 +26,15 @@
 
 pub mod cursor;
 mod inbound;
+mod inputs;
+mod lifecycle;
 mod outbox;
 pub mod outcome;
+mod retention;
 pub(crate) mod run;
+mod terminal;
 mod timer;
+mod waits;
 
 use ostro_log::VerifiedBatch;
 use ostro_types::command::{Cmd, decode_command};
@@ -119,7 +124,7 @@ fn dispatch(
                 .then(|| (s.workflow.clone(), s.idempotency_key.clone()));
             run::start_run(b, cur, s, dedupe, actions)
         }
-        Cmd::AttemptGranted(g) => run::apply_attempt_granted(b, cur, g),
+        Cmd::AttemptGranted(g) => run::apply_attempt_granted(b, cur, g, actions),
         Cmd::EventsAppended(e) => run::apply_events_appended(b, cur, e, actions),
         Cmd::TimerFired(t) => timer::apply_timer_fired(b, cur, t, actions),
         Cmd::InboundBatch(ib) => inbound::apply_inbound_batch(b, cur, ib, actions),

@@ -32,6 +32,7 @@ use super::START_DELAY_OP;
 use super::cursor::Cursor;
 use super::outbox::{emit, msg_oversize, msg_target};
 use super::outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
+use super::{lifecycle, terminal, waits};
 use crate::store::keys::{
     children_key, dedupe_key, event_key, payload_key, ready_key, run_key, running_key, timer_key,
 };
@@ -332,6 +333,7 @@ pub(crate) fn start_run(
             op: START_DELAY_OP,
         });
     }
+    lifecycle::on_start(b, &run, &mut rec, s, actions);
     store_run(b, &run, &rec);
     Ok(ApplyOutcome::Accepted)
 }
@@ -342,6 +344,7 @@ pub(crate) fn apply_attempt_granted(
     b: &mut ApplyBatch<'_>,
     cur: &mut Cursor,
     g: &AttemptGranted,
+    actions: &mut Vec<Action>,
 ) -> Result<ApplyOutcome, StoreError> {
     let Some(t) = g.token.map(AttemptToken::from) else {
         return reject(invalid(InvalidCode::MissingToken));
@@ -374,6 +377,7 @@ pub(crate) fn apply_attempt_granted(
         running_key(&run),
         values::encode(&(t.epoch.0, t.n)),
     );
+    lifecycle::on_attempt_granted(b, &run, &mut rec, g, actions);
     store_run(b, &run, &rec);
     Ok(ApplyOutcome::Accepted)
 }
@@ -383,8 +387,9 @@ pub(crate) fn apply_attempt_granted(
 /// Validates the Derived intents' structure; returns nothing on success.
 ///
 /// `CompleteRun` and `Suspend` must be last; `Suspend` cannot be combined with
-/// `EnqueueReady` or `CompleteRun` and needs a `Running` run.
-fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus) -> Check<()> {
+/// `EnqueueReady` or `CompleteRun` and needs a `Running` run. `pub(crate)` for
+/// `lifecycle::complete_continued_as_new` (05-09).
+pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus) -> Check<()> {
     let mut completed = false;
     let mut suspended = false;
     let mut enqueued = false;
@@ -443,13 +448,24 @@ fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus) -> Check<(
     Ok(())
 }
 
-fn any_oversize(e: &EventsAppended) -> bool {
+/// Any inline payload over 256 KiB in the events or intents (`CompleteRun.parent_event`
+/// included, W5). `pub(crate)` for `lifecycle::complete_continued_as_new` (05-09).
+pub(crate) fn any_oversize(e: &EventsAppended) -> bool {
     e.events.iter().any(|ev| oversize(&ev.payload))
         || e.derived.iter().any(|d| match &d.intent {
             Some(Intent::SendMessage(m)) => m.msg.as_ref().is_some_and(msg_oversize),
-            Some(Intent::CompleteRun(c)) => oversize(&c.result),
+            Some(Intent::CompleteRun(c)) => oversize(&c.result) || oversize(&c.parent_event),
             _ => false,
         })
+}
+
+/// Whether the batch ends with `CompleteRun{ContinuedAsNew}` (routed to 05-09's
+/// `lifecycle::complete_continued_as_new`).
+fn ends_continued_as_new(e: &EventsAppended) -> bool {
+    matches!(
+        e.derived.last().and_then(|d| d.intent.as_ref()),
+        Some(Intent::CompleteRun(c)) if terminal_status(c.status) == Some(RunStatus::ContinuedAsNew)
+    )
 }
 
 pub(crate) fn apply_events_appended(
@@ -492,6 +508,9 @@ pub(crate) fn apply_events_appended(
     if !e.events_contiguous_from(e.from_seq) {
         return reject(invalid(InvalidCode::EventsNotContiguous));
     }
+    if ends_continued_as_new(e) {
+        return lifecycle::complete_continued_as_new(b, cur, e, &run, rec, actions);
+    }
     if let Err(r) = check_intents(cur, e, rec.status) {
         return reject(r);
     }
@@ -504,6 +523,11 @@ pub(crate) fn apply_events_appended(
         put_event(b, &run, ev);
     }
     rec.next_seq = new_next;
+    if e.from_seq == 0 && n > 0 {
+        // B1: this batch wrote seq 0. Pending signals are journaled after its events and
+        // before its intents (05-08).
+        waits::on_first_events(b, &run, &mut rec, actions)?;
+    }
     for d in &e.derived {
         let Some(i) = &d.intent else { continue };
         match i {
@@ -557,6 +581,10 @@ pub(crate) fn apply_events_appended(
                 leave_running(b, &run, &rec);
                 rec.status = status;
                 rec.completed_at_ms = (c.completed_at_ms != 0).then_some(c.completed_at_ms);
+                rec.resumable = c.resumable;
+                // Executor completions carry no reason; clear one left by an earlier
+                // hard stop of a resumed run.
+                rec.terminal_reason.clear();
                 if let Some(res) = &c.result {
                     b.insert(
                         Table::Payloads,
@@ -565,6 +593,7 @@ pub(crate) fn apply_events_appended(
                     );
                 }
                 remove_ready(b, &run, &mut rec);
+                terminal::on_terminal(b, &run, &mut rec, c.completed_at_ms, actions)?;
                 actions.push(Action::RunCompleted { run, status });
                 if let Some((parent, op)) = rec.parent {
                     let msg = OutboxMsg {
@@ -586,4 +615,121 @@ pub(crate) fn apply_events_appended(
     }
     store_run(b, &run, &rec);
     Ok(ApplyOutcome::Accepted)
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use bytes::Bytes;
+    use ostro_types::command::{
+        AttemptGranted, AttemptTokenMsg, EventsAppended, JournalEvent, StartRun, encode_command,
+    };
+    use ostro_types::{Command, Epoch, PartitionCount, PartitionId, PayloadRef, RunId};
+
+    use crate::apply::{ApplyOutcome, Cursor, apply_command};
+    use crate::store::{PartitionStore, StoreConfig};
+
+    struct H {
+        _dir: tempfile::TempDir,
+        store: PartitionStore,
+        cur: Cursor,
+    }
+
+    impl H {
+        fn apply(&mut self, c: &Command) -> ApplyOutcome {
+            let mut b = self.store.batch();
+            let mut actions = Vec::new();
+            let off = self.cur.next;
+            let out = apply_command(
+                &mut b,
+                &mut self.cur,
+                off,
+                Epoch(1),
+                &encode_command(c),
+                &mut actions,
+            )
+            .expect("apply");
+            let mu = self.cur.meta_update();
+            b.commit(&mu).expect("commit");
+            out
+        }
+    }
+
+    fn rid(n: u8) -> RunId {
+        let mut b = [0u8; 18];
+        b[17] = n;
+        RunId::from_bytes(&b).expect("run id")
+    }
+
+    fn append(r: &RunId, from: u64, n: u64) -> Command {
+        Command::events_appended(EventsAppended {
+            run_id: r.as_bytes().to_vec(),
+            token: Some(AttemptTokenMsg { epoch: 1, n: 1 }),
+            from_seq: from,
+            events: (from..from + n)
+                .map(|seq| JournalEvent {
+                    seq,
+                    kind: 16,
+                    payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+                })
+                .collect(),
+            derived: vec![],
+        })
+    }
+
+    fn calls() -> u32 {
+        super::waits::FIRST_EVENTS_CALLS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn first_events_hook_runs_once_per_run_at_the_seq0_batch() {
+        let dir = ostro_testkit::fs::tempdir();
+        let (store, meta) = PartitionStore::open(
+            dir.path(),
+            PartitionId(0),
+            PartitionCount::new(4).expect("non-zero"),
+            &StoreConfig::default(),
+        )
+        .expect("open");
+        let cur = Cursor::from_meta(&meta);
+        let mut h = H {
+            _dir: dir,
+            store,
+            cur,
+        };
+        let ok = ApplyOutcome::Accepted;
+        assert_eq!(h.apply(&Command::leader_announced(1, 1, 0)), ok);
+        let base = calls();
+        for n in [1u8, 2] {
+            let r = rid(n);
+            let start = StartRun {
+                run_id: r.as_bytes().to_vec(),
+                workflow: "wf".into(),
+                queue: "q".into(),
+                ..Default::default()
+            };
+            assert_eq!(h.apply(&Command::start_run(start)), ok);
+            let grant = AttemptGranted {
+                run_id: r.as_bytes().to_vec(),
+                token: Some(AttemptTokenMsg { epoch: 1, n: 1 }),
+                after_failure: false,
+            };
+            assert_eq!(h.apply(&Command::attempt_granted(grant)), ok);
+        }
+        let (r1, r2) = (rid(1), rid(2));
+        // An empty batch at from_seq 0 writes no seq 0: no call.
+        assert_eq!(h.apply(&append(&r1, 0, 0)), ok);
+        assert_eq!(calls(), base);
+        // A rejected batch at from_seq 0 (seq mismatch elsewhere) never calls either.
+        assert!(!h.apply(&append(&r1, 5, 1)).is_accepted());
+        assert_eq!(calls(), base);
+        // The seq-0 batch calls exactly once; later batches never do.
+        assert_eq!(h.apply(&append(&r1, 0, 2)), ok);
+        assert_eq!(calls(), base + 1);
+        assert_eq!(h.apply(&append(&r1, 2, 1)), ok);
+        assert_eq!(h.apply(&append(&r1, 3, 0)), ok);
+        assert_eq!(calls(), base + 1);
+        // Once per run.
+        assert_eq!(h.apply(&append(&r2, 0, 1)), ok);
+        assert_eq!(calls(), base + 2);
+    }
 }
