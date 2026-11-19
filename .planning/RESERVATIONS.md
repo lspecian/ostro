@@ -95,13 +95,15 @@ Rules:
 | 16–28 | StepCompleted … RunContinuedAsNew | exists (P3) |
 | 29 | StepAttemptFailed | exists (P4, 04-04) |
 | 30–63 | — (guest-command range) | unallocated |
-| 64–69 | TimerFired, EffectCompleted, SignalReceived, ChildCompleted, TokenCompleted, CancelRequested | exists (P3) |
+| 64–69 | TimerFired, EffectCompleted, SignalReceived, ChildCompleted, TokenCompleted, CancelRequested | exists (P3). From P5 on, SignalReceived (66) stays decodable but is never produced (D21) |
 | 70 | WaitTimedOut | planned P5 (05-01) |
 | 71 | RunTerminated | planned P5 (05-01) |
 | 72–79 | — (P6 declared 0 needs) | reserved P6 |
 | 80–87 | — | reserved P7 |
 | 88–95 | — (P8 declared 0 needs) | reserved P8 |
-| 96–127 | — | unallocated |
+| 96 | SignalPayload `{name, payload}`: submitter-encoded, stored verbatim (D21) | planned P5 (05-01; allocated under rule 2 from the unallocated range) |
+| 97 | SignalMatched `{op, payload_seq}`: apply-encoded, no user data (D21) | planned P5 (05-01; rule 2) |
+| 98–127 | — | unallocated |
 | 128+ | — | reserved (codec) |
 
 ## 5. `TerminalStatus` enum values (prost) — partition `RunStatus` mirrors are appended in the same order

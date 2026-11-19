@@ -80,7 +80,7 @@ created: 2026-11-19
 | 5-06-02 | 06 | 2 | D11 journal shape | integration | `cargo test -p ostro-engine --test sdk_cancellation --test sdk_guests --test step_retry && cargo test -p ostro-server --test sdk_e2e && cargo test -p ostro --test e2e_dev` | ❌ W0 | ⬜ pending |
 | 5-07-01 | 07 | 2 | OPS-06, WF-09 (meta run policies; P8 Schedule fields + Webhook per D20) | unit (CAS) | `cargo test -p ostro-meta --locked && cargo build --workspace --all-targets` | ❌ W0 (meta_policies) | ⬜ pending |
 | 5-07-02 | 07 | 2 | D20 (META_FORMAT bump, golden) | golden + negative | `cargo test -p ostro-meta --test meta_golden` | ❌ W0 | ⬜ pending |
-| 5-08-01/02 | 08 | 3 | WF-05, API-05 (signal/cancel), API-07 | integration (apply; idempotent RegisterWait, open_waits, asserted read counts) | `cargo test -p ostro-partition --test apply_waits --test apply_cross` | ❌ W0 | ⬜ pending |
+| 5-08-01/02 | 08 | 3 | WF-05, API-05 (signal/cancel), API-07 | integration (apply; idempotent RegisterWait, open_waits, asserted read counts, D21 verbatim events + 1 MiB signal/token) | `cargo test -p ostro-partition --test apply_waits --test apply_cross` | ❌ W0 | ⬜ pending |
 | 5-08-03 | 08 | 3 | WF-05 | proptest | `cargo test -p ostro-partition --test rebuild_digest` + failpoint suite | ✅ (extended) | ⬜ pending |
 | 5-09-01/02 | 09 | 3 | WF-09, API-05 (terminate/retry), OPS-06 | integration (apply; RunCompleted actions, resumed_count, s2s_due_ms) | `cargo test -p ostro-partition --test apply_lifecycle --test apply_retention` | ❌ W0 | ⬜ pending |
 | 5-09-03 | 09 | 3 | OPS-06, WF-09 | proptest | `cargo test -p ostro-partition --test rebuild_digest` + failpoint suite | ✅ (extended) | ⬜ pending |
@@ -97,7 +97,7 @@ created: 2026-11-19
 | 5-14-01/02 | 14 | 6 | CLI-06 | unit | `cargo test -p ostro-cli && cargo deny check` | ❌ W0 | ⬜ pending |
 | 5-14-03 | 14 | 6 | CLI-06 | e2e (spawned binary) + insta | `cargo test -p ostro --test cli_verbs` | ❌ W0 | ⬜ pending |
 | 5-15-01 | 15 | 6 | WF-03, WF-04 | e2e (sleepers in a serial CI step) | `cargo test -p ostro-server --test semantics_e2e gather_race && cargo test -p ostro-server --test semantics_sleepers -- --ignored --test-threads=1` | ❌ W0 | ⬜ pending |
-| 5-15-02 | 15 | 6 | WF-05, WF-08, WF-09, API-05, API-07 (incl. resume after signal-wait / sleep timeout) | e2e | `cargo test -p ostro-server --test semantics_e2e` | ❌ W0 | ⬜ pending |
+| 5-15-02 | 15 | 6 | WF-05, WF-08, WF-09, API-05, API-07 (incl. resume after signal-wait / sleep timeout, D21 1 MiB payloads) | e2e | `cargo test -p ostro-server --test semantics_e2e` | ❌ W0 | ⬜ pending |
 | 5-15-03 | 15 | 6 | OPS-06, API-06 | e2e | `cargo test -p ostro-server --test semantics_e2e -- continue_as_new retention` | ❌ W0 | ⬜ pending |
 | 5-16-01/03 | 16 | 7 | SC-4 perf (D15/D16), OPS-06 (expiry cost) | benchmark (`#[ignore]`) | `OSTRO_BENCH_PROFILE=a cargo test --release -p ostro-server --test perf -- --ignored --nocapture` (WSL2 advisory; native NVMe human_needed) | ❌ W0 | ⬜ pending |
 | 5-16-02 | 16 | 7 | SC-4 (start path) | integration | `cargo test -p ostro-partition && cargo test -p ostro-server && cargo test -p ostro-engine --test replay_corpus` | ❌ W0 (apply_run_started) | ⬜ pending |
