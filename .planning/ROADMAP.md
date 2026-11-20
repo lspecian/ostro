@@ -231,7 +231,7 @@ Plans:
 - [x] 06-12-PLAN.md — Object store: shared ostro-objstore LocalFs + S3 (rusty-s3) + presign, bridge object adapter + local HMAC presign (FX-05)
 - [x] 06-13-PLAN.md — Vault (vaultrs) + Kubernetes (kube) secret providers with zeroizing TTL cache (FX-10)
 - [x] 06-14-PLAN.md — Server seam: config sections, BridgeServices + PresignKeyStore, EffectDriver adapter, CompleteEffect submission, SendGate, derive mappings, no unsupported repair for effects (B1), test helpers (FX-01..FX-06, FX-08)
-- [ ] 06-15-PLAN.md — Seam e2e (in-process): intent before I/O, journal delivery, crash re-drive instead of unsupported repair, 1 MiB blob outcome, evicted-run wake, children regression (FX-01, FX-03, FX-06)
+- [x] 06-15-PLAN.md — Seam e2e (in-process): intent before I/O, journal delivery, crash re-drive instead of unsupported repair, 1 MiB blob outcome, evicted-run wake, children regression (FX-01, FX-03, FX-06)
 - [x] 06-16-PLAN.md — Server admin impl (sealed secrets, grants, connections, egress, presign route) + CLI verbs + API-based e2e helpers (FX-05..FX-08, FX-10)
 - [ ] 06-17-PLAN.md — E2E SC1/SC4: kill -9 re-drive with same key, window → effect_outcome_unknown, SSRF table via guest (classifier reasons asserted), env proxy, allow-lists, rate limits (FX-01, FX-02, FX-03, FX-08, FX-09)
 - [ ] 06-18-PLAN.md — E2E SC2: kill -9 between COMMIT and effect_completed on PG (+ MySQL in CI), CI service containers (shared S3 test spec, SeaweedFS), ci-local env gating (FX-04)
