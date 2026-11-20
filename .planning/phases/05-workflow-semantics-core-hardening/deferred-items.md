@@ -21,3 +21,13 @@ Out-of-scope discoveries logged by executors (not fixed in the plan that found t
   executor re-activates without a WARN line; only the RunStarted path logs one. So the
   campaign's informational `failpoint_hits` (counted from log lines) undercounts these
   sites. Correctness is unaffected; a debug or metrics counter would make the hits visible.
+- **Replay-corpus wasm embeds a session path (05-20, 2026-11-20; blocks ci-local).**
+  `scripts/check-vendored.sh` check 4 fails on the six entries added by `82c9333`:
+  `tests/replay-corpus/{crash-campaign-s00-a,crash-campaign-s00-b,crash-campaign-s00-c,order-saga-cancelled,order-saga-compensated,order-saga-happy}/module.wasm`.
+  Their guests were built inside a session scratchpad worktree, so the wasm panic-location
+  strings carry that local path. The entries replay green (gnu and musl); only the
+  path-leak check fails. Options (user decision): re-record the six entries from a build in
+  a neutral path (their `module_sha256` changes; they are new in 05-20 and nothing depends
+  on their hashes yet), or exempt corpus `module.wasm` files from check 4. Future corpus
+  exports should build guests from the main checkout or a neutral path (e.g. with
+  `--remap-path-prefix`).
