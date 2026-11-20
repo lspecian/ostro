@@ -28,6 +28,9 @@ use ostro_types::{Command, PartitionCount, PartitionId, PayloadRef, RunId, parti
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep, timeout};
 
+/// Phase 8 helpers (08-10): `Phase8Server` builder, webhook signers, REST helpers.
+pub mod phase8;
+
 /// Generous default timeout for harness operations.
 pub const T: Duration = Duration::from_secs(20);
 

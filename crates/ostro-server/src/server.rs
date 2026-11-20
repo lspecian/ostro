@@ -36,6 +36,13 @@
 //! OTLP trace and log providers inside this runtime. `GET /metrics` is merged into the
 //! API router when `[telemetry] metrics` is on.
 //!
+//! The Phase 8 API controllers (08-10) are wired at 5: one
+//! [`crate::control::ControlCtx`] (node, meta, config, blobs, guest log sink, the control
+//! plane as partition client, sealed secrets, the clock, the data dir) and
+//! [`crate::control::phase8_extensions`] fill every `ostro_api::ApiExtensions` slot; the
+//! hook body limit is `[triggers] webhook_body_limit`. Feature plans fill
+//! `control/{schedules,webhooks,run_logs,admin}.rs` only.
+//!
 //! Between 4 and 5 the **services seam** starts ([`crate::services::Services::start`],
 //! P8-D21): `Node::open` has returned (every partition's readiness barrier is open and
 //! its leader services run) and the leaders are recorded in meta.
@@ -72,7 +79,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::config::ServerConfig;
-use crate::control::ServerControlPlane;
+use crate::control::{ControlCtx, ServerControlPlane, phase8_extensions};
 use crate::derive::MetaModules;
 use crate::executor::{EngineExecutor, ExecutorConfig, ExecutorHooks};
 use crate::leadership::MetaLeadership;
@@ -366,6 +373,7 @@ async fn start_inner(
         .flatten()
         .next()
         .map(|h| Arc::clone(h.blobs()));
+    let ctl_blobs = blobs.clone();
     let cfg = Arc::new(cfg);
     let meta = Arc::new(meta);
 
@@ -391,7 +399,7 @@ async fn start_inner(
 
     // 5. API.
     let control = Arc::new(ServerControlPlane::new(
-        meta,
+        Arc::clone(&meta),
         partitions,
         count,
         Arc::clone(&runtime),
@@ -401,7 +409,23 @@ async fn start_inner(
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
         max_request_bytes: usize::try_from(cfg.api.max_request_bytes).unwrap_or(usize::MAX),
     };
-    let mut app = ostro_api::router(Arc::clone(&control) as Arc<dyn ControlPlane>, api_cfg);
+    // Phase 8 controllers (08-10): one context, every slot filled.
+    let ctl = ControlCtx::new(
+        &node,
+        meta,
+        Arc::clone(&cfg),
+        ctl_blobs,
+        Arc::clone(&guest_logs),
+        Arc::clone(&control),
+        Arc::clone(&clock),
+        data_dir.clone(),
+    );
+    let mut app = ostro_api::router_with(
+        Arc::clone(&control) as Arc<dyn ControlPlane>,
+        api_cfg,
+        phase8_extensions(&ctl),
+    );
+    drop(ctl);
     if cfg.telemetry.metrics {
         app = app.merge(crate::telemetry::metrics_router());
     }

@@ -13,11 +13,25 @@
 //! - [`lifecycle`]: signal, cancel, terminate, retry and await-token completion, each with
 //!   a no-effect `dry_run` (API-05/06/07, 05-13).
 //! - [`watch`]: the long-poll [`RunWatchers`] hub and `await_result` (05-13).
+//!
+//! Phase 8 (08-10): the controllers behind `ostro_api::phase8`, each holding the one
+//! [`ControlCtx`] built in `server.rs` and installed through [`phase8_extensions`]:
+//!
+//! | File | Traits | Owner | Now |
+//! |---|---|---|---|
+//! | [`schedules`] | `ScheduleApi` | 08-14 | stub |
+//! | [`webhooks`] | `WebhookApi`, `HookIngress` | 08-15 | stub |
+//! | [`run_logs`] | `RunLogsApi` | 08-17 | stub |
+//! | [`admin`] | `AdminApi` | 08-18 | stub |
+//!
+//! A stub method answers `Unavailable` (HTTP 503, gRPC `UNAVAILABLE`) with the message
+//! `not yet implemented (08-NN)`. Feature plans fill only their controller file;
+//! `server.rs` and this wiring stay untouched.
 
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
-use ostro_api::ApiError;
 use ostro_api::domain::{
     ActivateWorkflow, AwaitResultRequest, AwaitResultResponse, CancelRequest, CancelResponse,
     CompleteTokenRequest, CompleteTokenResponse, ControlPlane, HistoryPage, HistoryRequest,
@@ -25,24 +39,31 @@ use ostro_api::domain::{
     SignalRequest, SignalResponse, StartRunRequest, StartRunResult, TerminateRequest,
     TerminateResponse, UploadModule, UploadModuleResult, WorkflowInfo,
 };
+use ostro_api::{ApiError, ApiExtensions};
 use ostro_blob::BlobStore;
 use ostro_engine::runtime::Runtime;
 use ostro_log::Rf1Log;
-use ostro_meta::MetaHandle;
-use ostro_partition::{PartitionHandle, PartitionHealth};
+use ostro_meta::records::SealedSecret;
+use ostro_meta::{MetaHandle, MetaKey, MetaRecord, MetaView};
+use ostro_partition::{Clock, Node, PartitionHandle, PartitionHealth};
 use ostro_types::{PartitionCount, PartitionId};
 
 use crate::config::ServerConfig;
+use crate::services::guest_logs::GuestLogSink;
 pub use watch::RunWatchers;
 
+pub mod admin;
 pub mod history;
 pub mod lifecycle;
 pub mod list;
 pub mod modules;
 pub mod names;
 pub mod policy;
+pub mod run_logs;
 pub mod runs;
+pub mod schedules;
 pub mod watch;
+pub mod webhooks;
 
 /// Shared state behind every API call.
 pub struct ServerControlPlane {
@@ -256,5 +277,142 @@ impl ControlPlane for ServerControlPlane {
                     )
                 })
             })
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 8 controllers (08-10)
+// ---------------------------------------------------------------------------------
+
+/// The answer of every Phase 8 stub method: `Unavailable`, naming the owning plan.
+pub(crate) fn not_yet(owner: &str) -> ApiError {
+    ApiError::unavailable(format!("not yet implemented ({owner})"))
+}
+
+/// Read access to sealed meta secrets (webhook verifier secrets, 08-15).
+///
+/// Returns the sealed record only; unsealing goes through the Phase 6 secrets resolver
+/// when the server wires one. Secret material never leaves the server through the API.
+#[derive(Clone)]
+pub struct SecretsAccess {
+    meta: MetaView,
+}
+
+impl std::fmt::Debug for SecretsAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretsAccess").finish_non_exhaustive()
+    }
+}
+
+impl SecretsAccess {
+    /// Over the meta view.
+    pub fn new(meta: MetaView) -> Self {
+        Self { meta }
+    }
+
+    /// The sealed secret stored under `name` (the full meta key, tenant-qualified per
+    /// D23), if any.
+    pub fn sealed(&self, name: &str) -> Option<SealedSecret> {
+        match self
+            .meta
+            .read(|s| s.get(&MetaKey::Secret(name.to_owned())))?
+            .value
+        {
+            MetaRecord::Secret(sec) => Some(sec),
+            _ => None,
+        }
+    }
+}
+
+/// Everything a Phase 8 controller can reach, built once in `server.rs` (08-10) so the
+/// feature plans (08-14, 08-15, 08-17, 08-18) never edit it.
+#[derive(Clone)]
+pub struct ControlCtx {
+    /// The node. Held weakly: the server handle owns the last strong reference, so
+    /// `Node::shutdown` can take it back even if a connection outlives the API drain.
+    /// Use [`ControlCtx::node`].
+    node: Weak<Node>,
+    /// Metadata (schedules, webhooks, secrets: CAS proposals and reads).
+    pub meta: Arc<MetaHandle>,
+    /// The effective configuration (`[triggers]`, `[guest_logs]`, `[backup]`, ...).
+    pub config: Arc<ServerConfig>,
+    /// The node-wide blob store; `None` when no partition started.
+    pub blobs: Option<Arc<BlobStore>>,
+    /// The guest log sink: the very instance the executor writes and
+    /// `Services::guest_log_sink()` returns (08-17 reads its ring buffers).
+    pub guest_logs: Arc<GuestLogSink>,
+    /// The partition client: start / signal / complete-token through the same code path
+    /// as the API (submit, wait for apply), plus partition handles and the run watchers.
+    pub partitions: Arc<ServerControlPlane>,
+    /// Sealed meta secrets.
+    pub secrets: SecretsAccess,
+    /// The one injectable clock (Phase 10 F5): the same instance as `NodeConfig.clock`
+    /// and `ServiceCtx.clock`. Every time read that feeds logic goes through it.
+    pub clock: Arc<dyn Clock>,
+    /// The data directory.
+    pub data_dir: PathBuf,
+}
+
+impl std::fmt::Debug for ControlCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlCtx")
+            .field("data_dir", &self.data_dir)
+            .field("blobs", &self.blobs.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ControlCtx {
+    /// Assemble the context (server.rs).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        node: &Arc<Node>,
+        meta: Arc<MetaHandle>,
+        config: Arc<ServerConfig>,
+        blobs: Option<Arc<BlobStore>>,
+        guest_logs: Arc<GuestLogSink>,
+        partitions: Arc<ServerControlPlane>,
+        clock: Arc<dyn Clock>,
+        data_dir: PathBuf,
+    ) -> Self {
+        let secrets = SecretsAccess::new(meta.view().clone());
+        Self {
+            node: Arc::downgrade(node),
+            meta,
+            config,
+            blobs,
+            guest_logs,
+            partitions,
+            secrets,
+            clock,
+            data_dir,
+        }
+    }
+
+    /// The node, or `Unavailable` once shutdown has released it.
+    pub fn node(&self) -> Result<Arc<Node>, ApiError> {
+        self.node
+            .upgrade()
+            .ok_or_else(|| ApiError::unavailable("the node is shutting down"))
+    }
+
+    /// `clock.now_ms()`.
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+}
+
+/// The Phase 8 API slots, every one filled with this server's controller, and the hook
+/// body limit from `[triggers] webhook_body_limit`.
+pub fn phase8_extensions(ctx: &ControlCtx) -> ApiExtensions {
+    let webhooks = Arc::new(webhooks::WebhookController::new(ctx.clone()));
+    ApiExtensions {
+        schedules: Some(Arc::new(schedules::ScheduleController::new(ctx.clone()))),
+        webhooks: Some(webhooks.clone()),
+        hooks: Some(webhooks),
+        run_logs: Some(Arc::new(run_logs::RunLogsController::new(ctx.clone()))),
+        admin: Some(Arc::new(admin::AdminController::new(ctx.clone()))),
+        hook_body_limit: usize::try_from(ctx.config.triggers.webhook_body_limit)
+            .unwrap_or(usize::MAX),
     }
 }
