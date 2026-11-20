@@ -667,6 +667,28 @@ async fn pg_value_round_trip() {
             SqlValue::Null,
         ]]
     );
+    // Numerics come back as the server's text: its scale, plain notation (06-11 decision).
+    let num = sql(fx
+        .exec(
+            "db",
+            &run,
+            8,
+            "SELECT 1.5::numeric(30,4) AS a, 10000::numeric AS b, 100.00::numeric AS c, \
+             0.000000001::numeric AS d, n::text AS t FROM vals",
+            vec![],
+            false,
+        )
+        .await);
+    assert_eq!(
+        num.rows,
+        vec![vec![
+            SqlValue::Numeric("1.5000".into()),
+            SqlValue::Numeric("10000".into()),
+            SqlValue::Numeric("100.00".into()),
+            SqlValue::Numeric("0.000000001".into()),
+            SqlValue::Text("12345678901234567890.125".into()),
+        ]]
+    );
     let e = nonretryable(
         fx.exec("db", &run, 4, "SELECT current_date AS d", vec![], false)
             .await,
@@ -782,15 +804,47 @@ async fn pg_schema_isolates_connections() {
     )
     .await);
     assert_eq!(count(&b, "SELECT count(*) FROM ostro_effects").await, 1);
-    assert_eq!(
-        count(
-            &a,
+    // `a` has its own token table: with `manage_schema` (default) the DDL runs when a pool is
+    // first built (06-11: "on first build"), whatever the statement, so `a`'s first SELECT
+    // created it in `a`'s schema. It holds none of `b`'s rows.
+    let tables_in = |schema: &str| {
+        format!(
             "SELECT count(*) FROM information_schema.tables \
-             WHERE table_schema = current_schema() AND table_name = 'ostro_effects'"
+             WHERE table_schema = '{schema}' AND table_name IN ('ostro_effects', 'only_here')"
         )
-        .await,
-        0
+    };
+    assert_eq!(count(&a, &tables_in(a.schema())).await, 2);
+    assert_eq!(
+        count(&a, &tables_in(b.schema())).await,
+        1,
+        "b: token table only"
     );
+    assert_eq!(
+        count(&a, &tables_in("public")).await,
+        0,
+        "nothing leaks to public"
+    );
+    assert_eq!(count(&a, "SELECT count(*) FROM ostro_effects").await, 0);
+    // Every pooled connection runs with its own `search_path`.
+    for (name, schema, op) in [("a", a.schema(), 4u64), ("b", b.schema(), 5)] {
+        let r = sql(exec(
+            &conn,
+            name,
+            &run,
+            op,
+            "SELECT current_schema()::text AS s",
+            vec![],
+            false,
+            false,
+            0,
+        )
+        .await);
+        assert_eq!(
+            r.rows,
+            vec![vec![SqlValue::Text(schema.to_owned())]],
+            "{name}"
+        );
+    }
 }
 
 #[cfg(feature = "failpoints")]

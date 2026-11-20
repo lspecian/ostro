@@ -19,7 +19,9 @@
 //! **Columns** decode by `type_info().name()` ([`pg_class`], [`mysql_class`]):
 //! - bool → `Boolean`; every integer → `Int8`; MySQL `BIGINT UNSIGNED` above `i64::MAX` →
 //!   `Numeric`;
-//! - float4/8, FLOAT/DOUBLE → `Float8`; numeric/DECIMAL → `Numeric(BigDecimal::to_string)`;
+//! - float4/8, FLOAT/DOUBLE → `Float8`; numeric/DECIMAL → `Numeric` holding the server's text
+//!   exactly: plain notation at the server's scale (`numeric(30,4)` 1.5 → `"1.5000"`, unconstrained
+//!   `numeric` keeps the stored scale; sqlx alone drops the PostgreSQL `dscale`);
 //! - text/varchar/char/name/citext/enum, MySQL CHAR/VARCHAR/*TEXT/ENUM → `Text`; uuid → `Text`;
 //! - bytea, MySQL BINARY/VARBINARY/*BLOB → `Bytea`; json/jsonb/JSON → `Json` (server text);
 //! - timestamptz and MySQL TIMESTAMP → `Timestamptz`. PostgreSQL `timestamp` (without time zone)
@@ -35,7 +37,9 @@ use std::str::FromStr;
 use ostro_types::journal::{Failure, SqlValue};
 use sqlx::mysql::{MySql, MySqlArguments, MySqlRow};
 use sqlx::postgres::types::Oid;
-use sqlx::postgres::{PgArgumentBuffer, PgArguments, PgRow, PgTypeInfo, PgTypeKind, Postgres};
+use sqlx::postgres::{
+    PgArgumentBuffer, PgArguments, PgRow, PgTypeInfo, PgTypeKind, PgValueFormat, Postgres,
+};
 use sqlx::query::Query;
 use sqlx::types::time::{OffsetDateTime, PrimitiveDateTime};
 use sqlx::types::{BigDecimal, JsonRawValue, Uuid};
@@ -355,6 +359,26 @@ pub fn column_names<R: Row>(row: &R) -> Vec<String> {
     row.columns().iter().map(|c| c.name().to_owned()).collect()
 }
 
+/// The display scale (`dscale`) of a binary PostgreSQL `numeric`: the header is
+/// `ndigits i16, weight i16, sign u16, dscale u16` (big-endian). `None` when too short.
+fn pg_numeric_dscale(bytes: &[u8]) -> Option<u16> {
+    let b = bytes.get(6..8)?;
+    Some(u16::from_be_bytes([b[0], b[1]]))
+}
+
+/// The server's text of a decimal: plain notation (never `1E-9`), at the server's scale.
+///
+/// sqlx decodes a binary PostgreSQL `numeric` from its base-10000 digit groups and drops the
+/// `dscale` header field, so `12345678901234567890.125` would come back as `...1250` and
+/// `10000` as `1E+4`. Re-applying `dscale` is exact: the digits past `dscale` are the zero
+/// padding of the last group. The result equals the server's `numeric::text`.
+fn numeric_text(d: BigDecimal, dscale: Option<u16>) -> String {
+    match dscale {
+        Some(s) => d.with_scale(i64::from(s)).to_plain_string(),
+        None => d.to_plain_string(),
+    }
+}
+
 /// Decodes one PostgreSQL row.
 pub fn decode_pg_row(row: &PgRow) -> Result<Vec<SqlValue>, Failure> {
     let mut out = Vec::with_capacity(row.len());
@@ -378,7 +402,12 @@ pub fn decode_pg_row(row: &PgRow) -> Result<Vec<SqlValue>, Failure> {
             Class::F32 => SqlValue::Float8(f64::from(row.try_get::<f32, _>(i).map_err(e)?)),
             Class::F64 => SqlValue::Float8(row.try_get(i).map_err(e)?),
             Class::Numeric => {
-                SqlValue::Numeric(row.try_get::<BigDecimal, _>(i).map_err(e)?.to_string())
+                let d = row.try_get::<BigDecimal, _>(i).map_err(e)?;
+                let dscale = match raw.format() {
+                    PgValueFormat::Binary => raw.as_bytes().ok().and_then(pg_numeric_dscale),
+                    PgValueFormat::Text => None,
+                };
+                SqlValue::Numeric(numeric_text(d, dscale))
             }
             Class::Text => SqlValue::Text(row.try_get_unchecked::<String, _>(i).map_err(e)?),
             Class::Bytes => SqlValue::Bytea(row.try_get(i).map_err(e)?),
@@ -425,9 +454,12 @@ pub fn decode_mysql_row(row: &MySqlRow) -> Result<Vec<SqlValue>, Failure> {
             Class::U64 => unsigned_to_value(row.try_get_unchecked::<u64, _>(i).map_err(e)?),
             Class::F32 => SqlValue::Float8(f64::from(row.try_get::<f32, _>(i).map_err(e)?)),
             Class::F64 => SqlValue::Float8(row.try_get(i).map_err(e)?),
-            Class::Numeric => {
-                SqlValue::Numeric(row.try_get::<BigDecimal, _>(i).map_err(e)?.to_string())
-            }
+            // MySQL sends DECIMAL as text, so the parsed value already carries the server's
+            // scale.
+            Class::Numeric => SqlValue::Numeric(numeric_text(
+                row.try_get::<BigDecimal, _>(i).map_err(e)?,
+                None,
+            )),
             Class::Text => SqlValue::Text(row.try_get_unchecked::<String, _>(i).map_err(e)?),
             Class::Bytes => SqlValue::Bytea(row.try_get_unchecked::<Vec<u8>, _>(i).map_err(e)?),
             Class::Json => SqlValue::Json(
@@ -537,6 +569,32 @@ mod tests {
             tstz("c", "TIMESTAMP", before_epoch).map_err(|f| nonretryable_kind(&f).to_owned()),
             Err(SQL_UNSUPPORTED_TYPE.to_owned())
         );
+    }
+
+    #[test]
+    fn numeric_text_is_the_server_text() {
+        let d = |s: &str| BigDecimal::from_str(s).unwrap();
+        // sqlx's binary decode of `...125` (dscale 3) yields scale 4; dscale restores it.
+        assert_eq!(
+            numeric_text(d("12345678901234567890.1250"), Some(3)),
+            "12345678901234567890.125"
+        );
+        assert_eq!(
+            numeric_text(d("12345678901234567890.125"), Some(4)),
+            "12345678901234567890.1250"
+        );
+        // 10000 decodes with a negative scale (Display would print 1E+4).
+        assert_eq!(
+            numeric_text(BigDecimal::new(1.into(), -4), Some(0)),
+            "10000"
+        );
+        assert_eq!(numeric_text(d("100"), Some(2)), "100.00");
+        assert_eq!(numeric_text(d("-0.0000000010"), Some(9)), "-0.000000001");
+        // Text-format and MySQL values keep their parsed scale, in plain notation.
+        assert_eq!(numeric_text(d("0.0000000001"), None), "0.0000000001");
+        assert_eq!(numeric_text(d("1.10"), None), "1.10");
+        assert_eq!(pg_numeric_dscale(&[0, 1, 0, 0, 0, 0, 0, 3, 0, 1]), Some(3));
+        assert_eq!(pg_numeric_dscale(&[0, 0, 0]), None);
     }
 
     #[test]
