@@ -13,6 +13,8 @@ failpoints = ["dep:fail", "fail/failpoints"]
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Put observer (08-08): BlobStore::subscribe_puts broadcast channel.
+tokio.workspace = true
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -2,7 +2,9 @@
 //! (STOR-03, STOR-08, STOR-09, STOR-10; see [`startup`](crate::startup) for the sequence).
 //!
 //! Layout under `data_dir`:
-//! - `node.toml`: `format_version = 1` and the fixed partition count (STOR-09);
+//! - `node.toml`: `format_version = 1`, the fixed partition count (STOR-09) and the
+//!   additive `incarnation` key (08-08, P8-D4: 128-bit random, 32 lowercase hex chars,
+//!   written on first open, preserved afterwards; older readers ignore unknown keys);
 //! - `state/pNNNN`: one fjall state store per partition (also records the count);
 //! - `wal/`: the shared group-commit WAL of every partition log;
 //! - `blobs/`: the content-addressed blob store shared by all partitions.
@@ -13,7 +15,9 @@ use std::sync::Arc;
 
 use ostro_blob::BlobStore;
 use ostro_log::ostro_wal::GroupCommitConfig;
-use ostro_log::{LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicatedLog, Rf1Log, Role};
+use ostro_log::{
+    LogError, LogNode, LogNodeConfig, RawBatch, ReadyBarrier, ReplicatedLog, Rf1Log, Role,
+};
 use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -29,7 +33,8 @@ use crate::leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 use crate::machine::{MachineConfig, MachineHandle, PartitionHealth};
 use crate::router::{InProcessRouter, PartitionRouter};
 use crate::startup::{StartupEvent, StartupLog};
-use crate::store::{PartitionStore, StoreConfig, StoreMeta};
+use crate::store::meta::{K_APPLIED, K_STATE_HASH};
+use crate::store::{PartitionStore, StoreConfig, StoreMeta, Table};
 
 /// `node.toml` format version.
 const NODE_FILE_VERSION: u64 = 1;
@@ -137,6 +142,7 @@ pub struct Node {
     events: Arc<StartupLog>,
     leaders: Vec<LeaderTasks>,
     shutdown: watch::Sender<bool>,
+    incarnation: [u8; 16],
 }
 
 impl std::fmt::Debug for Node {
@@ -160,8 +166,8 @@ impl Node {
         let count = cfg.partitions;
         std::fs::create_dir_all(&cfg.data_dir)?;
 
-        // 0. the fixed partition count.
-        check_node_file(&cfg.data_dir, count)?;
+        // 0. the fixed partition count (and the node incarnation).
+        let incarnation = check_node_file(&cfg.data_dir, count)?;
         events.push(StartupEvent::NodeFileChecked);
 
         // 1. state stores (the durable floors), in parallel.
@@ -339,7 +345,74 @@ impl Node {
             events,
             leaders,
             shutdown,
+            incarnation,
         })
+    }
+
+    /// This data directory's incarnation (`node.toml` `incarnation`, 08-08): generated on
+    /// first open, stable across reopens; a restore (08-18) writes a new one. Used by the
+    /// bottomless `LOCK` fence (P8-D4).
+    pub fn incarnation(&self) -> [u8; 16] {
+        self.incarnation
+    }
+
+    /// The consistent HW cut of every partition ([`LogNode::cut`]): causally closed, so a
+    /// cut containing a record appended after observing another partition's HW `x` also
+    /// contains `x`. A failed partition reports 0.
+    pub fn log_cut(&self) -> Vec<Offset> {
+        self.log.cut()
+    }
+
+    /// Partition `p`'s stored OSTR envelopes of whole batches in `[from, HW)`, up to about
+    /// `max_bytes` ([`ReplicatedLog::read_envelopes`]). `LogError::Failed` for a partition
+    /// that did not start.
+    pub async fn read_envelopes(
+        &self,
+        p: PartitionId,
+        from: Offset,
+        max_bytes: usize,
+    ) -> Result<Vec<RawBatch>, LogError> {
+        let h = self
+            .handle(p)
+            .ok_or_else(|| LogError::Failed(format!("partition {} is not running", p.0)))?;
+        h.log().read_envelopes(from, max_bytes).await
+    }
+
+    /// Partition `p`'s committed `(applied_offset, state_hash)`, read atomically: both meta
+    /// rows come from ONE fjall snapshot, and every apply chunk commits them in one batch,
+    /// so the pair always belongs to the same chunk (never a mix of two). `None` for a
+    /// partition that did not start or whose meta rows cannot be read (logged).
+    pub fn applied_state(&self, p: PartitionId) -> Option<(Offset, [u8; 32])> {
+        let h = self.handle(p)?;
+        // The meta keyspace holds a handful of fixed rows; one prefix scan = one snapshot.
+        let rows = match h.reader().prefix(Table::Meta, b"", 64) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(partition = p.0, error = %e, "applied_state: meta read failed");
+                return None;
+            }
+        };
+        let mut applied = None;
+        let mut hash = None;
+        for (k, v) in rows {
+            if k == K_APPLIED {
+                applied = <[u8; 8]>::try_from(v.as_slice())
+                    .ok()
+                    .map(|b| Offset(u64::from_be_bytes(b)));
+            } else if k == K_STATE_HASH {
+                hash = <[u8; 32]>::try_from(v.as_slice()).ok();
+            }
+        }
+        match (applied, hash) {
+            (Some(a), Some(h)) => Some((a, h)),
+            _ => {
+                warn!(
+                    partition = p.0,
+                    "applied_state: meta rows missing or malformed"
+                );
+                None
+            }
+        }
     }
 
     /// Partition `p`'s handle, if it started.
@@ -557,42 +630,130 @@ impl PartitionStart {
     }
 }
 
-/// Create `node.toml` or check its partition count against `count`.
-fn check_node_file(dir: &Path, count: PartitionCount) -> Result<(), NodeError> {
+/// Create `node.toml` or check its partition count against `count`; returns the node
+/// incarnation. A file without `incarnation` (written before 08-08) gains one through an
+/// append-only atomic rewrite (tmp + fsync + rename + dir fsync); the existing lines are
+/// kept byte for byte.
+fn check_node_file(dir: &Path, count: PartitionCount) -> Result<[u8; 16], NodeError> {
     let path = dir.join(NODE_FILE);
     match std::fs::read_to_string(&path) {
         Ok(s) => {
-            let (version, stored) = parse_node_file(&s)?;
-            if version != NODE_FILE_VERSION {
+            let f = parse_node_file(&s)?;
+            if f.version != NODE_FILE_VERSION {
                 return Err(NodeError::NodeFile(format!(
-                    "{}: unsupported format_version {version}",
-                    path.display()
+                    "{}: unsupported format_version {}",
+                    path.display(),
+                    f.version
                 )));
             }
-            if stored != count.get() {
+            if f.partitions != count.get() {
                 return Err(NodeError::PartitionCountMismatch {
                     configured: count.get(),
-                    stored,
+                    stored: f.partitions,
                 });
             }
-            Ok(())
+            if let Some(inc) = f.incarnation {
+                return Ok(inc);
+            }
+            let inc = new_incarnation();
+            let mut body = s;
+            if !body.is_empty() && !body.ends_with('\n') {
+                body.push('\n');
+            }
+            body.push_str(&incarnation_line(&inc));
+            write_durably(dir, NODE_FILE, body.as_bytes())?;
+            info!(incarnation = %hex16(&inc), "node.toml: incarnation added");
+            Ok(inc)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let inc = new_incarnation();
             let body = format!(
-                "format_version = {NODE_FILE_VERSION}\npartitions = {}\n",
-                count.get()
+                "format_version = {NODE_FILE_VERSION}\npartitions = {}\n{}",
+                count.get(),
+                incarnation_line(&inc)
             );
             write_durably(dir, NODE_FILE, body.as_bytes())?;
-            Ok(())
+            Ok(inc)
         }
         Err(e) => Err(e.into()),
     }
 }
 
-/// `(format_version, partitions)` from the `key = value` lines of `node.toml`.
-fn parse_node_file(s: &str) -> Result<(u64, u16), NodeError> {
+/// The `incarnation = "<32 hex>"` line of `node.toml`.
+fn incarnation_line(inc: &[u8; 16]) -> String {
+    format!("incarnation = \"{}\"\n", hex16(inc))
+}
+
+/// Lowercase hex of an incarnation (32 chars).
+pub fn hex16(b: &[u8; 16]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(32);
+    for x in b {
+        let _ = write!(s, "{x:02x}");
+    }
+    s
+}
+
+/// A fresh 128-bit random node incarnation (08-08; restore, 08-18, calls it too).
+///
+/// No new dependency: the bytes are BLAKE3 over 16 bytes of `/dev/urandom` (when readable),
+/// two hashes keyed by std's OS-seeded `RandomState` (128 bits of OS randomness per process),
+/// the pid and a process-wide counter. No clock read is involved.
+pub fn new_incarnation() -> [u8; 16] {
+    use std::hash::BuildHasher as _;
+    use std::io::Read as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut h = blake3::Hasher::new();
+    h.update(b"ostro node incarnation v1");
+    let mut os = [0u8; 16];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut os))
+        .is_ok()
+    {
+        h.update(&os);
+    }
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let rs = std::collections::hash_map::RandomState::new();
+    h.update(&rs.hash_one((0u8, n)).to_le_bytes());
+    h.update(&rs.hash_one((1u8, n)).to_le_bytes());
+    h.update(&std::process::id().to_le_bytes());
+    h.update(&n.to_le_bytes());
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&h.finalize().as_bytes()[..16]);
+    out
+}
+
+/// The keys of `node.toml` this version reads.
+#[derive(Debug, PartialEq, Eq)]
+struct NodeFile {
+    version: u64,
+    partitions: u16,
+    incarnation: Option<[u8; 16]>,
+}
+
+fn parse_incarnation(v: &str) -> Result<[u8; 16], NodeError> {
+    let bad = || NodeError::NodeFile(format!("incarnation {v:?}: want 32 hex chars in quotes"));
+    let inner = v
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .ok_or_else(bad)?;
+    if inner.len() != 32 || !inner.is_ascii() {
+        return Err(bad());
+    }
+    let mut out = [0u8; 16];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&inner[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+    }
+    Ok(out)
+}
+
+/// The known keys from the `key = value` lines of `node.toml` (unknown keys are ignored).
+fn parse_node_file(s: &str) -> Result<NodeFile, NodeError> {
     let mut version = None;
     let mut partitions = None;
+    let mut incarnation = None;
     for line in s.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -615,11 +776,16 @@ fn parse_node_file(s: &str) -> Result<(u64, u16), NodeError> {
                         .map_err(|e| NodeError::NodeFile(format!("partitions {v:?}: {e}")))?,
                 );
             }
+            "incarnation" => incarnation = Some(parse_incarnation(v)?),
             _ => {}
         }
     }
     match (version, partitions) {
-        (Some(v), Some(p)) => Ok((v, p)),
+        (Some(version), Some(partitions)) => Ok(NodeFile {
+            version,
+            partitions,
+            incarnation,
+        }),
         _ => Err(NodeError::NodeFile(
             "missing format_version or partitions".into(),
         )),
@@ -644,14 +810,45 @@ mod tests {
 
     #[test]
     fn node_file_parse() {
+        let vp = |s: &str| {
+            let f = parse_node_file(s).unwrap();
+            (f.version, f.partitions)
+        };
+        assert_eq!(vp("format_version = 1\npartitions = 16\n"), (1, 16));
         assert_eq!(
-            parse_node_file("format_version = 1\npartitions = 16\n").unwrap(),
-            (1, 16)
-        );
-        assert_eq!(
-            parse_node_file("# c\n\npartitions=4\nformat_version=1\nother = x\n").unwrap(),
+            vp("# c\n\npartitions=4\nformat_version=1\nother = x\n"),
             (1, 4)
         );
+        let f = parse_node_file(
+            "format_version = 1\npartitions = 2\nincarnation = \"000102030405060708090a0b0c0d0eff\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            f.incarnation,
+            Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 255])
+        );
+        assert_eq!(
+            parse_node_file("format_version = 1\npartitions = 2\n")
+                .unwrap()
+                .incarnation,
+            None
+        );
+        for bad in [
+            "00",
+            "\"00\"",
+            "000102030405060708090a0b0c0d0eff",
+            "\"zz0102030405060708090a0b0c0d0eff\"",
+        ] {
+            assert!(
+                parse_node_file(&format!(
+                    "format_version = 1\npartitions = 2\nincarnation = {bad}\n"
+                ))
+                .is_err(),
+                "{bad}"
+            );
+        }
+        assert_ne!(new_incarnation(), new_incarnation());
+        assert_eq!(hex16(&[0xab; 16]), "ab".repeat(16));
         assert!(parse_node_file("partitions = 4\n").is_err());
         assert!(parse_node_file("format_version = 1\npartitions = x\n").is_err());
         assert!(parse_node_file("garbage\n").is_err());

@@ -14,6 +14,12 @@
 //!
 //! A visible blob is always complete because it only appears through a rename
 //! after its tmp file was fsynced. Object-store backends and blob GC are Phase 8.
+//!
+//! Put observer (08-08): [`BlobStore::subscribe_puts`] returns a broadcast receiver that
+//! gets the sha256 of every successful put, whether the blob was new or already present.
+//! The channel holds [`PUT_EVENTS_CAPACITY`] events; a receiver that falls further behind
+//! gets [`tokio::sync::broadcast::error::RecvError::Lagged`] and must reconcile from a
+//! listing (the bottomless uploader, 08-13). A put is never dropped silently.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -21,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
+use tokio::sync::broadcast;
 
 /// Reference to a stored blob: its sha256 and length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,10 +67,14 @@ pub fn hex(sha: &[u8; 32]) -> String {
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Capacity of the put-event broadcast channel ([`BlobStore::subscribe_puts`]).
+pub const PUT_EVENTS_CAPACITY: usize = 4096;
+
 /// Local content-addressed blob store rooted at a data dir.
 #[derive(Debug)]
 pub struct BlobStore {
     root: PathBuf,
+    puts: broadcast::Sender<[u8; 32]>,
 }
 
 const BLOBS_DIR: &str = "blobs";
@@ -113,7 +124,20 @@ impl BlobStore {
             fsync_dir(&tmp)?;
             tracing::info!(removed, dir = %tmp.display(), "removed stale blob tmp files");
         }
-        Ok(Self { root })
+        let (puts, _) = broadcast::channel(PUT_EVENTS_CAPACITY);
+        Ok(Self { root, puts })
+    }
+
+    /// Subscribe to put events: the sha256 of every successful [`put`](Self::put) after
+    /// this call, new or already present. A receiver more than [`PUT_EVENTS_CAPACITY`]
+    /// events behind gets `RecvError::Lagged(n)` and must reconcile from a listing.
+    pub fn subscribe_puts(&self) -> broadcast::Receiver<[u8; 32]> {
+        self.puts.subscribe()
+    }
+
+    /// Notify subscribers of a successful put (no subscribers is fine).
+    fn notify_put(&self, sha: [u8; 32]) {
+        let _ = self.puts.send(sha);
     }
 
     /// Final path of a blob: `<data>/blobs/<hex[0:2]>/<hex>`.
@@ -138,6 +162,7 @@ impl BlobStore {
         let final_path = self.path_of(&r);
         if final_path.is_file() {
             // Visible blobs are complete: they only appear via rename after fsync.
+            self.notify_put(r.sha256);
             return Ok(r);
         }
 
@@ -166,6 +191,7 @@ impl BlobStore {
         ensure_dir(&shard)?;
         fs::rename(&tmp_path, &final_path)?;
         fsync_dir(&shard)?;
+        self.notify_put(r.sha256);
         Ok(r)
     }
 
