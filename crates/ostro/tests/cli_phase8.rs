@@ -2,10 +2,10 @@
 //! binary: help lists every verb, clap rejects bad arguments with exit 2, and one round
 //! trip against a spawned `ostro dev --ephemeral`.
 //!
-//! The server's schedule and webhook controllers may still be stubs (08-14 / 08-15 land
-//! in the same wave). The round trip therefore accepts either success or the mapped
-//! "not implemented on this server" error (exit 1). A panic, a malformed request (400)
-//! or any other error fails. 08-20 drives the full flow end to end.
+//! The round trip runs the success path of every verb against the real controllers (08-14
+//! schedules, 08-15 webhooks): it deploys the `signals` guest, seals a webhook secret with
+//! `ostro secret set --from-env`, and checks that no CLI output and no server log line
+//! carries the secret value. 08-20 drives deliveries and fires end to end.
 
 mod common;
 
@@ -153,21 +153,51 @@ fn argument_validation_is_clap_exit_2() {
     assert_eq!(code, 1, "{err}");
 }
 
-/// Success, or the mapped "not implemented" answer of a stub controller.
-fn ok_or_unimplemented(code: i32, body: &serde_json::Value, err: &str, what: &str) -> bool {
-    if code == 0 {
-        return true;
-    }
-    assert_eq!(code, 1, "{what}: {body}\n{err}");
+const CANARY: &str = "cnry-hook-7c3e9a1b5d2f4086";
+
+/// `ostro <args> --json` asserting exit 0; stdout parsed. The canary never appears.
+fn ok(addr: std::net::SocketAddr, args: &[&str]) -> serde_json::Value {
+    let (code, body, err) = cli_json(addr, args);
+    assert_eq!(code, 0, "{args:?}: {body}\n{err}");
     assert!(
-        err.contains("not implemented on this server"),
-        "{what}: unexpected error: {body}\n{err}"
+        !body.to_string().contains(CANARY) && !err.contains(CANARY),
+        "{args:?} leaks the secret: {body}\n{err}"
     );
+    body
+}
+
+/// `ostro <args> --json` expecting exit 1 and an API error body with `status`.
+fn fails(addr: std::net::SocketAddr, args: &[&str], status: u64) -> serde_json::Value {
+    let (code, body, err) = cli_json(addr, args);
+    assert_eq!(code, 1, "{args:?}: {body}\n{err}");
     assert!(
-        !err.contains("HTTP 400"),
-        "{what}: malformed request: {err}"
+        !err.contains("not implemented on this server"),
+        "{args:?}: {err}"
     );
-    false
+    assert!(body["error"].is_object(), "{args:?}: {body}\n{err}");
+    let text = format!("{body}\n{err}");
+    assert!(
+        text.contains(&status.to_string()),
+        "{args:?}: HTTP {status} expected: {text}"
+    );
+    assert!(!text.contains(CANARY), "{args:?} leaks the secret: {text}");
+    body
+}
+
+fn tag(v: &serde_json::Value) -> String {
+    v["version_tag"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("version_tag in {v}"))
+        .to_string()
+}
+
+fn names(v: &serde_json::Value, list: &str) -> Vec<String> {
+    v[list]
+        .as_array()
+        .unwrap_or_else(|| panic!("{list} in {v}"))
+        .iter()
+        .filter_map(|x| x["name"].as_str().map(str::to_owned))
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -177,11 +207,17 @@ async fn round_trip_against_ostro_dev() {
     let a = addr.to_string();
     let mut cmd = dev(work.path(), &["--ephemeral", "--listen", &a]);
     cmd.env("OSTRO_NODE__PARTITIONS", "4")
-        .env("OSTRO_LOG__LEVEL", "warn");
+        .env("OSTRO_LOG__LEVEL", "debug");
     let mut srv = Spawned::spawn(cmd);
     srv.wait_readyz(&http(), addr).await;
 
-    let (code, body, err) = cli_json(
+    // A workflow for the schedule and the webhook to reference.
+    let guest = write_guest(work.path(), "signals");
+    ok(addr, &["deploy", guest.to_str().unwrap(), "--activate"]);
+
+    // ---- schedules ----
+    // An unknown workflow is a 400 from the controller, not a stub answer.
+    let e = fails(
         addr,
         &[
             "schedules",
@@ -193,29 +229,217 @@ async fn round_trip_against_ostro_dev() {
             "--cron",
             "@daily",
         ],
+        400,
     );
-    if ok_or_unimplemented(code, &body, &err, "schedules create") {
-        assert_eq!(body["name"], "smoke", "{body}");
-        let (code, ls, err) = cli_json(addr, &["schedules", "ls"]);
-        assert_eq!(code, 0, "{ls}\n{err}");
-        let names: Vec<&str> = ls["schedules"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{ls}"))
-            .iter()
-            .filter_map(|s| s["name"].as_str())
-            .collect();
-        assert!(names.contains(&"smoke"), "{ls}");
-    } else {
-        // Stub: `ls --json` prints the error body as JSON (exit 1, mapped message).
-        let (code, ls, err) = cli_json(addr, &["schedules", "ls"]);
-        ok_or_unimplemented(code, &ls, &err, "schedules ls");
-        assert!(ls["error"].is_object(), "{ls}");
-    }
+    assert!(e.to_string().contains("does not exist"), "{e}");
 
-    let (code, body, err) = cli_json(addr, &["webhooks", "ls"]);
-    if ok_or_unimplemented(code, &body, &err, "webhooks ls") {
-        assert!(body["webhooks"].is_array(), "{body}");
-    }
+    let created = ok(
+        addr,
+        &[
+            "schedules",
+            "create",
+            "--name",
+            "smoke",
+            "--workflow",
+            "signals",
+            "--cron",
+            "@daily",
+            "--input-json",
+            r#"{"mode":"fifo"}"#,
+            "--overlap",
+            "skip",
+        ],
+    );
+    assert_eq!(created["name"], "smoke", "{created}");
+    assert_eq!(created["workflow"], "signals", "{created}");
+    assert_eq!(created["paused"], false, "{created}");
+    // A duplicate name is a 409.
+    fails(
+        addr,
+        &[
+            "schedules",
+            "create",
+            "--name",
+            "smoke",
+            "--workflow",
+            "signals",
+            "--cron",
+            "@daily",
+        ],
+        409,
+    );
+
+    let got = ok(addr, &["schedules", "get", "smoke"]);
+    assert_eq!(got, created);
+    let ls = ok(addr, &["schedules", "ls"]);
+    assert_eq!(names(&ls, "schedules"), ["smoke"], "{ls}");
+
+    let updated = ok(
+        addr,
+        &[
+            "schedules",
+            "update",
+            "smoke",
+            "--version-tag",
+            &tag(&got),
+            "--overlap",
+            "allow-all",
+        ],
+    );
+    assert_eq!(updated["overlap"], "allow_all", "{updated}");
+    // The old tag is stale now: 409.
+    fails(
+        addr,
+        &[
+            "schedules",
+            "update",
+            "smoke",
+            "--version-tag",
+            &tag(&got),
+            "--overlap",
+            "skip",
+        ],
+        409,
+    );
+
+    let paused = ok(addr, &["schedules", "pause", "smoke"]);
+    assert_eq!(paused["paused"], true, "{paused}");
+    assert_eq!(ok(addr, &["schedules", "get", "smoke"])["paused"], true);
+    let resumed = ok(addr, &["schedules", "resume", "smoke"]);
+    assert_eq!(resumed["paused"], false, "{resumed}");
+
+    // Trigger-now starts a run; a repeated request id returns the same run.
+    let t1 = ok(
+        addr,
+        &["schedules", "trigger", "smoke", "--request-id", "r-1"],
+    );
+    let run = t1["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{t1}"))
+        .to_owned();
+    let t2 = ok(
+        addr,
+        &["schedules", "trigger", "smoke", "--request-id", "r-1"],
+    );
+    assert_eq!(t2["run_id"], run.as_str(), "{t2}");
+    let info = ok(addr, &["inspect", &run]);
+    assert_eq!(info["workflow"], "signals", "{info}");
+    fails(addr, &["schedules", "trigger", "nope"], 404);
+
+    let current = ok(addr, &["schedules", "get", "smoke"]);
+    ok(
+        addr,
+        &[
+            "schedules",
+            "delete",
+            "smoke",
+            "--version-tag",
+            &tag(&current),
+        ],
+    );
+    fails(addr, &["schedules", "get", "smoke"], 404);
+    assert!(names(&ok(addr, &["schedules", "ls"]), "schedules").is_empty());
+
+    // ---- webhooks ----
+    // The verifier secret is sealed from the environment (never argv).
+    let mut set = command();
+    set.env("OSTRO_SERVER", format!("http://{addr}"))
+        .env("HOOK_SECRET_VALUE", CANARY)
+        .args([
+            "secret",
+            "set",
+            "gh-hook",
+            "--from-env",
+            "HOOK_SECRET_VALUE",
+            "--json",
+        ])
+        .stdin(std::process::Stdio::null());
+    let (st, out, err) = run_to_end(set);
+    assert!(st.success(), "{out}\n{err}");
+    assert!(
+        !out.contains(CANARY) && !err.contains(CANARY),
+        "{out}\n{err}"
+    );
+
+    // A secret_ref naming no sealed secret is a 400.
+    fails(
+        addr,
+        &[
+            "webhooks",
+            "create",
+            "--name",
+            "gh",
+            "--action",
+            "start",
+            "--workflow",
+            "signals",
+            "--verifier",
+            "github",
+            "--secret-ref",
+            "no-such-secret",
+        ],
+        400,
+    );
+    let hook = ok(
+        addr,
+        &[
+            "webhooks",
+            "create",
+            "--name",
+            "gh",
+            "--action",
+            "start",
+            "--workflow",
+            "signals",
+            "--verifier",
+            "github",
+            "--secret-ref",
+            "gh-hook",
+        ],
+    );
+    assert_eq!(hook["name"], "gh", "{hook}");
+    assert_eq!(hook["verifier"]["kind"], "github", "{hook}");
+    assert_eq!(hook["verifier"]["secret_ref"], "gh-hook", "{hook}");
+    assert_eq!(ok(addr, &["webhooks", "get", "gh"]), hook);
+    assert_eq!(names(&ok(addr, &["webhooks", "ls"]), "webhooks"), ["gh"]);
+
+    let upd = ok(
+        addr,
+        &[
+            "webhooks",
+            "update",
+            "gh",
+            "--version-tag",
+            &tag(&hook),
+            "--idempotency",
+            "header:x-github-delivery",
+        ],
+    );
+    assert!(upd.to_string().contains("x-github-delivery"), "{upd}");
+    assert_eq!(upd["verifier"]["secret_ref"], "gh-hook", "{upd}");
+    fails(
+        addr,
+        &[
+            "webhooks",
+            "update",
+            "gh",
+            "--version-tag",
+            &tag(&hook),
+            "--idempotency",
+            "none",
+        ],
+        409,
+    );
+
+    ok(
+        addr,
+        &["webhooks", "delete", "gh", "--version-tag", &tag(&upd)],
+    );
+    fails(addr, &["webhooks", "get", "gh"], 404);
+    assert!(names(&ok(addr, &["webhooks", "ls"]), "webhooks").is_empty());
 
     srv.stop_clean("INT");
+    // The server never logged the secret value (debug level).
+    let log = srv.stderr();
+    assert!(!log.contains(CANARY), "the server log leaks the secret");
 }
