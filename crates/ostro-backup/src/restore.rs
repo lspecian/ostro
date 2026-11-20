@@ -696,7 +696,7 @@ pub async fn restore(
     source: RestoreSource,
     opts: RestoreOptions,
 ) -> Result<RestoreReport, RestoreError> {
-    let t0 = Instant::now();
+    let t0 = Instant::now(); // clock-exempt: RestoreReport.durations (measurement only)
     let data_dir = opts.data_dir.clone();
     if !is_empty_dir(&data_dir)? {
         return Err(RestoreError::NotEmpty(data_dir));
@@ -775,7 +775,7 @@ pub async fn restore(
     write_durably(&data_dir, "node.toml", node_toml.as_bytes())?;
 
     // 4. Meta.
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: RestoreReport.durations (measurement only)
     let meta_index = match meta_bytes {
         Some((index, bytes, _)) => {
             let h =
@@ -799,13 +799,13 @@ pub async fn restore(
     )));
 
     // 5. Blobs.
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: RestoreReport.durations (measurement only)
     let parallelism = opts.parallelism.max(1);
     let blobs = restore_blobs(&store, &data_dir, parallelism).await?;
     let blobs_ms = ms(t.elapsed());
 
     // 6./7a. Partitions in parallel.
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: RestoreReport.durations (measurement only)
     let sem = Arc::new(Semaphore::new(parallelism));
     let mut set = JoinSet::new();
     for q in 0..p {
@@ -833,7 +833,7 @@ pub async fn restore(
     let partitions_ms = ms(t.elapsed());
 
     // 7b. Inspect replay to verify_offset; compare the state hash.
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: RestoreReport.durations (measurement only)
     let node = open_inspect(&data_dir, count, node_id).await?;
     let mut mismatch = None;
     for w in work.values() {
