@@ -12,3 +12,12 @@ pub mod output;
 
 pub use commands::{ClientCommand, run};
 pub use output::{Outcome, exit_code};
+
+// Phase 8 (plan 08-01): `tar` for `ostro backup --to` (08-12/08-18), anchored until it is used.
+use tar as _;
+
+#[cfg(test)]
+mod dev_dep_anchors {
+    // FakeControlPlane-backed CLI tests (08-12).
+    use ostro_api as _;
+}

@@ -15,7 +15,7 @@ path = "src/main.rs"
 # (ostro-server and everything under it) and calls `fail::FailScenario::setup()` in `main`,
 # so the FAILPOINTS env var configures them. Build it out of the way of the release binary:
 #   cargo build --release -p ostro --features failpoints --target-dir target/failpoints
-failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints"]
+failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints", "ostro-backup/failpoints"]
 
 [dependencies]
 mimalloc.workspace = true
@@ -27,6 +27,8 @@ ostro-server = { path = "../ostro-server" }
 ostro-api = { path = "../ostro-api" }
 # CLI-06 client verbs (05-14)
 ostro-cli = { path = "../ostro-cli" }
+# Phase 8: `ostro restore` / `ostro backup` (08-18)
+ostro-backup = { path = "../ostro-backup" }
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]

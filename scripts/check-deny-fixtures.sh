@@ -37,6 +37,8 @@ check_fixture() {
 
 check_fixture dup-prost bans 'duplicate' "prost"
 check_fixture bad-licence licenses 'GPL-3\.0-only' 'rejected|not explicitly allowed'
+# P8-D17: the prometheus crate stays banned by exact name (metrics-exporter-prometheus is allowed)
+check_fixture ban-prometheus bans 'banned' 'prometheus'
 
 if [[ "$failures" -ne 0 ]]; then
   echo "${failures} deny fixture check(s) failed"

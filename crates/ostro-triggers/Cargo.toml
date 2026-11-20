@@ -1,0 +1,24 @@
+[package]
+name = "ostro-triggers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Phase 8 triggers (TRIG-01..03): cron evaluation (08-05) and webhook verification /
+# idempotency extraction (08-06). Pure crate: no I/O, no clock reads (times are i64 ms).
+# croner speaks jiff 0.2 (P8-D9); jiff02 is used only inside this crate's adapter, the public
+# API is jiff 1.0 / i64 ms. Drop the adapter when croner ships jiff 1 support.
+
+[dependencies]
+croner.workspace = true
+jiff02.workspace = true
+jiff.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -59,8 +59,8 @@ utoipa-axum = "0.3.0"
 serde_json = "1"
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
 # exact: locked decision (Phase 4 research); chrono is banned
-jiff = { version = "=1.0.1", features = ["serde"] }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+jiff = { version = "=1.0.1", features = ["serde", "tzdb-bundle-always"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 # OS RNG for run rng_seed / token key (same major as uuid's)
 getrandom = "0.4.3"
@@ -70,6 +70,30 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "h
 # pulls (one copy in Cargo.lock). Bump only together with wasmtime (D17).
 wit-component = { version = "=0.261.0", default-features = false, features = ["semver-check"] }
 wit-parser = "=0.261.0"
+# Phase 8 triggers / bottomless / observability (plan 08-01 declares every Phase 8 dependency
+# once, P8-D21; versions verified 2026-11-19, 08-RESEARCH "Standard Stack").
+# OTel: all opentelemetry* crates share 0.33; otlp is gRPC (tonic) only and never zstd
+# (zstd-sys is C). Resolves to the locked tonic 0.14.9 / prost 0.14.6 (no duplicates, deny).
+opentelemetry = "0.33.1"
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "logs"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "trace", "logs", "tls-aws-lc"] }
+opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic", "trace", "logs"] }
+tracing-opentelemetry = "0.34.0"
+opentelemetry-appender-tracing = "0.33.1"
+# /metrics text exposition; default features off = no hyper server, no prost
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+# S3 SigV4 (sans-IO) for ostro-objstore; exact (P8-D5)
+rusty-s3 = "=0.12.0"
+url = "2.5.8"
+futures-core = "0.3.34"
+futures-util = "0.3.34"
+# cron (P8-D9): croner's jiff backend only (never its default `chrono`). croner speaks jiff
+# 0.2, so jiff02 is a second jiff major, used only inside ostro-triggers' adapter.
+croner = { version = "4.0.3", default-features = false, features = ["jiff"] }
+jiff02 = { package = "jiff", version = "0.2.46", default-features = false, features = ["alloc", "std"] }
+# backup tar files (P8-D7); snapshot frame compression (same major as lsm-tree's lz4_flex)
+tar = "0.4.46"
+lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

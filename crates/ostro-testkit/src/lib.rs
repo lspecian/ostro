@@ -32,3 +32,11 @@ mod tests {
         unsafe { std::env::remove_var("PROPTEST_CASES") };
     }
 }
+
+// Phase 8 (plan 08-01): in-process OTLP collector dependencies for 08-04, anchored so cargo's
+// unused-dependency lint stays quiet until that module lands.
+mod phase8_dep_anchors {
+    use opentelemetry_proto as _;
+    use tokio as _;
+    use tonic as _;
+}

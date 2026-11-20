@@ -31,7 +31,7 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 #   cargo test -p <crate> --features failpoints [--test <target>] --locked -- --test-threads=1
 # `<crate>:<target>` restricts a crate whose full suite would take over 5 min single-threaded
 # to its failpoint test target (plan 05-18); the whole crate is still linted with the feature.
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5)
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)
@@ -209,15 +209,10 @@ check_order_saga() {
     --manifest-path "$ORDER_SAGA_MANIFEST" --target-dir target/order-saga -- -D warnings
 }
 
+# Shared with the ci.yml "No chronik / tokio-uring / prometheus in the tree" step (P8-D17): an
+# anchored crate-name match, so metrics-exporter-prometheus passes and prometheus fails.
 check_forbidden_crates() {
-  local hits
-  hits="$(cargo tree --workspace -e normal --locked | grep -E 'chronik|tokio-uring|prometheus ' || true)"
-  if [[ -n "$hits" ]]; then
-    echo "forbidden crates in the dependency tree:"
-    echo "$hits"
-    return 1
-  fi
-  echo "no chronik / tokio-uring / prometheus in cargo tree"
+  bash scripts/forbidden-crates.sh --self-test && bash scripts/forbidden-crates.sh
 }
 
 check_workflow() {

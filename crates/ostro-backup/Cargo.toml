@@ -1,0 +1,36 @@
+[package]
+name = "ostro-backup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Phase 8 bottomless backup and restore (BACK-01..04): chunk/manifest/fence/uploader (08-13),
+# restore and tar archives (08-18), remote blob GC (08-19). Config contract in src/config.rs.
+
+[features]
+# Fault injection (upload::, restore::, blobgc:: failpoints; RESERVATIONS §11). Its suite runs
+# in the "Failpoint suites" step (FAILPOINT_CRATES in scripts/ci-local.sh).
+failpoints = ["dep:fail", "fail/failpoints"]
+
+[dependencies]
+ostro-objstore = { path = "../ostro-objstore" }
+ostro-partition = { path = "../ostro-partition" }
+ostro-log = { path = "../ostro-log" }
+ostro-blob = { path = "../ostro-blob" }
+ostro-meta = { path = "../ostro-meta" }
+ostro-types.workspace = true
+tar.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+fail = { workspace = true, optional = true }
+
+[lints]
+workspace = true

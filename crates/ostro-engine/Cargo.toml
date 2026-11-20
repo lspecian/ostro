@@ -21,6 +21,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 fail = { workspace = true, optional = true }
+# Phase 8 (P8-D13/D14): the OTel API crate only (span contexts for 08-11); never the SDK here
+opentelemetry.workspace = true
 
 [features]
 # Exposes the in-memory fake ActivationSink and test helpers (plan 03-08).

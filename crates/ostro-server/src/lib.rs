@@ -37,3 +37,20 @@ pub use server::{LOCK_FILE, Server, ServerError, ServerHandle, StartupTimings, s
 mod dev_dep_anchors {
     use ostro_testkit as _;
 }
+
+// Phase 8 dependencies declared once by plan 08-01 (P8-D21) for later Phase 8 plans
+// (08-04 telemetry/metrics, 08-11 spans, 08-13/08-18 bottomless, 08-14/08-15 triggers).
+// Anchored here so cargo's unused-dependency lint stays quiet until the owning modules
+// consume them; harmless afterwards.
+mod phase8_dep_anchors {
+    use hmac as _;
+    use metrics_exporter_prometheus as _;
+    use opentelemetry as _;
+    use opentelemetry_appender_tracing as _;
+    use opentelemetry_otlp as _;
+    use opentelemetry_sdk as _;
+    use ostro_backup as _;
+    use ostro_objstore as _;
+    use ostro_triggers as _;
+    use tracing_opentelemetry as _;
+}

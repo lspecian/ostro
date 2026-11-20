@@ -17,9 +17,13 @@ jiff.workspace = true
 # module sha256 for `ostro deploy`
 sha2.workspace = true
 tokio.workspace = true
+# Phase 8: `ostro backup --to f.tar` (08-12/08-18)
+tar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# FakeControlPlane-backed CLI tests (08-12)
+ostro-api = { path = "../ostro-api", features = ["fake"] }
 
 [lints]
 workspace = true

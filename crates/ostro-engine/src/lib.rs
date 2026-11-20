@@ -15,6 +15,8 @@ pub mod replay;
 pub mod retry;
 pub mod runtime;
 pub mod sink;
+/// Span-id override contract (Phase 8, P8-D14; plan 08-01).
+pub mod telemetry;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 pub mod validate;
@@ -33,3 +35,5 @@ pub mod token {
 // Anchored here so cargo's unused-dependency lint stays quiet until the owning modules
 // consume them; harmless afterwards. (hmac/metrics/tracing are used by `cache`.)
 use chacha20 as _;
+// Phase 8 (plan 08-01): the OTel API crate for 08-11's span contexts (P8-D13/D14).
+use opentelemetry as _;

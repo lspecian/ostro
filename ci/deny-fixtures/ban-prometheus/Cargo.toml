@@ -1,0 +1,14 @@
+# Negative fixture for P8-D17: the `prometheus` crate must be rejected by deny.toml (banned by
+# exact name; `metrics-exporter-prometheus` is allowed and is checked by
+# scripts/forbidden-crates.sh --self-test).
+[workspace]
+
+[package]
+name = "deny-fixture-ban-prometheus"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+prometheus = { version = "0.14", default-features = false }

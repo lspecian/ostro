@@ -1,0 +1,30 @@
+[package]
+name = "ostro-objstore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Shared object-store crate (D19, P8-D5; Phase 6 FX-05 reuses it). The first phase to run
+# creates it (Phase 8 08-01 here); 08-03 defines and freezes the object-safe trait and the
+# S3 (rusty-s3 + reqwest) and LocalFs backends; Phase 6 adds only presign/put_with with
+# default impls. No object_store, no chrono, no native-tls/openssl, no reqwest zstd.
+
+[dependencies]
+rusty-s3.workspace = true
+reqwest = { workspace = true, features = ["rustls", "stream"] }
+tokio.workspace = true
+bytes.workspace = true
+url.workspace = true
+jiff.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+# object-safe BoxStream multipart signature (08-03, B1); both already in Cargo.lock
+futures-core.workspace = true
+futures-util.workspace = true
+
+[lints]
+workspace = true

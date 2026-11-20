@@ -27,6 +27,9 @@ thiserror.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 fail = { workspace = true, optional = true }
+# Phase 8 (08-01 declares; 08-02 OSNP snapshot frames: CRC32C + optional lz4 frames)
+lz4_flex.workspace = true
+crc32c.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

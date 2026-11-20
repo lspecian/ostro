@@ -10,6 +10,10 @@ publish.workspace = true
 # cycles); partition-specific doubles live in crates/ostro-partition/tests/common/.
 [dependencies]
 tempfile.workspace = true
+# Phase 8: in-process OTLP collector (gRPC trace + logs services) for the OTel tests (08-04)
+opentelemetry-proto.workspace = true
+tonic.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
