@@ -296,7 +296,7 @@ Plans:
 - [x] 08-06-PLAN.md — Webhook verifiers (TDD): Stripe/GitHub/Slack/Standard/generic HMAC, idempotency extractors (TRIG-01)
 - [ ] 08-07-PLAN.md — ScheduleFire apply: watermark exactly-once, overlap policies, buffered fire on terminal, rebuild digest (TRIG-02/03)
 - [x] 08-08-PLAN.md — Bottomless primitives: HwVector consistent cut (update-before-publish), raw envelope reads, blob put observer, node.toml incarnation (BACK-01)
-- [ ] 08-09-PLAN.md — Snapshot service + WAL trimming enabled (dynamic floors, upload floor init), open-path snapshot install, SC4 proptest/failpoints (BACK-04)
+- [x] 08-09-PLAN.md — Snapshot service + WAL trimming enabled (dynamic floors, upload floor init), open-path snapshot install, SC4 proptest/failpoints (BACK-04)
 - [x] 08-10-PLAN.md — Phase 8 API surface: schedules/webhooks/hooks/run logs/admin backup over REST+gRPC+OpenAPI, traceparent in, server stubs (TRIG-01/02/03, OBS-01/03, BACK-03)
 - [x] 08-11-PLAN.md — Traces: deterministic ids, live-only activation/step spans, run span on RunCompleted, effect-span + traceparent hooks (OBS-01)
 - [x] 08-12-PLAN.md — CLI verbs: ostro schedules / ostro webhooks (TRIG-01/02/03)
