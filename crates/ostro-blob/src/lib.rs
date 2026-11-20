@@ -13,7 +13,11 @@
 //!   `rename` is atomic. [`BlobStore::open`] deletes leftovers.
 //!
 //! A visible blob is always complete because it only appears through a rename
-//! after its tmp file was fsynced. Object-store backends and blob GC are Phase 8.
+//! after its tmp file was fsynced. Object-store backends are Phase 8 (`ostro-objstore`).
+//!
+//! Blob GC (08-19, [`gc`]): `put` holds the GC lock in shared mode and, for a blob that is
+//! already present, touches its mtime, so a re-referenced old blob is young again;
+//! [`BlobStore::sweep`] deletes unmarked blobs older than the grace under the exclusive lock.
 //!
 //! Put observer (08-08): [`BlobStore::subscribe_puts`] returns a broadcast receiver that
 //! gets the sha256 of every successful put, whether the blob was new or already present.
@@ -21,13 +25,17 @@
 //! gets [`tokio::sync::broadcast::error::RecvError::Lagged`] and must reconcile from a
 //! listing (the bottomless uploader, 08-13). A put is never dropped silently.
 
-use std::fs::{self, File};
+pub mod gc;
+
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
+
+pub use gc::{GcLock, SweepReport};
 
 /// Reference to a stored blob: its sha256 and length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,6 +73,18 @@ pub fn hex(sha: &[u8; 32]) -> String {
     s
 }
 
+/// Set an existing blob's mtime to now without rewriting its content, durably.
+fn touch(path: &Path) -> io::Result<()> {
+    let f = OpenOptions::new().write(true).open(path)?;
+    // Filesystem time domain: new blob files get their mtime from the kernel clock, so a
+    // touch must use the same clock (the sweep's cut-off comes from the injected clock,
+    // which is the system clock in production).
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    let now = std::time::SystemTime::now(); // clock-exempt: filesystem mtime domain
+    f.set_modified(now)?;
+    f.sync_all()
+}
+
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Capacity of the put-event broadcast channel ([`BlobStore::subscribe_puts`]).
@@ -75,6 +95,7 @@ pub const PUT_EVENTS_CAPACITY: usize = 4096;
 pub struct BlobStore {
     root: PathBuf,
     puts: broadcast::Sender<[u8; 32]>,
+    gc_lock: GcLock,
 }
 
 const BLOBS_DIR: &str = "blobs";
@@ -125,7 +146,11 @@ impl BlobStore {
             tracing::info!(removed, dir = %tmp.display(), "removed stale blob tmp files");
         }
         let (puts, _) = broadcast::channel(PUT_EVENTS_CAPACITY);
-        Ok(Self { root, puts })
+        Ok(Self {
+            root,
+            puts,
+            gc_lock: GcLock::default(),
+        })
     }
 
     /// Subscribe to put events: the sha256 of every successful [`put`](Self::put) after
@@ -152,18 +177,27 @@ impl BlobStore {
     }
 
     /// Durably store `bytes` and return its reference. Idempotent: if the
-    /// blob is already visible it is not rewritten. Synchronous; async
-    /// callers use `spawn_blocking`.
+    /// blob is already visible it is not rewritten, but its mtime is touched
+    /// (blob GC grace, 08-19). Holds the GC lock in shared mode throughout.
+    /// Synchronous; async callers use `spawn_blocking`.
     pub fn put(&self, bytes: &[u8]) -> Result<BlobRef, BlobError> {
         let r = BlobRef {
             sha256: Sha256::digest(bytes).into(),
             len: bytes.len() as u64,
         };
+        let _gc = self.gc_lock.read();
         let final_path = self.path_of(&r);
         if final_path.is_file() {
             // Visible blobs are complete: they only appear via rename after fsync.
-            self.notify_put(r.sha256);
-            return Ok(r);
+            match touch(&final_path) {
+                Ok(()) => {
+                    self.notify_put(r.sha256);
+                    return Ok(r);
+                }
+                // Removed behind our back (not by GC: we hold its lock): write it again.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
         }
 
         let h = hex(&r.sha256);

@@ -53,13 +53,21 @@ fn put_is_idempotent() {
     let store = BlobStore::open(dir.path()).unwrap();
     let bytes = payload(4096);
     let a = store.put(&bytes).unwrap();
-    let mtime = fs::metadata(store.path_of(&a)).unwrap().modified().unwrap();
+    let md = fs::metadata(store.path_of(&a)).unwrap();
     let b = store.put(&bytes).unwrap();
     assert_eq!(a, b);
     assert_eq!(files_under(&dir.path().join("blobs")).len(), 1);
     assert!(files_under(&dir.path().join("tmp")).is_empty());
-    let mtime2 = fs::metadata(store.path_of(&a)).unwrap().modified().unwrap();
-    assert_eq!(mtime, mtime2, "second put must not rewrite the blob");
+    let md2 = fs::metadata(store.path_of(&a)).unwrap();
+    // The second put touches the mtime (blob GC grace, 08-19) but never rewrites the blob:
+    // same file (inode), same content.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(md.ino(), md2.ino(), "second put must not rewrite the blob");
+    }
+    assert!(md2.modified().unwrap() >= md.modified().unwrap());
+    assert_eq!(fs::read(store.path_of(&a)).unwrap(), bytes);
 }
 
 #[test]

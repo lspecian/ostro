@@ -87,3 +87,54 @@ fn fsync_error_fails_put_and_nothing_is_visible() {
     assert!(!store.contains(&r));
     scenario.teardown();
 }
+
+/// Blob GC crash window (08-19): a panic at `blobgc::before_unlink` (between the mark and
+/// the unlink) loses no referenced blob; the store reopens and a rerun completes.
+#[test]
+fn gc_panic_before_unlink_is_safe_and_rerun_completes() {
+    use std::collections::HashSet;
+    use std::fs::OpenOptions;
+    use std::time::{Duration, SystemTime};
+
+    let scenario = fail::FailScenario::setup();
+    let dir = tempfile::tempdir().unwrap();
+    let hour = Duration::from_secs(3600);
+    let keep_bytes = b"referenced".repeat(100);
+    let drop_bytes: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i; 2048]).collect();
+    let (keep, drops) = {
+        let store = BlobStore::open(dir.path()).unwrap();
+        let keep = store.put(&keep_bytes).unwrap();
+        let drops: Vec<BlobRef> = drop_bytes.iter().map(|b| store.put(b).unwrap()).collect();
+        for r in drops.iter().chain([&keep]) {
+            let f = OpenOptions::new().write(true).open(store.path_of(r)).unwrap();
+            f.set_modified(SystemTime::now() - 2 * hour).unwrap();
+        }
+        (keep, drops)
+    };
+    let mark: HashSet<[u8; 32]> = [keep.sha256].into_iter().collect();
+    let cutoff = SystemTime::now() - hour;
+
+    {
+        let store = BlobStore::open(dir.path()).unwrap();
+        fail::cfg("blobgc::before_unlink", "1*off->panic").unwrap();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.sweep(&mark, cutoff)
+        }));
+        fail::remove("blobgc::before_unlink");
+        assert!(res.is_err(), "sweep must have panicked at the failpoint");
+        assert!(store.contains(&keep), "referenced blob kept");
+        // The lock is poisoned but still usable: put works on the same instance.
+        assert_eq!(store.put(&keep_bytes).unwrap(), keep);
+    }
+
+    let store = BlobStore::open(dir.path()).unwrap();
+    assert!(store.contains(&keep));
+    assert_eq!(store.get(&keep).unwrap(), keep_bytes);
+    let gone_after_crash = drops.iter().filter(|r| !store.contains(r)).count();
+    assert_eq!(gone_after_crash, 1, "exactly the unlink before the panic happened");
+    let rep = store.sweep(&mark, cutoff).unwrap();
+    assert_eq!(rep.deleted, 3, "the rerun completes the sweep");
+    assert!(drops.iter().all(|r| !store.contains(r)));
+    assert!(store.contains(&keep));
+    scenario.teardown();
+}
