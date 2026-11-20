@@ -11,8 +11,11 @@
 //!     [--deadline-nanos N] [--race-seed N] [--corpus DIR]
 //! ```
 //!
-//! - `<guest>` is a `guests/` member, built in release for wasm32-wasip2 (`guest_wasm`, the
-//!   same build the engine suites use); a path ending in `.wasm` is read as is.
+//! - `<guest>` is a `guests/` member, built in release for wasm32-wasip2 by
+//!   `scripts/corpus-guest-build.sh` (path-neutral, `target/guests-corpus`); a path ending in
+//!   `.wasm` is read as is (build it with the same script).
+//! - The written `module.wasm` and `journal.bin` must embed no local paths
+//!   (`corpus-guest-build.sh --check`); otherwise the entry is removed again and refused.
 //! - `--input` is the run input (bytes of the text, `application/octet-stream` like every
 //!   testkit `RunSpec`). `--workflow` defaults to the guest name.
 //! - Defaults: partition 7, run id `run-<entry>`, seed `[0x5a; 32]`, accepted at
@@ -1034,7 +1037,7 @@ async fn record(a: Args) -> Result<PathBuf, String> {
         (bytes, wf)
     } else {
         (
-            common::guest_wasm(&a.guest),
+            corpus_guest_wasm(&a.guest)?,
             a.workflow.clone().unwrap_or_else(|| a.guest.clone()),
         )
     };
@@ -1159,7 +1162,55 @@ fn write_entry(dir: &Path, module: &[u8], bin: &[u8], toml_body: &str) -> Result
     std::fs::write(dir.join("journal.bin"), bin).map_err(|e| format!("journal.bin: {e}"))?;
     std::fs::write(dir.join("entry.toml"), format!("{header}{toml_body}"))
         .map_err(|e| format!("entry.toml: {e}"))?;
+    if let Err(e) = check_no_local_paths(&[dir.join("module.wasm"), dir.join("journal.bin")]) {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err(e);
+    }
     Ok(())
+}
+
+/// A `guests/` member built path-neutrally (`scripts/corpus-guest-build.sh`, own target dir
+/// `target/guests-corpus`), so the recorded module embeds no local build paths.
+fn corpus_guest_wasm(name: &str) -> Result<Vec<u8>, String> {
+    let root = common::repo_root();
+    let target = root.join("target/guests-corpus");
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/corpus-guest-build.sh"))
+        .arg(root.join("guests/Cargo.toml"))
+        .arg(&target)
+        .args(["-p", name])
+        .output()
+        .map_err(|e| format!("spawn scripts/corpus-guest-build.sh: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "path-neutral guest build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let p = target
+        .join("wasm32-wasip2/release")
+        .join(format!("{}.wasm", name.replace('-', "_")));
+    std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))
+}
+
+/// Refuse files that embed local paths (home dir, /tmp, repository root, cargo/rustup home,
+/// session paths): `scripts/corpus-guest-build.sh --check`. A module built without the
+/// remap carries them in its panic-location strings.
+fn check_no_local_paths(files: &[PathBuf]) -> Result<(), String> {
+    let out = std::process::Command::new("bash")
+        .arg(common::repo_root().join("scripts/corpus-guest-build.sh"))
+        .arg("--check")
+        .args(files)
+        .output()
+        .map_err(|e| format!("spawn scripts/corpus-guest-build.sh --check: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing the entry: {}build the guest with scripts/corpus-guest-build.sh",
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
 }
 
 /// `--dump <entry-dir>`: print an existing entry's events (seq, kind, ts, summary) and its

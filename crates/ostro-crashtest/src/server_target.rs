@@ -3,7 +3,8 @@
 //! - [`failpoint_bin`] builds `cargo build --release -p ostro --features failpoints
 //!   --target-dir target/failpoints --locked` once per process (or uses `OSTRO_FAILPOINT_BIN`)
 //!   and asserts that `build-info` ends in `failpoints=on`.
-//! - [`crash_saga_wasm`] builds the guests (`target/guests`, same command as ci-local) once.
+//! - [`crash_saga_wasm`] builds crash-saga once, path-neutrally (`scripts/corpus-guest-build.sh`,
+//!   `target/guests-corpus`).
 //! - [`ServerTarget::spawn`] runs `ostro dev --data-dir <dir> --listen 127.0.0.1:0` with
 //!   `FAILPOINTS` set (or removed), parses the ready line for the bound address and waits
 //!   for `/readyz`. stdout/stderr are drained by threads into a ring buffer, and lines that
@@ -82,32 +83,24 @@ pub fn failpoint_bin() -> PathBuf {
     .clone()
 }
 
-/// The crash-saga component (guests built once per process into `target/guests`).
+/// The crash-saga component, built once per process into `target/guests-corpus` by
+/// `scripts/corpus-guest-build.sh` (path-neutral: `--remap-path-prefix` for the repository,
+/// cargo home, rustup home and target dir). Runs exported from a campaign data dir become
+/// replay-corpus entries, so the deployed module must not embed local build paths. Its own
+/// target dir keeps these flags from invalidating the plain `target/guests` build.
 pub fn crash_saga_wasm() -> Vec<u8> {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
     WASM.get_or_init(|| {
         let root = repo_root();
-        let target = root.join("target/guests");
-        let out = Command::new(cargo())
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-wasip2",
-                "-p",
-                "crash-saga",
-                "--manifest-path",
-            ])
+        let target = root.join("target/guests-corpus");
+        let out = Command::new("bash")
+            .arg(root.join("scripts/corpus-guest-build.sh"))
             .arg(root.join("guests/Cargo.toml"))
-            .arg("--target-dir")
             .arg(&target)
-            .env_remove("RUSTFLAGS")
-            .env_remove("CARGO_ENCODED_RUSTFLAGS")
-            .env_remove("CARGO_BUILD_TARGET")
-            .env_remove("CARGO_TARGET_DIR")
-            .env_remove("RUSTC_WRAPPER")
+            .args(["-p", "crash-saga"])
+            .env("CARGO", cargo())
             .output()
-            .expect("spawn cargo build (guests)");
+            .expect("spawn scripts/corpus-guest-build.sh (guests)");
         assert!(
             out.status.success(),
             "guests build failed:\n{}",

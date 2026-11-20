@@ -21,6 +21,11 @@
 //! dev/test data dirs (`ostro dev`, test servers): their key is ephemeral and not a secret.
 //! Never export from a production data dir; a production key must never be committed.
 //!
+//! The deployed module must have been built path-neutrally (`scripts/corpus-guest-build.sh`):
+//! after writing, `module.wasm` and `journal.bin` are checked with
+//! `corpus-guest-build.sh --check` (no home dir, /tmp, repository root, cargo/rustup home or
+//! session paths), and a failing entry is removed again and refused.
+//!
 //! Before writing, the entry is replayed on the engine (production linker, zero appends,
 //! same terminal outcome); the entry directory must not exist (entries are never
 //! re-recorded, see tests/replay-corpus/README.md).
@@ -54,6 +59,24 @@ struct Args {
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// Refuse files that embed local paths: `scripts/corpus-guest-build.sh --check`.
+fn check_no_local_paths(files: &[PathBuf]) -> Result<(), String> {
+    let out = std::process::Command::new("bash")
+        .arg(repo_root().join("scripts/corpus-guest-build.sh"))
+        .arg("--check")
+        .args(files)
+        .output()
+        .map_err(|e| format!("spawn scripts/corpus-guest-build.sh --check: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing the entry: {}deploy a guest built with scripts/corpus-guest-build.sh",
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -471,6 +494,10 @@ async fn export(a: &Args) -> Result<PathBuf, String> {
     std::fs::write(dir.join("module.wasm"), &x.module).map_err(|e| format!("module: {e}"))?;
     std::fs::write(dir.join("journal.bin"), &x.bin).map_err(|e| format!("journal: {e}"))?;
     std::fs::write(dir.join("entry.toml"), toml).map_err(|e| format!("entry.toml: {e}"))?;
+    if let Err(e) = check_no_local_paths(&[dir.join("module.wasm"), dir.join("journal.bin")]) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
     println!(
         "exported {} ({expected}, {} events)",
         dir.display(),

@@ -86,6 +86,25 @@ directory. Use it to check an entry before committing it.
 
 ## Recording
 
+**Build every recorded guest path-neutrally** with `scripts/corpus-guest-build.sh`. A
+guest's panic and `Location` strings embed the absolute source paths (repository, cargo
+registry, the toolchain's rust-src), and a committed module keeps them forever. The script
+runs the release wasm32-wasip2 build with `--remap-path-prefix` (repository root ->
+`/ostro`, cargo home -> `/cargo`, rustup home -> `/rustup`, target dir -> `/target`,
+`<sysroot>/lib/rustlib/src/rust` -> `/rustc/<rustc commit-hash>`), then checks the output:
+
+```sh
+scripts/corpus-guest-build.sh guests/Cargo.toml target/guests-corpus -p <guest>
+scripts/corpus-guest-build.sh examples/order-saga/Cargo.toml target/order-saga-corpus
+scripts/corpus-guest-build.sh --check <file.wasm>...   # home dir, /tmp, repo root, cargo/rustup home, session paths
+```
+
+`record_corpus` builds named guests this way (`target/guests-corpus`), and the crash
+campaign deploys a crash-saga built this way. Both `record_corpus` and `export_run` run
+`--check` on the written `module.wasm` and `journal.bin` and remove and refuse an entry that
+fails it. For a server export, deploy the module from the script's output, not from a plain
+`cargo build`. `scripts/check-vendored.sh` check 4 also rejects committed session paths.
+
 **Engine recorder** (`crates/ostro-engine/examples/record_corpus.rs`). It drives a guest on
 the engine testkit with scripted inputs, in the same shapes the partition leader commits:
 - D21 `SignalPayload` + `SignalMatched` (immediate, buffered then late, or B1 before the
@@ -145,8 +164,23 @@ re-run it over an existing entry.
 | `order-saga-happy` | examples/order-saga (server export, 05-20) | `ostro dev` + CLI: 5 SDK steps, durable timer, `approve`=true raced with cancellation | completed |
 | `order-saga-compensated` | examples/order-saga (server export, 05-20) | `approve`=false: shielded reverse compensations (`refund_payment`, `release_inventory`) | completed |
 | `order-saga-cancelled` | examples/order-saga (server export, 05-20) | graceful cancel during the settle timer / approval wait, shielded compensations | cancelled |
-| `crash-campaign-s00-a` | crash-saga (server export from the 05-20 10k-kill gate, shard 00, seed 0x0520) | completed run whose start and completion are 8 leader epochs apart (it lived through repeated kill -9 + restart), 5 grants | completed |
-| `crash-campaign-s00-b` | crash-saga (same gate, shard 00) | 7 epochs apart, 7 grants (re-dispatch after kills) | completed |
-| `crash-campaign-s00-c` | crash-saga (same gate, shard 00, late in the shard) | 8 epochs apart, 5 grants | completed |
+| `crash-campaign-s00-a` | crash-saga (server export from a shard-00 run of the 05-20 gate settings: seed 0x0520, 20 shards, 500 kills in the shard) | run `s00-562`: completed, start and completion 8 leader epochs apart (it lived through repeated kill -9 + restart), 5 grants, a step retry | completed |
+| `crash-campaign-s00-b` | crash-saga (same shard-00 run) | run `s00-1421`: 7 epochs apart, 5 grants, step retries (one step failing twice) | completed |
+| `crash-campaign-s00-c` | crash-saga (same shard-00 run, later in the shard) | run `s00-3929`: 7 epochs apart, 5 grants, step retries | completed |
 
 05-20 adds the final entries (order-saga and crash-campaign samples) at the freeze.
+
+The six 05-20 entries (`order-saga-*`, `crash-campaign-s00-*`) were first exported from
+guests built inside a session worktree, so their modules embedded that local path and
+failed `check-vendored.sh` check 4. Before anything pinned their hashes, they were
+re-recorded once (same scenarios, same tools) from guests built with
+`scripts/corpus-guest-build.sh`: the order-saga flows on a fresh `ostro dev`, and the crash
+samples from a new shard-00 campaign run with the gate's settings (500 kills, 0 violations).
+Kill timing is not reproducible, so the crash samples are other runs of the same shape
+(completed, 7-8 leader epochs between start and completion, re-dispatch after kills, step
+retries). This is the only re-recording; rule 1 holds from here on.
+
+The remap removes every local path. A guest of the `guests/` workspace (crash-saga) also
+builds byte-identically from any checkout path. `examples/order-saga` is a standalone
+workspace whose `ostro-sdk` path dependency lies outside it, so cargo's package metadata hash
+still depends on the checkout path. Its bytes are leak-free but not path-independent.

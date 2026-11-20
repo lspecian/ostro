@@ -2,20 +2,20 @@
 # Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
 name = "crash-campaign-s00-b"
 workflow = "crash-saga"
-input_json = "{\"fail_pattern\":\"00010100\",\"id\":\"s00-641\",\"plan\":{\"b1\":false,\"dup\":false,\"signals\":true,\"stop\":null},\"signal_timeout_ms\":600000,\"sleep_ms\":249,\"steps\":8}"
+input_json = "{\"fail_pattern\":\"1010020\",\"id\":\"s00-1421\",\"plan\":{\"b1\":false,\"dup\":false,\"signals\":true,\"stop\":null},\"signal_timeout_ms\":600000,\"sleep_ms\":2804,\"steps\":7}"
 expected = "completed"
-partition = 15
-run_id = "007g38fmzm738xcejrxv6gntshxm4"
-token_key_hex = "1e3ec72960dd61401aae6ffa83d9c9c0e2a5f2977a9677468206233d769bebb0"
-terminal_payload_sha256 = "a76bce829336f7a416410ff9687a7d972c70c7e2f092c3d766b37bab52784b1f"
-journal_events = 29
-module_sha256 = "9bf235e724e877b394b9d76e6ada657a4669c84aa19aa84767a69fd801002d6a"
-journal_sha256 = "8f416a32b68d3ecadbf54a7c72cf13b10360c8e8ccf149281d3e5492afc3592d"
+partition = 6
+run_id = "003038fqm79wpxjqhrgq9c7rkwvgm"
+token_key_hex = "efdf28e6a1bdd7e3c5fcf2e864ee5eede011a108efebc94f6973140dd2fc2970"
+terminal_payload_sha256 = "947a79a1a606c5d16e84f6da258c709385c695777edf872a4ae931cdcd6a13cd"
+journal_events = 31
+module_sha256 = "f9533d5baa7ad1a82607250a8f22dacab60326736f8b44f1b3f2e3ffeafad7ea"
+journal_sha256 = "ece507f4e32ecc9529f278bfbad3fd0021a81e941942214c65889d010b2932b8"
 
 [recorded_with]
-ostro = "8d6562f68549-dirty"
+ostro = "wit/ostro-runtime-v0.1.0-2-gacce046c5dda-dirty"
 wasmtime = "50.0.2"
 target = "x86_64-unknown-linux-gnu"
-date = "2026-11-19"
+date = "2026-11-20"
 tool = "export_run"
-command = "export_run --run 007g38fmzm738xcejrxv6gntshxm4 --entry crash-campaign-s00-b"
+command = "export_run --run 003038fqm79wpxjqhrgq9c7rkwvgm --entry crash-campaign-s00-b"

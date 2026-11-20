@@ -4,18 +4,18 @@ name = "order-saga-cancelled"
 workflow = "order-saga"
 input_json = "{\"amount\":4999,\"order_id\":\"o-cancel\",\"qty\":1,\"settle_ms\":200,\"sku\":\"BOOK-42\"}"
 expected = "cancelled"
-partition = 2
-run_id = "001038fmzwt6axcanmbv1jbhdj2g4"
-token_key_hex = "0394f95111b29efefedd1f88ebfb43587513cc49bd49e8888ae3b015645e4de6"
+partition = 0
+run_id = "000038fqm0rzcxghqy2zz73r45wer"
+token_key_hex = "54a72af5798fe984f297c87083e362523d7cbcf350920c8c115cb070963fac46"
 terminal_payload_sha256 = "084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5"
 journal_events = 13
-module_sha256 = "681640ff3b3de2d2a37cf960b89b2668d7da7aeb87cdb6568817a8ef64855510"
-journal_sha256 = "aade6225de5a1361f70ea2df8ace1a32c325205d79223bdf2120f96e9c4673bc"
+module_sha256 = "0cbbca692a7f8449856598a4f068dc7979d6881e3e6cc7ca692064c8daff6765"
+journal_sha256 = "478ed971933f8553256d582dc0f235b58d9b3a51e079fbce7392415702a4fa91"
 
 [recorded_with]
-ostro = "8d6562f68549-dirty"
+ostro = "wit/ostro-runtime-v0.1.0-2-gacce046c5dda-dirty"
 wasmtime = "50.0.2"
 target = "x86_64-unknown-linux-gnu"
-date = "2026-11-19"
+date = "2026-11-20"
 tool = "export_run"
-command = "export_run --run 001038fmzwt6axcanmbv1jbhdj2g4 --entry order-saga-cancelled"
+command = "export_run --run 000038fqm0rzcxghqy2zz73r45wer --entry order-saga-cancelled"
