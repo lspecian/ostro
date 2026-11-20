@@ -511,11 +511,17 @@ async fn cron_cli_policies() {
     let manual_run: RunId = v["run_id"].as_str().expect("run_id").parse().expect("id");
     let (fires, manual) = runs_of(&s, "skip1");
     assert_eq!((fires.len(), manual), (1, vec![manual_run]));
+    // A retried trigger with the same request id while that run is still live returns the
+    // same run: the manual dedupe row is checked before overlap Skip (was 409).
+    let v = cli_ok(&s, &["trigger", "skip1", "--request-id", "sc2-manual-1"]);
+    assert_eq!(
+        v["run_id"],
+        manual_run.to_string(),
+        "retry while live: same run"
+    );
     signal(&s, &manual_run).await;
     wait_for("manual run done", || live(&s, &[manual_run]) == 0).await;
-    // A retried trigger with the same request id returns the same run. (While that run is
-    // still live, overlap Skip answers 409 first: the overlap check precedes the manual
-    // dedupe row in apply; see 08-20-SUMMARY.)
+    // And after it finished, too.
     let v = cli_ok(&s, &["trigger", "skip1", "--request-id", "sc2-manual-1"]);
     assert_eq!(
         v["run_id"],

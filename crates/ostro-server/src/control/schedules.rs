@@ -30,7 +30,9 @@
 //! the run's idempotency key `__cron/<name>/manual/<hex>` (`ReturnExisting`: a repeated
 //! `request_id` returns the same run). Manual fires never move the watermark; they are
 //! subject to the overlap policy like any fire (an overlap skip is 409 `schedule_overlap`, a
-//! buffered fire returns the run id that will start when the live run ends).
+//! buffered fire returns the run id that will start when the live run ends), except that a
+//! repeated `request_id` is answered by its dedupe row first (apply returns
+//! `Duplicate { existing }`), so a retry while its own run is live returns that run.
 //!
 //! # Schedule source
 //!

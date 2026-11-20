@@ -657,6 +657,42 @@ fn manual_fires_ignore_the_watermark_and_dedupe_by_request_id() {
     h.assert_rebuild_equal();
 }
 
+/// A retried trigger-now (same `request_id`) while its own manual run is live answers the
+/// existing run before the overlap policy, instead of being skipped (Skip) or buffered
+/// (BufferOne). Found by 08-20's CLI e2e (409 `schedule_overlap` on a retry).
+#[test]
+fn manual_retry_while_its_run_is_live_returns_the_run_before_overlap() {
+    for policy in [SKIP, BUFFER] {
+        let mut h = H::new();
+        let n = h.name.clone();
+        let a = h.fire(manual_cmd(&n, 500, b"req-1", policy, C1, &r(1)));
+        assert_eq!(a.out, ApplyOutcome::Accepted);
+        assert!(started(&a, &r(1)));
+        // r1 is live: the retry is a duplicate of r1, not a skip / buffered fire.
+        let a = h.fire(manual_cmd(&n, 600, b"req-1", policy, C1, &r(2)));
+        assert_eq!(a.out, dup(Some(r(1))), "policy {policy}");
+        assert_eq!(a.reads, 3, "schedule row + last run record + dedupe row");
+        assert!(h.run(&r(2)).is_none());
+        let st = h.state();
+        assert_eq!(
+            (
+                st.duplicates,
+                st.skipped,
+                st.fired,
+                st.last_run,
+                st.buffered.is_none()
+            ),
+            (1, 0, 1, Some(r(1)), true),
+            "policy {policy}"
+        );
+        // A different request id still meets the policy.
+        let a = h.fire(manual_cmd(&n, 700, b"req-2", policy, C1, &r(3)));
+        assert_eq!(a.out, ApplyOutcome::Accepted);
+        assert!(h.run(&r(3)).is_none());
+        h.assert_rebuild_equal();
+    }
+}
+
 // ---------------------------------------------------------------- incarnations (W4)
 
 #[test]

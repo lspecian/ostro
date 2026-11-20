@@ -33,6 +33,8 @@
 //!   the second guard). A start sets `last_run`, `fired += 1`, writes the reverse row and
 //!   drops a pending buffered fire (`skipped += 1`): a started fire supersedes it.
 //!   With `last_run` live:
+//!   - `Manual` under `Skip`/`BufferOne` whose `__cron/` dedupe row exists (a retried
+//!     `request_id`): `Duplicate { existing }`, `duplicates += 1`, checked before the policy;
 //!   - `Skip`: `skipped += 1`, no start;
 //!   - `BufferOne`: `buffered = this fire` (a replaced buffered fire counts `skipped += 1`);
 //!     the last run's terminal transition starts it ([`on_run_terminal`]);
@@ -53,7 +55,8 @@
 //!
 //! **Reads:** state row 1; `+1` last-run record when `last_run` is set and the fire is not a
 //! duplicate; `+1` dedupe row (the StartRun read, or the `existing` lookup of a duplicate fire
-//! without `last_run`); `CancelOther`/`TerminateOther` add the cancel/terminate reads
+//! without `last_run`, or the repeated-`request_id` lookup of a `Manual` under a live
+//! `Skip`/`BufferOne`); `CancelOther`/`TerminateOther` add the cancel/terminate reads
 //! (record + children/waits scans). The terminal hook reads nothing for runs without a
 //! `__cron/` idempotency key, 1 (reverse row) for a schedule run without the row, 2 with the
 //! row, and 3 when it starts a buffered fire.
@@ -237,6 +240,22 @@ pub(crate) fn apply_schedule_fire(
     };
 
     if let Some(_last) = live_last {
+        // A repeated manual `request_id` is answered by its dedupe row before the overlap
+        // policy: a retried trigger-now while its own run is live returns that run instead
+        // of being skipped or buffered. (Started policies reach `start_run`, whose dedupe
+        // check runs before any cancel/terminate.)
+        if !moves_watermark && matches!(f.policy, OverlapPolicy::Skip | OverlapPolicy::BufferOne) {
+            let (wf, key) = dedupe_of(st);
+            if let Some(v) = b.get(Table::Dedupe, &dedupe_key(&wf, &key))? {
+                let existing = RunId::from_bytes(&v)
+                    .map_err(|e| StoreError::Codec(format!("dedupe row: {e}")))?;
+                row.duplicates += 1;
+                store_state(b, name, &row);
+                return Ok(ApplyOutcome::Duplicate {
+                    existing: Some(existing),
+                });
+            }
+        }
         match f.policy {
             OverlapPolicy::Skip => {
                 row.skipped += 1;

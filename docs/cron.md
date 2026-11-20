@@ -110,6 +110,8 @@ After catch-up, the steady state resumes at the first fire after `max(floor, now
   - It is subject to the overlap policy like any fire. With `skip`, a trigger while the
     previous run is live answers 409 `schedule_overlap`. With `buffer_one`, it returns the
     id of the run that starts when the live one ends.
+  - A retried `request_id` is checked before the overlap policy: retrying a trigger while
+    its own run is still live returns that run (not 409, not a buffered fire).
 
 ## Exactly-once
 
