@@ -12,7 +12,8 @@ pub mod health {
 ///
 /// Services `Modules`, `Workflows`, `Runs` and `Tokens` (await-token
 /// completion, Phase 5) mirror the REST operations one-to-one, as do the Phase 8
-/// services `Schedules`, `RunLogs` (`schedules.proto`) and `Webhooks` (`webhooks.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
+/// services `Schedules`, `RunLogs` (`schedules.proto`) and `Webhooks` (`webhooks.proto`)
+/// and the Phase 6 services `Secrets` and `Connectors` (`bridge.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
 /// `*_json`; timestamps are Unix milliseconds in `*_at_ms` fields.
 pub mod api {
     /// Version 1 of the control-plane API.
@@ -248,5 +249,59 @@ mod tests {
         assert!(name::<WebhooksServer<()>>().contains("WebhooksServer"));
         assert!(name::<RunLogsClient<tonic::transport::Channel>>().contains("RunLogsClient"));
         assert!(name::<RunLogsServer<()>>().contains("RunLogsServer"));
+    }
+
+    #[test]
+    fn bridge_messages_roundtrip() {
+        use super::api::v1::{
+            ConnectionInfo, GrantInfo, PutSecretRequest, SecretInfo,
+            connectors_client::ConnectorsClient, connectors_server::ConnectorsServer,
+            secrets_client::SecretsClient, secrets_server::SecretsServer,
+        };
+        let put = PutSecretRequest {
+            name: "stripe/live".into(),
+            value: b"sk_live_0123456789".to_vec(),
+            tenant: Some(String::new()),
+        };
+        let back = PutSecretRequest::decode(put.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(back, put);
+        assert_eq!(back.tenant.as_deref(), Some(""));
+        let info = SecretInfo {
+            name: "stripe/live".into(),
+            key_id: "k1".into(),
+            tenant: None,
+        };
+        assert_eq!(
+            SecretInfo::decode(info.encode_to_vec().as_slice()).expect("decode"),
+            info
+        );
+        let g = GrantInfo {
+            id: String::new(),
+            module: "acme/billing".into(),
+            secret: "stripe/live".into(),
+            origins: vec!["https://api.stripe.com".into()],
+            body: true,
+        };
+        assert_eq!(
+            GrantInfo::decode(g.encode_to_vec().as_slice()).expect("decode"),
+            g
+        );
+        let c = ConnectionInfo {
+            name: "db".into(),
+            kind: "sql-postgres".into(),
+            config_json: br#"{"v":1}"#.to_vec(),
+        };
+        assert_eq!(
+            ConnectionInfo::decode(c.encode_to_vec().as_slice()).expect("decode"),
+            c
+        );
+
+        fn name<T: ?Sized>() -> &'static str {
+            std::any::type_name::<T>()
+        }
+        assert!(name::<SecretsClient<tonic::transport::Channel>>().contains("SecretsClient"));
+        assert!(name::<SecretsServer<()>>().contains("SecretsServer"));
+        assert!(name::<ConnectorsClient<tonic::transport::Channel>>().contains("ConnectorsClient"));
+        assert!(name::<ConnectorsServer<()>>().contains("ConnectorsServer"));
     }
 }

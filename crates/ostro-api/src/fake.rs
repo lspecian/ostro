@@ -74,6 +74,13 @@ struct State {
     /// `(sha256, tenant, name)` of every upload past the sha check, in order (the fake does not
     /// qualify names; the real server does, 05-24).
     uploads: Vec<(String, Option<String>, Option<String>)>,
+    /// Phase 6 bridge admin (06-08): `(tenant, name)` -> value. Values stay inside the
+    /// fake; [`FakeControlPlane::secret_value`] exposes them to tests only.
+    secrets: BTreeMap<(Option<String>, String), Vec<u8>>,
+    grants: BTreeMap<String, GrantInfo>,
+    connections: BTreeMap<String, ConnectionInfo>,
+    egress: BTreeMap<String, EgressInfo>,
+    last_presign: Option<PresignedObjectRequest>,
 }
 
 impl State {
@@ -159,6 +166,13 @@ fn parse_fake_token(token: &str) -> Result<(String, u64), ApiError> {
     Ok((run.to_owned(), op))
 }
 
+/// Key id the fake reports for every sealed secret.
+pub const FAKE_SECRET_KEY_ID: &str = "fake-key-1";
+/// Signature the fake's [`ControlPlane::presigned_object`] accepts; anything else is 403.
+pub const FAKE_PRESIGN_VALID_SIG: &str = "valid";
+/// Body of a successful fake presigned GET.
+pub const FAKE_OBJECT_BODY: &[u8] = b"fake-object-body";
+
 /// In-memory control plane.
 pub struct FakeControlPlane {
     state: Mutex<State>,
@@ -181,6 +195,19 @@ impl FakeControlPlane {
             ready: AtomicBool::new(true),
             changed: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Test helper: the stored value of a secret (the API never returns one).
+    pub fn secret_value(&self, name: &str, tenant: Option<&str>) -> Option<Vec<u8>> {
+        self.lock()
+            .secrets
+            .get(&(tenant.map(str::to_owned), name.to_owned()))
+            .cloned()
+    }
+
+    /// Test helper: the last request [`ControlPlane::presigned_object`] received.
+    pub fn last_presigned_object(&self) -> Option<PresignedObjectRequest> {
+        self.lock().last_presign.clone()
     }
 
     /// Flip what [`ControlPlane::ready`] reports.
@@ -927,12 +954,233 @@ impl ControlPlane for FakeControlPlane {
             .copied()
             .unwrap_or_default())
     }
+
+    // --- Phase 6 bridge administration (06-08).
+
+    async fn put_secret(&self, req: PutSecret) -> Result<SecretInfo, ApiError> {
+        req.validate()?;
+        let mut st = self.lock();
+        st.tick();
+        let info = SecretInfo {
+            name: req.name.clone(),
+            key_id: FAKE_SECRET_KEY_ID.to_owned(),
+            tenant: req.tenant.clone(),
+        };
+        st.secrets.insert((req.tenant, req.name), req.value);
+        Ok(info)
+    }
+
+    async fn list_secrets(&self, tenant: Option<String>) -> Result<Vec<SecretInfo>, ApiError> {
+        Ok(self
+            .lock()
+            .secrets
+            .keys()
+            .filter(|(t, _)| *t == tenant)
+            .map(|(t, n)| SecretInfo {
+                name: n.clone(),
+                key_id: FAKE_SECRET_KEY_ID.to_owned(),
+                tenant: t.clone(),
+            })
+            .collect())
+    }
+
+    async fn delete_secret(&self, name: String, tenant: Option<String>) -> Result<(), ApiError> {
+        let mut st = self.lock();
+        if st.secrets.remove(&(tenant, name.clone())).is_none() {
+            return Err(ApiError::not_found(format!("secret {name} not found")));
+        }
+        st.tick();
+        Ok(())
+    }
+
+    async fn put_grant(&self, g: GrantInfo) -> Result<GrantInfo, ApiError> {
+        g.validate()?;
+        let g = GrantInfo {
+            id: g.expected_id(),
+            ..g
+        };
+        let mut st = self.lock();
+        st.tick();
+        st.grants.insert(g.id.clone(), g.clone());
+        Ok(g)
+    }
+
+    async fn list_grants(&self, module: Option<String>) -> Result<Vec<GrantInfo>, ApiError> {
+        Ok(self
+            .lock()
+            .grants
+            .values()
+            .filter(|g| module.as_ref().is_none_or(|m| *m == g.module))
+            .cloned()
+            .collect())
+    }
+
+    async fn delete_grant(&self, id: String) -> Result<(), ApiError> {
+        let mut st = self.lock();
+        if st.grants.remove(&id).is_none() {
+            return Err(ApiError::not_found(format!("grant {id} not found")));
+        }
+        st.tick();
+        Ok(())
+    }
+
+    async fn put_connection(&self, c: ConnectionInfo) -> Result<ConnectionInfo, ApiError> {
+        c.validate()?;
+        let mut st = self.lock();
+        st.tick();
+        st.connections.insert(c.name.clone(), c.clone());
+        Ok(c)
+    }
+
+    async fn get_connection(&self, name: String) -> Result<ConnectionInfo, ApiError> {
+        self.lock()
+            .connections
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found(format!("connection {name} not found")))
+    }
+
+    async fn list_connections(&self) -> Result<Vec<ConnectionInfo>, ApiError> {
+        Ok(self.lock().connections.values().cloned().collect())
+    }
+
+    async fn delete_connection(&self, name: String) -> Result<(), ApiError> {
+        let mut st = self.lock();
+        if st.connections.remove(&name).is_none() {
+            return Err(ApiError::not_found(format!("connection {name} not found")));
+        }
+        st.tick();
+        Ok(())
+    }
+
+    async fn put_egress(&self, e: EgressInfo) -> Result<EgressInfo, ApiError> {
+        e.validate()?;
+        let mut st = self.lock();
+        st.tick();
+        st.egress.insert(e.module.clone(), e.clone());
+        Ok(e)
+    }
+
+    async fn get_egress(&self, module: String) -> Result<EgressInfo, ApiError> {
+        self.lock()
+            .egress
+            .get(&module)
+            .cloned()
+            .ok_or_else(|| ApiError::not_found(format!("egress policy {module} not found")))
+    }
+
+    async fn list_egress(&self) -> Result<Vec<EgressInfo>, ApiError> {
+        Ok(self.lock().egress.values().cloned().collect())
+    }
+
+    async fn delete_egress(&self, module: String) -> Result<(), ApiError> {
+        let mut st = self.lock();
+        if st.egress.remove(&module).is_none() {
+            return Err(ApiError::not_found(format!(
+                "egress policy {module} not found"
+            )));
+        }
+        st.tick();
+        Ok(())
+    }
+
+    /// 200 with [`FAKE_OBJECT_BODY`] (GET) or an empty body (PUT) when `sig` is
+    /// [`FAKE_PRESIGN_VALID_SIG`]; 403 otherwise. Exercises routing only.
+    async fn presigned_object(
+        &self,
+        req: PresignedObjectRequest,
+    ) -> Result<PresignedObjectResponse, ApiError> {
+        let (sig, method) = (req.sig.clone(), req.method);
+        self.lock().last_presign = Some(req);
+        if sig != FAKE_PRESIGN_VALID_SIG {
+            return Ok(PresignedObjectResponse {
+                status: 403,
+                body: b"signature mismatch".to_vec(),
+                content_type: Some("text/plain".to_owned()),
+            });
+        }
+        Ok(match method {
+            PresignMethod::Get => PresignedObjectResponse {
+                status: 200,
+                body: FAKE_OBJECT_BODY.to_vec(),
+                content_type: Some("application/octet-stream".to_owned()),
+            },
+            PresignMethod::Put => PresignedObjectResponse {
+                status: 200,
+                body: Vec::new(),
+                content_type: None,
+            },
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+
+    #[tokio::test]
+    async fn bridge_admin_round_trip() {
+        let cp = FakeControlPlane::new();
+        let info = cp
+            .put_secret(PutSecret {
+                name: "stripe/live".into(),
+                value: b"sk_live_0123456789".to_vec(),
+                tenant: None,
+            })
+            .await
+            .expect("put");
+        assert_eq!(info.key_id, FAKE_SECRET_KEY_ID);
+        assert_eq!(
+            cp.secret_value("stripe/live", None).as_deref(),
+            Some(&b"sk_live_0123456789"[..])
+        );
+        assert_eq!(cp.list_secrets(None).await.expect("list"), vec![info]);
+        assert!(
+            cp.list_secrets(Some("t".into()))
+                .await
+                .expect("list")
+                .is_empty()
+        );
+        cp.delete_secret("stripe/live".into(), None)
+            .await
+            .expect("delete");
+        assert_eq!(
+            cp.delete_secret("stripe/live".into(), None)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        let g = cp
+            .put_grant(GrantInfo {
+                id: String::new(),
+                module: "t/m".into(),
+                secret: "k".into(),
+                origins: vec!["https://x.com".into()],
+                body: false,
+            })
+            .await
+            .expect("grant");
+        assert_eq!(g.id, "secret:t/m:k");
+        assert_eq!(
+            cp.list_grants(Some("t/other".into())).await.unwrap(),
+            vec![]
+        );
+        let bad = cp
+            .presigned_object(PresignedObjectRequest {
+                connection: "c".into(),
+                key: "k".into(),
+                method: PresignMethod::Get,
+                exp: 0,
+                sig: "nope".into(),
+                body: None,
+                content_type: None,
+            })
+            .await
+            .expect("ok");
+        assert_eq!(bad.status, 403);
+    }
 
     fn upload_req(wasm: bytes::Bytes) -> UploadModule {
         UploadModule {

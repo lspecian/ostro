@@ -11,6 +11,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Phase 8 (08-10): schedules + run logs, webhooks.
         "proto/ostro/api/v1/schedules.proto",
         "proto/ostro/api/v1/webhooks.proto",
+        // Phase 6 (06-08): Secrets + Connectors (bridge administration).
+        "proto/ostro/api/v1/bridge.proto",
     ];
     for proto in PROTOS {
         println!("cargo:rerun-if-changed={proto}");

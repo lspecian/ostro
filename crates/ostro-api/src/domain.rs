@@ -92,6 +92,94 @@ pub trait ControlPlane: Send + Sync + 'static {
         let _ = queue;
         Err(ApiError::unimplemented("get_queue_policy"))
     }
+
+    // --- Phase 6 bridge administration (D-FX9, P-16; 06-08). Default bodies answer
+    // Unimplemented so a control plane compiles before it implements them
+    // (ostro-server: 06-16). Implementations call the `validate` helpers below
+    // ([`PutSecret::validate`], [`GrantInfo::validate`], [`ConnectionInfo::validate`],
+    // [`EgressInfo::validate`]) and may validate more strictly.
+
+    /// Seal and store a secret (create or replace). Secret values are write-only: no
+    /// method ever returns one.
+    async fn put_secret(&self, req: PutSecret) -> Result<SecretInfo, ApiError> {
+        let _ = req;
+        Err(ApiError::unimplemented("put_secret"))
+    }
+    /// Metadata of the stored secrets of `tenant` (`None` = global), sorted by name.
+    async fn list_secrets(&self, tenant: Option<String>) -> Result<Vec<SecretInfo>, ApiError> {
+        let _ = tenant;
+        Err(ApiError::unimplemented("list_secrets"))
+    }
+    /// Delete a secret.
+    async fn delete_secret(&self, name: String, tenant: Option<String>) -> Result<(), ApiError> {
+        let _ = (name, tenant);
+        Err(ApiError::unimplemented("delete_secret"))
+    }
+    /// Create or replace an origin-bound secret grant. The id is computed server-side
+    /// ([`GrantInfo::expected_id`]); a client may leave it empty.
+    async fn put_grant(&self, g: GrantInfo) -> Result<GrantInfo, ApiError> {
+        let _ = g;
+        Err(ApiError::unimplemented("put_grant"))
+    }
+    /// Grants, optionally only one module's, sorted by id.
+    async fn list_grants(&self, module: Option<String>) -> Result<Vec<GrantInfo>, ApiError> {
+        let _ = module;
+        Err(ApiError::unimplemented("list_grants"))
+    }
+    /// Delete a grant by id.
+    async fn delete_grant(&self, id: String) -> Result<(), ApiError> {
+        let _ = id;
+        Err(ApiError::unimplemented("delete_grant"))
+    }
+    /// Create or replace a connection.
+    async fn put_connection(&self, c: ConnectionInfo) -> Result<ConnectionInfo, ApiError> {
+        let _ = c;
+        Err(ApiError::unimplemented("put_connection"))
+    }
+    /// One connection by name.
+    async fn get_connection(&self, name: String) -> Result<ConnectionInfo, ApiError> {
+        let _ = name;
+        Err(ApiError::unimplemented("get_connection"))
+    }
+    /// Every connection, sorted by name.
+    async fn list_connections(&self) -> Result<Vec<ConnectionInfo>, ApiError> {
+        Err(ApiError::unimplemented("list_connections"))
+    }
+    /// Delete a connection.
+    async fn delete_connection(&self, name: String) -> Result<(), ApiError> {
+        let _ = name;
+        Err(ApiError::unimplemented("delete_connection"))
+    }
+    /// Create or replace a module's egress policy.
+    async fn put_egress(&self, e: EgressInfo) -> Result<EgressInfo, ApiError> {
+        let _ = e;
+        Err(ApiError::unimplemented("put_egress"))
+    }
+    /// One module's egress policy.
+    async fn get_egress(&self, module: String) -> Result<EgressInfo, ApiError> {
+        let _ = module;
+        Err(ApiError::unimplemented("get_egress"))
+    }
+    /// Every egress policy, sorted by module.
+    async fn list_egress(&self) -> Result<Vec<EgressInfo>, ApiError> {
+        Err(ApiError::unimplemented("list_egress"))
+    }
+    /// Delete a module's egress policy.
+    async fn delete_egress(&self, module: String) -> Result<(), ApiError> {
+        let _ = module;
+        Err(ApiError::unimplemented("delete_egress"))
+    }
+    /// Serve a locally presigned object URL (`GET|PUT /v1/objects/{connection}/{key}`).
+    /// Reached without API authentication: the signature is the authorisation, so the
+    /// implementation verifies `sig`/`exp` before touching the store. A bad or expired
+    /// signature is `Ok` with `status = 403`.
+    async fn presigned_object(
+        &self,
+        req: PresignedObjectRequest,
+    ) -> Result<PresignedObjectResponse, ApiError> {
+        let _ = req;
+        Err(ApiError::unimplemented("presigned_object"))
+    }
 }
 
 /// Upload request: raw module bytes plus the client-claimed digest.
@@ -693,6 +781,369 @@ pub fn effective_limit(limit: u32) -> u32 {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Phase 6 bridge administration (D-FX9, P-16; 06-08)
+//
+// The validation helpers duplicate the minimal checks of ostro-bridge (secret-name
+// grammar, origin patterns, connection kinds) on purpose: ostro-api does not depend on
+// ostro-bridge. The server may validate more strictly (06-16).
+// ---------------------------------------------------------------------------------
+
+/// `details.reason` of a secret value shorter than [`MIN_SECRET_LEN`] (400).
+pub const REASON_SECRET_TOO_SHORT: &str = "secret_too_short";
+/// `details.reason` of a name under the reserved [`RESERVED_SECRET_PREFIX`] (400).
+pub const REASON_SECRET_RESERVED: &str = "secret_reserved";
+/// Shortest accepted secret value, bytes.
+pub const MIN_SECRET_LEN: usize = 8;
+/// Longest accepted secret name, bytes (template grammar).
+pub const MAX_SECRET_NAME_LEN: usize = 128;
+/// Secret names the API never accepts (server-internal sealed records).
+pub const RESERVED_SECRET_PREFIX: &str = "__ostro/";
+/// Grant id prefix (RESERVATIONS §11): `secret:<module>:<secret>`.
+pub const GRANT_ID_PREFIX: &str = "secret:";
+/// Egress allow-list prefix naming a connection (P-7).
+pub const EGRESS_CONNECTION_PREFIX: &str = "connection:";
+/// Connection kinds the bridge knows.
+pub const CONNECTION_KINDS: [&str; 4] = ["sql-postgres", "sql-mysql", "object", "http-target"];
+/// Longest accepted module or connection name, bytes.
+pub const MAX_BRIDGE_NAME_LEN: usize = 256;
+
+/// Store a secret. The value is write-only; `Debug` redacts it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PutSecret {
+    /// Secret name (template grammar).
+    pub name: String,
+    /// The value (at least [`MIN_SECRET_LEN`] bytes).
+    pub value: Vec<u8>,
+    /// Tenant scope; `None` = global.
+    pub tenant: Option<String>,
+}
+
+impl std::fmt::Debug for PutSecret {
+    /// Redacts the value so it never reaches logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PutSecret")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("tenant", &self.tenant)
+            .finish()
+    }
+}
+
+impl PutSecret {
+    /// Name grammar ([`validate_secret_name`]) and minimum length. Errors never echo
+    /// the value.
+    pub fn validate(&self) -> Result<(), ApiError> {
+        validate_secret_name("name", &self.name)?;
+        if self.value.len() < MIN_SECRET_LEN {
+            return Err(ApiError::invalid_argument(format!(
+                "secret value must be at least {MIN_SECRET_LEN} bytes"
+            ))
+            .with_details(serde_json::json!({
+                "reason": REASON_SECRET_TOO_SHORT,
+                "field": "value",
+                "min": MIN_SECRET_LEN,
+            })));
+        }
+        Ok(())
+    }
+}
+
+/// Metadata of a stored secret. Never carries the value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretInfo {
+    /// Secret name.
+    pub name: String,
+    /// Id of the sealing key the value is sealed under.
+    pub key_id: String,
+    /// Tenant scope; `None` = global.
+    pub tenant: Option<String>,
+}
+
+/// An origin-bound secret grant (`Grant{id: "secret:<module>:<secret>", ..}`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GrantInfo {
+    /// `secret:<module>:<secret>` (computed server-side; empty on input = omitted).
+    pub id: String,
+    /// Tenant-qualified deployed module name (`<tenant>/<name>`).
+    pub module: String,
+    /// Secret name.
+    pub secret: String,
+    /// Origin patterns the secret may be sent to (at least one).
+    pub origins: Vec<String>,
+    /// Placeholders allowed in the request body.
+    pub body: bool,
+}
+
+impl GrantInfo {
+    /// The id this grant is stored under.
+    pub fn expected_id(&self) -> String {
+        format!("{GRANT_ID_PREFIX}{}:{}", self.module, self.secret)
+    }
+
+    /// Module and secret names, at least one valid origin pattern, and (when given) an
+    /// id equal to [`GrantInfo::expected_id`].
+    pub fn validate(&self) -> Result<(), ApiError> {
+        validate_module_name("module", &self.module)?;
+        validate_secret_name("secret", &self.secret)?;
+        if self.origins.is_empty() {
+            return Err(field_error("origins", "a grant needs at least one origin"));
+        }
+        for o in &self.origins {
+            validate_origin_pattern("origins", o)?;
+        }
+        if !self.id.is_empty() && self.id != self.expected_id() {
+            return Err(field_error(
+                "id",
+                format!("grant id must be {:?} (or empty)", self.expected_id()),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A connection (SQL database, object store or HTTP target).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectionInfo {
+    /// Connection name (an origin for `http-target`).
+    pub name: String,
+    /// One of [`CONNECTION_KINDS`].
+    pub kind: String,
+    /// Kind-specific config: a JSON object with `"v": 1`.
+    pub config: serde_json::Value,
+}
+
+impl ConnectionInfo {
+    /// Name, a known kind, and a config object with `"v": 1`.
+    pub fn validate(&self) -> Result<(), ApiError> {
+        validate_bridge_name("name", &self.name)?;
+        if !CONNECTION_KINDS.contains(&self.kind.as_str()) {
+            return Err(field_error(
+                "kind",
+                format!(
+                    "unknown connection kind {:?} (expected one of {})",
+                    self.kind,
+                    CONNECTION_KINDS.join(", ")
+                ),
+            ));
+        }
+        let Some(obj) = self.config.as_object() else {
+            return Err(field_error("config", "config must be a JSON object"));
+        };
+        if obj.get("v").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(field_error("config", "config must contain \"v\": 1"));
+        }
+        Ok(())
+    }
+}
+
+/// A module's egress allow list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EgressInfo {
+    /// Tenant-qualified deployed module name.
+    pub module: String,
+    /// Origin patterns or `connection:<name>` entries.
+    pub allow: Vec<String>,
+}
+
+impl EgressInfo {
+    /// Module name and every allow entry ([`validate_egress_entry`]).
+    pub fn validate(&self) -> Result<(), ApiError> {
+        validate_module_name("module", &self.module)?;
+        for e in &self.allow {
+            validate_egress_entry("allow", e)?;
+        }
+        Ok(())
+    }
+}
+
+/// Method of a presigned object request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresignMethod {
+    /// Download.
+    Get,
+    /// Upload.
+    Put,
+}
+
+/// A request to a locally presigned object URL.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PresignedObjectRequest {
+    /// Object connection name.
+    pub connection: String,
+    /// Object key (may contain `/`).
+    pub key: String,
+    /// HTTP method.
+    pub method: PresignMethod,
+    /// Expiry, Unix seconds.
+    pub exp: u64,
+    /// Hex signature.
+    pub sig: String,
+    /// Upload body (`Put` only).
+    pub body: Option<Vec<u8>>,
+    /// Upload content type (`Put` only).
+    pub content_type: Option<String>,
+}
+
+impl std::fmt::Debug for PresignedObjectRequest {
+    /// Redacts the signature (a bearer capability) and elides the body.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PresignedObjectRequest")
+            .field("connection", &self.connection)
+            .field("key", &self.key)
+            .field("method", &self.method)
+            .field("exp", &self.exp)
+            .field("sig", &"<redacted>")
+            .field("body_len", &self.body.as_ref().map(Vec::len))
+            .field("content_type", &self.content_type)
+            .finish()
+    }
+}
+
+/// Response of a presigned object request: any status (403 for a bad signature).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresignedObjectResponse {
+    /// HTTP status.
+    pub status: u16,
+    /// Response body.
+    pub body: Vec<u8>,
+    /// Response content type.
+    pub content_type: Option<String>,
+}
+
+fn field_error(field: &str, message: impl Into<String>) -> ApiError {
+    let message = message.into();
+    ApiError::invalid_argument(format!("{field}: {message}"))
+        .with_details(serde_json::json!({ "field": field }))
+}
+
+/// Secret name grammar: `[a-z0-9][a-z0-9_.\-/]{0,127}`, no `..`, no empty or `.` path
+/// segment, and not under [`RESERVED_SECRET_PREFIX`] (`details.reason =
+/// "secret_reserved"`).
+pub fn validate_secret_name(field: &str, name: &str) -> Result<(), ApiError> {
+    if name.starts_with(RESERVED_SECRET_PREFIX) {
+        return Err(ApiError::invalid_argument(format!(
+            "{field}: names under {RESERVED_SECRET_PREFIX} are reserved"
+        ))
+        .with_details(serde_json::json!({ "field": field, "reason": REASON_SECRET_RESERVED })));
+    }
+    let b = name.as_bytes();
+    let grammar = !b.is_empty()
+        && b.len() <= MAX_SECRET_NAME_LEN
+        && matches!(b[0], b'a'..=b'z' | b'0'..=b'9')
+        && b.iter()
+            .all(|c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'/'));
+    if !grammar {
+        return Err(field_error(
+            field,
+            format!(
+                "secret names are 1..={MAX_SECRET_NAME_LEN} bytes of [a-z0-9_.-/] starting with [a-z0-9]"
+            ),
+        ));
+    }
+    if name.contains("..") || name.split('/').any(|seg| seg.is_empty() || seg == ".") {
+        return Err(field_error(field, "invalid path segment in secret name"));
+    }
+    Ok(())
+}
+
+/// Non-empty, at most [`MAX_BRIDGE_NAME_LEN`] bytes, no control characters.
+fn validate_bridge_name(field: &str, name: &str) -> Result<(), ApiError> {
+    if name.is_empty() {
+        return Err(field_error(field, "must not be empty"));
+    }
+    check_len(field, name, MAX_BRIDGE_NAME_LEN)?;
+    if name.chars().any(char::is_control) {
+        return Err(field_error(field, "must not contain control characters"));
+    }
+    Ok(())
+}
+
+/// A tenant-qualified module name: a bridge name without `:`.
+fn validate_module_name(field: &str, name: &str) -> Result<(), ApiError> {
+    validate_bridge_name(field, name)?;
+    if name.contains(':') {
+        return Err(field_error(field, "module names must not contain ':'"));
+    }
+    Ok(())
+}
+
+fn is_label(l: &str) -> bool {
+    !l.is_empty()
+        && l.len() <= 63
+        && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        && !l.starts_with('-')
+        && !l.ends_with('-')
+}
+
+/// Origin pattern: `scheme://host[:port]` or `scheme://*.domain[:port]` (an optional
+/// trailing `/` is accepted). The scheme is `http` or `https`; a bare `*`, a `*` other
+/// than the whole first label, paths, queries, fragments and userinfo are rejected.
+pub fn validate_origin_pattern(field: &str, pattern: &str) -> Result<(), ApiError> {
+    let bad = |why: &str| field_error(field, format!("invalid origin pattern {pattern:?}: {why}"));
+    let Some((scheme, rest)) = pattern.split_once("://") else {
+        return Err(bad("missing scheme"));
+    };
+    if !matches!(scheme, "http" | "https") {
+        return Err(bad("scheme must be http or https"));
+    }
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    if rest.is_empty() || rest.contains(['/', '?', '#', '@']) {
+        return Err(bad("only scheme://host[:port] is allowed"));
+    }
+    // Split off the port; an IPv6 literal is bracketed.
+    let (host, port) = if let Some(after) = rest.strip_prefix('[') {
+        let (inside, tail) = after.split_once(']').ok_or_else(|| bad("unclosed '['"))?;
+        if inside.is_empty() || !inside.bytes().all(|c| c.is_ascii_hexdigit() || c == b':') {
+            return Err(bad("invalid IPv6 literal"));
+        }
+        let port = match tail {
+            "" => None,
+            t => Some(t.strip_prefix(':').ok_or_else(|| bad("junk after ']'"))?),
+        };
+        (None, port)
+    } else {
+        match rest.rsplit_once(':') {
+            Some((h, p)) => (Some(h), Some(p)),
+            None => (Some(rest), None),
+        }
+    };
+    if let Some(p) = port
+        && !matches!(p.parse::<u16>(), Ok(n) if n > 0)
+    {
+        return Err(bad("invalid port"));
+    }
+    let Some(host) = host else {
+        return Ok(());
+    };
+    if host == "*" {
+        return Err(bad("a bare `*` host is not allowed"));
+    }
+    let (wildcard, domain) = match host.strip_prefix("*.") {
+        Some(d) => (true, d),
+        None => (false, host),
+    };
+    if domain.contains('*') {
+        return Err(bad("`*` is allowed only as the whole first label"));
+    }
+    let labels: Vec<&str> = domain.trim_end_matches('.').split('.').collect();
+    if !labels.iter().all(|l| is_label(l)) {
+        return Err(bad("invalid host"));
+    }
+    if wildcard && labels.len() < 2 {
+        return Err(bad("a wildcard needs at least two labels after `*.`"));
+    }
+    Ok(())
+}
+
+/// An egress allow entry: an origin pattern or `connection:<name>`.
+pub fn validate_egress_entry(field: &str, entry: &str) -> Result<(), ApiError> {
+    match entry.strip_prefix(EGRESS_CONNECTION_PREFIX) {
+        Some(name) => validate_bridge_name(field, name),
+        None => validate_origin_pattern(field, entry),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -882,5 +1333,212 @@ mod tests {
         assert_eq!(effective_limit(0), DEFAULT_PAGE_LIMIT);
         assert_eq!(effective_limit(5), 5);
         assert_eq!(effective_limit(5000), MAX_PAGE_LIMIT);
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use crate::error::ErrorCode;
+
+    fn reason(e: &ApiError) -> Option<&str> {
+        e.details.as_ref()?.get("reason")?.as_str()
+    }
+
+    #[test]
+    fn secret_names() {
+        for ok in [
+            "a",
+            "stripe/live-key",
+            "db.pass_1",
+            "0abc",
+            &"a".repeat(128),
+        ] {
+            validate_secret_name("name", ok).unwrap_or_else(|e| panic!("{ok}: {e:?}"));
+        }
+        for bad in [
+            "",
+            "Upper",
+            "_x",
+            "-x",
+            "/x",
+            "a//b",
+            "a/../b",
+            "a..b",
+            "a/./b",
+            "a/",
+            "sp ace",
+            &"a".repeat(129),
+        ] {
+            let e = validate_secret_name("name", bad).expect_err(bad);
+            assert_eq!(e.code, ErrorCode::InvalidArgument, "{bad}");
+        }
+        let e = validate_secret_name("name", "__ostro/token-key").expect_err("reserved");
+        assert_eq!(reason(&e), Some(REASON_SECRET_RESERVED));
+    }
+
+    #[test]
+    fn put_secret_value_is_redacted_and_checked() {
+        let canary = "CANARY-value-0123456789";
+        let p = PutSecret {
+            name: "k".into(),
+            value: canary.as_bytes().to_vec(),
+            tenant: None,
+        };
+        assert!(!format!("{p:?}").contains(canary));
+        p.validate().expect("ok");
+        let short = PutSecret {
+            value: b"1234567".to_vec(),
+            ..p.clone()
+        };
+        let e = short.validate().expect_err("short");
+        assert_eq!(e.code, ErrorCode::InvalidArgument);
+        assert_eq!(reason(&e), Some(REASON_SECRET_TOO_SHORT));
+        assert!(!e.message.contains("1234567"));
+    }
+
+    #[test]
+    fn origin_patterns() {
+        for ok in [
+            "https://api.stripe.com",
+            "https://api.stripe.com/",
+            "http://localhost:8080",
+            "https://*.example.com",
+            "https://*.example.com:8443",
+            "http://127.0.0.1:9000",
+            "http://[::1]:8080",
+            "https://[2001:db8::1]",
+        ] {
+            validate_origin_pattern("o", ok).unwrap_or_else(|e| panic!("{ok}: {e:?}"));
+        }
+        for bad in [
+            "*",
+            "https://*",
+            "https://*:443",
+            "https://*.com",
+            "https://a.*.com",
+            "api.stripe.com",
+            "ftp://x.com",
+            "https://x.com/path",
+            "https://x.com?q",
+            "https://u@x.com",
+            "https://x.com:0",
+            "https://x.com:99999",
+            "https://",
+            "https://-x.com",
+            "https://[zz]",
+        ] {
+            assert!(validate_origin_pattern("o", bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn grants_connections_egress() {
+        let g = GrantInfo {
+            id: String::new(),
+            module: "acme/billing".into(),
+            secret: "stripe/live".into(),
+            origins: vec!["https://api.stripe.com".into()],
+            body: false,
+        };
+        g.validate().expect("ok");
+        assert_eq!(g.expected_id(), "secret:acme/billing:stripe/live");
+        GrantInfo {
+            id: g.expected_id(),
+            ..g.clone()
+        }
+        .validate()
+        .expect("matching id");
+        for bad in [
+            GrantInfo {
+                id: "secret:other:x".into(),
+                ..g.clone()
+            },
+            GrantInfo {
+                origins: vec![],
+                ..g.clone()
+            },
+            GrantInfo {
+                origins: vec!["*".into()],
+                ..g.clone()
+            },
+            GrantInfo {
+                module: "a:b".into(),
+                ..g.clone()
+            },
+            GrantInfo {
+                secret: "__ostro/presign/x".into(),
+                ..g.clone()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+
+        let c = ConnectionInfo {
+            name: "https://api.example.com".into(),
+            kind: "http-target".into(),
+            config: serde_json::json!({ "v": 1 }),
+        };
+        c.validate().expect("ok");
+        for kind in CONNECTION_KINDS {
+            ConnectionInfo {
+                kind: kind.into(),
+                ..c.clone()
+            }
+            .validate()
+            .expect(kind);
+        }
+        for bad in [
+            ConnectionInfo {
+                kind: "redis".into(),
+                ..c.clone()
+            },
+            ConnectionInfo {
+                config: serde_json::json!([1]),
+                ..c.clone()
+            },
+            ConnectionInfo {
+                config: serde_json::json!({ "v": 2 }),
+                ..c.clone()
+            },
+            ConnectionInfo {
+                name: String::new(),
+                ..c.clone()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+
+        let e = EgressInfo {
+            module: "acme/billing".into(),
+            allow: vec![
+                "https://api.stripe.com".into(),
+                "connection:db".into(),
+                "https://*.example.com".into(),
+            ],
+        };
+        e.validate().expect("ok");
+        for bad in ["*", "connection:", "db", "https://x.com/p"] {
+            let b = EgressInfo {
+                allow: vec![bad.into()],
+                ..e.clone()
+            };
+            assert!(b.validate().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn presign_request_debug_redacts_signature() {
+        let r = PresignedObjectRequest {
+            connection: "files".into(),
+            key: "a/b".into(),
+            method: PresignMethod::Put,
+            exp: 1,
+            sig: "deadbeefcafe".into(),
+            body: Some(b"hello".to_vec()),
+            content_type: None,
+        };
+        let d = format!("{r:?}");
+        assert!(!d.contains("deadbeefcafe") && !d.contains("hello"), "{d}");
     }
 }

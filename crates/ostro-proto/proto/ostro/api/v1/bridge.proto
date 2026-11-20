@@ -1,0 +1,157 @@
+// Effects-bridge administration (Phase 6, 06-08; D-FX9, P-14): secrets and their
+// origin-bound grants (service Secrets), connections and module egress policies
+// (service Connectors).
+//
+// REST mirrors: /v1/secrets, /v1/grants, /v1/connections, /v1/egress. The local
+// presigned object route (REST GET|PUT /v1/objects/{connection}/{key}) is REST-only:
+// it is an HTTP capability URL with no gRPC counterpart.
+//
+// Secret values are write-only: PutSecretRequest.value is the only field that carries
+// one, and no response message has a field that could return it.
+syntax = "proto3";
+
+package ostro.api.v1;
+
+service Secrets {
+  rpc PutSecret(PutSecretRequest) returns (SecretInfo);
+  rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
+  rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
+  rpc PutGrant(PutGrantRequest) returns (GrantInfo);
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
+  rpc DeleteGrant(DeleteGrantRequest) returns (DeleteGrantResponse);
+}
+
+service Connectors {
+  rpc PutConnection(PutConnectionRequest) returns (ConnectionInfo);
+  rpc GetConnection(GetConnectionRequest) returns (ConnectionInfo);
+  rpc ListConnections(ListConnectionsRequest) returns (ListConnectionsResponse);
+  rpc DeleteConnection(DeleteConnectionRequest) returns (DeleteConnectionResponse);
+  rpc PutEgress(PutEgressRequest) returns (EgressInfo);
+  rpc GetEgress(GetEgressRequest) returns (EgressInfo);
+  rpc ListEgress(ListEgressRequest) returns (ListEgressResponse);
+  rpc DeleteEgress(DeleteEgressRequest) returns (DeleteEgressResponse);
+}
+
+// --- Secrets ------------------------------------------------------------------------
+
+message PutSecretRequest {
+  // Secret name (lower-case template grammar; `__ostro/` is reserved).
+  string name = 1;
+  // The value (>= 8 bytes). Write-only: never returned by any RPC.
+  bytes value = 2;
+  // Tenant scope; unset = global.
+  optional string tenant = 3;
+}
+
+// Metadata of a stored secret. Carries no value.
+message SecretInfo {
+  string name = 1;
+  // Id of the sealing key the value is sealed under.
+  string key_id = 2;
+  optional string tenant = 3;
+}
+
+message ListSecretsRequest {
+  optional string tenant = 1;
+}
+
+message ListSecretsResponse {
+  repeated SecretInfo secrets = 1;
+}
+
+message DeleteSecretRequest {
+  string name = 1;
+  optional string tenant = 2;
+}
+
+message DeleteSecretResponse {}
+
+// An origin-bound secret grant: module `module` may send secret `secret` to `origins`.
+message GrantInfo {
+  // `secret:<module>:<secret>`; computed server-side, may be empty on PutGrant.
+  string id = 1;
+  // Tenant-qualified deployed module name (`<tenant>/<name>`).
+  string module = 2;
+  string secret = 3;
+  // `scheme://host[:port]` or `scheme://*.domain[:port]` (at least one).
+  repeated string origins = 4;
+  // Placeholders allowed in the request body.
+  bool body = 5;
+}
+
+message PutGrantRequest {
+  GrantInfo grant = 1;
+}
+
+message ListGrantsRequest {
+  // Only this module's grants; unset = all.
+  optional string module = 1;
+}
+
+message ListGrantsResponse {
+  repeated GrantInfo grants = 1;
+}
+
+message DeleteGrantRequest {
+  string id = 1;
+}
+
+message DeleteGrantResponse {}
+
+// --- Connectors ---------------------------------------------------------------------
+
+message ConnectionInfo {
+  string name = 1;
+  // `sql-postgres`, `sql-mysql`, `object` or `http-target`.
+  string kind = 2;
+  // UTF-8 JSON object with `"v": 1`. Secrets appear only as `{{secret:NAME}}` templates.
+  bytes config_json = 3;
+}
+
+message PutConnectionRequest {
+  ConnectionInfo connection = 1;
+}
+
+message GetConnectionRequest {
+  string name = 1;
+}
+
+message ListConnectionsRequest {}
+
+message ListConnectionsResponse {
+  repeated ConnectionInfo connections = 1;
+}
+
+message DeleteConnectionRequest {
+  string name = 1;
+}
+
+message DeleteConnectionResponse {}
+
+// A module's egress allow list.
+message EgressInfo {
+  // Tenant-qualified deployed module name.
+  string module = 1;
+  // Origin patterns or `connection:<name>` entries.
+  repeated string allow = 2;
+}
+
+message PutEgressRequest {
+  EgressInfo egress = 1;
+}
+
+message GetEgressRequest {
+  string module = 1;
+}
+
+message ListEgressRequest {}
+
+message ListEgressResponse {
+  repeated EgressInfo policies = 1;
+}
+
+message DeleteEgressRequest {
+  string module = 1;
+}
+
+message DeleteEgressResponse {}
