@@ -12,8 +12,30 @@
 //! 3. **Classifier** ([`classify`]): the IANA special-purpose tables with IPv4-mapped,
 //!    IPv4-compatible, NAT64 and 6to4 unwrapping, and the node-level `allow_private`
 //!    exemptions ([`EgressConfig::allow_private`], P-6).
+//! 4. **Client** ([`client`]): the only `reqwest::ClientBuilder` in ostro-bridge.
+//!
+//! # Exactly one guarded client
+//!
+//! [`Egress::client`] is built once and shared. Every guest-driven request goes through it,
+//! so every connection it opens was vetted by the resolver (or, for IP literals, by the
+//! gate), and its pooled connections stay on those vetted addresses. A second client built
+//! elsewhere (or a default-constructed reqwest client) would read proxy env vars, follow up to 10
+//! redirects and resolve through getaddrinfo, silently skipping every guard; a test greps
+//! the crate so that the reqwest builder is only called from `egress/client.rs`.
+//!
+//! # Manual redirects (P-5)
+//!
+//! The client never follows redirects (`Policy::none()`). A reqwest redirect policy has no
+//! module context, so it cannot apply the per-module allow-list or re-classify IP-literal
+//! targets (which the resolver never sees). The HTTP connector (06-10) follows untemplated
+//! redirects itself, calling [`Egress::check`] on every hop; templated requests never follow
+//! redirects.
+//!
+//! [`Egress::operator_client`] serves operator-configured, trusted endpoints (object
+//! stores): same no-proxy / no-redirect / no-referer settings, normal resolution.
 
 pub mod classify;
+pub mod client;
 pub mod config;
 pub mod policy;
 pub mod resolver;
@@ -28,6 +50,7 @@ use ostro_meta::records::EgressPolicy;
 use ostro_types::journal::{ErrorInfo, Failure, Payload};
 
 pub use classify::{effective_v4, is_blocked};
+pub use client::{ReadError, TooLarge, read_capped};
 pub use config::EgressConfig;
 pub use policy::{AllowRule, RuleError, allows_connection, parse_rule};
 pub use resolver::{EgressResolver, HickoryLookup, Lookup, ResolveDenied, StaticLookup};
@@ -140,6 +163,7 @@ pub struct Egress {
     cfg: EgressConfig,
     allow_private: Arc<[IpNet]>,
     lookup: Arc<dyn Lookup>,
+    client: reqwest::Client,
 }
 
 impl Egress {
@@ -148,11 +172,29 @@ impl Egress {
     pub fn new(cfg: EgressConfig, lookup: Arc<dyn Lookup>) -> Result<Self, EgressError> {
         cfg.validate().map_err(EgressError::Config)?;
         let allow_private: Arc<[IpNet]> = cfg.allow_private.clone().into();
+        let client = client::guarded(
+            &cfg,
+            EgressResolver::new(lookup.clone(), allow_private.clone()),
+        )?;
         Ok(Self {
             cfg,
             allow_private,
             lookup,
+            client,
         })
+    }
+
+    /// The single guarded client (no proxy, no redirects, no referer, no compression,
+    /// vetting resolver). Run [`Egress::check`] on every URL before sending.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    /// A client for trusted operator endpoints (object stores): no proxy, no redirects,
+    /// no referer, system resolver, no private-range block.
+    pub fn operator_client(cfg: &EgressConfig) -> Result<reqwest::Client, EgressError> {
+        cfg.validate().map_err(EgressError::Config)?;
+        Ok(client::operator(cfg)?)
     }
 
     /// The `[egress]` section this layer was built with.
