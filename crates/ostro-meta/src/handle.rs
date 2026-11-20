@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::command::{DecodeError, MetaCommand, MetaResult, decode_result, encode_command};
+use crate::command::{self, DecodeError, MetaCommand, MetaResult, decode_result, encode_command};
 use crate::records::ClusterInfo;
 use crate::sm::{MetaSm, MetaView};
 use crate::{DriverConfig, NullOutbox, ProposeError, RaftDriver, RaftHandle};
@@ -111,6 +111,36 @@ impl MetaHandle {
                 Err(MetaError::Timeout)
             }
         }
+    }
+
+    /// Bootstrap a brand-new metadata group in the empty directory `dir` from a metadata
+    /// snapshot (`[META_FORMAT] ‖ postcard(MetaState)`, as uploaded by the bottomless
+    /// uploader as `meta/<index>.msnap`), then start it like [`MetaHandle::start`].
+    ///
+    /// Native raft install (08-18 spike, research Open Question 5): the snapshot is written
+    /// into the Raft log store at `index` (term 1, configuration = {`node_id`}) exactly as a
+    /// follower would install a leader's snapshot, so the restored state is byte-identical,
+    /// including every record's `updated_index`, the applied index is `index`, and new
+    /// proposals continue after it (the new term's empty entry is `index + 1`). No leader is
+    /// needed: the lone voter campaigns on start.
+    ///
+    /// Refuses a directory that already holds a Raft log or snapshot, and a snapshot that
+    /// does not decode (nothing is written then). `index` 0 is treated as 1 (raft reserves 0
+    /// for "no snapshot").
+    pub async fn bootstrap_from_snapshot(
+        dir: &Path,
+        node_id: u64,
+        index: u64,
+        snapshot: &[u8],
+    ) -> Result<MetaHandle, MetaError> {
+        command::decode_snapshot(snapshot)
+            .map_err(|e| MetaError::Start(format!("metadata snapshot: {e}")))?;
+        let dir_buf = dir.to_path_buf();
+        let data = snapshot.to_vec();
+        tokio::task::spawn_blocking(move || install_bootstrap(&dir_buf, node_id, index, data))
+            .await
+            .map_err(|e| MetaError::Start(format!("bootstrap task: {e}")))??;
+        Self::start(dir, node_id).await
     }
 
     async fn wait_leader_caught_up(&self) -> Result<(), MetaError> {
@@ -255,6 +285,33 @@ impl MetaHandle {
             let _ = tokio::task::spawn_blocking(move || driver.stop()).await;
         }
     }
+}
+
+/// Write the bootstrap snapshot into an empty Raft log store (blocking).
+fn install_bootstrap(dir: &Path, node_id: u64, index: u64, data: Vec<u8>) -> Result<(), MetaError> {
+    use ostro_raft_driver::raft::eraftpb::Snapshot;
+    use ostro_raft_driver::{LogStoreOptions, RaftLogStore};
+
+    let start = |e: std::io::Error| MetaError::Start(format!("metadata log store: {e}"));
+    let store = RaftLogStore::open(dir, LogStoreOptions::default()).map_err(start)?;
+    if store.snapshot_index_term() != (0, 0) || store.entry_count() > 0 {
+        return Err(MetaError::Start(format!(
+            "{}: metadata log already exists; bootstrap needs an empty directory",
+            dir.display()
+        )));
+    }
+    let mut snap = Snapshot {
+        data: data.into(),
+        ..Snapshot::default()
+    };
+    let meta = snap.mut_metadata();
+    meta.index = index.max(1);
+    meta.term = 1;
+    meta.mut_conf_state().voters = vec![node_id];
+    store
+        .apply_snapshot(snap)
+        .map_err(start)?
+        .map_err(|e| MetaError::Start(format!("bootstrap snapshot: {e}")))
 }
 
 #[cfg(test)]

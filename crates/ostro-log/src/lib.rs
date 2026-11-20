@@ -10,12 +10,14 @@
 //! - [`hw`]: high-watermark computation shared with the Phase 12 cluster.
 //! - [`epoch_cache`]: leader-epoch history (ported Kafka semantics).
 //! - [`barrier`]: readiness barrier and trim permits (STOR-08).
+//! - [`import`]: write a partition log from raw envelope batches up to a cut (restore, 08-18).
 
 pub mod barrier;
 pub mod cut;
 pub mod epoch_cache;
 pub mod error;
 pub mod hw;
+pub mod import;
 pub mod node;
 pub mod recovery;
 pub mod replicated;
@@ -26,6 +28,7 @@ pub use barrier::{ReadyBarrier, TrimPermit};
 pub use cut::HwVector;
 pub use error::LogError;
 pub use hw::{ReplicaProgress, compute_hw};
+pub use import::{ImportMode, ImportReport, write_partition_log};
 pub use node::{LogNode, LogNodeConfig, PartitionLogs};
 pub use ostro_wal;
 pub use recovery::{RecoveryReport, TornCut, recover_partition};
