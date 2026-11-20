@@ -1465,6 +1465,730 @@ async fn ui_shell() -> Html<String> {
 }
 
 // ---------------------------------------------------------------------------------
+// Phase 6 bridge administration (D-FX9, P-16; 06-08): secrets, grants, connections,
+// egress policies, and the unauthenticated local presign route.
+//
+// Request bodies of these routes are never logged: the trace layer records only the
+// request line and status, and `PutSecretBody`'s `Debug` redacts the value.
+// ---------------------------------------------------------------------------------
+
+/// `PUT /v1/secrets/{name}` body: exactly one of `value` (UTF-8) or `value_b64`
+/// (standard base64, padding optional). Write-only.
+#[derive(Clone, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutSecretBody {
+    /// The value as UTF-8 text.
+    #[schema(write_only)]
+    pub value: Option<String>,
+    /// The value as standard base64.
+    #[schema(write_only)]
+    pub value_b64: Option<String>,
+}
+
+impl std::fmt::Debug for PutSecretBody {
+    /// Redacts both value fields so they never reach logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PutSecretBody")
+            .field("value", &self.value.as_ref().map(|_| "<redacted>"))
+            .field("value_b64", &self.value_b64.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// `?tenant=` of the secret routes.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TenantQuery {
+    /// Tenant scope; absent = global secrets.
+    pub tenant: Option<String>,
+}
+
+/// Metadata of a stored secret (never its value).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SecretInfoDto {
+    /// Secret name.
+    pub name: String,
+    /// Id of the sealing key the value is sealed under.
+    pub key_id: String,
+    /// Tenant scope; null = global.
+    pub tenant: Option<String>,
+}
+
+impl From<domain::SecretInfo> for SecretInfoDto {
+    fn from(s: domain::SecretInfo) -> Self {
+        SecretInfoDto {
+            name: s.name,
+            key_id: s.key_id,
+            tenant: s.tenant,
+        }
+    }
+}
+
+/// `GET /v1/secrets` response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SecretListResponse {
+    /// Secrets sorted by name.
+    pub secrets: Vec<SecretInfoDto>,
+}
+
+/// An origin-bound secret grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GrantDto {
+    /// `secret:<module>:<secret>`; computed server-side (may be omitted on PUT).
+    #[serde(default)]
+    pub id: String,
+    /// Tenant-qualified deployed module name (`<tenant>/<name>`).
+    pub module: String,
+    /// Secret name.
+    pub secret: String,
+    /// Origin patterns (`scheme://host[:port]`, `scheme://*.domain[:port]`).
+    pub origins: Vec<String>,
+    /// Placeholders allowed in the request body.
+    #[serde(default)]
+    pub body: bool,
+}
+
+impl From<domain::GrantInfo> for GrantDto {
+    fn from(g: domain::GrantInfo) -> Self {
+        GrantDto {
+            id: g.id,
+            module: g.module,
+            secret: g.secret,
+            origins: g.origins,
+            body: g.body,
+        }
+    }
+}
+
+impl From<GrantDto> for domain::GrantInfo {
+    fn from(g: GrantDto) -> Self {
+        domain::GrantInfo {
+            id: g.id,
+            module: g.module,
+            secret: g.secret,
+            origins: g.origins,
+            body: g.body,
+        }
+    }
+}
+
+/// `GET /v1/grants` response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GrantListResponse {
+    /// Grants sorted by id.
+    pub grants: Vec<GrantDto>,
+}
+
+/// `?module=` of `GET /v1/grants`.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct GrantListQuery {
+    /// Only this module's grants.
+    pub module: Option<String>,
+}
+
+/// `PUT /v1/connections/{name}` body.
+#[derive(Clone, Debug, PartialEq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutConnectionBody {
+    /// `sql-postgres`, `sql-mysql`, `object` or `http-target`.
+    pub kind: String,
+    /// Kind-specific config object with `"v": 1`; secrets only as `{{secret:NAME}}`.
+    pub config: serde_json::Value,
+}
+
+/// A connection.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ConnectionDto {
+    /// Connection name.
+    pub name: String,
+    /// Connection kind.
+    pub kind: String,
+    /// Kind-specific config.
+    pub config: serde_json::Value,
+}
+
+impl From<domain::ConnectionInfo> for ConnectionDto {
+    fn from(c: domain::ConnectionInfo) -> Self {
+        ConnectionDto {
+            name: c.name,
+            kind: c.kind,
+            config: c.config,
+        }
+    }
+}
+
+/// `GET /v1/connections` response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ConnectionListResponse {
+    /// Connections sorted by name.
+    pub connections: Vec<ConnectionDto>,
+}
+
+/// `PUT /v1/egress/{module}` body.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutEgressBody {
+    /// Origin patterns or `connection:<name>` entries.
+    pub allow: Vec<String>,
+}
+
+/// A module's egress policy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct EgressDto {
+    /// Tenant-qualified deployed module name.
+    pub module: String,
+    /// Origin patterns or `connection:<name>` entries.
+    pub allow: Vec<String>,
+}
+
+impl From<domain::EgressInfo> for EgressDto {
+    fn from(e: domain::EgressInfo) -> Self {
+        EgressDto {
+            module: e.module,
+            allow: e.allow,
+        }
+    }
+}
+
+/// `GET /v1/egress` response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct EgressListResponse {
+    /// Policies sorted by module.
+    pub policies: Vec<EgressDto>,
+}
+
+/// `?exp=&sig=` of a presigned object URL.
+#[derive(Clone, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PresignQuery {
+    /// Expiry, Unix seconds.
+    pub exp: Option<u64>,
+    /// Hex signature.
+    pub sig: Option<String>,
+}
+
+/// Object bytes (documentation-only schema of presigned object bodies).
+#[derive(ToSchema)]
+#[schema(value_type = String, format = Binary)]
+pub struct ObjectBytes(#[allow(dead_code)] Vec<u8>);
+
+/// Standard base64 (RFC 4648 §4), padding optional, no whitespace. ostro-api has no
+/// base64 dependency and the lock file is fixed for this plan.
+pub(crate) fn decode_base64(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    }
+    let b = s.as_bytes();
+    let b = b
+        .strip_suffix(b"==")
+        .or_else(|| b.strip_suffix(b"="))
+        .unwrap_or(b);
+    if b.len() % 4 == 1 || (s.len() != b.len() && !s.len().is_multiple_of(4)) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(b.len() * 3 / 4);
+    for chunk in b.chunks(4) {
+        let mut acc = 0u32;
+        for (i, &c) in chunk.iter().enumerate() {
+            acc |= val(c)? << (18 - 6 * i);
+        }
+        let bytes = acc.to_be_bytes();
+        let n = chunk.len() - 1;
+        // Non-canonical trailing bits are rejected.
+        if chunk.len() < 4 && (acc & ((1 << (8 * (3 - n))) - 1)) != 0 {
+            return None;
+        }
+        out.extend_from_slice(&bytes[1..=n]);
+    }
+    Some(out)
+}
+
+fn secret_value(b: PutSecretBody) -> Result<Vec<u8>, ApiError> {
+    match (b.value, b.value_b64) {
+        (Some(v), None) => Ok(v.into_bytes()),
+        (None, Some(v)) => decode_base64(&v).ok_or_else(|| {
+            ApiError::invalid_argument("value_b64: not valid standard base64")
+                .with_details(serde_json::json!({ "field": "value_b64" }))
+        }),
+        _ => Err(
+            ApiError::invalid_argument("exactly one of value or value_b64 is required")
+                .with_details(serde_json::json!({ "field": "value" })),
+        ),
+    }
+}
+
+fn no_content() -> Response {
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Store a secret (create or replace). The value is write-only.
+#[utoipa::path(
+    put,
+    path = "/v1/secrets/{name}",
+    tag = "secrets",
+    params(
+        ("name" = String, Path, description = "Secret name (may contain `/`)"),
+        TenantQuery,
+    ),
+    request_body = PutSecretBody,
+    responses(
+        (status = 200, description = "Secret stored (metadata only)", body = SecretInfoDto),
+        (status = 400, description = "Invalid name, reserved name (secret_reserved) or value shorter than 8 bytes (secret_too_short)", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+    )
+)]
+async fn put_secret(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+    q: Result<Query<TenantQuery>, QueryRejection>,
+    body: Result<Json<PutSecretBody>, JsonRejection>,
+) -> Result<Json<SecretInfoDto>, ApiError> {
+    let tenant = query(q)?.tenant;
+    let value = secret_value(json_body(body)?)?;
+    let info = cp
+        .put_secret(domain::PutSecret {
+            name,
+            value,
+            tenant,
+        })
+        .await?;
+    Ok(Json(info.into()))
+}
+
+/// List secrets (metadata only; values are never returned).
+#[utoipa::path(
+    get,
+    path = "/v1/secrets",
+    tag = "secrets",
+    params(TenantQuery),
+    responses((status = 200, description = "Secrets", body = SecretListResponse))
+)]
+async fn list_secrets(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    q: Result<Query<TenantQuery>, QueryRejection>,
+) -> Result<Json<SecretListResponse>, ApiError> {
+    let secrets = cp.list_secrets(query(q)?.tenant).await?;
+    Ok(Json(SecretListResponse {
+        secrets: secrets.into_iter().map(Into::into).collect(),
+    }))
+}
+
+/// Delete a secret.
+#[utoipa::path(
+    delete,
+    path = "/v1/secrets/{name}",
+    tag = "secrets",
+    params(
+        ("name" = String, Path, description = "Secret name (may contain `/`)"),
+        TenantQuery,
+    ),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "Unknown secret", body = ErrorBody),
+    )
+)]
+async fn delete_secret(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+    q: Result<Query<TenantQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    cp.delete_secret(name, query(q)?.tenant).await?;
+    Ok(no_content())
+}
+
+/// Create or replace a secret grant (the id is computed server-side).
+#[utoipa::path(
+    put,
+    path = "/v1/grants",
+    tag = "secrets",
+    request_body = GrantDto,
+    responses(
+        (status = 200, description = "Stored grant", body = GrantDto),
+        (status = 400, description = "Invalid module, secret name, origin pattern or id", body = ErrorBody),
+    )
+)]
+async fn put_grant(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    body: Result<Json<GrantDto>, JsonRejection>,
+) -> Result<Json<GrantDto>, ApiError> {
+    let g = cp.put_grant(json_body(body)?.into()).await?;
+    Ok(Json(g.into()))
+}
+
+/// List grants.
+#[utoipa::path(
+    get,
+    path = "/v1/grants",
+    tag = "secrets",
+    params(GrantListQuery),
+    responses((status = 200, description = "Grants", body = GrantListResponse))
+)]
+async fn list_grants(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    q: Result<Query<GrantListQuery>, QueryRejection>,
+) -> Result<Json<GrantListResponse>, ApiError> {
+    let grants = cp.list_grants(query(q)?.module).await?;
+    Ok(Json(GrantListResponse {
+        grants: grants.into_iter().map(Into::into).collect(),
+    }))
+}
+
+/// Delete a grant.
+#[utoipa::path(
+    delete,
+    path = "/v1/grants/{id}",
+    tag = "secrets",
+    params(("id" = String, Path, description = "Grant id `secret:<module>:<secret>` (may contain `/`)")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "Unknown grant", body = ErrorBody),
+    )
+)]
+async fn delete_grant(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    cp.delete_grant(id).await?;
+    Ok(no_content())
+}
+
+/// Create or replace a connection.
+#[utoipa::path(
+    put,
+    path = "/v1/connections/{name}",
+    tag = "connectors",
+    params(("name" = String, Path, description = "Connection name, percent-decoded (http-target names are origins)")),
+    request_body = PutConnectionBody,
+    responses(
+        (status = 200, description = "Stored connection", body = ConnectionDto),
+        (status = 400, description = "Unknown kind or invalid config", body = ErrorBody),
+    )
+)]
+async fn put_connection(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+    body: Result<Json<PutConnectionBody>, JsonRejection>,
+) -> Result<Json<ConnectionDto>, ApiError> {
+    let b = json_body(body)?;
+    let c = cp
+        .put_connection(domain::ConnectionInfo {
+            name,
+            kind: b.kind,
+            config: b.config,
+        })
+        .await?;
+    Ok(Json(c.into()))
+}
+
+/// One connection.
+#[utoipa::path(
+    get,
+    path = "/v1/connections/{name}",
+    tag = "connectors",
+    params(("name" = String, Path, description = "Connection name, percent-decoded")),
+    responses(
+        (status = 200, description = "Connection", body = ConnectionDto),
+        (status = 404, description = "Unknown connection", body = ErrorBody),
+    )
+)]
+async fn get_connection(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<ConnectionDto>, ApiError> {
+    Ok(Json(cp.get_connection(name).await?.into()))
+}
+
+/// List connections.
+#[utoipa::path(
+    get,
+    path = "/v1/connections",
+    tag = "connectors",
+    responses((status = 200, description = "Connections", body = ConnectionListResponse))
+)]
+async fn list_connections(
+    State(cp): State<Arc<dyn ControlPlane>>,
+) -> Result<Json<ConnectionListResponse>, ApiError> {
+    let connections = cp.list_connections().await?;
+    Ok(Json(ConnectionListResponse {
+        connections: connections.into_iter().map(Into::into).collect(),
+    }))
+}
+
+/// Delete a connection.
+#[utoipa::path(
+    delete,
+    path = "/v1/connections/{name}",
+    tag = "connectors",
+    params(("name" = String, Path, description = "Connection name, percent-decoded")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "Unknown connection", body = ErrorBody),
+    )
+)]
+async fn delete_connection(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    cp.delete_connection(name).await?;
+    Ok(no_content())
+}
+
+/// Create or replace a module's egress policy.
+#[utoipa::path(
+    put,
+    path = "/v1/egress/{module}",
+    tag = "connectors",
+    params(("module" = String, Path, description = "Tenant-qualified module name (contains `/`)")),
+    request_body = PutEgressBody,
+    responses(
+        (status = 200, description = "Stored policy", body = EgressDto),
+        (status = 400, description = "Invalid module name or allow entry", body = ErrorBody),
+    )
+)]
+async fn put_egress(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(module): Path<String>,
+    body: Result<Json<PutEgressBody>, JsonRejection>,
+) -> Result<Json<EgressDto>, ApiError> {
+    let b = json_body(body)?;
+    let e = cp
+        .put_egress(domain::EgressInfo {
+            module,
+            allow: b.allow,
+        })
+        .await?;
+    Ok(Json(e.into()))
+}
+
+/// One module's egress policy.
+#[utoipa::path(
+    get,
+    path = "/v1/egress/{module}",
+    tag = "connectors",
+    params(("module" = String, Path, description = "Tenant-qualified module name (contains `/`)")),
+    responses(
+        (status = 200, description = "Policy", body = EgressDto),
+        (status = 404, description = "No policy for this module", body = ErrorBody),
+    )
+)]
+async fn get_egress(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(module): Path<String>,
+) -> Result<Json<EgressDto>, ApiError> {
+    Ok(Json(cp.get_egress(module).await?.into()))
+}
+
+/// List egress policies.
+#[utoipa::path(
+    get,
+    path = "/v1/egress",
+    tag = "connectors",
+    responses((status = 200, description = "Policies", body = EgressListResponse))
+)]
+async fn list_egress(
+    State(cp): State<Arc<dyn ControlPlane>>,
+) -> Result<Json<EgressListResponse>, ApiError> {
+    let policies = cp.list_egress().await?;
+    Ok(Json(EgressListResponse {
+        policies: policies.into_iter().map(Into::into).collect(),
+    }))
+}
+
+/// Delete a module's egress policy.
+#[utoipa::path(
+    delete,
+    path = "/v1/egress/{module}",
+    tag = "connectors",
+    params(("module" = String, Path, description = "Tenant-qualified module name (contains `/`)")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "No policy for this module", body = ErrorBody),
+    )
+)]
+async fn delete_egress(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(module): Path<String>,
+) -> Result<Response, ApiError> {
+    cp.delete_egress(module).await?;
+    Ok(no_content())
+}
+
+fn presign_parts(
+    q: Result<Query<PresignQuery>, QueryRejection>,
+) -> Result<(u64, String), ApiError> {
+    let q = query(q)?;
+    match (q.exp, q.sig) {
+        (Some(exp), Some(sig)) if !sig.is_empty() => Ok((exp, sig)),
+        _ => Err(
+            ApiError::invalid_argument("presigned object URLs need exp and sig")
+                .with_details(serde_json::json!({ "field": "sig" })),
+        ),
+    }
+}
+
+fn presign_response(r: domain::PresignedObjectResponse) -> Response {
+    let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut resp = (status, axum::body::Body::from(r.body)).into_response();
+    if let Some(ct) = r
+        .content_type
+        .and_then(|ct| axum::http::HeaderValue::from_str(&ct).ok())
+    {
+        resp.headers_mut().insert(header::CONTENT_TYPE, ct);
+    }
+    resp
+}
+
+/// Download through a locally presigned URL. Not behind API authentication: the
+/// signature is the authorisation.
+#[utoipa::path(
+    get,
+    path = "/v1/objects/{connection}/{key}",
+    tag = "connectors",
+    params(
+        ("connection" = String, Path, description = "Object connection name"),
+        ("key" = String, Path, description = "Object key (may contain `/`)"),
+        PresignQuery,
+    ),
+    responses(
+        (status = 200, description = "Object bytes", body = ObjectBytes, content_type = "application/octet-stream"),
+        (status = 400, description = "Missing exp or sig", body = ErrorBody),
+        (status = 403, description = "Bad or expired signature"),
+        (status = 404, description = "Unknown object"),
+    )
+)]
+async fn get_presigned_object(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path((connection, key)): Path<(String, String)>,
+    q: Result<Query<PresignQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let (exp, sig) = presign_parts(q)?;
+    let r = cp
+        .presigned_object(domain::PresignedObjectRequest {
+            connection,
+            key,
+            method: domain::PresignMethod::Get,
+            exp,
+            sig,
+            body: None,
+            content_type: None,
+        })
+        .await?;
+    Ok(presign_response(r))
+}
+
+/// Upload through a locally presigned URL. Not behind API authentication: the
+/// signature is the authorisation.
+#[utoipa::path(
+    put,
+    path = "/v1/objects/{connection}/{key}",
+    tag = "connectors",
+    params(
+        ("connection" = String, Path, description = "Object connection name"),
+        ("key" = String, Path, description = "Object key (may contain `/`)"),
+        PresignQuery,
+    ),
+    request_body(description = "Object bytes", content((ObjectBytes = "application/octet-stream"))),
+    responses(
+        (status = 200, description = "Stored"),
+        (status = 400, description = "Missing exp or sig", body = ErrorBody),
+        (status = 403, description = "Bad or expired signature"),
+        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+    )
+)]
+async fn put_presigned_object(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path((connection, key)): Path<(String, String)>,
+    q: Result<Query<PresignQuery>, QueryRejection>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ApiError> {
+    let (exp, sig) = presign_parts(q)?;
+    let body = body.map_err(|r| body_rejection(r.status(), r.body_text()))?;
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let r = cp
+        .presigned_object(domain::PresignedObjectRequest {
+            connection,
+            key,
+            method: domain::PresignMethod::Put,
+            exp,
+            sig,
+            body: Some(body.to_vec()),
+            content_type,
+        })
+        .await?;
+    Ok(presign_response(r))
+}
+
+/// Register `umr` at `axum_path` (a `{*wildcard}` path) while documenting it under the
+/// OpenAPI path its `#[utoipa::path]` names (`{name}` style): utoipa-axum would
+/// otherwise mount the documented single-segment path.
+fn wildcard_routes<S: Clone + Send + Sync + 'static>(
+    mut router: OpenApiRouter<S>,
+    (schemas, paths, method_router): utoipa_axum::router::UtoipaMethodRouter<S>,
+    axum_path: &str,
+) -> OpenApiRouter<S> {
+    let doc = router.get_openapi_mut();
+    for (path, item) in paths.paths {
+        if let Some(it) = doc.paths.paths.get_mut(&path) {
+            it.merge_operations(item);
+        } else {
+            doc.paths.paths.insert(path, item);
+        }
+    }
+    doc.components
+        .get_or_insert_with(utoipa::openapi::Components::new)
+        .schemas
+        .extend(schemas);
+    router.route(axum_path, method_router)
+}
+
+/// Phase 6 bridge admin routes (06-08), merged into [`api_routes`].
+fn bridge_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
+    let r = r
+        .routes(routes!(list_secrets))
+        .routes(routes!(put_grant, list_grants))
+        .routes(routes!(list_connections))
+        .routes(routes!(list_egress));
+    let r = wildcard_routes(r, routes!(put_secret, delete_secret), "/v1/secrets/{*name}");
+    let r = wildcard_routes(r, routes!(delete_grant), "/v1/grants/{*id}");
+    let r = wildcard_routes(
+        r,
+        routes!(put_connection, get_connection, delete_connection),
+        "/v1/connections/{*name}",
+    );
+    wildcard_routes(
+        r,
+        routes!(put_egress, get_egress, delete_egress),
+        "/v1/egress/{*module}",
+    )
+}
+
+/// `GET|PUT /v1/objects/{connection}/{*key}` (06-08): the local presign route. It is
+/// mounted by [`crate::router_with`] **outside** the API middleware stack, so API
+/// authentication (when added) never applies to it; the signature is the
+/// authorisation. It carries no trace layer either: the query holds the signature.
+pub fn object_routes() -> OpenApiRouter<CpState> {
+    let mut doc = utoipa::openapi::OpenApi::default();
+    doc.info.title = ApiDoc::openapi().info.title;
+    wildcard_routes(
+        OpenApiRouter::with_openapi(doc),
+        routes!(get_presigned_object, put_presigned_object),
+        "/v1/objects/{connection}/{*key}",
+    )
+}
+
+// ---------------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------------
 
@@ -1484,6 +2208,8 @@ async fn ui_shell() -> Html<String> {
         (name = "schedules", description = "Cron schedules (Phase 8)"),
         (name = "webhooks", description = "Inbound webhooks: definitions and POST /hooks/{name} (Phase 8)"),
         (name = "admin", description = "Online backup (Phase 8)"),
+        (name = "secrets", description = "Write-only secrets and origin-bound secret grants (Phase 6)"),
+        (name = "connectors", description = "Connections, module egress policies and presigned object URLs (Phase 6)"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )
@@ -1497,7 +2223,7 @@ pub struct ApiDoc;
 pub fn api_routes(max_module_bytes: usize) -> OpenApiRouter<CpState> {
     let mut doc = ApiDoc::openapi();
     doc.info.version = env!("CARGO_PKG_VERSION").to_owned();
-    OpenApiRouter::with_openapi(doc)
+    let r = OpenApiRouter::with_openapi(doc)
         .routes(routes!(upload_module).layer(DefaultBodyLimit::max(max_module_bytes)))
         .routes(routes!(get_module))
         .routes(routes!(list_workflows))
@@ -1517,5 +2243,30 @@ pub fn api_routes(max_module_bytes: usize) -> OpenApiRouter<CpState> {
         .routes(routes!(healthz))
         .routes(routes!(readyz))
         .routes(routes!(openapi_json))
-        .routes(routes!(ui_shell))
+        .routes(routes!(ui_shell));
+    bridge_routes(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_base64;
+
+    #[test]
+    fn base64_decoding() {
+        assert_eq!(decode_base64("").as_deref(), Some(&b""[..]));
+        assert_eq!(decode_base64("Zg==").as_deref(), Some(&b"f"[..]));
+        assert_eq!(decode_base64("Zg").as_deref(), Some(&b"f"[..]));
+        assert_eq!(decode_base64("Zm8=").as_deref(), Some(&b"fo"[..]));
+        assert_eq!(decode_base64("Zm9v").as_deref(), Some(&b"foo"[..]));
+        assert_eq!(decode_base64("Zm9vYg").as_deref(), Some(&b"foob"[..]));
+        assert_eq!(
+            decode_base64("+/+/").as_deref(),
+            Some(&[0xfb, 0xff, 0xbf][..])
+        );
+        for bad in [
+            "Z", "Zh==", "Zg=", "Zm9v=", "Zm 9v", "Zm9v-_", "Zg===", "=", "Zm8=Zm8=",
+        ] {
+            assert_eq!(decode_base64(bad), None, "{bad}");
+        }
+    }
 }

@@ -212,6 +212,404 @@ expression: pretty
         }
       }
     },
+    "/v1/connections": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "List connections.",
+        "operationId": "list_connections",
+        "responses": {
+          "200": {
+            "description": "Connections",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/connections/{name}": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "One connection.",
+        "operationId": "get_connection",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Connection name, percent-decoded",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Create or replace a connection.",
+        "operationId": "put_connection",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Connection name, percent-decoded (http-target names are origins)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutConnectionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown kind or invalid config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Delete a connection.",
+        "operationId": "delete_connection",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Connection name, percent-decoded",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Unknown connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/egress": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "List egress policies.",
+        "operationId": "list_egress",
+        "responses": {
+          "200": {
+            "description": "Policies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/egress/{module}": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "One module's egress policy.",
+        "operationId": "get_egress",
+        "parameters": [
+          {
+            "name": "module",
+            "in": "path",
+            "description": "Tenant-qualified module name (contains `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No policy for this module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Create or replace a module's egress policy.",
+        "operationId": "put_egress",
+        "parameters": [
+          {
+            "name": "module",
+            "in": "path",
+            "description": "Tenant-qualified module name (contains `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutEgressBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EgressDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid module name or allow entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Delete a module's egress policy.",
+        "operationId": "delete_egress",
+        "parameters": [
+          {
+            "name": "module",
+            "in": "path",
+            "description": "Tenant-qualified module name (contains `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No policy for this module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/grants": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "List grants.",
+        "operationId": "list_grants",
+        "parameters": [
+          {
+            "name": "module",
+            "in": "query",
+            "description": "Only this module's grants.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Create or replace a secret grant (the id is computed server-side).",
+        "operationId": "put_grant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrantDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid module, secret name, origin pattern or id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/grants/{id}": {
+      "delete": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Delete a grant.",
+        "operationId": "delete_grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Grant id `secret:<module>:<secret>` (may contain `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Unknown grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/modules/{sha256}": {
       "get": {
         "tags": [
@@ -356,6 +754,169 @@ expression: pretty
           },
           "413": {
             "description": "Module exceeds api.max_module_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/objects/{connection}/{key}": {
+      "get": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Download through a locally presigned URL. Not behind API authentication: the\nsignature is the authorisation.",
+        "operationId": "get_presigned_object",
+        "parameters": [
+          {
+            "name": "connection",
+            "in": "path",
+            "description": "Object connection name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Object key (may contain `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "exp",
+            "in": "query",
+            "description": "Expiry, Unix seconds.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "sig",
+            "in": "query",
+            "description": "Hex signature.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Object bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectBytes"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing exp or sig",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Bad or expired signature"
+          },
+          "404": {
+            "description": "Unknown object"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "connectors"
+        ],
+        "summary": "Upload through a locally presigned URL. Not behind API authentication: the\nsignature is the authorisation.",
+        "operationId": "put_presigned_object",
+        "parameters": [
+          {
+            "name": "connection",
+            "in": "path",
+            "description": "Object connection name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Object key (may contain `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "exp",
+            "in": "query",
+            "description": "Expiry, Unix seconds.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "sig",
+            "in": "query",
+            "description": "Hex signature.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Object bytes",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/ObjectBytes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored"
+          },
+          "400": {
+            "description": "Missing exp or sig",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Bad or expired signature"
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
             "content": {
               "application/json": {
                 "schema": {
@@ -1566,6 +2127,151 @@ expression: pretty
         }
       }
     },
+    "/v1/secrets": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "List secrets (metadata only; values are never returned).",
+        "operationId": "list_secrets",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant scope; absent = global secrets.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Secrets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/secrets/{name}": {
+      "put": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Store a secret (create or replace). The value is write-only.",
+        "operationId": "put_secret",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Secret name (may contain `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant scope; absent = global secrets.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutSecretBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Secret stored (metadata only)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretInfoDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name, reserved name (secret_reserved) or value shorter than 8 bytes (secret_too_short)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Delete a secret.",
+        "operationId": "delete_secret",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Secret name (may contain `/`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant scope; absent = global secrets.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "Unknown secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tokens/complete": {
       "post": {
         "tags": [
@@ -2347,6 +3053,44 @@ expression: pretty
           "reject"
         ]
       },
+      "ConnectionDto": {
+        "type": "object",
+        "description": "A connection.",
+        "required": [
+          "name",
+          "kind",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "description": "Kind-specific config."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Connection kind."
+          },
+          "name": {
+            "type": "string",
+            "description": "Connection name."
+          }
+        }
+      },
+      "ConnectionListResponse": {
+        "type": "object",
+        "description": "`GET /v1/connections` response.",
+        "required": [
+          "connections"
+        ],
+        "properties": {
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectionDto"
+            },
+            "description": "Connections sorted by name."
+          }
+        }
+      },
       "DeletedDto": {
         "type": "object",
         "description": "Delete result.",
@@ -2362,6 +3106,43 @@ expression: pretty
           "name": {
             "type": "string",
             "description": "Deleted record name."
+          }
+        }
+      },
+      "EgressDto": {
+        "type": "object",
+        "description": "A module's egress policy.",
+        "required": [
+          "module",
+          "allow"
+        ],
+        "properties": {
+          "allow": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Origin patterns or `connection:<name>` entries."
+          },
+          "module": {
+            "type": "string",
+            "description": "Tenant-qualified deployed module name."
+          }
+        }
+      },
+      "EgressListResponse": {
+        "type": "object",
+        "description": "`GET /v1/egress` response.",
+        "required": [
+          "policies"
+        ],
+        "properties": {
+          "policies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EgressDto"
+            },
+            "description": "Policies sorted by module."
           }
         }
       },
@@ -2396,6 +3177,56 @@ expression: pretty
           "message": {
             "type": "string",
             "description": "Human-readable message."
+          }
+        }
+      },
+      "GrantDto": {
+        "type": "object",
+        "description": "An origin-bound secret grant.",
+        "required": [
+          "module",
+          "secret",
+          "origins"
+        ],
+        "properties": {
+          "body": {
+            "type": "boolean",
+            "description": "Placeholders allowed in the request body."
+          },
+          "id": {
+            "type": "string",
+            "description": "`secret:<module>:<secret>`; computed server-side (may be omitted on PUT)."
+          },
+          "module": {
+            "type": "string",
+            "description": "Tenant-qualified deployed module name (`<tenant>/<name>`)."
+          },
+          "origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Origin patterns (`scheme://host[:port]`, `scheme://*.domain[:port]`)."
+          },
+          "secret": {
+            "type": "string",
+            "description": "Secret name."
+          }
+        }
+      },
+      "GrantListResponse": {
+        "type": "object",
+        "description": "`GET /v1/grants` response.",
+        "required": [
+          "grants"
+        ],
+        "properties": {
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrantDto"
+            },
+            "description": "Grants sorted by id."
           }
         }
       },
@@ -2546,6 +3377,11 @@ expression: pretty
           }
         }
       },
+      "ObjectBytes": {
+        "type": "string",
+        "format": "binary",
+        "description": "Object bytes (documentation-only schema of presigned object bodies)."
+      },
       "OverlapPolicyDto": {
         "type": "string",
         "description": "What a fire does when the previous run of the schedule is still open. Numbering\n([`OverlapPolicyDto::as_u8`]) equals the meta `OVERLAP_*` constants (05-07).",
@@ -2556,6 +3392,64 @@ expression: pretty
           "cancel_other",
           "terminate_other"
         ]
+      },
+      "PutConnectionBody": {
+        "type": "object",
+        "description": "`PUT /v1/connections/{name}` body.",
+        "required": [
+          "kind",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "description": "Kind-specific config object with `\"v\": 1`; secrets only as `{{secret:NAME}}`."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`sql-postgres`, `sql-mysql`, `object` or `http-target`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PutEgressBody": {
+        "type": "object",
+        "description": "`PUT /v1/egress/{module}` body.",
+        "required": [
+          "allow"
+        ],
+        "properties": {
+          "allow": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Origin patterns or `connection:<name>` entries."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PutSecretBody": {
+        "type": "object",
+        "description": "`PUT /v1/secrets/{name}` body: exactly one of `value` (UTF-8) or `value_b64`\n(standard base64, padding optional). Write-only.",
+        "properties": {
+          "value": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The value as UTF-8 text.",
+            "writeOnly": true
+          },
+          "value_b64": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The value as standard base64.",
+            "writeOnly": true
+          }
+        },
+        "additionalProperties": false
       },
       "RetryBody": {
         "type": "object",
@@ -3141,6 +4035,47 @@ expression: pretty
               "$ref": "#/components/schemas/ScheduleDto"
             },
             "description": "Every schedule, by name."
+          }
+        }
+      },
+      "SecretInfoDto": {
+        "type": "object",
+        "description": "Metadata of a stored secret (never its value).",
+        "required": [
+          "name",
+          "key_id"
+        ],
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "description": "Id of the sealing key the value is sealed under."
+          },
+          "name": {
+            "type": "string",
+            "description": "Secret name."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant scope; null = global."
+          }
+        }
+      },
+      "SecretListResponse": {
+        "type": "object",
+        "description": "`GET /v1/secrets` response.",
+        "required": [
+          "secrets"
+        ],
+        "properties": {
+          "secrets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SecretInfoDto"
+            },
+            "description": "Secrets sorted by name."
           }
         }
       },
@@ -3750,6 +4685,14 @@ expression: pretty
     {
       "name": "admin",
       "description": "Online backup (Phase 8)"
+    },
+    {
+      "name": "secrets",
+      "description": "Write-only secrets and origin-bound secret grants (Phase 6)"
+    },
+    {
+      "name": "connectors",
+      "description": "Connections, module egress policies and presigned object URLs (Phase 6)"
     },
     {
       "name": "health",

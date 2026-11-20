@@ -19,8 +19,8 @@ pub use openapi::openapi;
 pub use phase8::ApiExtensions;
 
 use ostro_proto::api::v1::{
-    modules_server::ModulesServer, runs_server::RunsServer, tokens_server::TokensServer,
-    workflows_server::WorkflowsServer,
+    connectors_server::ConnectorsServer, modules_server::ModulesServer, runs_server::RunsServer,
+    secrets_server::SecretsServer, tokens_server::TokensServer, workflows_server::WorkflowsServer,
 };
 use ostro_proto::health::v1::{
     CheckRequest, CheckResponse,
@@ -78,8 +78,10 @@ pub fn ui_shell_html() -> String {
 
 /// Build the combined one-port router: REST (`/v1/...`), `/openapi.json`, `/healthz`,
 /// `/readyz`, the UI shell at `/`, and the tonic gRPC services (`ostro.health.v1.Health`,
-/// `ostro.api.v1.{Modules,Workflows,Runs,Tokens}`) under their `/<package>.<Service>/`
-/// paths.
+/// `ostro.api.v1.{Modules,Workflows,Runs,Tokens,Secrets,Connectors}`) under their
+/// `/<package>.<Service>/` paths. The Phase 6 presign route
+/// (`/v1/objects/{connection}/{key}`, [`rest::object_routes`]) is mounted outside the
+/// REST middleware stack.
 ///
 /// gRPC size limits mirror REST: the Modules server's decode limit is raised from
 /// tonic's 4 MiB default to `cfg.max_module_bytes` (plus framing headroom; the module
@@ -117,16 +119,33 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
         .add_service(
             TokensServer::new(grpc::GrpcTokens(cp.clone()))
                 .max_decoding_message_size(cfg.max_request_bytes),
+        )
+        // Phase 6 (06-08): bridge administration.
+        .add_service(
+            SecretsServer::new(grpc::GrpcSecrets(cp.clone()))
+                .max_decoding_message_size(cfg.max_request_bytes),
+        )
+        .add_service(
+            ConnectorsServer::new(grpc::GrpcConnectors(cp.clone()))
+                .max_decoding_message_size(cfg.max_request_bytes),
         );
     let grpc = phase8::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
         .into_axum_router()
         .layer(axum::middleware::map_response(grpc::map_size_limit_status));
+    // The local presign route (06-08) sits outside the API middleware stack below: API
+    // authentication, when added there, must never wrap it (the signature is the
+    // authorisation), and it has no trace layer (its query carries the signature).
+    let (objects, _doc) = rest::object_routes().split_for_parts();
+    let objects = objects
+        .with_state(cp.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes));
     rest.with_state(cp)
         .merge(phase8::router(ext))
         // Route-level limits (the module upload, the hook body) are inner layers and win
         // over this one.
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes))
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        .merge(objects)
         .merge(grpc)
 }
 

@@ -17,6 +17,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
                 .split_for_parts()
                 .1,
         );
+        // Phase 6 (06-08): the presign route, mounted outside the API middleware.
+        doc.merge(crate::rest::object_routes().split_for_parts().1);
         doc
     })
     .clone()

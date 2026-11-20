@@ -1,7 +1,7 @@
 //! gRPC adapter: `ostro.api.v1` services over [`ControlPlane`].
 //!
-//! [`GrpcModules`], [`GrpcWorkflows`], [`GrpcRuns`] and [`GrpcTokens`] are thin
-//! translators, like the
+//! [`GrpcModules`], [`GrpcWorkflows`], [`GrpcRuns`], [`GrpcTokens`], [`GrpcSecrets`] and
+//! [`GrpcConnectors`] are thin translators, like the
 //! REST handlers: proto request -> domain request -> `ControlPlane` -> proto response.
 //! Errors go through [`to_status`], which takes the code from the shared
 //! [`ApiError::grpc_code`] table. Every proto <-> domain conversion lives in this file.
@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use ostro_proto::api::v1 as pb;
-use ostro_proto::api::v1::{modules_server, runs_server, tokens_server, workflows_server};
+use ostro_proto::api::v1::{
+    connectors_server, modules_server, runs_server, secrets_server, tokens_server, workflows_server,
+};
 use tonic::{Request, Response, Status};
 
 use crate::domain::{self, ControlPlane};
@@ -688,6 +690,271 @@ impl tokens_server::Tokens for GrpcTokens {
             accepted: r.accepted,
             dry_run: r.dry_run,
         }))
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 6 bridge administration (06-08): ostro.api.v1.{Secrets, Connectors}
+// ---------------------------------------------------------------------------------
+
+impl From<domain::SecretInfo> for pb::SecretInfo {
+    fn from(s: domain::SecretInfo) -> Self {
+        pb::SecretInfo {
+            name: s.name,
+            key_id: s.key_id,
+            tenant: s.tenant,
+        }
+    }
+}
+
+impl From<domain::GrantInfo> for pb::GrantInfo {
+    fn from(g: domain::GrantInfo) -> Self {
+        pb::GrantInfo {
+            id: g.id,
+            module: g.module,
+            secret: g.secret,
+            origins: g.origins,
+            body: g.body,
+        }
+    }
+}
+
+impl From<pb::GrantInfo> for domain::GrantInfo {
+    fn from(g: pb::GrantInfo) -> Self {
+        domain::GrantInfo {
+            id: g.id,
+            module: g.module,
+            secret: g.secret,
+            origins: g.origins,
+            body: g.body,
+        }
+    }
+}
+
+impl From<domain::ConnectionInfo> for pb::ConnectionInfo {
+    fn from(c: domain::ConnectionInfo) -> Self {
+        pb::ConnectionInfo {
+            name: c.name,
+            kind: c.kind,
+            config_json: json_bytes(&c.config),
+        }
+    }
+}
+
+impl TryFrom<pb::ConnectionInfo> for domain::ConnectionInfo {
+    type Error = ApiError;
+
+    /// `config_json` must be JSON (empty = `null`, which validation then rejects).
+    fn try_from(c: pb::ConnectionInfo) -> Result<Self, ApiError> {
+        Ok(domain::ConnectionInfo {
+            config: payload_from_proto("config_json", &c.config_json)?,
+            name: c.name,
+            kind: c.kind,
+        })
+    }
+}
+
+impl From<domain::EgressInfo> for pb::EgressInfo {
+    fn from(e: domain::EgressInfo) -> Self {
+        pb::EgressInfo {
+            module: e.module,
+            allow: e.allow,
+        }
+    }
+}
+
+impl From<pb::EgressInfo> for domain::EgressInfo {
+    fn from(e: pb::EgressInfo) -> Self {
+        domain::EgressInfo {
+            module: e.module,
+            allow: e.allow,
+        }
+    }
+}
+
+fn required<T>(field: &str, v: Option<T>) -> Result<T, Status> {
+    v.ok_or_else(|| {
+        to_status(
+            ApiError::invalid_argument(format!("{field} is required"))
+                .with_details(serde_json::json!({ "field": field })),
+        )
+    })
+}
+
+/// `ostro.api.v1.Secrets` (secrets and grants) over a [`ControlPlane`]. Secret values
+/// are accepted on `PutSecret` only and never returned.
+#[derive(Clone)]
+pub struct GrpcSecrets(pub Arc<dyn ControlPlane>);
+
+/// `ostro.api.v1.Connectors` (connections and egress policies) over a [`ControlPlane`].
+#[derive(Clone)]
+pub struct GrpcConnectors(pub Arc<dyn ControlPlane>);
+
+#[tonic::async_trait]
+impl secrets_server::Secrets for GrpcSecrets {
+    async fn put_secret(
+        &self,
+        request: Request<pb::PutSecretRequest>,
+    ) -> Result<Response<pb::SecretInfo>, Status> {
+        let r = request.into_inner();
+        let info = self
+            .0
+            .put_secret(domain::PutSecret {
+                name: r.name,
+                value: r.value,
+                tenant: r.tenant,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(info.into()))
+    }
+
+    async fn list_secrets(
+        &self,
+        request: Request<pb::ListSecretsRequest>,
+    ) -> Result<Response<pb::ListSecretsResponse>, Status> {
+        let secrets = self
+            .0
+            .list_secrets(request.into_inner().tenant)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListSecretsResponse {
+            secrets: secrets.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    async fn delete_secret(
+        &self,
+        request: Request<pb::DeleteSecretRequest>,
+    ) -> Result<Response<pb::DeleteSecretResponse>, Status> {
+        let r = request.into_inner();
+        self.0
+            .delete_secret(r.name, r.tenant)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::DeleteSecretResponse {}))
+    }
+
+    async fn put_grant(
+        &self,
+        request: Request<pb::PutGrantRequest>,
+    ) -> Result<Response<pb::GrantInfo>, Status> {
+        let g = required("grant", request.into_inner().grant)?;
+        let g = self.0.put_grant(g.into()).await.map_err(to_status)?;
+        Ok(Response::new(g.into()))
+    }
+
+    async fn list_grants(
+        &self,
+        request: Request<pb::ListGrantsRequest>,
+    ) -> Result<Response<pb::ListGrantsResponse>, Status> {
+        let grants = self
+            .0
+            .list_grants(request.into_inner().module)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::ListGrantsResponse {
+            grants: grants.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    async fn delete_grant(
+        &self,
+        request: Request<pb::DeleteGrantRequest>,
+    ) -> Result<Response<pb::DeleteGrantResponse>, Status> {
+        self.0
+            .delete_grant(request.into_inner().id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::DeleteGrantResponse {}))
+    }
+}
+
+#[tonic::async_trait]
+impl connectors_server::Connectors for GrpcConnectors {
+    async fn put_connection(
+        &self,
+        request: Request<pb::PutConnectionRequest>,
+    ) -> Result<Response<pb::ConnectionInfo>, Status> {
+        let c = required("connection", request.into_inner().connection)?;
+        let c = domain::ConnectionInfo::try_from(c).map_err(to_status)?;
+        let c = self.0.put_connection(c).await.map_err(to_status)?;
+        Ok(Response::new(c.into()))
+    }
+
+    async fn get_connection(
+        &self,
+        request: Request<pb::GetConnectionRequest>,
+    ) -> Result<Response<pb::ConnectionInfo>, Status> {
+        let c = self
+            .0
+            .get_connection(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(c.into()))
+    }
+
+    async fn list_connections(
+        &self,
+        _request: Request<pb::ListConnectionsRequest>,
+    ) -> Result<Response<pb::ListConnectionsResponse>, Status> {
+        let connections = self.0.list_connections().await.map_err(to_status)?;
+        Ok(Response::new(pb::ListConnectionsResponse {
+            connections: connections.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    async fn delete_connection(
+        &self,
+        request: Request<pb::DeleteConnectionRequest>,
+    ) -> Result<Response<pb::DeleteConnectionResponse>, Status> {
+        self.0
+            .delete_connection(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::DeleteConnectionResponse {}))
+    }
+
+    async fn put_egress(
+        &self,
+        request: Request<pb::PutEgressRequest>,
+    ) -> Result<Response<pb::EgressInfo>, Status> {
+        let e = required("egress", request.into_inner().egress)?;
+        let e = self.0.put_egress(e.into()).await.map_err(to_status)?;
+        Ok(Response::new(e.into()))
+    }
+
+    async fn get_egress(
+        &self,
+        request: Request<pb::GetEgressRequest>,
+    ) -> Result<Response<pb::EgressInfo>, Status> {
+        let e = self
+            .0
+            .get_egress(request.into_inner().module)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(e.into()))
+    }
+
+    async fn list_egress(
+        &self,
+        _request: Request<pb::ListEgressRequest>,
+    ) -> Result<Response<pb::ListEgressResponse>, Status> {
+        let policies = self.0.list_egress().await.map_err(to_status)?;
+        Ok(Response::new(pb::ListEgressResponse {
+            policies: policies.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    async fn delete_egress(
+        &self,
+        request: Request<pb::DeleteEgressRequest>,
+    ) -> Result<Response<pb::DeleteEgressResponse>, Status> {
+        self.0
+            .delete_egress(request.into_inner().module)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::DeleteEgressResponse {}))
     }
 }
 

@@ -2541,3 +2541,624 @@ mod phase8 {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Phase 6 (06-08): Secrets and Connectors parity (secrets, grants, connections, egress).
+// The presign route is REST-only (no gRPC counterpart).
+// ---------------------------------------------------------------------------------
+
+mod bridge {
+    use super::*;
+    use ostro_proto::api::v1::{
+        connectors_client::ConnectorsClient, secrets_client::SecretsClient,
+    };
+
+    fn secret_out(name: &Value, key_id: &Value, tenant: &Value) -> Value {
+        json!({ "name": name, "key_id": key_id, "tenant": tenant })
+    }
+
+    fn grant_out(
+        id: &Value,
+        module: &Value,
+        secret: &Value,
+        origins: &Value,
+        body: &Value,
+    ) -> Value {
+        json!({ "id": id, "module": module, "secret": secret, "origins": origins, "body": body })
+    }
+
+    fn pb_secret(s: &pb::SecretInfo) -> Value {
+        secret_out(&json!(s.name), &json!(s.key_id), &json!(s.tenant))
+    }
+
+    fn pb_grant(g: &pb::GrantInfo) -> Value {
+        grant_out(
+            &json!(g.id),
+            &json!(g.module),
+            &json!(g.secret),
+            &json!(g.origins),
+            &json!(g.body),
+        )
+    }
+
+    fn pb_connection(c: &pb::ConnectionInfo) -> Value {
+        json!({ "name": c.name, "kind": c.kind, "config": embed(&c.config_json) })
+    }
+
+    fn pb_egress(e: &pb::EgressInfo) -> Value {
+        json!({ "module": e.module, "allow": e.allow })
+    }
+
+    fn rest_secret(v: &Value) -> Value {
+        secret_out(&v["name"], &v["key_id"], &v["tenant"])
+    }
+
+    fn rest_grant(v: &Value) -> Value {
+        grant_out(
+            &v["id"],
+            &v["module"],
+            &v["secret"],
+            &v["origins"],
+            &v["body"],
+        )
+    }
+
+    fn rest_connection(v: &Value) -> Value {
+        json!({ "name": v["name"], "kind": v["kind"], "config": v["config"] })
+    }
+
+    fn rest_egress(v: &Value) -> Value {
+        json!({ "module": v["module"], "allow": v["allow"] })
+    }
+
+    fn rest_list(v: &Value, key: &str, f: fn(&Value) -> Value) -> Value {
+        Value::Array(v[key].as_array().expect(key).iter().map(f).collect())
+    }
+
+    /// Percent-encode a path segment (names may contain `/` and `:`).
+    fn enc(s: &str) -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    }
+
+    trait BridgeClient {
+        async fn put_secret(&mut self, name: &str, value: &[u8], tenant: Option<&str>) -> Out;
+        async fn list_secrets(&mut self, tenant: Option<&str>) -> Out;
+        async fn delete_secret(&mut self, name: &str, tenant: Option<&str>) -> Out;
+        async fn put_grant(&mut self, g: Value) -> Out;
+        async fn list_grants(&mut self, module: Option<&str>) -> Out;
+        async fn delete_grant(&mut self, id: &str) -> Out;
+        async fn put_connection(&mut self, name: &str, kind: &str, config: Value) -> Out;
+        async fn get_connection(&mut self, name: &str) -> Out;
+        async fn list_connections(&mut self) -> Out;
+        async fn delete_connection(&mut self, name: &str) -> Out;
+        async fn put_egress(&mut self, module: &str, allow: &[&str]) -> Out;
+        async fn get_egress(&mut self, module: &str) -> Out;
+        async fn list_egress(&mut self) -> Out;
+        async fn delete_egress(&mut self, module: &str) -> Out;
+    }
+
+    fn tenant_q(tenant: Option<&str>) -> String {
+        tenant
+            .map(|t| format!("?tenant={}", enc(t)))
+            .unwrap_or_default()
+    }
+
+    impl BridgeClient for RestClient {
+        async fn put_secret(&mut self, name: &str, value: &[u8], tenant: Option<&str>) -> Out {
+            // UTF-8 values travel as `value` (the scenario uses only text).
+            let text = std::str::from_utf8(value).expect("utf8 scenario value");
+            let url = format!("{}/v1/secrets/{}{}", self.base, enc(name), tenant_q(tenant));
+            let v = self
+                .send(self.http.put(url).json(&json!({ "value": text })))
+                .await?;
+            Ok(rest_secret(&v))
+        }
+
+        async fn list_secrets(&mut self, tenant: Option<&str>) -> Out {
+            let url = format!("{}/v1/secrets{}", self.base, tenant_q(tenant));
+            let v = self.send(self.http.get(url)).await?;
+            Ok(rest_list(&v, "secrets", rest_secret))
+        }
+
+        async fn delete_secret(&mut self, name: &str, tenant: Option<&str>) -> Out {
+            let url = format!("{}/v1/secrets/{}{}", self.base, enc(name), tenant_q(tenant));
+            self.send(self.http.delete(url)).await?;
+            Ok(json!({}))
+        }
+
+        async fn put_grant(&mut self, g: Value) -> Out {
+            let v = self
+                .send(self.http.put(format!("{}/v1/grants", self.base)).json(&g))
+                .await?;
+            Ok(rest_grant(&v))
+        }
+
+        async fn list_grants(&mut self, module: Option<&str>) -> Out {
+            let q = module
+                .map(|m| format!("?module={}", enc(m)))
+                .unwrap_or_default();
+            let v = self
+                .send(self.http.get(format!("{}/v1/grants{q}", self.base)))
+                .await?;
+            Ok(rest_list(&v, "grants", rest_grant))
+        }
+
+        async fn delete_grant(&mut self, id: &str) -> Out {
+            self.send(
+                self.http
+                    .delete(format!("{}/v1/grants/{}", self.base, enc(id))),
+            )
+            .await?;
+            Ok(json!({}))
+        }
+
+        async fn put_connection(&mut self, name: &str, kind: &str, config: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .put(format!("{}/v1/connections/{}", self.base, enc(name)))
+                        .json(&json!({ "kind": kind, "config": config })),
+                )
+                .await?;
+            Ok(rest_connection(&v))
+        }
+
+        async fn get_connection(&mut self, name: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .get(format!("{}/v1/connections/{}", self.base, enc(name))),
+                )
+                .await?;
+            Ok(rest_connection(&v))
+        }
+
+        async fn list_connections(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/connections", self.base)))
+                .await?;
+            Ok(rest_list(&v, "connections", rest_connection))
+        }
+
+        async fn delete_connection(&mut self, name: &str) -> Out {
+            self.send(
+                self.http
+                    .delete(format!("{}/v1/connections/{}", self.base, enc(name))),
+            )
+            .await?;
+            Ok(json!({}))
+        }
+
+        async fn put_egress(&mut self, module: &str, allow: &[&str]) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .put(format!("{}/v1/egress/{}", self.base, enc(module)))
+                        .json(&json!({ "allow": allow })),
+                )
+                .await?;
+            Ok(rest_egress(&v))
+        }
+
+        async fn get_egress(&mut self, module: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .get(format!("{}/v1/egress/{}", self.base, enc(module))),
+                )
+                .await?;
+            Ok(rest_egress(&v))
+        }
+
+        async fn list_egress(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/egress", self.base)))
+                .await?;
+            Ok(rest_list(&v, "policies", rest_egress))
+        }
+
+        async fn delete_egress(&mut self, module: &str) -> Out {
+            self.send(
+                self.http
+                    .delete(format!("{}/v1/egress/{}", self.base, enc(module))),
+            )
+            .await?;
+            Ok(json!({}))
+        }
+    }
+
+    struct BridgeGrpc {
+        secrets: SecretsClient<Channel>,
+        connectors: ConnectorsClient<Channel>,
+    }
+
+    impl BridgeGrpc {
+        async fn connect(addr: SocketAddr) -> Self {
+            let ch = Channel::from_shared(format!("http://{addr}"))
+                .expect("uri")
+                .connect()
+                .await
+                .expect("h2c connect");
+            BridgeGrpc {
+                secrets: SecretsClient::new(ch.clone()),
+                connectors: ConnectorsClient::new(ch),
+            }
+        }
+    }
+
+    fn str_vec(v: &Value) -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|x| x.as_str().expect("string").to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    impl BridgeClient for BridgeGrpc {
+        async fn put_secret(&mut self, name: &str, value: &[u8], tenant: Option<&str>) -> Out {
+            let r = self
+                .secrets
+                .put_secret(pb::PutSecretRequest {
+                    name: name.into(),
+                    value: value.to_vec(),
+                    tenant: tenant.map(Into::into),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(pb_secret(&r.into_inner()))
+        }
+
+        async fn list_secrets(&mut self, tenant: Option<&str>) -> Out {
+            let r = self
+                .secrets
+                .list_secrets(pb::ListSecretsRequest {
+                    tenant: tenant.map(Into::into),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(Value::Array(
+                r.into_inner().secrets.iter().map(pb_secret).collect(),
+            ))
+        }
+
+        async fn delete_secret(&mut self, name: &str, tenant: Option<&str>) -> Out {
+            self.secrets
+                .delete_secret(pb::DeleteSecretRequest {
+                    name: name.into(),
+                    tenant: tenant.map(Into::into),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(json!({}))
+        }
+
+        async fn put_grant(&mut self, g: Value) -> Out {
+            let r = self
+                .secrets
+                .put_grant(pb::PutGrantRequest {
+                    grant: Some(pb::GrantInfo {
+                        id: g["id"].as_str().unwrap_or_default().into(),
+                        module: g["module"].as_str().unwrap_or_default().into(),
+                        secret: g["secret"].as_str().unwrap_or_default().into(),
+                        origins: str_vec(&g["origins"]),
+                        body: g["body"].as_bool().unwrap_or(false),
+                    }),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(pb_grant(&r.into_inner()))
+        }
+
+        async fn list_grants(&mut self, module: Option<&str>) -> Out {
+            let r = self
+                .secrets
+                .list_grants(pb::ListGrantsRequest {
+                    module: module.map(Into::into),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(Value::Array(
+                r.into_inner().grants.iter().map(pb_grant).collect(),
+            ))
+        }
+
+        async fn delete_grant(&mut self, id: &str) -> Out {
+            self.secrets
+                .delete_grant(pb::DeleteGrantRequest { id: id.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(json!({}))
+        }
+
+        async fn put_connection(&mut self, name: &str, kind: &str, config: Value) -> Out {
+            let r = self
+                .connectors
+                .put_connection(pb::PutConnectionRequest {
+                    connection: Some(pb::ConnectionInfo {
+                        name: name.into(),
+                        kind: kind.into(),
+                        config_json: serde_json::to_vec(&config).expect("json"),
+                    }),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(pb_connection(&r.into_inner()))
+        }
+
+        async fn get_connection(&mut self, name: &str) -> Out {
+            let r = self
+                .connectors
+                .get_connection(pb::GetConnectionRequest { name: name.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(pb_connection(&r.into_inner()))
+        }
+
+        async fn list_connections(&mut self) -> Out {
+            let r = self
+                .connectors
+                .list_connections(pb::ListConnectionsRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(Value::Array(
+                r.into_inner()
+                    .connections
+                    .iter()
+                    .map(pb_connection)
+                    .collect(),
+            ))
+        }
+
+        async fn delete_connection(&mut self, name: &str) -> Out {
+            self.connectors
+                .delete_connection(pb::DeleteConnectionRequest { name: name.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(json!({}))
+        }
+
+        async fn put_egress(&mut self, module: &str, allow: &[&str]) -> Out {
+            let r = self
+                .connectors
+                .put_egress(pb::PutEgressRequest {
+                    egress: Some(pb::EgressInfo {
+                        module: module.into(),
+                        allow: allow.iter().map(|s| (*s).to_owned()).collect(),
+                    }),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(pb_egress(&r.into_inner()))
+        }
+
+        async fn get_egress(&mut self, module: &str) -> Out {
+            let r = self
+                .connectors
+                .get_egress(pb::GetEgressRequest {
+                    module: module.into(),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(pb_egress(&r.into_inner()))
+        }
+
+        async fn list_egress(&mut self) -> Out {
+            let r = self
+                .connectors
+                .list_egress(pb::ListEgressRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(Value::Array(
+                r.into_inner().policies.iter().map(pb_egress).collect(),
+            ))
+        }
+
+        async fn delete_egress(&mut self, module: &str) -> Out {
+            self.connectors
+                .delete_egress(pb::DeleteEgressRequest {
+                    module: module.into(),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(json!({}))
+        }
+    }
+
+    async fn scenario<C: BridgeClient>(c: &mut C) -> Vec<(String, Out)> {
+        let mut t: Vec<(String, Out)> = Vec::new();
+        macro_rules! step {
+            ($label:expr, $e:expr) => {
+                t.push(($label.to_owned(), $e.await));
+            };
+        }
+        step!(
+            "put secret",
+            c.put_secret("stripe/live", b"sk_live_0123456789", None)
+        );
+        step!(
+            "put tenant secret",
+            c.put_secret("db/pass", b"hunter2-hunter2", Some("acme"))
+        );
+        step!(
+            "replace secret",
+            c.put_secret("stripe/live", b"sk_live_9876543210", None)
+        );
+        step!("put short secret", c.put_secret("k", b"short", None));
+        step!(
+            "put reserved secret",
+            c.put_secret("__ostro/token-key", b"0123456789", None)
+        );
+        step!(
+            "put bad secret name",
+            c.put_secret("Bad Name", b"0123456789", None)
+        );
+        step!("list secrets", c.list_secrets(None));
+        step!("list tenant secrets", c.list_secrets(Some("acme")));
+        step!("delete secret", c.delete_secret("db/pass", Some("acme")));
+        step!(
+            "delete secret again",
+            c.delete_secret("db/pass", Some("acme"))
+        );
+        step!(
+            "put grant",
+            c.put_grant(json!({
+                "module": "acme/billing", "secret": "stripe/live",
+                "origins": ["https://api.stripe.com"], "body": true,
+            }))
+        );
+        step!(
+            "put grant with id",
+            c.put_grant(json!({
+                "id": "secret:acme/web:stripe/live", "module": "acme/web",
+                "secret": "stripe/live", "origins": ["https://*.example.com:8443"],
+            }))
+        );
+        step!(
+            "put grant wrong id",
+            c.put_grant(json!({
+                "id": "secret:x:y", "module": "acme/web",
+                "secret": "stripe/live", "origins": ["https://x.com"],
+            }))
+        );
+        step!(
+            "put grant bare star",
+            c.put_grant(json!({ "module": "acme/web", "secret": "k", "origins": ["*"] }))
+        );
+        step!("list grants", c.list_grants(None));
+        step!("list grants by module", c.list_grants(Some("acme/web")));
+        step!(
+            "delete grant",
+            c.delete_grant("secret:acme/web:stripe/live")
+        );
+        step!(
+            "delete grant again",
+            c.delete_grant("secret:acme/web:stripe/live")
+        );
+        step!(
+            "put connection",
+            c.put_connection(
+                "orders-db",
+                "sql-postgres",
+                json!({ "v": 1, "host": "db", "password": "{{secret:db/pass}}" })
+            )
+        );
+        step!(
+            "put http-target connection",
+            c.put_connection("https://api.example.com", "http-target", json!({ "v": 1 }))
+        );
+        step!(
+            "put connection bad kind",
+            c.put_connection("x", "redis", json!({ "v": 1 }))
+        );
+        step!(
+            "put connection bad version",
+            c.put_connection("x", "object", json!({ "v": 2 }))
+        );
+        step!(
+            "get connection",
+            c.get_connection("https://api.example.com")
+        );
+        step!("get unknown connection", c.get_connection("nope"));
+        step!("list connections", c.list_connections());
+        step!("delete connection", c.delete_connection("orders-db"));
+        step!("delete connection again", c.delete_connection("orders-db"));
+        step!(
+            "put egress",
+            c.put_egress(
+                "acme/billing",
+                &["https://api.stripe.com", "connection:orders-db"]
+            )
+        );
+        step!("put egress bad entry", c.put_egress("acme/billing", &["*"]));
+        step!("put egress bad module", c.put_egress("a:b", &[]));
+        step!("get egress", c.get_egress("acme/billing"));
+        step!("get unknown egress", c.get_egress("acme/none"));
+        step!("list egress", c.list_egress());
+        step!("delete egress", c.delete_egress("acme/billing"));
+        step!("delete egress again", c.delete_egress("acme/billing"));
+        step!("list egress empty", c.list_egress());
+        t
+    }
+
+    #[tokio::test]
+    async fn bridge_rest_and_grpc_transcripts_are_equal() {
+        let rest_srv = serve(cfg()).await;
+        let grpc_srv = serve(cfg()).await;
+        let rest = scenario(&mut RestClient::new(rest_srv.addr)).await;
+        let grpc = scenario(&mut BridgeGrpc::connect(grpc_srv.addr).await).await;
+        assert_eq!(rest.len(), grpc.len());
+        for ((label, r), (_, g)) in rest.iter().zip(grpc.iter()) {
+            assert_eq!(r, g, "step {label:?} differs between REST and gRPC");
+        }
+        // Both fakes stored the same (replaced) value; the API never returned it.
+        for srv in [&rest_srv, &grpc_srv] {
+            assert_eq!(
+                srv.cp.secret_value("stripe/live", None).as_deref(),
+                Some(&b"sk_live_9876543210"[..])
+            );
+        }
+
+        let get = |l: &str| rest.iter().find(|(x, _)| x == l).expect(l).1.clone();
+        let err = |l: &str| get(l).expect_err(l);
+        for l in [
+            "put short secret",
+            "put reserved secret",
+            "put bad secret name",
+            "put grant wrong id",
+            "put grant bare star",
+            "put connection bad kind",
+            "put connection bad version",
+            "put egress bad entry",
+            "put egress bad module",
+        ] {
+            assert_eq!(err(l).0, ErrorCode::InvalidArgument, "{l}");
+        }
+        assert_eq!(
+            err("put short secret").1.expect("details")["reason"],
+            "secret_too_short"
+        );
+        for l in [
+            "delete secret again",
+            "delete grant again",
+            "get unknown connection",
+            "delete connection again",
+            "get unknown egress",
+            "delete egress again",
+        ] {
+            assert_eq!(err(l).0, ErrorCode::NotFound, "{l}");
+        }
+        assert_eq!(
+            get("put grant").unwrap()["id"],
+            "secret:acme/billing:stripe/live"
+        );
+        assert_eq!(
+            get("list secrets").unwrap().as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            get("list grants").unwrap().as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            get("list grants by module")
+                .unwrap()
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            get("get connection").unwrap()["name"],
+            "https://api.example.com"
+        );
+        assert_eq!(get("list egress empty").unwrap(), json!([]));
+    }
+}
