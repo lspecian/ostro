@@ -16,6 +16,12 @@
 //! 2. `InitCluster` (idempotent for the same partition count; a different count is a
 //!    fatal [`ServerError::PartitionCountMismatch`]). The first boot generates the cluster
 //!    id and the await-token key; every boot reads the stored key back from meta.
+//!
+//!    Then [`BridgeServices::build`] (06-14): the Phase 6 effects bridge (sealing key,
+//!    secret providers, egress, connectors, the bridge and its SQL GC task) over the live
+//!    meta state. It exists before the node because every activation's sink hands its
+//!    `EffectDriver` to the engine; the started partitions are registered in its partition
+//!    table right after step 4.
 //! 3. `Runtime::new` with the cluster token key and the AOT cache under
 //!    `<data>/cache/aot`.
 //! 4. `Node::open` with [`MetaLeadership`] as the epoch floor and the dispatcher running
@@ -54,7 +60,8 @@
 //! # Shutdown ([`ServerHandle::shutdown`])
 //!
 //! `/readyz` turns 503 -> the listener stops accepting and in-flight requests finish ->
-//! the services stop (cancel + join) -> `Node::shutdown` (the dispatcher revokes leases,
+//! the services stop (cancel + join) -> the effects bridge stops (in-flight effect tasks get
+//! a short grace, the SQL GC stops, partition handles are released) -> `Node::shutdown` (the dispatcher revokes leases,
 //! activations stop) -> meta stops -> the data-dir lock is released -> the ephemeral
 //! directory is removed -> the telemetry providers are flushed and shut down (Pitfall 11).
 
@@ -78,6 +85,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+use crate::bridge_services::{BridgeEnv, BridgeServices};
 use crate::config::ServerConfig;
 use crate::control::{ControlCtx, ServerControlPlane, phase8_extensions};
 use crate::derive::MetaModules;
@@ -280,6 +288,31 @@ async fn start_inner(
         }
     };
     timings.init_cluster = t.elapsed();
+    // From here meta is shared (the bridge holds it weakly for presign key writes).
+    let meta = Arc::new(meta);
+
+    // 2b. effects bridge (before the executor: every sink hands out its driver).
+    let bridge = match BridgeServices::build(
+        &cfg,
+        BridgeEnv {
+            meta: Arc::downgrade(&meta),
+            view: meta.view().clone(),
+            data_dir: data_dir.clone(),
+            partitions: Arc::new(crate::effects::PartitionTable::new()),
+            cluster_id: cluster_id.clone(),
+            node_id,
+            clock: Arc::clone(&clock),
+            public_base_url: cfg.public_base_url(local_addr),
+        },
+    )
+    .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            stop_meta(meta).await;
+            return Err(ServerError::Config(format!("effects bridge: {e}")));
+        }
+    };
 
     // 3. engine runtime.
     let t = Instant::now();
@@ -293,7 +326,8 @@ async fn start_inner(
     ) {
         Ok(rt) => Arc::new(rt),
         Err(e) => {
-            meta.stop().await;
+            bridge.shutdown().await;
+            stop_meta(meta).await;
             return Err(e.into());
         }
     };
@@ -320,6 +354,7 @@ async fn start_inner(
         EngineExecutor::new(Arc::clone(&runtime), exec_cfg)
             .with_hooks(hooks)
             .with_guest_log_sink(Arc::clone(&guest_logs))
+            .with_bridge(Arc::clone(&bridge))
             .with_resolvers(
                 Arc::new(MetaModules(meta.view().clone())),
                 Arc::new(MetaPolicies {
@@ -350,16 +385,23 @@ async fn start_inner(
     let node = match Node::open(node_cfg).await {
         Ok(n) => Arc::new(n),
         Err(e) => {
-            meta.stop().await;
+            bridge.shutdown().await;
+            stop_meta(meta).await;
             return Err(e.into());
         }
     };
     timings.node_open = t.elapsed();
+    for slot in node.slots() {
+        if let PartitionSlot::Ready(h) = slot {
+            bridge.partitions().insert(h.clone());
+        }
+    }
 
     let t = Instant::now();
     if let Err(e) = record_partition_leaders(&meta, &node, node_id).await {
+        bridge.shutdown().await;
         shutdown_node(node).await;
-        meta.stop().await;
+        stop_meta(meta).await;
         return Err(e);
     }
     timings.record_leaders = t.elapsed();
@@ -379,7 +421,6 @@ async fn start_inner(
         .map(|h| Arc::clone(h.blobs()));
     let ctl_blobs = blobs.clone();
     let cfg = Arc::new(cfg);
-    let meta = Arc::new(meta);
 
     // 4b. Services seam (P8-D21): every barrier is open and the leaders are recorded.
     let services = match blobs {
@@ -408,6 +449,7 @@ async fn start_inner(
         count,
         Arc::clone(&runtime),
         Arc::clone(&cfg),
+        Arc::clone(&bridge),
     ));
     let api_cfg = ApiConfig {
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
@@ -774,6 +816,11 @@ impl ServerHandle {
         self.node.as_ref().expect("node present until shutdown")
     }
 
+    /// The effects bridge (06-14).
+    pub fn bridge(&self) -> &Arc<BridgeServices> {
+        self.control.bridge()
+    }
+
     /// The node services (P8-D21 seam).
     pub fn services(&self) -> &Services {
         self.services
@@ -835,6 +882,9 @@ impl ServerHandle {
         if let Some(services) = services {
             services.shutdown().await;
         }
+        // The bridge next: no effect task outlives the node, and the partition handles in
+        // its table are released before `Node::shutdown`.
+        control.bridge().shutdown().await;
         let node_res = match node {
             Some(node) => shutdown_shared_node(node).await,
             None => Ok(()),

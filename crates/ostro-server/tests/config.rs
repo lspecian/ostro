@@ -735,3 +735,195 @@ fn phase8_sections_round_trip_through_toml() {
     let back = load_toml(&s).expect("reload printed config");
     assert_eq!(back, c);
 }
+
+// ---------------------------------------------------------------- Phase 6 sections (06-14)
+
+#[test]
+fn phase6_defaults_per_profile() {
+    for (name, c) in [
+        ("server", ServerConfig::server_defaults()),
+        ("dev", ServerConfig::dev_defaults()),
+    ] {
+        let s = c.secrets.to_bridge().expect("secrets");
+        assert_eq!(
+            s.providers.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+            ["sealed", "env", "file"],
+            "{name}"
+        );
+        assert_eq!(s.env_prefix, "OSTRO_SECRET_");
+        assert!(s.sealing_key_file.is_none() && s.vault.is_none() && s.k8s.is_none());
+        let e = c.egress.to_bridge().expect("egress");
+        assert!(e.allow_private.is_empty(), "{name}: deny-by-default");
+        assert_eq!(e.connect_timeout, Duration::from_secs(5));
+        assert_eq!(e.default_timeout, Duration::from_secs(30));
+        assert_eq!(e.max_response_bytes, 4 * 1024 * 1024);
+        assert_eq!(e.hard_max_response_bytes, 64 * 1024 * 1024);
+        assert_eq!(e.max_redirects, 5);
+        assert_eq!(e.rate_max_wait, Duration::from_secs(30));
+        assert_eq!(e.idempotency_window, Duration::from_secs(24 * 3600));
+        assert_eq!(e.safety_margin, Duration::from_secs(300));
+        assert_eq!(e, ostro_bridge::config::EgressConfig::default());
+        let k = c.connectors.to_bridge().expect("connectors");
+        assert_eq!(
+            k,
+            ostro_bridge::config::ConnectorsConfig::default(),
+            "{name}"
+        );
+        // public_base_url defaults to the API listen address (unspecified -> loopback).
+        assert_eq!(
+            c.public_base_url(c.api.listen),
+            "http://127.0.0.1:7700",
+            "{name}"
+        );
+    }
+    assert!(ServerConfig::dev_defaults().secrets.auto_sealing_key);
+    assert!(!ServerConfig::server_defaults().secrets.auto_sealing_key);
+    let bound: SocketAddr = "127.0.0.1:41234".parse().unwrap();
+    assert_eq!(
+        ServerConfig::server_defaults().public_base_url(bound),
+        "http://127.0.0.1:41234"
+    );
+}
+
+#[test]
+fn phase6_full_example_parses() {
+    let c = load_toml(
+        r#"
+[secrets]
+providers = ["vault", "sealed", "env", "file", "k8s"]
+sealing_key_file = "/etc/ostro/sealing.key"
+env_prefix = "MY_SECRET_"
+file_dir = "/run/secrets"
+auto_sealing_key = true
+
+[secrets.vault]
+addr = "https://vault.example.com:8200"
+mount = "kv"
+auth = "approle"
+role_id = "r-1"
+secret_id_file = "/run/vault/secret-id"
+cache_ttl = "1m"
+
+[secrets.k8s]
+namespace = "ostro"
+cache_ttl = "10s"
+
+[egress]
+allow_private = ["10.0.0.0/8", "127.0.0.0/8"]
+connect_timeout = "2s"
+default_timeout = "1m"
+max_response_bytes = "8MiB"
+hard_max_response_bytes = 33554432
+max_redirects = 2
+rate_max_wait = "5s"
+idempotency_window = "48h"
+safety_margin = "10m"
+
+[connectors]
+sql_max_rows = 500
+sql_max_bytes = "1MiB"
+sql_effects_retention = "72h"
+object_max_get_bytes = "2MiB"
+presign_default_expiry = "5m"
+backend_ttl = "1m"
+default_rate = "50/s"
+public_base_url = "https://ostro.example.com/"
+"#,
+    )
+    .expect("full example");
+    let s = c.secrets.to_bridge().expect("secrets");
+    assert_eq!(
+        s.providers.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
+        ["vault", "sealed", "env", "file", "k8s"]
+    );
+    assert_eq!(s.env_prefix, "MY_SECRET_");
+    assert_eq!(
+        s.file_dir.as_deref(),
+        Some(std::path::Path::new("/run/secrets"))
+    );
+    let v = s.vault.expect("vault");
+    assert_eq!(v.addr, "https://vault.example.com:8200");
+    assert_eq!(v.mount, "kv");
+    assert_eq!(v.cache_ttl, Duration::from_secs(60));
+    assert_eq!(s.k8s.expect("k8s").namespace.as_deref(), Some("ostro"));
+    assert!(c.secrets.auto_sealing_key);
+    let e = c.egress.to_bridge().expect("egress");
+    assert_eq!(e.allow_private.len(), 2);
+    assert_eq!(e.connect_timeout, Duration::from_secs(2));
+    assert_eq!(e.default_timeout, Duration::from_secs(60));
+    assert_eq!(e.max_response_bytes, 8 * 1024 * 1024);
+    assert_eq!(e.hard_max_response_bytes, 32 * 1024 * 1024);
+    assert_eq!(e.max_redirects, 2);
+    assert_eq!(e.rate_max_wait, Duration::from_secs(5));
+    assert_eq!(e.idempotency_window, Duration::from_secs(48 * 3600));
+    let k = c.connectors.to_bridge().expect("connectors");
+    assert_eq!(k.sql_max_rows, 500);
+    assert_eq!(k.sql_max_bytes, 1024 * 1024);
+    assert_eq!(k.sql_effects_retention, Duration::from_secs(72 * 3600));
+    assert_eq!(k.presign_default_expiry, Duration::from_secs(300));
+    assert_eq!(k.default_rate.expect("rate").per_second, 50);
+    assert_eq!(
+        c.public_base_url("0.0.0.0:7700".parse().unwrap()),
+        "https://ostro.example.com"
+    );
+
+    // The printed config keeps the new sections and reloads to the same value.
+    let printed = c.to_toml_string();
+    for section in ["[secrets]", "[egress]", "[connectors]"] {
+        assert!(printed.contains(section), "{section} missing:\n{printed}");
+    }
+    assert_eq!(load_toml(&printed).expect("reload printed config"), c);
+}
+
+#[test]
+fn phase6_unknown_keys_are_ignored() {
+    let c = load_toml(
+        r#"
+[secrets]
+future_key = 1
+[secrets.vault]
+addr = "http://127.0.0.1:8200"
+future_vault_key = "x"
+[egress]
+not_yet = true
+[connectors]
+someday = "maybe"
+"#,
+    )
+    .expect("unknown keys under the Phase 6 sections are ignored (D18)");
+    assert_eq!(c.egress, ServerConfig::server_defaults().egress);
+    c.secrets.to_bridge().expect("secrets still convert");
+    let c = load_toml_env(
+        "",
+        &env(&[
+            ("OSTRO_EGRESS__FUTURE_KNOB", "1"),
+            ("OSTRO_CONNECTORS__SQL_MAX_ROWS", "7"),
+        ]),
+    )
+    .expect("env");
+    assert_eq!(c.connectors.sql_max_rows, 7);
+}
+
+#[test]
+fn phase6_bad_values_name_the_key() {
+    for (section, key) in [
+        ("egress", "connect_timeout"),
+        ("egress", "rate_max_wait"),
+        ("connectors", "sql_effects_retention"),
+        ("connectors", "backend_ttl"),
+    ] {
+        let err = load_toml(&format!("[{section}]\n{key} = \"5 parsecs\"\n")).unwrap_err();
+        assert!(err.contains(key), "{section}.{key}: {err}");
+        assert!(err.contains("5 parsecs"), "{section}.{key}: {err}");
+    }
+    let err = load_toml("[egress]\nmax_response_bytes = \"4XB\"\n").unwrap_err();
+    assert!(err.contains("max_response_bytes"), "{err}");
+    let err = load_toml("[egress]\nallow_private = [\"not-a-cidr\"]\n").unwrap_err();
+    assert!(err.contains("egress"), "{err}");
+    let err = load_toml("[connectors]\ndefault_rate = \"10/h\"\n").unwrap_err();
+    assert!(err.contains("connectors"), "{err}");
+    let err = load_toml("[connectors]\npublic_base_url = \"ftp://x\"\n").unwrap_err();
+    assert!(err.contains("public_base_url"), "{err}");
+    let err = load_toml("[secrets]\nproviders = [\"sealed\", \"bogus\"]\n").unwrap_err();
+    assert!(err.contains("secrets"), "{err}");
+}

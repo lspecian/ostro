@@ -46,13 +46,16 @@
 //!
 //! # Secrets
 //!
-//! The Phase 6 `SecretResolver` (ostro-bridge, 06-05) is not wired into the server yet
-//! (06-14), so the secret is read from the **sealed meta `Secret` record** directly
-//! ([`super::SecretsAccess`]): `secret_ref` names the record exactly, or, for a bare name,
-//! `_/<name>` (the Phase 6 default-tenant form). `plaintext-v0` records (Phase 4 format)
-//! open as raw bytes; `aes256gcm:<kid>` records open with ostro-bridge's [`SealedStore`]
-//! over the node sealing key (`OSTRO_SEALING_KEY`, else `<data_dir>/sealing.key` when it
-//! exists). The value lives in a zeroize-on-drop [`SecretValue`] for one verification and
+//! The secret is the **sealed meta `Secret` record** ([`super::SecretsAccess`]):
+//! `secret_ref` names the record exactly, or, for a bare name, `_/<name>` (the Phase 6
+//! default-tenant form). `plaintext-v0` records (Phase 4 format) open as raw bytes;
+//! `aes256gcm:<kid>` records open with the node's [`SealedStore`] from the effects bridge
+//! (06-14: the same key ring as every other sealed secret, honouring `OSTRO_SEALING_KEY`,
+//! `[secrets] sealing_key_file` and the dev auto key). A node started without a sealing key
+//! falls back to discovering one lazily (`OSTRO_SEALING_KEY`, else `<data_dir>/sealing.key`
+//! once it exists). The bridge's `SecretResolver` itself is not used: its provider chain
+//! resolves `<tenant|_>/<name>` per tenant and adds env/file/vault lookups and the 8-byte
+//! template minimum, none of which apply to an exactly named webhook verifier secret. The value lives in a zeroize-on-drop [`SecretValue`] for one verification and
 //! is never logged, returned or put in an error message.
 //!
 //! # Status codes
@@ -139,7 +142,8 @@ impl Outcome {
 /// `WebhookApi` + `HookIngress` for the server.
 pub struct WebhookController {
     ctx: ControlCtx,
-    /// The node sealing key ring, loaded on first need (only `aes256gcm` records need it).
+    /// Fallback key ring when the bridge has none, loaded on first need (only `aes256gcm`
+    /// records need it).
     ring: OnceLock<Arc<SealingKeyRing>>,
 }
 
@@ -458,8 +462,12 @@ impl WebhookController {
         })
     }
 
-    /// The node sealing key ring (`OSTRO_SEALING_KEY`, else `<data_dir>/sealing.key`).
+    /// The node sealing key ring: the effects bridge's (06-14), else (no key at start)
+    /// `OSTRO_SEALING_KEY` / `<data_dir>/sealing.key`, discovered lazily.
     fn ring(&self) -> Option<Arc<SealingKeyRing>> {
+        if let Some(s) = self.ctx.partitions.bridge().sealed_store() {
+            return Some(Arc::clone(s.ring()));
+        }
         if let Some(r) = self.ring.get() {
             return Some(Arc::clone(r));
         }

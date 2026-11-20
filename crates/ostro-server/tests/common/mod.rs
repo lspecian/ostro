@@ -4,6 +4,7 @@
 //! `partition_for_new_run`.
 #![allow(dead_code, clippy::disallowed_methods, clippy::disallowed_types)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 use std::sync::atomic::Ordering;
@@ -500,13 +501,24 @@ impl TestServer {
         }
     }
 
+    /// Start a server for `cfg`: on the test's runtime, or on the runtime owned for its
+    /// data dir when it was started by [`start_server_with_bridge`] (06-14, W10).
     pub async fn boot(
         cfg: ServerConfig,
         hooks: Arc<ServerHooks>,
     ) -> Result<ServerHandle, ServerError> {
-        timeout(T, ostro_server::server::start_with_hooks(cfg, hooks))
+        match owned_rt_handle(&cfg.node.data_dir) {
+            Some(rt) => timeout(
+                T,
+                rt.spawn(ostro_server::server::start_with_hooks(cfg, hooks)),
+            )
             .await
             .expect("server start timed out")
+            .expect("server start task"),
+            None => timeout(T, ostro_server::server::start_with_hooks(cfg, hooks))
+                .await
+                .expect("server start timed out"),
+        }
     }
 
     pub fn h(&self) -> &ServerHandle {
@@ -544,13 +556,20 @@ impl TestServer {
         }
     }
 
-    /// Graceful shutdown, keeping the data dir.
+    /// Graceful shutdown, keeping the data dir (on the owned runtime when there is one).
     pub async fn shutdown(&mut self) {
         if let Some(h) = self.handle.take() {
-            timeout(T, h.shutdown())
-                .await
-                .expect("shutdown timed out")
-                .expect("shutdown");
+            match owned_rt_handle(&self.cfg.node.data_dir) {
+                Some(rt) => timeout(T, rt.spawn(h.shutdown()))
+                    .await
+                    .expect("shutdown timed out")
+                    .expect("shutdown task")
+                    .expect("shutdown"),
+                None => timeout(T, h.shutdown())
+                    .await
+                    .expect("shutdown timed out")
+                    .expect("shutdown"),
+            }
         }
     }
 
@@ -900,6 +919,264 @@ impl TestServer {
                 Some(t) => token = Some(t.to_owned()),
                 None => return out,
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 6 bridge helpers (plan 06-14; used by 06-15..06-19). Meta records are written
+// straight through the server's meta handle (06-16 adds API-based helpers).
+// ---------------------------------------------------------------------------------
+
+use ostro_bridge::secrets::GrantSpec;
+use ostro_meta::records::{Connection, EgressPolicy};
+use ostro_meta::{MetaCommand, MetaKey, MetaRecord, MetaResult};
+
+/// The sealing key [`BridgeTestOpts::default`] configures.
+pub const TEST_SEALING_KEY: [u8; 32] = [0x5e; 32];
+
+/// Knobs of [`start_server_with_bridge`].
+#[derive(Clone, Debug)]
+pub struct BridgeTestOpts {
+    /// `[egress] allow_private = ["127.0.0.0/8"]` (the mock provider listens on loopback;
+    /// the default config blocks it, Pitfall 8).
+    pub allow_private_loopback: bool,
+    /// Written to `<dir>/test-sealing.key` and set as `[secrets] sealing_key_file`;
+    /// `None` = no sealing key (server profile: secrets refused).
+    pub sealing_key: Option<[u8; 32]>,
+    /// Extra TOML layered over the test config (e.g. `[connectors] default_rate`).
+    pub extra_toml: String,
+}
+
+impl Default for BridgeTestOpts {
+    /// Loopback allowed, [`TEST_SEALING_KEY`], no extra TOML.
+    fn default() -> Self {
+        Self {
+            allow_private_loopback: true,
+            sealing_key: Some(TEST_SEALING_KEY),
+            extra_toml: String::new(),
+        }
+    }
+}
+
+/// The config [`start_server_with_bridge`] uses (server profile, P=4, 127.0.0.1:0).
+pub fn bridge_server_config(dir: &Path, opts: &BridgeTestOpts) -> ServerConfig {
+    let mut cfg = server_config(dir, &ServerOpts::default());
+    if opts.allow_private_loopback {
+        cfg.egress.allow_private = vec!["127.0.0.0/8".into()];
+    }
+    if let Some(key) = opts.sealing_key {
+        let p = dir.join("test-sealing.key");
+        std::fs::write(&p, key).expect("write sealing key");
+        cfg.secrets.sealing_key_file = Some(p);
+    }
+    if !opts.extra_toml.is_empty() {
+        let p = dir.join("extra.toml");
+        std::fs::write(&p, &opts.extra_toml).expect("write extra toml");
+        cfg = ostro_server::config::load_layered(
+            cfg,
+            Some(&p),
+            true,
+            &ostro_server::config::EnvSource::Map(HashMap::new()),
+            &ostro_server::config::Overrides::default(),
+        )
+        .expect("extra toml");
+    }
+    cfg
+}
+
+/// Runtimes owned per data dir: a bridge test server runs on its own tokio runtime so
+/// [`TestServer::crash`] can stop every task at once (`shutdown_background`, W10).
+fn owned_runtimes() -> &'static std::sync::Mutex<HashMap<PathBuf, tokio::runtime::Runtime>> {
+    static RTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, tokio::runtime::Runtime>>> =
+        OnceLock::new();
+    RTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn new_server_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_name("ostro-test-server")
+        .enable_all()
+        .build()
+        .expect("server runtime")
+}
+
+fn owned_rt_handle(dir: &Path) -> Option<tokio::runtime::Handle> {
+    owned_runtimes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(dir)
+        .map(|rt| rt.handle().clone())
+}
+
+/// Start a bridge-enabled server on `dir` (on its own tokio runtime, see
+/// [`TestServer::crash`]) and wait for `/readyz`.
+pub async fn start_server_with_bridge(dir: TempDir, opts: BridgeTestOpts) -> TestServer {
+    let cfg = bridge_server_config(dir.path(), &opts);
+    owned_runtimes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(cfg.node.data_dir.clone(), new_server_runtime());
+    let s = TestServer::start_cfg(cfg, Some(dir)).await;
+    s.wait_ready(T).await;
+    s
+}
+
+/// A Phase 6 test guest (`fx-http`, `fx-sql`, `fx-object`, `fx-canary`, `fx-ssrf`).
+pub fn fx_guest(name: &str) -> Vec<u8> {
+    guest_wasm(name)
+}
+
+/// Create or replace a meta record (CAS on the current version).
+pub async fn put_meta(server: &TestServer, key: MetaKey, record: MetaRecord) {
+    let meta = server.h().meta();
+    let current = meta.view().read(|s| s.get(&key).map(|v| v.version));
+    let r = timeout(
+        T,
+        meta.propose(MetaCommand::Put {
+            key,
+            expected_version: current,
+            record,
+        }),
+    )
+    .await
+    .expect("meta put timed out")
+    .expect("meta put");
+    assert!(matches!(r, MetaResult::Ok { .. }), "meta put: {r:?}");
+}
+
+/// Egress policy of the deployed module `module` (`allow`: rules such as
+/// `"http://127.0.0.1:<port>"` or `"connection:<name>"`).
+pub async fn put_egress(server: &TestServer, module: &str, allow: &[&str]) {
+    put_meta(
+        server,
+        MetaKey::Egress(module.to_owned()),
+        MetaRecord::Egress(EgressPolicy {
+            name: module.to_owned(),
+            allow: allow.iter().map(|a| (*a).to_owned()).collect(),
+            ext: Vec::new(),
+        }),
+    )
+    .await;
+}
+
+/// A secret grant (`GrantSpec::to_record`, keyed by its id).
+pub async fn put_grant(server: &TestServer, spec: GrantSpec) {
+    spec.validate().expect("valid grant spec");
+    let rec = spec.to_record();
+    put_meta(
+        server,
+        MetaKey::Grant(rec.id.clone()),
+        MetaRecord::Grant(rec),
+    )
+    .await;
+}
+
+/// A secret sealed with the server's sealing key under the full record name
+/// `record_name` (`_/<name>` for the default tenant, `<tenant>/<name>` otherwise).
+pub async fn put_sealed_secret(server: &TestServer, record_name: &str, value: &[u8]) {
+    let store = server
+        .h()
+        .bridge()
+        .sealed_store()
+        .expect("the server has a sealing key");
+    let rec = store.seal(record_name, value).expect("seal");
+    put_meta(
+        server,
+        MetaKey::Secret(record_name.to_owned()),
+        MetaRecord::Secret(rec),
+    )
+    .await;
+}
+
+/// A connection (`kind`: `http-target`, `sql-postgres`, `sql-mysql`, `object`; `config`:
+/// its JSON config).
+pub async fn put_connection(
+    server: &TestServer,
+    name: &str,
+    kind: &str,
+    config: serde_json::Value,
+) {
+    put_meta(
+        server,
+        MetaKey::Connection(name.to_owned()),
+        MetaRecord::Connection(Connection {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            config: serde_json::to_vec(&config).expect("config json"),
+            ext: Vec::new(),
+        }),
+    )
+    .await;
+}
+
+impl TestServer {
+    /// Kill the server without a graceful shutdown (W10). Every task on its runtime stops
+    /// where it is (`Runtime::shutdown_background`): no lease is revoked, nothing drains,
+    /// and no in-flight effect is sent or completed afterwards. What is left of the handle
+    /// is dropped on a plain thread (meta, partition stores and the data-dir lock are
+    /// released), and [`TestServer::restart`] then boots on the same dir with a fresh
+    /// runtime. Only for [`start_server_with_bridge`] servers.
+    ///
+    /// The test must not hold partition handles (`handle_of`, `partitions`) across a crash:
+    /// a held handle keeps that partition's state store open and the restart finds it
+    /// locked.
+    pub async fn crash(&mut self) {
+        let dir = self.cfg.node.data_dir.clone();
+        let rt = owned_runtimes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&dir)
+            .expect("crash() needs a server started by start_server_with_bridge");
+        let h = self.handle.take();
+        rt.shutdown_background();
+        if let Some(h) = h {
+            tokio::task::spawn_blocking(move || {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("drop runtime");
+                    rt.block_on(async move { drop(h) });
+                })
+                .join()
+                .expect("drop crashed server");
+            })
+            .await
+            .expect("drop task");
+        }
+        owned_runtimes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(dir, new_server_runtime());
+        self.http = reqwest::Client::new();
+    }
+
+    /// Upload `guest` under the deployed module name `name` (`?name=`, optionally
+    /// `&tenant=`); returns the tenant-qualified module name the bridge uses for egress
+    /// policies and grants (`<name>` for the default tenant, else `<tenant>/<name>`).
+    pub async fn deploy_named(&self, guest: &str, name: &str, tenant: Option<&str>) -> String {
+        use sha2::{Digest, Sha256};
+        let wasm = guest_wasm(guest);
+        let sha: [u8; 32] = Sha256::digest(&wasm).into();
+        let hex: String = sha.iter().map(|x| format!("{x:02x}")).collect();
+        let mut q = format!("?name={name}");
+        if let Some(t) = tenant {
+            q.push_str(&format!("&tenant={t}"));
+        }
+        let r = self
+            .http
+            .put(self.url(&format!("/v1/modules/{hex}{q}")))
+            .header("content-type", "application/wasm")
+            .body(wasm)
+            .send()
+            .await
+            .expect("PUT module");
+        assert!(r.status().is_success(), "deploy {guest}: {}", r.status());
+        match tenant {
+            Some(t) => format!("{t}/{name}"),
+            None => name.to_owned(),
         }
     }
 }

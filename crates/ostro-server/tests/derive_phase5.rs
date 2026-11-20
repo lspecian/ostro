@@ -273,11 +273,12 @@ fn wait_token_cancel_and_status_mappings() {
             }))],
         ),
         (
-            "cancel of an effect is no intent",
+            // 06-14: an effect registers its in-flight row and its cancel deletes it.
+            "effect registers, its cancel cancels the effect",
             vec![ev(3, t, effect()), ev(4, t, cancel(3))],
             &none,
             None,
-            vec![],
+            vec![Derived::register_effect(3, 0, 3), Derived::cancel_effect(3)],
         ),
         (
             "RunFailed{Cancelled} -> Cancelled",

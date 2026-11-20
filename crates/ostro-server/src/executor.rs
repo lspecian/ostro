@@ -133,6 +133,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::bridge_services::BridgeServices;
 use crate::config::GuestLogsSection;
 use crate::derive::{self, InheritPolicy, ModuleResolver, NoModules, PolicyResolver};
 use crate::journal_io;
@@ -312,6 +313,8 @@ pub struct EngineExecutor {
     rearmed: Arc<Mutex<HashMap<RunId, u32>>>,
     /// Node-level guest log sink (services seam, 08-04; filled by 08-17).
     guest_logs: Arc<GuestLogSink>,
+    /// The effects bridge (06-14): every job's sink hands its driver to the engine.
+    bridge: Option<Arc<BridgeServices>>,
 }
 
 impl std::fmt::Debug for EngineExecutor {
@@ -332,7 +335,15 @@ impl EngineExecutor {
             policy: Arc::new(InheritPolicy),
             rearmed: Arc::new(Mutex::new(HashMap::new())),
             guest_logs: Arc::new(GuestLogSink::new(&GuestLogsSection::default())),
+            bridge: None,
         }
+    }
+
+    /// Route every job's effects through the bridge (06-14, [`PartitionSink::with_bridge`]).
+    /// Without it effects complete as `unsupported` (Phase 4 path).
+    pub fn with_bridge(mut self, bridge: Arc<BridgeServices>) -> Self {
+        self.bridge = Some(bridge);
+        self
     }
 
     /// The node's guest log sink (the server passes the services seam's sink; 08-17 feeds
@@ -598,6 +609,10 @@ impl ActivationSink for EngineSink {
     fn guest_log(&self, rec: GuestLogRecord) {
         self.inner.guest_log(rec);
     }
+
+    fn effect_driver(&self) -> Option<Arc<dyn ostro_engine::EffectDriver>> {
+        self.inner.effect_driver()
+    }
 }
 
 // ------------------------------------------------------------------- failpoints
@@ -695,11 +710,14 @@ impl EngineExecutor {
             renew_st.renew();
         });
         let (sink_tx, sink_rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(
+        let mut sink =
             PartitionSink::new(handle.clone(), run, token, Some(sink_tx), Some(on_renew))
                 .with_resolvers(Arc::clone(&self.modules), Arc::clone(&self.policy))
-                .with_guest_logs(Arc::clone(&self.guest_logs)),
-        );
+                .with_guest_logs(Arc::clone(&self.guest_logs));
+        if let Some(b) = &self.bridge {
+            sink = sink.with_bridge(Arc::clone(b));
+        }
+        let sink = Arc::new(sink);
         let rref = RunRef {
             partition: run.partition().0,
             run_id: run.to_string(),

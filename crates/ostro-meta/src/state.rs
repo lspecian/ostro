@@ -543,6 +543,12 @@ impl MetaState {
         self.webhooks.values()
     }
 
+    /// Every grant, ordered by id (Phase 6, 06-14: the bridge's `MetaView::grants_for`
+    /// filters them by subject).
+    pub fn grants(&self) -> impl Iterator<Item = &Versioned<Grant>> {
+        self.grants.values()
+    }
+
     /// The await-token HMAC key written by `InitCluster` (Phase 4: stored as
     /// plaintext in a [`SealedSecret`]; see [`TOKEN_KEY_SECRET`]).
     pub fn token_key(&self) -> Option<[u8; 32]> {

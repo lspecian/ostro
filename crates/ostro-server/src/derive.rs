@@ -30,7 +30,9 @@
 //! | `AwaitTokenCreated{timeout_ms}` | `RegisterWait{op: s, Token, "", timeout_due_ms, at_ms}` |
 //! | `OpCancelled{op}`, `op` a `TimerStarted` | `CancelTimer{op, due_at_ms}` (same rounding) |
 //! | `OpCancelled{op}`, `op` a signal / token wait | `CancelWait{op}` |
-//! | `OpCancelled{op}`, `op` anything else | none |
+//! | `EffectScheduled{request}` (06-14) | `RegisterEffect{op: s, kind: EffectKind::from_request, scheduled_at_ms: ceil(t / 1e6)}` |
+//! | `OpCancelled{op}`, `op` an `EffectScheduled` (06-14) | `CancelEffect{op}` |
+//! | `OpCancelled{op}`, `op` anything else (children) | none |
 //! | `RunCompleted{output}` | `CompleteRun{Completed, result, completed_at_ms: ceil(t / 1e6)}` |
 //! | `RunFailed{Cancelled}` | `CompleteRun{Cancelled, result: failure JSON}` |
 //! | `RunFailed{failure}` | `CompleteRun{Failed, result: failure JSON}` |
@@ -49,8 +51,16 @@
 //! `CancelTimer`, exactly one `SendMessage(StartRun)`, then `CompleteRun{ContinuedAsNew}`.
 //!
 //! `StepAttemptFailed` maps to nothing: the executor (04-16) submits its own `EnqueueReady`
-//! after `Evicted{StepBackoff}`. Effects and children map to nothing here; the sink adds the
-//! Phase 4 "unsupported" completions ([`crate::sink`]) until Phase 6/9.
+//! after `Evicted{StepBackoff}`. Children map to nothing here; the sink adds the Phase 4
+//! "unsupported" completion ([`crate::sink`]) until Phase 9.
+//!
+//! **Effects (06-14).** `RegisterEffect` records the in-flight `effects` row the bridge's
+//! gate and the leader-start wake rely on; like waits it is left out of terminal batches
+//! (the terminal transition cleans effect rows up and the gate abandons sends for terminal
+//! runs). `CancelEffect` is emitted only for an op identified as an `EffectScheduled` (in
+//! the batch or through `prior`); apply treats it as a blind delete of `(run, op)`, so a
+//! repeat or a cancel of an already completed effect is harmless. A sink without a bridge
+//! strips both intents ([`crate::sink`]).
 //!
 //! Units: commands carry milliseconds, journal events nanoseconds; due and completion
 //! times round **up** (a timer never fires before its journaled time).
@@ -71,6 +81,7 @@ use ostro_types::command::{
     TerminalStatus, WaitKind, derived::Intent,
 };
 use ostro_types::journal::{CANCELLATION_OP, Continuation, Event, EventBody, Failure};
+use ostro_types::live::EffectKind;
 use ostro_types::{PayloadRef, RunId};
 
 /// Result-payload `reason_code` of a run that ended with `RunFailed`.
@@ -307,6 +318,15 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
                     out.push(d);
                 }
             }
+            EventBody::EffectScheduled(e) => {
+                if !terminal_batch {
+                    out.push(Derived::register_effect(
+                        ev.seq,
+                        u32::from(EffectKind::from_request(&e.request).as_u8()),
+                        ceil_ms(ev.ts_nanos),
+                    ));
+                }
+            }
             EventBody::OpCancelled(c) => {
                 let started = events
                     .iter()
@@ -329,14 +349,15 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
                     {
                         out.push(Derived::cancel_wait(c.op));
                     }
-                    // Effects and children: Phase 6/9.
+                    EventBody::EffectScheduled(_) => out.push(Derived::cancel_effect(c.op)),
+                    // Children: Phase 9.
                     _ => {}
                 }
             }
             // No intent: RunStarted (seq 0, written by the executor), StepCompleted,
             // StepAttemptFailed (the executor requeues itself, 04-16), PatchMarker,
-            // StatusPublished, WaitResolved, EffectScheduled / ChildStarted (the sink adds
-            // the unsupported completion), and inputs (journaled by apply, or by the
+            // StatusPublished, WaitResolved, ChildStarted (the sink adds the unsupported
+            // completion), and inputs (journaled by apply, or by the
             // executor's first-activation CancelRequested).
             _ => {}
         }
@@ -691,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn op_cancelled_effect_is_no_intent() {
+    fn op_cancelled_effect_cancels_effect() {
         let prior = |_: u64| {
             Some(EventBody::EffectScheduled(EffectScheduled {
                 meta: meta(),
@@ -706,11 +727,76 @@ mod tests {
                 }),
             }))
         };
-        assert!(
-            intents(&[ev(9, 1, cancel(2))], &prior, None)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            intents(&[ev(9, 1, cancel(2))], &prior, None).unwrap(),
+            vec![Derived::cancel_effect(2)]
         );
+    }
+
+    fn http_effect() -> EventBody {
+        EventBody::EffectScheduled(EffectScheduled {
+            meta: meta(),
+            request: EffectRequest::Http(HttpRequest {
+                method: "POST".into(),
+                url: "http://x/pay".into(),
+                headers: vec![],
+                body: None,
+                timeout_ms: None,
+                idempotency_key: None,
+                redact: vec![],
+            }),
+        })
+    }
+
+    #[test]
+    fn effect_scheduled_registers_effect_ceil_ms() {
+        let sql = EventBody::EffectScheduled(EffectScheduled {
+            meta: meta(),
+            request: EffectRequest::Sql(ostro_types::journal::SqlRequest {
+                connection: "db".into(),
+                statement: "select 1".into(),
+                params: vec![],
+                exactly_once: false,
+            }),
+        });
+        let d = intents(
+            &[ev(4, 1_000_001, http_effect()), ev(5, 2_000_000, sql)],
+            &none,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            d,
+            vec![
+                Derived::register_effect(4, 0, 2),
+                Derived::register_effect(5, 1, 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn effect_scheduled_and_cancelled_in_same_batch() {
+        let d = intents(&[ev(4, 1, http_effect()), ev(5, 2, cancel(4))], &none, None).unwrap();
+        assert_eq!(
+            d,
+            vec![Derived::register_effect(4, 0, 1), Derived::cancel_effect(4)]
+        );
+    }
+
+    #[test]
+    fn terminal_batch_registers_no_effect() {
+        let done = EventBody::RunCompleted(RunCompleted {
+            meta: meta(),
+            output: payload(b"1"),
+        });
+        let d = intents(
+            &[ev(4, 1, http_effect()), ev(5, 2, done)],
+            &none,
+            Some(pref(b"1")),
+        )
+        .unwrap();
+        assert_eq!(d.len(), 1);
+        assert!(matches!(intent(&d[0]), Intent::CompleteRun(_)));
     }
 
     #[test]
@@ -852,18 +938,7 @@ mod tests {
                 meta: meta(),
                 completed: vec![1],
             }),
-            EventBody::EffectScheduled(EffectScheduled {
-                meta: meta(),
-                request: EffectRequest::Http(HttpRequest {
-                    method: "GET".into(),
-                    url: "http://x".into(),
-                    headers: vec![],
-                    body: None,
-                    timeout_ms: None,
-                    idempotency_key: None,
-                    redact: vec![],
-                }),
-            }),
+            // (EffectScheduled derives RegisterEffect since 06-14: see the effect tests.)
             EventBody::ChildStarted(ChildStarted {
                 meta: meta(),
                 workflow: "w".into(),

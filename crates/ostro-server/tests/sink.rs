@@ -610,3 +610,215 @@ async fn read_journal_decode_failure_names_run_and_seq() {
         "{msg}"
     );
 }
+
+// ---------------------------------------------------------------- 06-14: bridge enabled (B1)
+
+use ostro_meta::MetaHandle;
+use ostro_server::bridge_services::{BridgeEnv, BridgeServices};
+use ostro_server::config::ServerConfig;
+use ostro_server::effects::PartitionTable;
+
+/// A bridge over a throwaway meta (no partitions registered until a sink attaches).
+struct BridgeFx {
+    _dir: tempfile::TempDir,
+    meta: Arc<MetaHandle>,
+    bridge: Arc<BridgeServices>,
+}
+
+impl BridgeFx {
+    async fn new() -> Self {
+        let dir = ostro_testkit::fs::tempdir();
+        let meta = Arc::new(
+            timeout(T, MetaHandle::start(&dir.path().join("meta"), 1))
+                .await
+                .expect("meta start timed out")
+                .expect("meta start"),
+        );
+        let bridge = BridgeServices::build(
+            &ServerConfig::server_defaults(),
+            BridgeEnv {
+                meta: Arc::downgrade(&meta),
+                view: meta.view().clone(),
+                data_dir: dir.path().to_path_buf(),
+                partitions: Arc::new(PartitionTable::new()),
+                cluster_id: "c-test".into(),
+                node_id: 1,
+                clock: Arc::new(ostro_partition::SystemClock),
+                public_base_url: "http://127.0.0.1:1".into(),
+            },
+        )
+        .await
+        .expect("bridge build");
+        Self {
+            _dir: dir,
+            meta,
+            bridge,
+        }
+    }
+
+    fn sink(&self, f: &Fixture) -> PartitionSink {
+        PartitionSink::new(f.handle.clone(), f.run, f.token, None, None)
+            .with_bridge(Arc::clone(&self.bridge))
+    }
+
+    async fn stop(self) {
+        self.bridge.shutdown().await;
+        drop(self.bridge);
+        match Arc::try_unwrap(self.meta) {
+            Ok(m) => m.stop().await,
+            Err(_) => panic!("meta still referenced (the bridge must hold it weakly)"),
+        }
+    }
+}
+
+/// Journal `events` with a raw command (no derived intents), as a crashed activation that
+/// never journaled completions would leave them.
+async fn raw_append(f: &Fixture, from: u64, events: &[Event]) {
+    let jevs = events
+        .iter()
+        .map(|e| {
+            let (kind, bytes) = ostro_types::journal::encode_event(e);
+            JournalEvent {
+                seq: e.seq,
+                kind,
+                payload: Some(PayloadRef::inline(bytes.into())),
+            }
+        })
+        .collect();
+    let o = f
+        .handle
+        .submit_one(Command::events_appended(EventsAppended {
+            run_id: f.run.as_bytes().to_vec(),
+            token: Some(AttemptTokenMsg::from(f.token)),
+            from_seq: from,
+            events: jevs,
+            derived: vec![],
+        }))
+        .await
+        .expect("submit");
+    assert_eq!(o, ApplyOutcome::Accepted);
+}
+
+fn child(seq: u64) -> Event {
+    ev(
+        seq,
+        EventBody::ChildStarted(ChildStarted {
+            meta: meta(),
+            workflow: "kid".into(),
+            input: Payload {
+                content_type: "application/json".into(),
+                data: b"{}".to_vec(),
+            },
+            options: ChildOptions {
+                queue: None,
+                version: None,
+                detached: false,
+                run_timeout_ms: None,
+            },
+        }),
+    )
+}
+
+/// B1: with the bridge, `repair_unsupported` (run on every journal load) leaves an
+/// uncompleted EffectScheduled alone: it is re-driven, never failed as unsupported.
+#[tokio::test]
+async fn bridge_repair_leaves_inflight_effect_alone() {
+    let f = Fixture::new().await;
+    let b = BridgeFx::new().await;
+    raw_append(&f, 1, &[effect(1)]).await;
+    let sink = b.sink(&f);
+    let j = f.journal().await;
+    assert_eq!(j.len(), 2);
+    assert_eq!(sink.unsupported_input(&j[1]), None);
+    sink.repair_unsupported(&j).await.expect("repair");
+    assert_eq!(f.journal().await.len(), 2, "repair appended nothing");
+    assert_eq!(sink.next_seq(), 2);
+    b.stop().await;
+}
+
+/// B1: children keep their unsupported completion with the bridge enabled.
+#[tokio::test]
+async fn bridge_repair_still_completes_children() {
+    let f = Fixture::new().await;
+    let b = BridgeFx::new().await;
+    raw_append(&f, 1, &[effect(1), child(2)]).await;
+    let sink = b.sink(&f);
+    sink.repair_unsupported(&f.journal().await)
+        .await
+        .expect("repair");
+    let j = f.journal().await;
+    assert_eq!(j.len(), 4, "only the child got a completion");
+    let EventBody::ChildCompleted(c) = &j[3].body else {
+        panic!("seq 3 is {:?}", j[3].body)
+    };
+    assert_eq!(c.op, 2);
+    assert_unsupported(&c.outcome, CHILDREN_UNSUPPORTED);
+    b.stop().await;
+}
+
+/// With the bridge: the append registers the effects row and journals no unsupported
+/// completion; the sink hands out the driver; a later OpCancelled deletes the row.
+#[tokio::test]
+async fn bridge_append_registers_and_cancels_effect_rows() {
+    let f = Fixture::new().await;
+    let b = BridgeFx::new().await;
+    let sink = b.sink(&f);
+    assert!(sink.effect_driver().is_some(), "P-1: the bridge driver");
+    let r = timeout(
+        T,
+        sink.append(&rref(&f.run), f.token.n, 1, vec![effect(1), child(2)]),
+    )
+    .await
+    .expect("append timed out");
+    assert_eq!(r, Ok(3));
+    let j = f.journal().await;
+    assert_eq!(
+        j.len(),
+        4,
+        "child completion only: {:?}",
+        j.iter().map(|e| e.body.kind()).collect::<Vec<_>>()
+    );
+    assert!(matches!(&j[3].body, EventBody::ChildCompleted(c) if c.op == 2));
+    let row = query::effect_row(&f.handle.reader(), &f.run, 1)
+        .expect("read")
+        .expect("effects row registered");
+    assert_eq!(row.kind, 0, "http");
+    assert!(
+        b.bridge.partitions().get(0).is_some(),
+        "the sink registered its partition"
+    );
+    let cancel = ev(
+        4,
+        EventBody::OpCancelled(OpCancelled {
+            meta: meta(),
+            op: 1,
+        }),
+    );
+    let r = timeout(T, sink.append(&rref(&f.run), f.token.n, 4, vec![cancel]))
+        .await
+        .expect("append timed out");
+    assert_eq!(r, Ok(5));
+    assert!(
+        query::effect_row(&f.handle.reader(), &f.run, 1)
+            .expect("read")
+            .is_none(),
+        "CancelEffect deleted the row"
+    );
+    b.stop().await;
+}
+
+/// Without the bridge the effect intents are stripped (no row nobody would clean up) and
+/// the Phase 4 unsupported completion stays.
+#[tokio::test]
+async fn no_bridge_registers_no_effect_row() {
+    let f = Fixture::new().await;
+    assert!(f.sink.effect_driver().is_none());
+    assert_eq!(f.append(1, vec![effect(1)]).await, Ok(2));
+    assert!(
+        query::effect_row(&f.handle.reader(), &f.run, 1)
+            .expect("read")
+            .is_none()
+    );
+    let j = f.journal().await;
+    assert!(matches!(&j[2].body, EventBody::EffectCompleted(c) if c.op == 1));
+}

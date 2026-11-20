@@ -49,6 +49,10 @@ pub const SECTIONS: &[&str] = &[
     "blob_gc",
     "triggers",
     "guest_logs",
+    // Phase 6 (RESERVATIONS §11), parsed since 06-14.
+    "secrets",
+    "egress",
+    "connectors",
 ];
 
 static PARSER: SpanParser = SpanParser::new();
@@ -346,6 +350,11 @@ pub struct ServerConfig {
     pub blob_gc: BlobGcSection,
     pub triggers: TriggersSection,
     pub guest_logs: GuestLogsSection,
+    // Phase 6 sections (RESERVATIONS §11, plan 06-14). Unknown keys inside them are
+    // ignored (D18 node.toml rule).
+    pub secrets: SecretsSection,
+    pub egress: EgressSection,
+    pub connectors: ConnectorsSection,
 }
 
 impl ServerConfig {
@@ -360,6 +369,9 @@ impl ServerConfig {
         // so a future server-profile default cannot leak into `ostro dev`). Snapshots keep
         // their defaults.
         c.backup = BackupSection::default();
+        // 06-DECISIONS: dev auto-generates `<data_dir>/sealing.key` when no key is
+        // configured; the server profile refuses to store secrets instead.
+        c.secrets.auto_sealing_key = true;
         c
     }
 
@@ -438,7 +450,29 @@ impl ServerConfig {
                 "snapshots.keep must be at least 1".into(),
             ));
         }
+        // Phase 6 sections: parse into the bridge types once so every bad value fails at
+        // load, naming its section.
+        self.secrets.to_bridge()?;
+        self.egress.to_bridge()?;
+        self.connectors.to_bridge()?;
         Ok(())
+    }
+
+    /// The base URL of local presigned object URLs: `[connectors] public_base_url`, else
+    /// `http://<API listen address>` (`bound` is the address actually bound; an unspecified
+    /// IP such as `0.0.0.0` becomes loopback).
+    pub fn public_base_url(&self, bound: SocketAddr) -> String {
+        if let Some(u) = &self.connectors.public_base_url {
+            return u.trim_end_matches('/').to_owned();
+        }
+        let mut addr = bound;
+        if addr.ip().is_unspecified() {
+            addr.set_ip(match addr {
+                SocketAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+                SocketAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
+            });
+        }
+        format!("http://{addr}")
     }
 }
 
@@ -770,6 +804,247 @@ impl Default for GuestLogsSection {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Phase 6 sections (RESERVATIONS §11; parsed since plan 06-14)
+//
+// The bridge owns the real types (`ostro_bridge::config::{SecretsConfig, EgressConfig,
+// ConnectorsConfig}`), which are `Deserialize`-only and reject unknown keys. The layered
+// loader needs `Serialize` (the profile is the base layer) and node.toml must ignore unknown
+// keys (D18), so these mirror sections hold the same keys with the same defaults and are
+// converted with `to_bridge()` (serde, so the bridge's own parsers and validation apply).
+// ---------------------------------------------------------------------------------
+
+/// A byte size: an integer or a string such as `"4MiB"` (the bridge's `parse_bytes`).
+/// Serialised as an integer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteSize(pub u64);
+
+impl ByteSize {
+    /// The size in bytes.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl Serialize for ByteSize {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = ByteSize;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a byte count or a size string such as \"4MiB\"")
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<ByteSize, E> {
+                Ok(ByteSize(v))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<ByteSize, E> {
+                u64::try_from(v)
+                    .map(ByteSize)
+                    .map_err(|_| E::custom(format!("invalid byte size {v}: negative")))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<ByteSize, E> {
+                ostro_bridge::config::parse_bytes(v)
+                    .map(ByteSize)
+                    .map_err(|e| E::custom(format!("invalid byte size {v:?}: {e}")))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// `[secrets]` (06-DECISIONS): provider order, the sealing key and the remote providers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecretsSection {
+    /// Provider lookup order (`sealed`, `env`, `file`, `vault`, `k8s`).
+    pub providers: Vec<String>,
+    /// File holding the sealing key (32 raw bytes or base64). `OSTRO_SEALING_KEY` wins.
+    pub sealing_key_file: Option<PathBuf>,
+    /// Env provider prefix (default `OSTRO_SECRET_`).
+    pub env_prefix: String,
+    /// File provider directory (the provider is skipped while unset).
+    pub file_dir: Option<PathBuf>,
+    /// Generate `<data_dir>/sealing.key` (0600) when no key is configured: on in the dev
+    /// profile, off in the server profile (which then refuses to store secrets but runs).
+    pub auto_sealing_key: bool,
+    /// `[secrets.vault]`; the provider exists only when this table is present.
+    pub vault: Option<VaultSection>,
+    /// `[secrets.k8s]`; the provider exists only when this table is present.
+    pub k8s: Option<K8sSection>,
+}
+
+impl Default for SecretsSection {
+    fn default() -> Self {
+        Self {
+            providers: vec!["sealed".into(), "env".into(), "file".into()],
+            sealing_key_file: None,
+            env_prefix: "OSTRO_SECRET_".into(),
+            file_dir: None,
+            auto_sealing_key: false,
+            vault: None,
+            k8s: None,
+        }
+    }
+}
+
+/// `[secrets.vault]` (unset keys take the bridge defaults).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VaultSection {
+    pub addr: Option<String>,
+    pub mount: Option<String>,
+    /// `token` | `approle` | `kubernetes`.
+    pub auth: Option<String>,
+    pub token_file: Option<PathBuf>,
+    pub role_id: Option<String>,
+    pub secret_id_file: Option<PathBuf>,
+    pub k8s_role: Option<String>,
+    pub cache_ttl: Option<FriendlyDuration>,
+}
+
+/// `[secrets.k8s]` (unset keys take the bridge defaults).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct K8sSection {
+    pub namespace: Option<String>,
+    pub kubeconfig: Option<PathBuf>,
+    pub cache_ttl: Option<FriendlyDuration>,
+}
+
+/// `[egress]` (06-DECISIONS): the SSRF gate and outbound HTTP limits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EgressSection {
+    /// Private CIDRs effects may reach (default none: deny-by-default, Pitfall 8).
+    pub allow_private: Vec<String>,
+    pub connect_timeout: FriendlyDuration,
+    pub default_timeout: FriendlyDuration,
+    pub max_response_bytes: ByteSize,
+    pub hard_max_response_bytes: ByteSize,
+    pub max_redirects: u8,
+    /// Longest wait for a rate-limit permit (passed to `Bridge::new`).
+    pub rate_max_wait: FriendlyDuration,
+    pub idempotency_window: FriendlyDuration,
+    pub safety_margin: FriendlyDuration,
+}
+
+impl Default for EgressSection {
+    fn default() -> Self {
+        Self {
+            allow_private: Vec::new(),
+            connect_timeout: FriendlyDuration::from_secs(5),
+            default_timeout: FriendlyDuration::from_secs(30),
+            max_response_bytes: ByteSize(4 * MIB),
+            hard_max_response_bytes: ByteSize(64 * MIB),
+            max_redirects: 5,
+            rate_max_wait: FriendlyDuration::from_secs(30),
+            idempotency_window: FriendlyDuration::from_secs(24 * 3600),
+            safety_margin: FriendlyDuration::from_secs(5 * 60),
+        }
+    }
+}
+
+/// `[connectors]` (06-DECISIONS): SQL/object caps, presign and the default rate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConnectorsSection {
+    pub sql_max_rows: u64,
+    pub sql_max_bytes: ByteSize,
+    pub sql_effects_retention: FriendlyDuration,
+    pub object_max_get_bytes: ByteSize,
+    pub presign_default_expiry: FriendlyDuration,
+    pub backend_ttl: FriendlyDuration,
+    /// Default per-target rate (`"100/s"`); unset = unlimited.
+    pub default_rate: Option<String>,
+    /// Base of local presigned URLs; unset = the API listen address
+    /// ([`ServerConfig::public_base_url`]).
+    pub public_base_url: Option<String>,
+}
+
+impl Default for ConnectorsSection {
+    fn default() -> Self {
+        Self {
+            sql_max_rows: 10_000,
+            sql_max_bytes: ByteSize(4 * MIB),
+            sql_effects_retention: FriendlyDuration::from_secs(168 * 3600),
+            object_max_get_bytes: ByteSize(16 * MIB),
+            presign_default_expiry: FriendlyDuration::from_secs(15 * 60),
+            backend_ttl: FriendlyDuration::from_secs(5 * 60),
+            default_rate: None,
+            public_base_url: None,
+        }
+    }
+}
+
+/// `value` without `null` members (unset keys take the bridge defaults).
+fn strip_nulls(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(m) => serde_json::Value::Object(
+            m.into_iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k, strip_nulls(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Serialise a mirror section and parse it as the bridge type (minus `drop` keys).
+fn to_bridge_type<T: serde::de::DeserializeOwned>(
+    section: &str,
+    value: &impl Serialize,
+    drop: &[&str],
+) -> Result<T, ConfigError> {
+    let mut v = strip_nulls(
+        serde_json::to_value(value)
+            .map_err(|e| ConfigError::Invalid(format!("[{section}]: {e}")))?,
+    );
+    if let serde_json::Value::Object(m) = &mut v {
+        for k in drop {
+            m.remove(*k);
+        }
+    }
+    serde_json::from_value(v).map_err(|e| ConfigError::Invalid(format!("[{section}]: {e}")))
+}
+
+impl SecretsSection {
+    /// The bridge's `[secrets]` type, validated.
+    pub fn to_bridge(&self) -> Result<ostro_bridge::config::SecretsConfig, ConfigError> {
+        let c: ostro_bridge::config::SecretsConfig =
+            to_bridge_type("secrets", self, &["auto_sealing_key"])?;
+        c.validate()
+            .map_err(|e| ConfigError::Invalid(format!("[secrets]: {e}")))?;
+        Ok(c)
+    }
+}
+
+impl EgressSection {
+    /// The bridge's `[egress]` type, validated.
+    pub fn to_bridge(&self) -> Result<ostro_bridge::config::EgressConfig, ConfigError> {
+        let c: ostro_bridge::config::EgressConfig = to_bridge_type("egress", self, &[])?;
+        c.validate()
+            .map_err(|e| ConfigError::Invalid(format!("[egress]: {e}")))?;
+        Ok(c)
+    }
+}
+
+impl ConnectorsSection {
+    /// The bridge's `[connectors]` type, validated (`public_base_url` stays as configured;
+    /// see [`ServerConfig::public_base_url`] for the effective value).
+    pub fn to_bridge(&self) -> Result<ostro_bridge::config::ConnectorsConfig, ConfigError> {
+        let c: ostro_bridge::config::ConnectorsConfig = to_bridge_type("connectors", self, &[])?;
+        c.validate()
+            .map_err(|e| ConfigError::Invalid(format!("[connectors]: {e}")))?;
+        Ok(c)
+    }
+}
+
 /// Explicit overrides from CLI flags; they win over every other layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Overrides {
@@ -907,14 +1182,18 @@ fn toml_render(cfg: &ServerConfig) -> String {
                 | serde_json::Value::Number(_)
                 | serde_json::Value::Bool(_) => val.to_string(),
                 // `[telemetry] otlp_headers`: an inline table of strings.
+                // `[secrets] providers`, `[egress] allow_private`: arrays of strings.
+                serde_json::Value::Array(_) => val.to_string(),
+                // `[telemetry] otlp_headers` and `[secrets.vault]` / `[secrets.k8s]`: an
+                // inline table of scalars (unset keys omitted).
                 serde_json::Value::Object(map) => {
                     let items: Vec<String> = map
                         .iter()
+                        .filter(|(_, v)| !v.is_null())
                         .map(|(k, v)| format!("{} = {v}", serde_json::Value::String(k.clone())))
                         .collect();
                     format!("{{ {} }}", items.join(", "))
                 }
-                other => unreachable!("non-scalar config value {other}"),
             };
             let _ = writeln!(out, "{k} = {rendered}");
         }

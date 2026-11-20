@@ -22,14 +22,21 @@
 //! Phase 8 (08-04): the [`services`] seam (one place every node-level background service
 //! starts and stops, P8-D21), the Phase 8 config sections in [`config`], and
 //! [`telemetry`] (Prometheus `/metrics`, OTLP traces/logs, `OstroIdGenerator`).
+//!
+//! Phase 6 (06-14): [`bridge_services::BridgeServices`] builds the effects bridge once per
+//! server over [`meta_view::MetaHandleView`]; [`effects`] adapts it to the engine's
+//! `EffectDriver` (completions through `Cmd::CompleteEffect`, the pre-send gate).
 
+pub mod bridge_services;
 pub mod config;
 pub mod control;
 pub mod derive;
+pub mod effects;
 pub mod executor;
 pub mod journal_io;
 pub mod leadership;
 pub mod logging;
+pub mod meta_view;
 pub mod retention;
 pub mod run_started;
 pub mod server;
@@ -58,9 +65,8 @@ mod phase8_dep_anchors {
     use ostro_triggers as _;
 }
 
-// Phase 6 dependencies declared once by plan 06-02 for 06-14 (BridgeServices wiring) and
-// 06-16 (admin impl); anchored like the Phase 8 ones above.
+// Phase 6 dependency declared once by plan 06-02 for 06-16 (admin impl); anchored like the
+// Phase 8 ones above (ostro-bridge itself is consumed by 06-14's `bridge_services`).
 mod phase6_dep_anchors {
     use base64 as _;
-    use ostro_bridge as _;
 }

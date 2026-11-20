@@ -48,6 +48,7 @@ use ostro_meta::{MetaHandle, MetaKey, MetaRecord, MetaView};
 use ostro_partition::{Clock, Node, PartitionHandle, PartitionHealth};
 use ostro_types::{PartitionCount, PartitionId};
 
+use crate::bridge_services::BridgeServices;
 use crate::config::ServerConfig;
 use crate::services::guest_logs::GuestLogSink;
 pub use watch::RunWatchers;
@@ -81,6 +82,9 @@ pub struct ServerControlPlane {
     pub(crate) status_rows_read: Arc<AtomicU64>,
     /// Long-poll waiters (05-13); fed by every started partition's action broadcast.
     pub(crate) watchers: RunWatchers,
+    /// The effects bridge (06-14): sealing key, secret resolver, object connector. 06-16
+    /// implements the Phase 6 admin methods over it.
+    pub(crate) bridge: Arc<BridgeServices>,
 }
 
 impl std::fmt::Debug for ServerControlPlane {
@@ -99,6 +103,7 @@ impl ServerControlPlane {
         count: PartitionCount,
         runtime: Arc<Runtime>,
         cfg: Arc<ServerConfig>,
+        bridge: Arc<BridgeServices>,
     ) -> Self {
         let blobs = partitions
             .iter()
@@ -119,7 +124,13 @@ impl ServerControlPlane {
             serving: AtomicBool::new(true),
             status_rows_read: Arc::new(AtomicU64::new(0)),
             watchers,
+            bridge,
         }
+    }
+
+    /// The effects bridge (06-14).
+    pub fn bridge(&self) -> &Arc<BridgeServices> {
+        &self.bridge
     }
 
     /// The long-poll waiter hub.

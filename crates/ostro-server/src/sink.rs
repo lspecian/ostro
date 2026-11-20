@@ -30,10 +30,24 @@
 //! (unknown workflow or version) completes the run `Failed` with reason
 //! `continue_as_new_failed` instead.
 //!
+//! # Effects (06-14)
+//!
+//! With [`PartitionSink::with_bridge`], the sink hands the engine the bridge's
+//! [`EffectDriver`](ostro_engine::EffectDriver) ([`ActivationSink::effect_driver`], P-1):
+//! `EffectScheduled` derives `RegisterEffect` (the in-flight `effects` row), an
+//! `OpCancelled` of an effect derives `CancelEffect` and, once that append is accepted, the
+//! bridge task is cancelled (best effort). The effect is completed by the bridge through
+//! `Cmd::CompleteEffect`, never by this sink: [`PartitionSink::unsupported_input`] returns
+//! `None` for `EffectScheduled` (B1), so neither the post-append path nor
+//! [`PartitionSink::repair_unsupported`] (run on every journal load) fails an in-flight
+//! effect as `unsupported`. Without a bridge (tests, bare nodes) `RegisterEffect` /
+//! `CancelEffect` are stripped and effects keep the Phase 4 path below.
+//!
 //! # Phase 4 "unsupported" completions (locked decision; Phase 6/9 replace this)
 //!
-//! Effects and child workflows are not implemented yet. Instead of hanging, the run gets an
-//! immediate non-retryable failure (await tokens are real since Phase 5: `RegisterWait`):
+//! Child workflows (and, without a bridge, effects) are not implemented yet. Instead of
+//! hanging, the run gets an immediate non-retryable failure (await tokens are real since
+//! Phase 5: `RegisterWait`):
 //!
 //! - `EffectScheduled{seq s}` -> input `EffectCompleted{op: s, outcome: Err(NonRetryable{kind:
 //!   "unsupported"})}`; `ChildStarted` -> `ChildCompleted` likewise. They are journaled with
@@ -72,6 +86,7 @@ use ostro_types::journal::{
 use ostro_types::{AttemptToken, Command, PayloadRef, RunId};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::bridge_services::BridgeServices;
 use crate::derive::{self, InheritPolicy, ModuleResolver, NoModules, PolicyResolver};
 use crate::journal_io;
 use crate::services::guest_logs::GuestLogSink;
@@ -104,6 +119,8 @@ pub struct PartitionSink<L: ReplicatedLog = Rf1Log> {
     modules: Arc<dyn ModuleResolver>,
     policy: Arc<dyn PolicyResolver>,
     guest_logs: Option<Arc<GuestLogSink>>,
+    /// The effects bridge (06-14); `None` keeps the Phase 4 unsupported path for effects.
+    bridge: Option<Arc<BridgeServices>>,
 }
 
 impl<L: ReplicatedLog> std::fmt::Debug for PartitionSink<L> {
@@ -129,10 +146,12 @@ pub fn unsupported_failure(message: &str) -> Failure {
     })
 }
 
-/// The unsupported completion input for an event that schedules an op, if any.
-fn unsupported_input(ev: &Event) -> Option<EventBody> {
+/// The unsupported completion input for an event that schedules an op, if any
+/// (`bridge`: effects are completed by the bridge, never as unsupported; B1).
+fn unsupported_completion(ev: &Event, bridge: bool) -> Option<EventBody> {
     let out: Result<OpOutput, Failure>;
     match &ev.body {
+        EventBody::EffectScheduled(_) if bridge => None,
         EventBody::EffectScheduled(_) => {
             out = Err(unsupported_failure(EFFECTS_UNSUPPORTED));
             Some(EventBody::EffectCompleted(EffectCompleted {
@@ -148,6 +167,17 @@ fn unsupported_input(ev: &Event) -> Option<EventBody> {
             }))
         }
         _ => None,
+    }
+}
+
+impl PartitionSink<Rf1Log> {
+    /// Route effects through the bridge (06-14; module docs). Registers this sink's
+    /// partition handle with the bridge's partition table (the gate and the completion
+    /// sink look partitions up there).
+    pub fn with_bridge(mut self, bridge: Arc<BridgeServices>) -> Self {
+        bridge.partitions().insert(self.handle.clone());
+        self.bridge = Some(bridge);
+        self
     }
 }
 
@@ -182,7 +212,14 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             modules: Arc::new(NoModules),
             policy: Arc::new(InheritPolicy),
             guest_logs: None,
+            bridge: None,
         }
+    }
+
+    /// The unsupported completion input for `ev`, if it schedules an op that gets one:
+    /// `ChildStarted` always; `EffectScheduled` only without a bridge (B1).
+    pub fn unsupported_input(&self, ev: &Event) -> Option<EventBody> {
+        unsupported_completion(ev, self.bridge.is_some())
     }
 
     /// Forward live guest log lines to the node's guest log sink (08-17). Without it the
@@ -411,7 +448,7 @@ impl<L: ReplicatedLog> PartitionSink<L> {
         let bodies: Vec<EventBody> = journal
             .iter()
             .filter(|e| !completed.contains(&e.seq))
-            .filter_map(unsupported_input)
+            .filter_map(|e| self.unsupported_input(e))
             .collect();
         let ts = journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
         self.journal_inputs(bodies, ts).await
@@ -519,15 +556,47 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
             },
         )
         .map_err(unavailable)?;
+        // Effect intents exist only with a bridge (without one nothing would ever complete
+        // or clean up the rows; the unsupported path below completes the effect instead).
+        let derived: Vec<Derived> = if self.bridge.is_some() {
+            derived
+        } else {
+            derived
+                .into_iter()
+                .filter(|d| {
+                    !matches!(
+                        d.intent,
+                        Some(Intent::RegisterEffect(_) | Intent::CancelEffect(_))
+                    )
+                })
+                .collect()
+        };
+        let cancelled: Vec<u64> = derived
+            .iter()
+            .filter_map(|d| match &d.intent {
+                Some(Intent::CancelEffect(c)) => Some(c.op),
+                _ => None,
+            })
+            .collect();
         let max_ts = events.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
         // 3. Events.
         let jevs = self.encode(&events).await?;
         // 4. Submit.
         let next = self.submit(from_seq, jevs, derived).await?;
-        // Phase 4: unsupported completions of effects / children, after the scheduling
-        // append (same token).
+        // CancelEffect committed: stop the bridge task (best effort; the gate's effects-row
+        // check abandons it anyway).
+        if let Some(b) = &self.bridge {
+            for op in cancelled {
+                b.bridge().cancel(run.partition, &run.run_id, op);
+            }
+        }
+        // Phase 4: unsupported completions of children (and effects without a bridge),
+        // after the scheduling append (same token).
         if !self.is_terminal() {
-            let bodies: Vec<EventBody> = events.iter().filter_map(unsupported_input).collect();
+            let bodies: Vec<EventBody> = events
+                .iter()
+                .filter_map(|e| self.unsupported_input(e))
+                .collect();
             self.journal_inputs(bodies, max_ts).await?;
         }
         Ok(next)
@@ -558,6 +627,12 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
 
     fn handles_guest_logs(&self) -> bool {
         self.guest_logs.is_some()
+    }
+
+    fn effect_driver(&self) -> Option<Arc<dyn ostro_engine::EffectDriver>> {
+        self.bridge
+            .as_ref()
+            .map(|b| Arc::clone(b.driver()) as Arc<dyn ostro_engine::EffectDriver>)
     }
 
     fn guest_log(&self, rec: GuestLogRecord) {
