@@ -218,7 +218,7 @@ Plans:
 
 Plans:
 - [x] 06-01-PLAN.md — PHASE-6 GATE (Phase 5 + WIT freeze, code vs RESERVATIONS) + decisions to STATE + FX-05 wording + RESERVATIONS names and canonical InvalidCode placeholder names (docs only) (all FX)
-- [ ] 06-02-PLAN.md — All Phase 6 deps + ostro-bridge contract skeleton + ostro-objstore skeleton (08-03 signatures, if absent) + ostro-types contract (CompleteEffect 13 = encoded EffectCompleted payload, RegisterEffect/CancelEffect 9/10, BadEffectCompletion 15) (all FX)
+- [x] 06-02-PLAN.md — All Phase 6 deps + ostro-bridge contract skeleton + ostro-objstore skeleton (08-03 signatures, if absent) + ostro-types contract (CompleteEffect 13 = encoded EffectCompleted payload, RegisterEffect/CancelEffect 9/10, BadEffectCompletion 15) (all FX)
 - [ ] 06-03-PLAN.md — Partition apply: effects rows (#12), RegisterEffect/CancelEffect, first-wins CompleteEffect stored verbatim, resumable-aware cleanup, LeaderAnnounced wake (FX-01, FX-03)
 - [ ] 06-04-PLAN.md — Egress core: URL gate, IANA classifier + mapped/NAT64/6to4 unwrap, allow-lists, hickory resolver with pinning, guarded client, capped reader, full [egress] config, SSRF table (FX-08)
 - [ ] 06-05-PLAN.md — Secrets core: template parser, origin-bound grants, multi-encoding scrubber, AES-256-GCM sealed store, env/file/sealed providers + chain, resolver (FX-06, FX-07, FX-10)
