@@ -331,9 +331,48 @@ pub fn children_prefix(parent: &RunId) -> Vec<u8> {
     parent.as_bytes().to_vec()
 }
 
+/// `effects` (keyspace #12, RESERVATIONS §6; rows first written in Phase 6, plan 06-03):
+/// run (18 B) ‖ op BE u64. Value: [`EffectRow`](super::values::EffectRow). Derived state (D18,
+/// additive): every row follows from the log's `RegisterEffect` / `CancelEffect` intents,
+/// `CompleteEffect` and terminal/expiry cleanup.
+pub fn effect_key(run: &RunId, op: u64) -> Vec<u8> {
+    let mut k = Vec::with_capacity(RUN_LEN + 8);
+    k.extend_from_slice(run.as_bytes());
+    k.extend_from_slice(&op.to_be_bytes());
+    k
+}
+
+/// Prefix of every `effects` row of one run (its 18 id bytes).
+pub fn effect_run_prefix(run: &RunId) -> Vec<u8> {
+    run.as_bytes().to_vec()
+}
+
+/// Inverse of [`effect_key`]: `(run, op)`.
+pub fn decode_effect_key(k: &[u8]) -> Option<(RunId, u64)> {
+    if k.len() != RUN_LEN + 8 {
+        return None;
+    }
+    let run = RunId::from_bytes(&k[..RUN_LEN]).ok()?;
+    let op = read_u64(&k[RUN_LEN..])?;
+    Some((run, op))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effect_key_roundtrip_and_order() {
+        let mut b = [0u8; 18];
+        b[1] = 3;
+        let r = RunId::from_bytes(&b).unwrap();
+        let k = effect_key(&r, 7);
+        assert_eq!(k.len(), 26);
+        assert!(k.starts_with(&effect_run_prefix(&r)));
+        assert_eq!(decode_effect_key(&k), Some((r, 7)));
+        assert!(effect_key(&r, 7) < effect_key(&r, 256));
+        assert_eq!(decode_effect_key(&k[..25]), None);
+    }
 
     #[test]
     fn priority_mapping_round_trips_and_reverses() {

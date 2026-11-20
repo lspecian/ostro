@@ -51,7 +51,7 @@ use super::START_DELAY_OP;
 use super::cursor::Cursor;
 use super::outbox::{emit, msg_oversize, msg_target};
 use super::outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
-use super::{lifecycle, terminal, waits};
+use super::{effects, lifecycle, terminal, waits};
 use crate::store::keys::{
     children_key, dedupe_key, event_key, payload_key, ready_key, run_key, running_key, timer_key,
 };
@@ -476,10 +476,9 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
             // Phase 5 seams: validated by `waits.rs` (05-08; stubs reject until then).
             Intent::RegisterWait(w) => waits::check_register_wait(cur, w)?,
             Intent::CancelWait(w) => waits::check_cancel_wait(cur, w)?,
-            // Phase 6: implemented in 06-03 (temporary reject arm).
-            Intent::RegisterEffect(_) | Intent::CancelEffect(_) => {
-                return Err(invalid(InvalidCode::BadIntent));
-            }
+            // Phase 6 (06-03): `effects.rs`.
+            Intent::RegisterEffect(r) => effects::check_register_effect(r)?,
+            Intent::CancelEffect(_) => {}
             Intent::ScheduleTimer(_) | Intent::CancelTimer(_) => {}
             Intent::EnqueueReady(_) => enqueued = true,
             Intent::SendMessage(m) => {
@@ -648,8 +647,9 @@ pub(crate) fn apply_events_appended(
             }
             Intent::RegisterWait(w) => waits::register_wait(b, &run, &mut rec, w, actions)?,
             Intent::CancelWait(w) => waits::cancel_wait(b, &run, &mut rec, w, actions)?,
-            // Phase 6: rejected by `check_intents` until 06-03.
-            Intent::RegisterEffect(_) | Intent::CancelEffect(_) => {}
+            // Phase 6 (06-03): blind effects-row writes, no reads.
+            Intent::RegisterEffect(r) => effects::register_effect(b, &run, &rec, r),
+            Intent::CancelEffect(c) => effects::cancel_effect(b, &run, c),
             Intent::CompleteRun(c) => {
                 let status = terminal_status(c.status)
                     .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;

@@ -793,7 +793,9 @@ fn continue_as_new_hands_off_without_child_completed() {
     );
     let (out, actions, reads) = h.apply_full(&cmd);
     assert_eq!(out, ApplyOutcome::Accepted);
-    assert_eq!(reads, 1, "EventsAppended's record read only");
+    // Record read + the effects prefix scan of the non-resumable terminal (06-03, P-8;
+    // docs/storage-format.md "Phase 6 additions").
+    assert_eq!(reads, 2, "EventsAppended's record read + effects cleanup scan");
     assert_eq!(
         run_completed(&actions),
         vec![(r, RunStatus::ContinuedAsNew)]

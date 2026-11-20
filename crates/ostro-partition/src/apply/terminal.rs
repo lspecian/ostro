@@ -9,13 +9,18 @@
 //! into a resumed run. Each removed timer also emits `Action::CancelTimer` for the timer
 //! service. Then it calls `lifecycle::on_terminal` (05-09: retention timer, run-timeout row).
 //!
+//! Phase 6 (06-03, P-8): when the run is **not** `resumable` (callers set the flag before the
+//! call), every `effects` row of the run is deleted (`effects::delete_run_effects`). Resumable
+//! terminals keep them, so a resumed run still accepts the completion of an in-flight effect.
+//!
 //! **Read budget:** the two `waits` prefix scans (2 reads) run only when
 //! `RunRecord.open_waits > 0`; otherwise the hook reads nothing (asserted in
-//! `tests/apply_seams.rs`). Documented exception, docs/storage-format.md §13.
+//! `tests/apply_seams.rs`). Documented exception, docs/storage-format.md §13. Non-resumable
+//! terminals add 1 effects prefix scan by run (06-03; asserted in `tests/apply_effects.rs`).
 
 use ostro_types::RunId;
 
-use super::lifecycle;
+use super::{effects, lifecycle};
 use super::outcome::Action;
 use crate::store::keys::{WAIT_ROW, decode_wait_key, timer_key, wait_prefixes};
 use crate::store::values::{self, RunRecord, WaitRow};
@@ -31,6 +36,10 @@ pub(crate) fn on_terminal(
     if rec.open_waits > 0 {
         clear_waits(b, run, actions)?;
         rec.open_waits = 0;
+    }
+    // P-8 (06-03): a resumable terminal keeps its in-flight effects for the resume.
+    if !rec.resumable {
+        effects::delete_run_effects(b, run)?;
     }
     lifecycle::on_terminal(b, run, rec, at_ms, actions)
 }

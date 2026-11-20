@@ -339,8 +339,9 @@ fn complete_run_without_waits_reads_no_waits() {
     ));
     assert_eq!(out, ApplyOutcome::Accepted);
     assert_eq!(
-        reads, 1,
-        "only the run record: open_waits == 0 skips both scans"
+        reads, 2,
+        "run record + the effects scan of a non-resumable terminal (06-03, P-8): \
+         open_waits == 0 skips both waits scans"
     );
     let rec = h.run(&r);
     assert_eq!(rec.status, RunStatus::Completed);

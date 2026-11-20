@@ -20,11 +20,14 @@
 //!   `EventsAppended`) issue at most one keyspace point read each.
 //!   `TimerFired` reads at most twice (timer row, then run record);
 //!   `OutboxTruncated` is blind (zero reads); `InboundBatch` reads per
-//!   message (see `inbound`).
+//!   message (see `inbound`). Phase 6 exceptions (`effects`): `CompleteEffect`
+//!   reads 2 (run record + effects row); an accepted `LeaderAnnounced` scans
+//!   the effects keyspace once plus one record read per run with rows.
 //! - **No chunk leakage (Pitfall 9):** nothing depends on batch boundaries;
 //!   [`apply_chunk`] is a plain loop over [`apply_command`].
 
 pub mod cursor;
+mod effects;
 mod inbound;
 mod inputs;
 mod lifecycle;
@@ -111,6 +114,9 @@ fn dispatch(
         if la.epoch > current.0 && env_epoch.0 == la.epoch {
             cur.meta.epoch = la.epoch;
             cur.meta.epoch_history.push((la.epoch, off.0));
+            // P-9 (06-03): suspended runs with in-flight effects wake on leader start. One
+            // effects scan (+ a record read per run with rows); a no-op without rows.
+            effects::wake_effect_runs(b, actions)?;
             return Ok(ApplyOutcome::Accepted);
         }
         return Ok(ApplyOutcome::Rejected(RejectReason::StaleEpoch { current }));
@@ -140,10 +146,8 @@ fn dispatch(
         Cmd::RetryRun(r) => lifecycle::retry_run(b, cur, r, actions),
         // Phase 8: implemented in 08-07 (rejects with Invalid(NotImplemented) until then).
         Cmd::ScheduleFire(s) => schedule::apply_schedule_fire(b, cur, s, actions),
-        // Phase 6: implemented in 06-03 (temporary reject arm).
-        Cmd::CompleteEffect(_) => Ok(ApplyOutcome::Rejected(RejectReason::Invalid(
-            InvalidCode::NotImplemented,
-        ))),
+        // Phase 6 (06-03): first completion wins, 2 reads (`effects.rs`).
+        Cmd::CompleteEffect(c) => effects::apply_complete_effect(b, cur, c, actions),
     }
 }
 

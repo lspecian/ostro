@@ -822,7 +822,9 @@ fn reads_budget() {
     );
     let (o, a, reads) = h.apply_raw(1, &encode_command(&cmd));
     assert_eq!(o, ApplyOutcome::Accepted);
-    assert!(reads <= 1, "EventsAppended did {reads} reads");
+    // The batch ends in a non-resumable CompleteRun: + 1 effects prefix scan by run (06-03,
+    // P-8; documented exception, docs/storage-format.md "Phase 6 additions").
+    assert!(reads <= 2, "terminal EventsAppended did {reads} reads");
     assert!(a.contains(&Action::OutboxAppended {
         target: PartitionId(3),
         seq: 1

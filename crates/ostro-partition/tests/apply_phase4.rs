@@ -370,7 +370,8 @@ fn running_row_lifecycle_grant_and_complete() {
     // CompleteRun removes it.
     let (o, _, reads) = h.apply_full(1, &events(&r, (1, 2), 0, vec![ev(0)], vec![complete_at(7)]));
     assert_eq!(o, ApplyOutcome::Accepted);
-    assert_eq!(reads, 1);
+    // + the effects prefix scan of a non-resumable terminal (06-03, P-8).
+    assert_eq!(reads, 2);
     assert_eq!(h.running_row(&r), None);
     assert_eq!(h.all_running(), 0);
 }

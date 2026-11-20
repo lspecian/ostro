@@ -28,6 +28,7 @@ use ostro_types::RunId;
 use ostro_types::command::TimerFired;
 
 use super::cursor::Cursor;
+use super::effects;
 use super::lifecycle::expire_due;
 use super::outcome::{Action, ApplyOutcome, ApplyResult};
 use super::run::{PAYLOAD_INPUT, PAYLOAD_RESULT, remove_ready};
@@ -93,7 +94,7 @@ fn delete_run(b: &mut ApplyBatch<'_>, run: &RunId, rec: &mut RunRecord) -> Resul
         delete_prefix(b, Table::Waits, &p)?;
     }
     delete_prefix(b, Table::Children, &children_prefix(run))?;
-    delete_prefix(b, Table::Effects, &rp)?;
+    effects::delete_run_effects(b, run)?;
     delete_prefix(b, Table::SignalSeen, &rp)?;
     delete_prefix(b, Table::Dlq, &rp)?;
     Ok(())

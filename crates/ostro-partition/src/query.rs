@@ -11,14 +11,19 @@
 //! - [`journal_rows`]: a run's journal from a sequence number on.
 //! - [`run_record`], [`run_payload`]: one run's record and its input/result payload refs.
 //! - [`runs_page`]: runs in key order (partition, then uuid v7 = creation time order).
+//! - [`effect_row`], [`open_effects`]: a run's in-flight effects (`effects` rows, Phase 6
+//!   plan 06-03). The bridge's `SendGate` (06-14) checks `effect_row` before sending.
 
 use ostro_types::command::JournalEvent;
 use ostro_types::{AttemptToken, Epoch, PayloadRef, RunId};
 use prost::Message;
 
 use crate::apply::run;
-use crate::store::keys::{decode_ready_key, event_key, payload_key, run_key};
-use crate::store::values::{self, ReadyValue, RunRecord};
+use crate::store::keys::{
+    decode_effect_key, decode_ready_key, effect_key, effect_run_prefix, event_key, payload_key,
+    run_key,
+};
+use crate::store::values::{self, EffectRow, ReadyValue, RunRecord};
 use crate::store::{StoreError, StoreReader, Table};
 
 /// `payloads` kind of a run's input.
@@ -171,5 +176,24 @@ pub fn runs_page(
     };
     rows.into_iter()
         .map(|(k, v)| Ok((run_id("run key", &k)?, values::decode(&v)?)))
+        .collect()
+}
+
+/// The `effects` row of `(run, op)`: `Some` while the effect is in flight (registered, not
+/// yet completed, cancelled or cleaned up). One point read.
+pub fn effect_row(r: &StoreReader, run: &RunId, op: u64) -> Result<Option<EffectRow>, StoreError> {
+    r.get(Table::Effects, &effect_key(run, op))?
+        .map(|v| values::decode(&v))
+        .transpose()
+}
+
+/// Every open `effects` row of `run` as `(op, row)`, in op order. One prefix scan.
+pub fn open_effects(r: &StoreReader, run: &RunId) -> Result<Vec<(u64, EffectRow)>, StoreError> {
+    r.prefix(Table::Effects, &effect_run_prefix(run), usize::MAX)?
+        .into_iter()
+        .map(|(k, v)| {
+            let (_, op) = decode_effect_key(&k).ok_or_else(|| codec("effects key", "malformed"))?;
+            Ok((op, values::decode(&v)?))
+        })
         .collect()
 }

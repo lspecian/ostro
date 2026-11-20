@@ -174,6 +174,20 @@ pub struct ReadyValue {
     pub first: bool,
 }
 
+/// Value of an `effects` row (`effect_key(run, op)`, keyspace #12, RESERVATIONS §6): one
+/// in-flight http/sql/object effect of the run (Phase 6, plan 06-03). Written by the
+/// `RegisterEffect` intent, deleted by `CancelEffect`, by the first `CompleteEffect`, by
+/// non-resumable terminal transitions (P-8) and by retention expiry. Derived value (D18,
+/// additive: a new value type in an existing keyspace that had no rows before Phase 6).
+/// Stored as `VALUE_FORMAT ‖ postcard`. Carries no payload (no `BlobRef`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectRow {
+    /// `ostro_types::live::EffectKind` as `u8` (Http 0, Sql 1, Object 2).
+    pub kind: u8,
+    /// `RegisterEffect.scheduled_at_ms` (time of the `EffectScheduled` event).
+    pub scheduled_at_ms: u64,
+}
+
 /// What a `waits` row waits for (mirrors `ostro_types::command::WaitKind`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WaitKind {
