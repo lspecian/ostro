@@ -223,7 +223,7 @@ Plans:
 - [x] 06-04-PLAN.md — Egress core: URL gate, IANA classifier + mapped/NAT64/6to4 unwrap, allow-lists, hickory resolver with pinning, guarded client, capped reader, full [egress] config, SSRF table (FX-08)
 - [x] 06-05-PLAN.md — Secrets core: template parser, origin-bound grants, multi-encoding scrubber, AES-256-GCM sealed store, env/file/sealed providers + chain, resolver (FX-06, FX-07, FX-10)
 - [x] 06-06-PLAN.md — Engine seam: EffectDriver + ActivationSink::effect_driver, start only after the HostState::flush commit, replay re-drive, redacted journal copy (FX-01, FX-03, FX-06)
-- [ ] 06-07-PLAN.md — Bridge driver core: Bridge/EffectRegistry, gate → rate limit → execute → completion sink, panic → internal_error, per-target rate limits (FX-09, FX-01, FX-03)
+- [x] 06-07-PLAN.md — Bridge driver core: Bridge/EffectRegistry, gate → rate limit → execute → completion sink, panic → internal_error, per-target rate limits (FX-09, FX-01, FX-03)
 - [ ] 06-08-PLAN.md — Admin API surface: bridge.proto (Secrets, Connectors), REST/gRPC/fake/parity/OpenAPI, unauthenticated local presign route (FX-05..FX-08, FX-10)
 - [ ] 06-09-PLAN.md — Rust SDK effect builders + ctx.idempotency_key + guests fx-http/fx-sql/fx-object/fx-canary/fx-ssrf (FX-02, FX-04, FX-05)
 - [ ] 06-10-PLAN.md — HTTP connector: idempotency key, unknown-outcome window, retries/timeouts/size cap, templating + no-redirect + identity encoding + scrub/redact, manual redirects, mock provider (FX-01, FX-02, FX-03, FX-07)
