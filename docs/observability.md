@@ -124,18 +124,68 @@ The tracer provider uses `OstroIdGenerator`:
   exactly those ids.
 - Otherwise ids are random.
 
-Run, activation, step and effect spans (08-11) use this, so a replayed run never produces
+Run, activation, step and effect spans (08-11, see the span model below) use this, so a replayed run never produces
 different ids for the same span.
 
 The global propagator is the W3C `TraceContextPropagator`.
 
 ## Span model
 
-*Filled by 08-11:*
-- `workflow.run` → `activation` → `step` / `effect:http` hierarchy;
-- live-only emission;
-- trace id taken from the run's `traceparent`;
-- deterministic span ids.
+Every run produces one trace (OBS-01, P8-D14). The engine and run spans use the
+instrumentation scope `ostro-engine`; node-internal `tracing` spans (API requests, the
+`activation` tracing span that carries log context) are separate and have random ids.
+
+| Span | Emitted by | Parent | Span id (`kind`, `n`) | Start / end | Attributes |
+|---|---|---|---|---|---|
+| `workflow.run` | ostro-server `services/run_spans.rs`, on the post-apply `Action::RunCompleted` | the caller's span from the run's `traceparent`; none (root) otherwise | `run`, 0 | `created_at_ms` / `completed_at_ms` of the run record | `ostro.run_id`, `ostro.workflow`, `ostro.status`; status Ok for `completed` / `continued_as_new`, Error otherwise |
+| `activation` | the engine, once per activation | `workflow.run` | `activation`, `attempt << 32 \| counter` (counter = committed journal length at activation start) | activation start / end (wall clock) | `ostro.run_id`, `ostro.workflow`, `ostro.attempt`, `ostro.replayed_events`, `ostro.outcome`; status Error on a failed attempt (trap, fuel, nondeterminism, ...) |
+| `<step name>` | the engine, after the append carrying the step's `StepCompleted` / `StepAttemptFailed` committed | the activation that ran the step live | `step`, journal seq | attempt start / the journaled completion ts | `ostro.run_id`, `ostro.seq`, `ostro.attempt`, `ostro.outcome` (`ok`, `retry`, `cancelled`, `timeout`, `error`) |
+| `effect:<kind>` | the effect driver (08-21 wires it into ostro-server's `ServerEffectDriver`) | `workflow.run` | `effect`, op id | effect I/O start / end | `ostro.run_id`, `ostro.op`, `ostro.effect_kind`, `ostro.outcome` |
+
+### Id derivation
+
+- Trace id: the trace id of the run's stored W3C `traceparent` (the `traceparent` header
+  or body field at start), else `blake3("ostro/trace" ‖ run_id)[..16]`.
+- Span id: `blake3("ostro/span" ‖ run_id ‖ kind ‖ n as u64 little-endian)[..8]`.
+- `run_id` is the run id's string form. Pinned vectors (`run-1`): trace
+  `86ca30530a6d71a97854d22c0272e94b`; `run`/0 `d3ede864a16f6334`; `activation`/(1, 1)
+  `9bc352849fc38bc5`; `step`/3 `a6b04adb4033b468`; `effect`/7 `a4b3d0fc243cbad8`.
+
+### Live-only rule
+
+- Replayed steps never emit spans: after an eviction and re-activation there is exactly one
+  span per `(run, seq)`. A step whose append failed (fenced, conflict) emits nothing; its
+  re-execution later emits the span once, with the same id.
+- `workflow.run` comes from post-apply actions, which are off during startup catch-up, so a
+  restart never emits a second run span.
+- Telemetry never feeds guest-visible state or the journal: step start times use the wall
+  clock only for the span, ends use the journaled `ts_nanos`, and the journal bytes are
+  identical with and without a tracer provider (tested).
+- Without an OTLP endpoint the global tracer is the no-op tracer and the engine skips all
+  step bookkeeping.
+
+### Late parents
+
+Activation spans reference the `workflow.run` span id long before the run span is
+exported (it is emitted when the run completes, possibly by another node incarnation).
+OTLP backends accept a late parent; until the run completes, a trace view shows the
+activations under a missing parent.
+
+### Hooks for Phase 6/7 (ostro-engine `telemetry`)
+
+```rust
+pub fn effect_span_context(run_id: &str, traceparent: Option<&str>, op: u64) -> SpanContext;
+pub fn effect_span(run: &RunTrace, op: u64, kind: &str, start: SystemTime, end: SystemTime,
+                   outcome: Result<(), &str>);
+pub fn traceparent_headers(cx: &SpanContext) -> Vec<(String, String)>;
+impl HostState { pub fn activation_span_context(&self) -> Option<SpanContext>; }
+pub async fn with_traceparent<F: Future>(traceparent: Option<String>, f: F) -> F::Output;
+```
+
+`traceparent_headers` injects through the global propagator (`TraceContextPropagator`) and
+formats the W3C header itself when no propagator is installed, so outbound HTTP always
+carries `traceparent`. The executor wraps every activation in `with_traceparent(record
+.traceparent)`.
 
 ## Guest logs
 

@@ -831,14 +831,17 @@ impl EngineExecutor {
             inputs: Some(eng_rx),
             cancel: cancel.clone(),
         };
-        let outcome = self
-            .runtime
-            .activate(
+        // OBS-01 (08-11): the run's stored traceparent seeds the engine's deterministic trace
+        // ids (activation and step spans join the caller's trace, or the derived one).
+        let outcome = ostro_engine::telemetry::with_traceparent(
+            record.traceparent.clone(),
+            self.runtime.activate(
                 &prepared,
                 act,
                 Arc::clone(&esink) as Arc<dyn ActivationSink>,
-            )
-            .await;
+            ),
+        )
+        .await;
         if sink.is_terminal() || cancel.is_cancelled() {
             return (Some(outcome), ExecOutcome::Released);
         }
