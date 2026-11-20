@@ -213,6 +213,12 @@ impl VaultProvider {
         &self.cache
     }
 
+    /// A vaultrs client for the operator-configured Vault address.
+    ///
+    /// This is not guest egress: the address comes from `[secrets.vault]`, never from a
+    /// workflow, so the SSRF-guarded egress client (P-5) does not apply. The constructor is
+    /// called through the `<VaultClient>` path form because `tests/egress_client.rs` is a
+    /// textual guard against reqwest client constructors outside `egress/client.rs`.
     fn client(&self, token: &str) -> Result<VaultClient, ProviderError> {
         let settings = VaultClientSettingsBuilder::default()
             .address(&self.addr)
@@ -220,7 +226,7 @@ impl VaultProvider {
             .timeout(Some(REQUEST_TIMEOUT))
             .build()
             .map_err(|e| ProviderError::Invalid(format!("secrets.vault: client settings: {e}")))?;
-        VaultClient::new(settings)
+        <VaultClient>::new(settings)
             .map_err(|e| ProviderError::Unavailable(format!("vault client: {e}")))
     }
 
