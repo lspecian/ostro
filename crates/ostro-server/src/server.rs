@@ -31,6 +31,11 @@
 //!    one task per started partition subscribed to its apply machine's action broadcast
 //!    (05-13).
 //!
+//! Before 0, [`Telemetry::init`] (08-04) installs the Prometheus recorder (before any
+//! partition caches its metric handles) and, with `[telemetry] otlp_endpoint`, builds the
+//! OTLP trace and log providers inside this runtime. `GET /metrics` is merged into the
+//! API router when `[telemetry] metrics` is on.
+//!
 //! Between 4 and 5 the **services seam** starts ([`crate::services::Services::start`],
 //! P8-D21): `Node::open` has returned (every partition's readiness barrier is open and
 //! its leader services run) and the leaders are recorded in meta.
@@ -44,7 +49,7 @@
 //! `/readyz` turns 503 -> the listener stops accepting and in-flight requests finish ->
 //! the services stop (cancel + join) -> `Node::shutdown` (the dispatcher revokes leases,
 //! activations stop) -> meta stops -> the data-dir lock is released -> the ephemeral
-//! directory is removed.
+//! directory is removed -> the telemetry providers are flushed and shut down (Pitfall 11).
 
 use std::fs::File;
 use std::net::SocketAddr;
@@ -57,8 +62,8 @@ use ostro_engine::error::EngineError;
 use ostro_engine::runtime::{Runtime, RuntimeOptions};
 use ostro_meta::{MetaCommand, MetaError, MetaHandle, MetaResult};
 use ostro_partition::{
-    Clock, DispatcherConfig, DispatcherStats, Executor, Node, NodeConfig, NodeError,
-    PartitionSlot, SystemClock,
+    Clock, DispatcherConfig, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionSlot,
+    SystemClock,
 };
 use ostro_types::PartitionCount;
 use tempfile::TempDir;
@@ -74,6 +79,7 @@ use crate::leadership::MetaLeadership;
 use crate::retention::MetaPolicies;
 use crate::services::guest_logs::GuestLogSink;
 use crate::services::{ServiceCtx, Services};
+use crate::telemetry::{Telemetry, TelemetryError, TelemetryGuard};
 
 /// How long shutdown waits for in-flight HTTP/gRPC requests before closing them.
 const SERVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -117,6 +123,8 @@ pub enum ServerError {
     Node(#[from] NodeError),
     #[error("invariant violated: {0}")]
     Invariant(String),
+    #[error("telemetry: {0}")]
+    Telemetry(#[from] TelemetryError),
 }
 
 /// Wall-clock durations of the startup steps (logged at info; the 04-19 startup test
@@ -209,6 +217,22 @@ pub async fn start_with_hooks(
 pub async fn start_with_options(
     cfg: ServerConfig,
     opts: ServerOptions,
+) -> Result<ServerHandle, ServerError> {
+    let mut telemetry = Some(Telemetry::init(&cfg)?);
+    let res = start_inner(cfg, opts, &mut telemetry).await;
+    if res.is_err()
+        && let Some(mut guard) = telemetry
+    {
+        guard.shutdown().await;
+    }
+    res
+}
+
+/// The startup sequence; takes the telemetry guard into the handle on success.
+async fn start_inner(
+    cfg: ServerConfig,
+    opts: ServerOptions,
+    telemetry: &mut Option<TelemetryGuard>,
 ) -> Result<ServerHandle, ServerError> {
     let ServerOptions { clock, hooks } = opts;
     // clock-exempt: startup step durations are reported (StartupTimings), never used for logic.
@@ -377,7 +401,10 @@ pub async fn start_with_options(
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
         max_request_bytes: usize::try_from(cfg.api.max_request_bytes).unwrap_or(usize::MAX),
     };
-    let app = ostro_api::router(Arc::clone(&control) as Arc<dyn ControlPlane>, api_cfg);
+    let mut app = ostro_api::router(Arc::clone(&control) as Arc<dyn ControlPlane>, api_cfg);
+    if cfg.telemetry.metrics {
+        app = app.merge(crate::telemetry::metrics_router());
+    }
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
     let serve = tokio::spawn(async move {
@@ -418,6 +445,7 @@ pub async fn start_with_options(
         node: Some(node),
         services: Some(services),
         clock,
+        telemetry: telemetry.take().unwrap_or_else(TelemetryGuard::disabled),
         stats,
         stop_tx,
         serve: Some(serve),
@@ -640,6 +668,8 @@ pub struct ServerHandle {
     services: Option<Services>,
     /// The one injectable clock (Phase 10 F5).
     clock: Arc<dyn Clock>,
+    /// OTel providers + Prometheus upkeep; shut down last.
+    telemetry: TelemetryGuard,
     stats: Arc<DispatcherStats>,
     stop_tx: watch::Sender<bool>,
     serve: Option<JoinHandle<std::io::Result<()>>>,
@@ -718,12 +748,19 @@ impl ServerHandle {
 
     /// The node services (P8-D21 seam).
     pub fn services(&self) -> &Services {
-        self.services.as_ref().expect("services present until shutdown")
+        self.services
+            .as_ref()
+            .expect("services present until shutdown")
     }
 
     /// The clock shared by meta timestamps, the node and the services.
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.clock
+    }
+
+    /// The telemetry guard (OTLP providers, Prometheus upkeep).
+    pub fn telemetry(&self) -> &TelemetryGuard {
+        &self.telemetry
     }
 
     /// Dispatcher counters (shared by every partition).
@@ -746,6 +783,7 @@ impl ServerHandle {
             control,
             node,
             services,
+            mut telemetry,
             stop_tx,
             serve,
             data_lock,
@@ -804,6 +842,8 @@ impl ServerHandle {
             elapsed_ms = t.elapsed().as_millis() as u64,
             "ostro server stopped"
         );
+        // Last: every span/log of the shutdown above is exported (Pitfall 11).
+        telemetry.shutdown().await;
         node_res
     }
 }
@@ -844,7 +884,11 @@ mod tests {
             .meta()
             .view()
             .read(|s| s.cluster().map(|c| c.value.created_at_ms));
-        assert_eq!(created, Some(FAKE_MS), "InitCluster used the injected clock");
+        assert_eq!(
+            created,
+            Some(FAKE_MS),
+            "InitCluster used the injected clock"
+        );
         assert_eq!(h.clock().now_ms(), FAKE_MS);
         assert_eq!(h.services().clock().now_ms(), FAKE_MS);
         clock.advance(5_000);

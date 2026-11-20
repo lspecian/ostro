@@ -3,9 +3,14 @@
 //! kill -9 never produces torn writes (the page cache survives a process
 //! kill), so torn, zeroed and truncated tails are injected offline on closed
 //! files instead (02-RESEARCH Pitfall 2).
+//!
+//! Phase 8 (08-04): [`otlp::Collector`], an in-process OTLP gRPC collector for the
+//! telemetry tests.
 
 pub mod corrupt;
 pub mod fs;
+/// In-process OTLP trace + logs collector (Phase 8, plan 08-04).
+pub mod otlp;
 
 // Phase 6 (06-02, P-12) helpers, one feature each.
 #[cfg(feature = "canary")]
@@ -39,14 +44,6 @@ mod tests {
         assert_eq!(proptest_cases(64), 64);
         unsafe { std::env::remove_var("PROPTEST_CASES") };
     }
-}
-
-// Phase 8 (plan 08-01): in-process OTLP collector dependencies for 08-04, anchored so cargo's
-// unused-dependency lint stays quiet until that module lands.
-mod phase8_dep_anchors {
-    use opentelemetry_proto as _;
-    use tokio as _;
-    use tonic as _;
 }
 
 // Phase 6 (plan 06-02, P-12): feature dependencies for 06-11 (db) and 06-19 (canary), anchored

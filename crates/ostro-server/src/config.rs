@@ -392,7 +392,10 @@ impl ServerConfig {
     fn resolve_and_validate(&mut self, env: &EnvSource) -> Result<(), ConfigError> {
         for (key, slot) in [
             ("backup.access_key_id", &mut self.backup.access_key_id),
-            ("backup.secret_access_key", &mut self.backup.secret_access_key),
+            (
+                "backup.secret_access_key",
+                &mut self.backup.secret_access_key,
+            ),
             ("backup.session_token", &mut self.backup.session_token),
         ] {
             if let Some(secret) = slot {

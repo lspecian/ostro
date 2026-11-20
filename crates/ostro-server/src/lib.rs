@@ -20,7 +20,8 @@
 //! `ostro_api::ControlPlane` (modules/workflows here, runs in 04-18).
 //!
 //! Phase 8 (08-04): the [`services`] seam (one place every node-level background service
-//! starts and stops, P8-D21) and the Phase 8 config sections in [`config`].
+//! starts and stops, P8-D21), the Phase 8 config sections in [`config`], and
+//! [`telemetry`] (Prometheus `/metrics`, OTLP traces/logs, `OstroIdGenerator`).
 
 pub mod config;
 pub mod control;
@@ -34,6 +35,7 @@ pub mod run_started;
 pub mod server;
 pub mod services;
 pub mod sink;
+pub mod telemetry;
 
 pub use server::{
     LOCK_FILE, Server, ServerError, ServerHandle, ServerOptions, StartupTimings, start,
@@ -48,17 +50,12 @@ mod dev_dep_anchors {
 // (08-04 telemetry/metrics, 08-11 spans, 08-13/08-18 bottomless, 08-14/08-15 triggers).
 // Anchored here so cargo's unused-dependency lint stays quiet until the owning modules
 // consume them; harmless afterwards.
+// (08-04 consumes the OTel/Prometheus crates and ostro-backup's config in `telemetry` and
+// `config`.)
 mod phase8_dep_anchors {
     use hmac as _;
-    use metrics_exporter_prometheus as _;
-    use opentelemetry as _;
-    use opentelemetry_appender_tracing as _;
-    use opentelemetry_otlp as _;
-    use opentelemetry_sdk as _;
-    use ostro_backup as _;
     use ostro_objstore as _;
     use ostro_triggers as _;
-    use tracing_opentelemetry as _;
 }
 
 // Phase 6 dependencies declared once by plan 06-02 for 06-14 (BridgeServices wiring) and

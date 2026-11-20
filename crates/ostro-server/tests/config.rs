@@ -432,7 +432,10 @@ fn phase8_defaults_match_p8_d22() {
     assert_eq!(c.telemetry.service_name, "ostro");
     // [snapshots] -> SnapshotConfig
     let s = c.snapshots.to_snapshot_config();
-    assert_eq!(s, ostro_partition::leader::snapshot::SnapshotConfig::default());
+    assert_eq!(
+        s,
+        ostro_partition::leader::snapshot::SnapshotConfig::default()
+    );
     assert!(s.enabled);
     assert_eq!(s.interval, HOUR);
     assert_eq!(s.min_interval, Duration::from_secs(60));
@@ -453,7 +456,10 @@ fn phase8_defaults_match_p8_d22() {
     // [guest_logs] (P8-D16)
     let g = &c.guest_logs;
     assert_eq!((g.rate_per_sec, g.burst), (50, 500));
-    assert_eq!((g.run_lines_cap, g.run_bytes_cap), (10_000, 10 * 1024 * 1024));
+    assert_eq!(
+        (g.run_lines_cap, g.run_bytes_cap),
+        (10_000, 10 * 1024 * 1024)
+    );
     assert_eq!(g.ring_lines, 1_000);
     assert_eq!(g.node_rate_per_sec, 5_000);
 }
@@ -537,7 +543,10 @@ node_rate_per_sec = 70
     assert!(!s.enabled);
     assert_eq!(s.interval, Duration::from_secs(1800));
     assert_eq!(s.min_interval, Duration::from_secs(10));
-    assert_eq!(s.bytes_threshold, 1024, "the `bytes` key maps to bytes_threshold");
+    assert_eq!(
+        s.bytes_threshold, 1024,
+        "the `bytes` key maps to bytes_threshold"
+    );
     assert_eq!(s.keep, 3);
 
     let b = c.backup.to_backup_config();
@@ -637,7 +646,10 @@ fn phase8_value_validation() {
     let err = load_toml("[telemetry]\nsample_ratio = 1.5\n").unwrap_err();
     assert!(err.contains("telemetry.sample_ratio"), "{err}");
     let err = load_toml("[telemetry]\notlp_protocol = \"http\"\n").unwrap_err();
-    assert!(err.contains("otlp_protocol") || err.contains("http"), "{err}");
+    assert!(
+        err.contains("otlp_protocol") || err.contains("http"),
+        "{err}"
+    );
     let err = load_toml("[telemetry]\notlp_endpoint = \"127.0.0.1:4317\"\n").unwrap_err();
     assert!(err.contains("telemetry.otlp_endpoint"), "{err}");
     let err = load_toml("[snapshots]\nkeep = 0\n").unwrap_err();
