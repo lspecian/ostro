@@ -15,6 +15,7 @@ use crate::bindings::ostro::runtime::context;
 use crate::bindings::ostro::runtime::effects;
 use crate::bindings::ostro::runtime::log as wit_log;
 use crate::bindings::ostro::runtime::types::Datetime;
+use crate::effects::{HttpClient, ObjectClient, SqlBuilder};
 use crate::error::WorkflowError;
 use crate::ops::{self, Op};
 
@@ -266,10 +267,34 @@ impl Ctx {
 
     /// Outbound HTTP request executed by the host.
     ///
-    /// Phase 4 note: the single-node server does not bridge effects yet; this op
-    /// completes with a non-retryable `"unsupported"` failure until Phase 6.
+    /// Prefer the [`Ctx::http`] builder; this takes a hand-built WIT record.
     pub fn http_fetch(&self, req: &HttpRequest) -> Op<HttpResponse> {
         Op::new(effects::http_fetch(req), ops::decode_http)
+    }
+
+    /// Builder for an outbound HTTP request: `ctx.http().post(url).header(..).send()`.
+    /// See [`crate::effects`] for the semantics (templating, redirects, redaction, keys).
+    pub fn http(&self) -> HttpClient {
+        HttpClient::new()
+    }
+
+    /// SQL statements against the named connection:
+    /// `ctx.sql("orders").exactly_once().query(stmt, params)`.
+    pub fn sql(&self, connection: &str) -> SqlBuilder {
+        SqlBuilder::new(connection)
+    }
+
+    /// Object-store operations against the named connection: `ctx.object("blobs").get(key)`.
+    pub fn object(&self, connection: &str) -> ObjectClient {
+        ObjectClient::new(connection)
+    }
+
+    /// Deterministic idempotency key for `name` in this run (P-11): 38 chars
+    /// (`ostro-` + 32 hex), stable across replay and attempts, different for every run.
+    /// Pass it to [`HttpBuilder::idempotency_key`](crate::effects::HttpBuilder::idempotency_key)
+    /// and embed it in the body for providers that read it from there.
+    pub fn idempotency_key(&self, name: &str) -> String {
+        crate::effects::idempotency_key(&context::info().run_id, name)
     }
 
     /// Wait for a named signal whose payload is JSON-decoded into `T`.

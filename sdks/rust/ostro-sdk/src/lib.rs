@@ -25,12 +25,17 @@
 pub mod bindings;
 
 pub mod ctx;
+pub mod effects;
 pub mod error;
 pub mod ops;
 pub mod registry;
 pub mod step;
 
 pub use ctx::{AwaitToken, Ctx, Header, HttpRequest, HttpResponse, Level, RunInfo};
+pub use effects::{
+    HttpBuilder, HttpClient, ObjectClient, ObjectHead, ObjectPutInfo, SqlBuilder, SqlResult,
+    SqlValue,
+};
 pub use error::{ContinueAsNew, StepError, WorkflowError};
 pub use ops::{CANCELLATION, Completion, Op, OpId, is_cancellation};
 

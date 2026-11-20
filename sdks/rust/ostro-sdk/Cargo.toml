@@ -11,4 +11,6 @@ description = "Rust guest SDK for Ostro durable workflows (WIT ostro:runtime@0.1
 wit-bindgen = "=0.63.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
+# Semantic idempotency keys (P-11); same pin as guests/Cargo.toml.
+sha2 = "=0.10.9"
 ostro-sdk-macros = { path = "../ostro-sdk-macros", version = "=0.1.0" }
