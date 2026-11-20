@@ -39,6 +39,15 @@ pub mod fx;
 /// Generous default timeout for harness operations.
 pub const T: Duration = Duration::from_secs(20);
 
+/// Bound on `Node::open` in server tests. Same value and reasoning as `OPEN_T` in
+/// `ostro-partition/tests/common` (debug session node-open-stall): a fresh state store costs
+/// about 295 serialized fjall fsyncs, so open time is fsync latency times 295. Reopens take
+/// 10-60 ms; fresh 1-partition opens take ~1.7 s at load 6-15 (sink-node-open-timeouts,
+/// 2026-11-20) but exceed 10-20 s when parallel test binaries and builds saturate I/O
+/// (load 15-43): `sink` (19 parallel fresh opens) then failed at both 453bd42 and later
+/// commits with an identical open path. 120 s absorbs fsync latency; a real hang still fails.
+pub const OPEN_T: Duration = Duration::from_secs(120);
+
 /// Repository root (`crates/ostro-server/../..`).
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -186,7 +195,7 @@ impl TestNode {
             slots: Arc::new(Semaphore::new(opts.slots)),
             stats: Some(Arc::clone(&stats)),
         });
-        let node = timeout(T, Node::open(cfg))
+        let node = timeout(OPEN_T, Node::open(cfg))
             .await
             .expect("node open timed out")
             .expect("node open");

@@ -2,6 +2,8 @@
 //! blob offload, derived intents, unsupported completions, journal read-back.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -37,7 +39,7 @@ const FAR_NANOS: u64 = 4_000_000_000_000_000_000;
 
 async fn open(dir: &Path) -> Node {
     let cfg = NodeConfig::new(dir.to_path_buf(), PartitionCount::new(1).expect("non-zero"));
-    timeout(T, Node::open(cfg))
+    timeout(common::OPEN_T, Node::open(cfg))
         .await
         .expect("node open timed out")
         .expect("node open")

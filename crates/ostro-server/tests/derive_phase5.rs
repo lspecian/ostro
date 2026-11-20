@@ -7,6 +7,8 @@
 //! so apply accepts (or rejects) exactly what derive produced.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -701,7 +703,7 @@ fn successor_without_meta_reuses_the_pinned_module_only_for_its_own_version() {
 
 async fn open(dir: &Path) -> Node {
     let cfg = NodeConfig::new(dir.to_path_buf(), PartitionCount::new(1).expect("non-zero"));
-    timeout(T, Node::open(cfg))
+    timeout(common::OPEN_T, Node::open(cfg))
         .await
         .expect("node open timed out")
         .expect("node open")
