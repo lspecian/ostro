@@ -302,7 +302,7 @@ Plans:
 - [x] 08-12-PLAN.md — CLI verbs: ostro schedules / ostro webhooks (TRIG-01/02/03)
 - [ ] 08-13-PLAN.md — Bottomless uploader: OSEG chain with start rule, validated manifest + snapshot hold-back, LOCK fencing, immutable puts, upload floor, remote retention (BACK-01)
 - [ ] 08-14-PLAN.md — Cron driver (owner partition) + schedules controller: catch-up, pause/resume, trigger-now (TRIG-02/03)
-- [ ] 08-15-PLAN.md — Webhooks controller: POST /hooks/{name} start/signal/complete_token, dedupe, CRUD (TRIG-01)
+- [x] 08-15-PLAN.md — Webhooks controller: POST /hooks/{name} start/signal/complete_token, dedupe, CRUD (TRIG-01)
 - [ ] 08-16-PLAN.md — Metrics coverage: queues, lag, steps, replay, fuel, memory, DLQ, HW lag, ISR, Raft + docs/metrics.md (OBS-02)
 - [ ] 08-17-PLAN.md — Guest logs: rate limits, per-run caps, ring buffer + /v1/runs/{id}/logs, JSON + OTLP LogRecords (OBS-03)
 - [ ] 08-18-PLAN.md — Restore (manifest validation, two-step in-files verified replay, meta bootstrap spike, WAL import) + tar backup online/offline + CLI (BACK-02/03)
