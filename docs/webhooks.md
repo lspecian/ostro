@@ -164,6 +164,12 @@ How the key is used:
 - Answer: `200 {"run_id", "accepted", "duplicate"}`.
 - An unknown run is `404`. Providers retry `404`s on their normal schedule, so a signal that
   arrives before its start is delivered on a later retry.
+- A run that has already finished:
+  - If this delivery's signal was applied before the run ended (a redelivery: the run's
+    SignalSeen set holds the delivery's request id), the answer is
+    `200 {"run_id", "accepted": true, "duplicate": true}`, so the provider stops retrying.
+  - Otherwise the signal can never be applied, and the answer is `409` with
+    `error.details.reason = "run_terminal"`.
 
 ### `complete_token`
 
@@ -190,6 +196,7 @@ makes the retry a duplicate.
 | Slack `url_verification` | 200 `text/plain` (the challenge) |
 | missing, malformed or wrong signature; stale timestamp | 401, `error.details.reason` = `missing_header`, `malformed`, `bad_signature` or `stale` |
 | body not JSON where the action needs it, pointer missing, key too long | 400 |
+| signal to a finished run that never took this delivery's signal | 409, `error.details.reason` = `run_terminal` |
 | unknown webhook; signal target run not found | 404 |
 | body larger than `webhook_body_limit` | 413 |
 | verifier misconfigured, secret missing or unopenable | 500 |

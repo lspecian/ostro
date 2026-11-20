@@ -6,7 +6,9 @@
 //! - Stale Stripe timestamps against the injected clock (a `ManualClock`), the Slack
 //!   challenge, Slack retries, the delivery metric.
 //! - Signal: by idempotency pointer and by run-id pointer; a redelivered signal is
-//!   applied once (SignalSeen); an unknown target is 404.
+//!   applied once (SignalSeen), also when redelivered after the run finished (200
+//!   duplicate; a never-applied delivery to a finished run is 409 `run_terminal`); an
+//!   unknown target is 404.
 //! - complete_token completes the `tokens` guest; a redelivery is a 200 duplicate.
 //! - CRUD over REST and gRPC: validation (400), stale CAS (409), no secret bytes in any
 //!   response.
@@ -489,6 +491,28 @@ async fn signal_action_targets_runs_and_dedupes_redelivery() {
         .map(|p| p["n"].clone())
         .collect();
     assert_eq!(ns, vec![json!(1), json!(2), json!(3)], "{got}");
+
+    // Redeliveries after the run finished (08-20 found these answered 409): a delivery
+    // whose signal applied before the run ended is a 200 duplicate, by either targeting.
+    let v = deliver_ok(&s, "paid", &gh_delivery("d1", b1), b1).await;
+    assert_eq!(
+        (v["duplicate"].clone(), v["run_id"].clone()),
+        (json!(true), json!(run_id)),
+        "{v}"
+    );
+    let v = deliver_ok(
+        &s,
+        "by-id",
+        &gh_delivery("d3", b3.as_bytes()),
+        b3.as_bytes(),
+    )
+    .await;
+    assert_eq!(v["duplicate"], true, "{v}");
+    // A new delivery to the finished run never applied: 409 run_terminal.
+    let b4 = br#"{"session":"cs_1","n":4}"#;
+    let (st, v) = deliver(&s, "paid", &gh_delivery("d4", b4), b4).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["error"]["details"]["reason"], "run_terminal", "{v}");
 
     // Unknown targets: 404, nothing submitted.
     let b = br#"{"session":"cs_unknown","n":9}"#;

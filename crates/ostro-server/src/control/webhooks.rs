@@ -64,6 +64,8 @@
 //! |---|---|
 //! | applied (new run / signal / completion) | 200 `{..., "duplicate": false}` |
 //! | duplicate delivery (existing run, SignalSeen, token already completed) | 200 `{..., "duplicate": true}` |
+//! | signal redelivered after the run finished, its signal applied before (SignalSeen) | 200 `{..., "duplicate": true}` |
+//! | signal to a finished run that never took this delivery's signal | 409 `run_terminal` |
 //! | Slack `url_verification` | 200 `text/plain` challenge |
 //! | unknown hook | 404 |
 //! | bad / missing / malformed signature, stale timestamp | 401 (`details.reason`) |
@@ -94,6 +96,8 @@ use ostro_meta::records::{
     WEBHOOK_ACTION_START, Webhook,
 };
 use ostro_meta::{MetaCommand, MetaError, MetaKey, MetaRecord, MetaResult};
+use ostro_partition::store::Table;
+use ostro_partition::store::keys::signal_seen_key;
 use ostro_triggers::extract::{
     IdempotencyExtractor, InputSelector, default_for, json_pointer_string,
 };
@@ -750,23 +754,40 @@ impl WebhookController {
     ) -> Result<(bool, serde_json::Value), ApiError> {
         let payload = body_json(proof, body)?;
         let run_id = self.signal_target(proof, w, body).await?;
+        let request_id = signal_request_id(key);
         let r = self
             .cp()
             .signal_run(SignalRequest {
                 run_id: run_id.clone(),
                 name: w.signal_name.clone(),
                 payload,
-                request_id: Some(signal_request_id(key)),
+                request_id: Some(request_id.clone()),
                 dry_run: false,
             })
-            .await
-            .map_err(|e| {
-                if e.code == ErrorCode::NotFound {
-                    ApiError::not_found("no run matches this delivery")
-                } else {
-                    e
+            .await;
+        let r = match r {
+            Ok(r) => r,
+            Err(e) if e.code == ErrorCode::NotFound => {
+                return Err(ApiError::not_found("no run matches this delivery"));
+            }
+            // A redelivery after the run finished: if this delivery's signal applied before
+            // the run ended (its SignalSeen row exists), it is a duplicate; otherwise the
+            // signal can never apply and the 409 `run_terminal` stands.
+            Err(e) if e.code == ErrorCode::Conflict && is_run_terminal(&e) => {
+                if self.signal_seen(&run_id, &request_id).await? {
+                    return Ok((
+                        true,
+                        serde_json::json!({
+                            "run_id": run_id,
+                            "accepted": true,
+                            "duplicate": true,
+                        }),
+                    ));
                 }
-            })?;
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         Ok((
             r.duplicate,
             serde_json::json!({
@@ -775,6 +796,21 @@ impl WebhookController {
                 "duplicate": r.duplicate,
             }),
         ))
+    }
+
+    /// Whether signal `request_id` was applied to run `run_id` (its D13 SignalSeen row in
+    /// keyspace 15 exists). The row lives as long as the run record (retention deletes both),
+    /// and a terminal run takes no more signals, so for a terminal run the answer is final.
+    async fn signal_seen(&self, run_id: &str, request_id: &str) -> Result<bool, ApiError> {
+        let cp = &self.ctx.partitions;
+        let run = super::runs::parse_run_id(cp, run_id)?;
+        let reader = cp.partition(run.partition())?.reader();
+        let key = signal_seen_key(&run, request_id.as_bytes());
+        let row = tokio::task::spawn_blocking(move || reader.get(Table::SignalSeen, &key))
+            .await
+            .map_err(super::runs::task_error)?
+            .map_err(super::runs::store_error)?;
+        Ok(row.is_some())
     }
 
     async fn act_complete(
@@ -816,6 +852,15 @@ impl WebhookController {
             Err(e) => Err(e),
         }
     }
+}
+
+/// A conflict whose `details.reason` is `run_terminal`.
+fn is_run_terminal(e: &ApiError) -> bool {
+    e.details
+        .as_ref()
+        .and_then(|d| d.get("reason"))
+        .and_then(|r| r.as_str())
+        == Some(ostro_api::error::reason::RUN_TERMINAL)
 }
 
 /// A completion conflict meaning "already done": `token_already_completed` or
