@@ -299,7 +299,7 @@ Plans:
 - [ ] 08-09-PLAN.md — Snapshot service + WAL trimming enabled (dynamic floors, upload floor init), open-path snapshot install, SC4 proptest/failpoints (BACK-04)
 - [x] 08-10-PLAN.md — Phase 8 API surface: schedules/webhooks/hooks/run logs/admin backup over REST+gRPC+OpenAPI, traceparent in, server stubs (TRIG-01/02/03, OBS-01/03, BACK-03)
 - [x] 08-11-PLAN.md — Traces: deterministic ids, live-only activation/step spans, run span on RunCompleted, effect-span + traceparent hooks (OBS-01)
-- [ ] 08-12-PLAN.md — CLI verbs: ostro schedules / ostro webhooks (TRIG-01/02/03)
+- [x] 08-12-PLAN.md — CLI verbs: ostro schedules / ostro webhooks (TRIG-01/02/03)
 - [ ] 08-13-PLAN.md — Bottomless uploader: OSEG chain with start rule, validated manifest + snapshot hold-back, LOCK fencing, immutable puts, upload floor, remote retention (BACK-01)
 - [ ] 08-14-PLAN.md — Cron driver (owner partition) + schedules controller: catch-up, pause/resume, trigger-now (TRIG-02/03)
 - [ ] 08-15-PLAN.md — Webhooks controller: POST /hooks/{name} start/signal/complete_token, dedupe, CRUD (TRIG-01)
