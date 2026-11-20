@@ -608,6 +608,12 @@ pub fn check_final(
     let expected = crash_saga_expected(&l.input, &go, &extra);
     let cancel_sent = l.stop_intent == Some(Stop::Cancel);
     let terminate_sent = l.stop_intent == Some(Stop::Terminate);
+    // D26: a terminate the server rejected (409 `run_terminal`, no terminate ack) found the
+    // run already terminal, so it cannot explain a `failed` status. Only the retry-exhaustion
+    // exception below uses this; `terminated` still accepts any terminate intent, because a
+    // retried terminate is rejected after a first attempt whose 200 was lost to a kill.
+    let terminate_rejected =
+        terminate_sent && l.stop_rejected && l.stop_acked != Some(Stop::Terminate);
     let completed_ok = |out: &mut Vec<Violation>| match &expected {
         Ok(want) if view.result.as_ref() == Some(want) => {}
         Ok(want) => out.push(v(
@@ -632,7 +638,7 @@ pub fn check_final(
         ("completed", _) => completed_ok(&mut out),
         // Documented crash-saga outcome: a step exhausted its 10 attempts across crashes.
         ("failed", None)
-            if !terminate_sent
+            if (!terminate_sent || terminate_rejected)
                 && view
                     .failure
                     .as_deref()

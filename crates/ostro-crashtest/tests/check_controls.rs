@@ -467,3 +467,132 @@ fn failed_is_accepted_only_after_retry_exhaustion() {
     assert!(check_journal(RUN, &j, None).is_empty());
     assert!(check_final(RUN, r, &failed, &j).is_empty());
 }
+
+/// A journal in which step1 exhausted its retries (nine attempt failures, then the final
+/// transient error) and the run failed: crash-saga's documented `failed` outcome.
+fn exhausted_journal() -> Vec<Event> {
+    let mut j = vec![Event::new(0, "run_started", json!({}))];
+    for a in 1..=9 {
+        j.push(Event::new(
+            0,
+            "step_attempt_failed",
+            json!({"name": "step1", "attempt": a}),
+        ));
+    }
+    j.push(Event::new(
+        0,
+        "step_completed",
+        json!({"name": "step1",
+        "outcome": {"error": {"kind": "transient", "type": "retryable"}}}),
+    ));
+    j.push(Event::new(0, "run_failed", json!({})));
+    renumber(j)
+}
+
+/// `records()` plus a terminate intent and the given outcome records.
+fn terminate_ledger(outcome: &[Record]) -> Ledger {
+    let mut recs = records();
+    recs.push(Record::StopIntent {
+        run_id: RUN.into(),
+        stop: Stop::Terminate,
+    });
+    recs.extend(outcome.iter().cloned());
+    Ledger::from_records(&recs)
+}
+
+/// D26 (shard 00, run 004038fnrafsrxswnmeq2kfv4qbn6): a terminate rejected with 409
+/// `run_terminal` found the run already failed by retry exhaustion; it is not a terminate
+/// that was sent for the status rule. Every other status rule is unchanged.
+#[test]
+fn control_d26_rejected_terminate() {
+    let failed = RunView {
+        status: "failed".into(),
+        result: None,
+        failure: Some(r#"{"kind":"transient","message":"step 1 simulated failure"}"#.into()),
+    };
+    let rejected = Record::StopRejected {
+        run_id: RUN.into(),
+        stop: Stop::Terminate,
+    };
+    let acked = Record::StopAck {
+        run_id: RUN.into(),
+        stop: Stop::Terminate,
+    };
+    let exhausted = exhausted_journal();
+    assert!(check_journal(RUN, &exhausted, None).is_empty());
+
+    // Positive: rejected terminate + failed by retry exhaustion -> no violation.
+    let l = terminate_ledger(std::slice::from_ref(&rejected));
+    let r = l.get(RUN).unwrap();
+    assert!(check_final(RUN, r, &failed, &exhausted).is_empty());
+
+    // Negative: rejected terminate + failed WITHOUT exhausted retries -> WrongStatus.
+    assert_eq!(
+        kinds(&check_final(RUN, r, &failed, &journal())),
+        [Kind::WrongStatus]
+    );
+
+    // Negative: rejected terminate + completed with a wrong result -> WrongResult.
+    let mut wrong = completed_view();
+    wrong.result.as_mut().unwrap()["results"][1] = json!("s00-1-9");
+    assert_eq!(
+        kinds(&check_final(RUN, r, &wrong, &journal())),
+        [Kind::WrongResult]
+    );
+    // ... and with the right result it passes (the terminate was refused).
+    assert!(check_final(RUN, r, &completed_view(), &journal()).is_empty());
+
+    // Negative: rejected terminate + non-terminal run -> NonTerminal.
+    let running = RunView {
+        status: "running".into(),
+        result: None,
+        failure: None,
+    };
+    assert_eq!(
+        kinds(&check_final(RUN, r, &running, &journal())),
+        [Kind::NonTerminal]
+    );
+
+    // Unchanged: a rejected retry after a first attempt whose 200 was lost may still have
+    // terminated the run, so `terminated` stays accepted.
+    let term = RunView {
+        status: "terminated".into(),
+        result: None,
+        failure: None,
+    };
+    assert!(check_final(RUN, r, &term, &journal()).is_empty());
+
+    // Negative: acked terminate + failed (even by retry exhaustion) -> WrongStatus.
+    let l = terminate_ledger(std::slice::from_ref(&acked));
+    assert_eq!(
+        kinds(&check_final(RUN, l.get(RUN).unwrap(), &failed, &exhausted)),
+        [Kind::WrongStatus]
+    );
+
+    // Negative: acked AND rejected (ack, then a rejected retry) + failed -> WrongStatus.
+    let l = terminate_ledger(&[acked.clone(), rejected.clone()]);
+    assert_eq!(
+        kinds(&check_final(RUN, l.get(RUN).unwrap(), &failed, &exhausted)),
+        [Kind::WrongStatus]
+    );
+
+    // Unchanged: an unacked terminate with no rejection + failed -> WrongStatus.
+    let l = terminate_ledger(&[]);
+    assert_eq!(
+        kinds(&check_final(RUN, l.get(RUN).unwrap(), &failed, &exhausted)),
+        [Kind::WrongStatus]
+    );
+
+    // Unchanged: a rejected cancel (no terminate intent) + failed by retry exhaustion passes.
+    let mut recs = records();
+    recs.push(Record::StopIntent {
+        run_id: RUN.into(),
+        stop: Stop::Cancel,
+    });
+    recs.push(Record::StopRejected {
+        run_id: RUN.into(),
+        stop: Stop::Cancel,
+    });
+    let l = Ledger::from_records(&recs);
+    assert!(check_final(RUN, l.get(RUN).unwrap(), &failed, &exhausted).is_empty());
+}
