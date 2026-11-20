@@ -668,7 +668,7 @@ pub(crate) fn apply_events_appended(
                     );
                 }
                 remove_ready(b, &run, &mut rec);
-                terminal::on_terminal(b, &run, &mut rec, c.completed_at_ms, actions)?;
+                terminal::on_terminal(b, cur, &run, &mut rec, c.completed_at_ms, actions)?;
                 actions.push(Action::RunCompleted { run, status });
                 if let Some((parent, op)) = rec.parent {
                     let msg = OutboxMsg {

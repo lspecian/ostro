@@ -13,21 +13,29 @@
 //! call), every `effects` row of the run is deleted (`effects::delete_run_effects`). Resumable
 //! terminals keep them, so a resumed run still accepts the completion of an in-flight effect.
 //!
+//! Phase 8 (08-07): for a schedule-started run (idempotency key `__cron/…`), the hook then
+//! calls `schedule::on_run_terminal`, which deletes the run's `schedule_state` reverse row and
+//! starts a buffered `BufferOne` fire in the same batch. Other runs pay nothing for it.
+//!
 //! **Read budget:** the two `waits` prefix scans (2 reads) run only when
 //! `RunRecord.open_waits > 0`; otherwise the hook reads nothing (asserted in
 //! `tests/apply_seams.rs`). Documented exception, docs/storage-format.md §13. Non-resumable
 //! terminals add 1 effects prefix scan by run (06-03; asserted in `tests/apply_effects.rs`).
+//! Schedule-started runs add 1 (reverse row) to 3 reads (08-07; asserted in
+//! `tests/apply_schedule.rs`).
 
 use ostro_types::RunId;
 
+use super::cursor::Cursor;
 use super::outcome::Action;
-use super::{effects, lifecycle};
+use super::{effects, lifecycle, schedule};
 use crate::store::keys::{WAIT_ROW, decode_wait_key, timer_key, wait_prefixes};
 use crate::store::values::{self, RunRecord, WaitRow};
 use crate::store::{ApplyBatch, StoreError, Table};
 
 pub(crate) fn on_terminal(
     b: &mut ApplyBatch<'_>,
+    cur: &mut Cursor,
     run: &RunId,
     rec: &mut RunRecord,
     at_ms: u64,
@@ -41,7 +49,12 @@ pub(crate) fn on_terminal(
     if !rec.resumable {
         effects::delete_run_effects(b, run)?;
     }
-    lifecycle::on_terminal(b, run, rec, at_ms, actions)
+    lifecycle::on_terminal(b, run, rec, at_ms, actions)?;
+    // 08-07: schedule runs only (0 reads otherwise).
+    if rec.idempotency_key.starts_with(schedule::CRON_KEY_PREFIX) {
+        schedule::on_run_terminal(b, cur, run, rec.status, actions)?;
+    }
+    Ok(())
 }
 
 /// Deletes both `waits` key shapes of `run` and the wait-timeout timers. Two prefix reads.

@@ -28,13 +28,13 @@ use ostro_types::RunId;
 use ostro_types::command::TimerFired;
 
 use super::cursor::Cursor;
-use super::effects;
 use super::lifecycle::expire_due;
 use super::outcome::{Action, ApplyOutcome, ApplyResult};
 use super::run::{PAYLOAD_INPUT, PAYLOAD_RESULT, remove_ready};
+use super::{effects, schedule};
 use crate::store::keys::{
     children_prefix, dedupe_key, event_key, payload_key, run_key, run_prefix, running_key,
-    wait_prefixes,
+    schedule_run_key, wait_prefixes,
 };
 use crate::store::values::RunRecord;
 use crate::store::{ApplyBatch, StoreError, Table};
@@ -95,6 +95,11 @@ fn delete_run(b: &mut ApplyBatch<'_>, run: &RunId, rec: &mut RunRecord) -> Resul
     }
     delete_prefix(b, Table::Children, &children_prefix(run))?;
     effects::delete_run_effects(b, run)?;
+    // 08-07: a schedule run's reverse row (normally gone at its terminal transition). Blind,
+    // and only for `__cron/` runs, so other expiries keep their write set.
+    if rec.idempotency_key.starts_with(schedule::CRON_KEY_PREFIX) {
+        b.remove(Table::ScheduleState, schedule_run_key(run));
+    }
     delete_prefix(b, Table::SignalSeen, &rp)?;
     delete_prefix(b, Table::Dlq, &rp)?;
     Ok(())

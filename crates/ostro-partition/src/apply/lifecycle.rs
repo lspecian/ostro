@@ -199,7 +199,7 @@ fn hard_stop(
             actions,
         )?;
     }
-    terminal::on_terminal(b, run, &mut rec, at_ms, actions)?;
+    terminal::on_terminal(b, cur, run, &mut rec, at_ms, actions)?;
     actions.push(Action::RunCompleted { run: *run, status });
     if let Some((parent, op)) = rec.parent {
         let msg = OutboxMsg {
@@ -611,7 +611,7 @@ pub(crate) fn complete_continued_as_new(
             res.encode_to_vec(),
         );
     }
-    terminal::on_terminal(b, run, &mut rec, c.completed_at_ms, actions)?;
+    terminal::on_terminal(b, cur, run, &mut rec, c.completed_at_ms, actions)?;
     actions.push(Action::RunCompleted { run: *run, status });
     store_run(b, run, &rec);
     Ok(ApplyOutcome::Accepted)

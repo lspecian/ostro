@@ -22,7 +22,9 @@
 //!   `OutboxTruncated` is blind (zero reads); `InboundBatch` reads per
 //!   message (see `inbound`). Phase 6 exceptions (`effects`): `CompleteEffect`
 //!   reads 2 (run record + effects row); an accepted `LeaderAnnounced` scans
-//!   the effects keyspace once plus one record read per run with rows.
+//!   the effects keyspace once plus one record read per run with rows. Phase 8 exception
+//!   (`schedule`): `ScheduleFire` reads the schedule row, the last run's record and the
+//!   dedupe row (plus the cancel/terminate reads under `CancelOther`/`TerminateOther`).
 //! - **No chunk leakage (Pitfall 9):** nothing depends on batch boundaries;
 //!   [`apply_chunk`] is a plain loop over [`apply_command`].
 
@@ -35,7 +37,6 @@ mod outbox;
 pub mod outcome;
 mod retention;
 pub(crate) mod run;
-// Phase 8 (08-01 seam): `schedule.rs` is filled by 08-07.
 mod schedule;
 mod terminal;
 mod timer;
@@ -144,7 +145,7 @@ fn dispatch(
         Cmd::CompleteToken(c) => waits::complete_token(b, cur, c, actions),
         Cmd::TerminateRun(t) => lifecycle::terminate_run(b, cur, t, actions),
         Cmd::RetryRun(r) => lifecycle::retry_run(b, cur, r, actions),
-        // Phase 8: implemented in 08-07 (rejects with Invalid(NotImplemented) until then).
+        // Phase 8 (08-07): watermark, overlap, manual and buffered fires (`schedule.rs`).
         Cmd::ScheduleFire(s) => schedule::apply_schedule_fire(b, cur, s, actions),
         // Phase 6 (06-03): first completion wins, 2 reads (`effects.rs`).
         Cmd::CompleteEffect(c) => effects::apply_complete_effect(b, cur, c, actions),
