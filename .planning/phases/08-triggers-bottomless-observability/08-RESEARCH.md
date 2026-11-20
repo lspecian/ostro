@@ -144,7 +144,7 @@ All versions were verified on crates.io on 2026-11-19. Compatibility was checked
 | `lz4_flex` | 0.13.x (same major as lsm-tree's 0.13.2) | Optional per-frame snapshot compression | Pure Rust. The latest is 0.14.2, but use 0.13 so it unifies with lsm-tree. |
 | `tracing-subscriber` | 0.3.23 + feature **`json`** | Structured JSON node logs | Add `LogFormat::Json`. |
 | `subtle` 2.6.1 or `hmac::Mac::verify_slice` | — | Constant-time signature comparison | Prefer `Mac::verify_slice` (already in hmac 0.13). |
-| `s3s` / `s3s-fs` | 0.17.0 (dev-dependency only) | In-process S3 server for protocol tests without Docker | s3s-fs depends on chrono, but `deny.toml` has `exclude-dev = true`. Verify that cargo-deny ignores it; if not, use MinIO in Docker (`#[ignore]`). |
+| `s3s` / `s3s-fs` | 0.17.0 (dev-dependency only) | In-process S3 server for protocol tests without Docker | s3s-fs depends on chrono, but `deny.toml` has `exclude-dev = true`. Verify that cargo-deny ignores it; if not, use SeaweedFS in Docker (`#[ignore]`). |
 | `webpki-root-certs` (or the reqwest `tls_certs_merge` API) | latest | CA roots when the binary runs `FROM scratch` (no `/etc/ssl/certs`) | Only for the distroless/scratch image path. Flag for Phase 14 but wire the config knob now. |
 
 ### Alternatives considered
@@ -311,7 +311,7 @@ Contents of the manifest (`manifest/current`, small: about 1–3 KB at P=16; pos
 - `LOCK` object `{cluster_id, node_id, incarnation}` created with `If-None-Match: *` when bottomless is first enabled.
 - The manifest PUT uses `If-Match`. A failed precondition means another writer owns the prefix: stop uploading, set `ostro_backup_fenced = 1`, and log an error.
 - A node restored from the bucket gets a new incarnation and needs `--takeover` to continue uploading to the same prefix. Otherwise the operator configures a new prefix.
-- Conditional PUT support: AWS S3 (2024), MinIO and R2. This is MEDIUM confidence and must be verified against MinIO in tests. Keep a LOCK re-read fallback for providers without `If-Match` on PUT.
+- Conditional PUT support: AWS S3 (2024), SeaweedFS and R2. This is MEDIUM confidence and must be verified against SeaweedFS in tests. Keep a LOCK re-read fallback for providers without `If-Match` on PUT.
 
 **Remote retention:**
 - Keep the last `K` remote snapshots per partition (default 3) and every chunk with `end > oldest kept snapshot offset`. Delete older chunks and snapshots after the new manifest is durable.
@@ -643,7 +643,7 @@ fn verify_stripe(secret: &[u8], header: &str, body: &[u8], now: i64, tol: i64) -
 | jiff 0.2 ecosystem | jiff 1.0.0 / 1.0.1 (2026-11-15 / 18) | Last week | Cron crates lag. Expect croner jiff-1 support soon; drop the adapter's jiff 0.2 then |
 | `SpanBuilder.trace_id/span_id/end_time` | Removed from the public builder in 0.33; use `IdGenerator` + `end_with_timestamp` | OTel Rust 0.2x–0.33 | Deterministic ids need a custom generator |
 | BatchSpanProcessor on an async runtime | SDK background threads by default | OTel Rust 0.28+ | Simpler setup; `rt-tokio` probably not needed |
-| S3 eventual consistency | Strong read-after-write (2020); conditional writes If-None-Match (Aug 2024), If-Match (Nov 2024) | — | The manifest CAS and LOCK patterns work on AWS. Verify on MinIO and R2 |
+| S3 eventual consistency | Strong read-after-write (2020); conditional writes If-None-Match (Aug 2024), If-Match (Nov 2024) | — | The manifest CAS and LOCK patterns work on AWS. Verify on SeaweedFS and R2 |
 
 **Deprecated / outdated:**
 - docs/03 §3 "S3/GCS/Azure/local backends from `chronik-storage::object_store`": superseded (rusty-s3 S3-compatible plus local). Azure is deferred.
@@ -667,9 +667,9 @@ fn verify_stripe(secret: &[u8], header: &str, body: &[u8], now: i64, tol: i64) -
 
 1. **Does cargo-deny with `exclude-dev = true` fully ignore chrono pulled in by the dev-only `s3s-fs`?**
    - What we know: the `[graph] exclude-dev = true` setting is present.
-   - Recommendation: verify in the 08-03 Wave 0 task. If it fails, use MinIO in Docker (`#[ignore]`, human-run) for S3 protocol tests and LocalFs for the rest.
-2. **Conditional PUT (`If-Match`) support on R2 and MinIO,** and whether rusty-s3 signs extra headers added through `headers_mut()`.
-   - Recommendation: an integration test against MinIO. Keep the LOCK re-read fallback.
+   - Recommendation: verify in the 08-03 Wave 0 task. If it fails, use SeaweedFS in Docker (`#[ignore]`, human-run) for S3 protocol tests and LocalFs for the rest.
+2. **Conditional PUT (`If-Match`) support on R2 and SeaweedFS,** and whether rusty-s3 signs extra headers added through `headers_mut()`.
+   - Recommendation: an integration test against SeaweedFS. Keep the LOCK re-read fallback.
 3. **fjall ingestion fsync behaviour.**
    - Recommendation: Pattern 3's reopen + digest + directory rename makes it non-critical. Measure ingestion against WriteBatch install speed.
 4. **jiff 0.2 `TimeZone::tzif` signature, and croner jiff-1 timing.**
@@ -690,7 +690,7 @@ Granularity is fine and parallelization is on. Phase 8 needs Phase 5 complete (f
 |------|------|------------|-------|--------------|
 | **08-01** Phase gate + contract | 1 | Phase 5 done | Confirm the F1–F4 outcomes. `Cmd::ScheduleFire` (reserved tag), `ScheduleState` keyspace (append to TABLES), InvalidCode appends, apply arms returning NotImplemented. `MetaRecord::Webhook` / `Schedule` fields (whatever pre-freeze did not land). Workspace pins (Standard Stack). New crate skeletons `ostro-objstore`, `ostro-backup`, `ostro-triggers`. **ci-local grep fix + deny fixtures.** Wave 0 test stubs. Golden lines appended. | all (contract) |
 | **08-02** Snapshot format OSNP v1 | 2 | 08-01 | `store/snapshot.rs` writer/reader/install (Patterns 1–3), `store/blobrefs.rs`, `docs/snapshot-format.md`. Tests: round-trip digest, corruption per frame, export during concurrent apply (batch consistency), install staging crash. | BACK-04 |
-| **08-03** ostro-objstore | 2 | 08-01 | `ObjectStore` trait (put, put_if_absent, put_if_match, get, get_range, head, list(prefix, start_after), delete, multipart ≥ 64 MiB); LocalFs (tmp + fsync + rename, emulated conditions under a lock); S3 via rusty-s3 + reqwest (retries, backoff, path-style/virtual-host, region, endpoint for R2/MinIO); TLS roots knob. Tests: LocalFs unit, S3 against s3s-fs (or MinIO `#[ignore]`). | BACK-01 (transport), FX-05 seam |
+| **08-03** ostro-objstore | 2 | 08-01 | `ObjectStore` trait (put, put_if_absent, put_if_match, get, get_range, head, list(prefix, start_after), delete, multipart ≥ 64 MiB); LocalFs (tmp + fsync + rename, emulated conditions under a lock); S3 via rusty-s3 + reqwest (retries, backoff, path-style/virtual-host, region, endpoint for R2/SeaweedFS); TLS roots knob. Tests: LocalFs unit, S3 against s3s-fs (or SeaweedFS `#[ignore]`). | BACK-01 (transport), FX-05 seam |
 | **08-04** Telemetry foundation | 2 | 08-01 | `[telemetry]` config (otlp endpoint/protocol/headers/sampling, metrics on/off); `LogFormat::Json`; Prometheus recorder + `/metrics` + upkeep + buckets; tracing-opentelemetry layer; appender layer with an otel-target filter; provider shutdown. Tests: scrape shows existing series; in-process OTLP collector (tonic `TraceServiceServer` from opentelemetry-proto) receives a span. | OBS-02 (base), OBS-01/03 (pipes) |
 | **08-05** Cron engine (pure) | 2 | 08-01 | `ostro-triggers::cron`: croner + jiff 0.2 adapter, shared TZif, `next_after`, catch-up enumeration, validation errors. DST vector tests + proptest (monotonic, no duplicates). **Spike first.** | TRIG-02/03 (logic) |
 | **08-06** Webhook verifiers (pure) | 2 | 08-01 | Stripe/GitHub/Slack/generic/Standard-Webhooks verifiers, idempotency extractors (header/JSON pointer), tolerance; vendor test vectors (see Validation). | TRIG-01 (logic) |
@@ -754,8 +754,8 @@ Wave summary:
 | BACK-04 / SC4 | Random snapshot/trim/kill sequences: never "snapshot required" without a usable snapshot; `log_start ≤ oldest retained snapshot` | proptest + failpoints | `cargo test -p ostro-partition --features failpoints --test trim_safety` | ❌ Wave 0 |
 | BACK-01 | Uploader: only below HW (chunk end ≤ HW at read), only on leader services (barrier closed → no uploads), keys partition/epoch/base, epoch split, chain hashes, blobs uploaded before the referencing chunk, meta snapshot after the cut | integration (LocalFs backend) | `cargo test -p ostro-backup --test uploader` | ❌ Wave 0 |
 | BACK-01 | Consistent cut: a cross-partition workload (children/signals) restored at any manifest gen → `outbox_next_seq` / `inbound_seen` consistent, no lost or deduped messages | integration + proptest | `cargo test -p ostro-backup --test cut_consistency` | ❌ Wave 0 |
-| BACK-01 | Fencing: a second writer with a different incarnation → precondition failure → uploads stop, `ostro_backup_fenced = 1` | integration (LocalFs emulation; MinIO `#[ignore]`) | `cargo test -p ostro-backup --test fencing` | ❌ Wave 0 |
-| BACK-01 | S3 backend against an in-process S3 (s3s-fs) or MinIO: put/get/range/list/delete/multipart/conditional | integration | `cargo test -p ostro-objstore --test s3` (MinIO: `-- --ignored`) | ❌ Wave 0 |
+| BACK-01 | Fencing: a second writer with a different incarnation → precondition failure → uploads stop, `ostro_backup_fenced = 1` | integration (LocalFs emulation; SeaweedFS `#[ignore]`) | `cargo test -p ostro-backup --test fencing` | ❌ Wave 0 |
+| BACK-01 | S3 backend against an in-process S3 (s3s-fs) or SeaweedFS: put/get/range/list/delete/multipart/conditional | integration | `cargo test -p ostro-objstore --test s3` (SeaweedFS: `-- --ignored`) | ❌ Wave 0 |
 | BACK-02 / SC3 | kill -9 during load → `ostro restore --from file://…` into an empty dir → state_hash at `verify_offset` matches the manifest; every ack with offset < cut is present; RPO (ack time of the last lost write − cut_at) ≤ seal interval + upload latency | crash loop (`#[ignore]`) | `cargo nextest run -P crash -p ostro-crashtest --run-ignored only restore_rpo` | ❌ Wave 0 |
 | BACK-03 | `ostro backup --to f.tar` then `ostro restore --from f.tar` round trip (online and offline) → identical digests | e2e (spawned binary) | `cargo test -p ostro --test backup_cli` | ❌ Wave 0 |
 | BACK-01 (blobs) | GC deletes unreferenced old blobs; keeps referenced, young, module and snapshot-ref blobs; re-put of an old blob survives a concurrent sweep; remote deletion delayed by the window | unit + integration + failpoint | `cargo test -p ostro-blob --test gc && cargo test -p ostro-backup --test remote_gc` | ❌ Wave 0 |
@@ -798,7 +798,7 @@ Wave summary:
 - github.com/apache/arrow-rs-object-store issues #909 (chrono) and #908 (humantime), open 2026-11-17; main `Cargo.toml` still requires chrono.
 - github.com/hexagon/croner-rust main `Cargo.toml` (jiff 0.2.35 optional, chrono default) and PR list (#68 DST fix in 4.0.3).
 - Stripe docs (manage-webhook-endpoints / signature troubleshooting): header entries, unknown entries, v0 on test events, multiple secrets during rotation, 3-day retries, event-id dedupe.
-- S3 conditional writes (If-None-Match 2024-08, If-Match 2024-11): from training knowledge plus widespread reporting; verify on MinIO and R2.
+- S3 conditional writes (If-None-Match 2024-08, If-Match 2024-11): from training knowledge plus widespread reporting; verify on SeaweedFS and R2.
 
 ### Tertiary (LOW confidence, validate during implementation)
 - GitHub and Slack signature test vectors (recalled from vendor docs).

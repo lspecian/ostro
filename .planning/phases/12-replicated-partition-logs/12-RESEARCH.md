@@ -25,7 +25,7 @@
 - The Chronik clone must not be read or referenced by path. Ports carry an attribution header and a VENDORED.md row, as `epoch_cache.rs` does.
 - Ordinals and reserved names come only from `.planning/RESERVATIONS.md`.
 - Post-Phase-5 format rules: D18 (amended) and D20. After 05-20, changes are additive only. Meta changes are new variants plus a META_FORMAT bump.
-- No Docker in WSL. MinIO tests stay env-gated and human_needed (P8-D18).
+- No Docker in WSL. SeaweedFS tests stay env-gated and human_needed (P8-D18).
 
 ### Claude's Discretion
 - Crate layout, harness design, liveness detector design, timing defaults, plan breakdown.

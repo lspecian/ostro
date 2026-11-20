@@ -18,11 +18,12 @@ An override that lands before the matching plan executes can be folded in. An ov
 | D-FX2 | SQL TLS roots | sqlx `tls-rustls-aws-lc-rs-native-roots` plus a per-connection `ca_file`. deny.toml is unchanged. MySQL uses `ssl_mode = "required"` by default; `mysql-rsa` is never enabled (Pitfall 5). **USER REVIEW.** | 06-02 pin. 06-11 connection config. |
 | D-FX3 | Unknown-outcome window | Default `idempotency_window = "24h"` for destinations without an `http-target` config. Default `safety_margin = "5m"`. RFC 9110 idempotent methods (GET, HEAD, OPTIONS, PUT, DELETE) are re-sent whatever the window, unless the target sets `force_window = true`. The decision is made **only at re-drive time** (`LiveEffect.redrive = true` and no registry task attached). | 06-10 `http::window`. 06-17 e2e. |
 | D-FX4 | Body templating | Opt-in per grant (`body` scope). The URL, method and header names are never templated; a placeholder there fails with `egress_denied` before anything is sent. | 06-05 grants and template. 06-10 applies them. |
-| D-FX5 | MySQL and MinIO locally | There is no mysqld and no Docker in WSL. MySQL and S3 (MinIO) tests are **env-gated** (`OSTRO_TEST_MYSQL_URL`, `OSTRO_TEST_S3_*`). They print a loud `SKIP` when the variable is unset, and run in GitHub Actions service containers. MinIO is started by a `docker run` step, because service containers cannot pass `server /data`. They are **human_needed** locally. PostgreSQL 14 at 127.0.0.1:5432 runs locally, so PG legs are mandatory locally. | 06-11, 06-12, 06-18 (ci.yml services), 06-20 (human_needed list). |
+| D-FX5 | MySQL and SeaweedFS locally | There is no mysqld and no Docker in WSL. MySQL and S3 (SeaweedFS) tests are **env-gated** (`OSTRO_TEST_MYSQL_URL`, `OSTRO_TEST_S3_*`). They print a loud `SKIP` when the variable is unset, and run in GitHub Actions service containers. SeaweedFS is started by a `docker run` step, because service containers cannot pass the `mini` command. They are **human_needed** locally. PostgreSQL 14 at 127.0.0.1:5432 runs locally, so PG legs are mandatory locally. | 06-11, 06-12, 06-18 (ci.yml services), 06-20 (human_needed list). |
 | D-FX6 | OTLP canary | Phase 6's canary harness scans tracing output through a capturing subscriber layer at TRACE, which is everything OTLP would export. It exposes `canary::register_sink(name, fn)` so Phase 8 can add an OTLP mock collector to the same harness. SC3's "OTLP" wording is satisfied at the **Phase 8 gate**. **USER REVIEW.** | 06-19 harness with the hook. 06-01 STATE todo. 06-20 human_needed/deferred list. |
 | D-FX7 | Rate-limit scope | Per node only, through governor direct limiters keyed by target. FR-4.5's partition-owned cluster-wide buckets are Phase 7/13. | 06-07 `ratelimit`. |
 | D-FX8 | Presign expiry and WIT | Presign expiry comes from the connection config (`presign_expiry`, default `15m`, S3 range 1 s to 7 d). **No `ostro:runtime@0.1.1` in Phase 6**; runtime.wit is untouched. | 06-12. 06-20 verifies that the WIT sha is unchanged. |
 | D-FX9 | Admin surface | REST + gRPC + CLI for secrets (set/list/delete; values are write-only and never returned), grants, connections and egress policies. No UI (Phase 11). | 06-08 API surface, 06-16 server impl + CLI. |
+| D-FX10 | S3 test backend | S3 test backend = SeaweedFS (user direction 2026-11-20; MinIO no longer ships Docker images). `chrislusf/seaweedfs:4.54` (Apache-2.0) running `weed mini` in one container, S3 on :8333, credentials/bucket from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `S3_BUCKET`. Its docs ("S3 Conditional Operations"; 4.50 PR #12026) cover `If-None-Match: *` / `If-Match` with 412 on a failed condition; ostro-objstore's `external_s3_if_none_match_second_put_412` smoke checks it in CI. Fallback, documented only: RustFS `rustfs/rustfs:1.0.6` (`RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`, :9000). Backend swap only: env names, bucket and gating are unchanged. | § "Shared S3 test spec" below; ci.yml `Start SeaweedFS` step (08-03's leg, switched 2026-11-20); 06-12, 06-18, 06-19 S3 legs. |
 
 ## Planner decisions (Claude's discretion)
 
@@ -73,21 +74,22 @@ An override that lands before the matching plan executes can be folded in. An ov
 |----------|---------|--------------|
 | `OSTRO_TEST_PG_URL` | 06-11, 06-18 | Available (PG 14). Mandatory locally. |
 | `OSTRO_TEST_MYSQL_URL` (with `ssl-mode=REQUIRED`) | 06-11, 06-18 | human_needed / CI service (mysql:8.4) |
-| `OSTRO_TEST_S3_URL`, `OSTRO_TEST_S3_ACCESS_KEY`, `OSTRO_TEST_S3_SECRET_KEY`, `OSTRO_TEST_S3_BUCKET` | 06-12, 06-19 | human_needed / CI (MinIO via `docker run`) |
+| `OSTRO_TEST_S3_URL`, `OSTRO_TEST_S3_ACCESS_KEY`, `OSTRO_TEST_S3_SECRET_KEY`, `OSTRO_TEST_S3_BUCKET` | 06-12, 06-19 | human_needed / CI (SeaweedFS via `docker run`) |
 | `OSTRO_TEST_VAULT_ADDR`, `OSTRO_TEST_VAULT_TOKEN` (optional) | 06-13 | The mock covers the default suite. A real Vault dev server is optional in CI. |
 
-### Shared MinIO / S3 test spec (canonical for Phases 6 and 8, W13)
+### Shared S3 test spec (SeaweedFS; canonical for Phases 6 and 8, W13)
 
 Phase 8 (08-03) references this table. Whichever phase lands first adds the CI step; the other reuses it unchanged.
 
 | Item | Value |
 |------|-------|
-| Image and command | `docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=ostro -e MINIO_ROOT_PASSWORD=ostrominio quay.io/minio/minio server /data` (a `docker run` step, because GitHub service containers cannot pass `server /data`) |
-| Health wait | `curl -sf http://127.0.0.1:9000/minio/health/ready` |
-| Credentials | access key `ostro`, secret key `ostrominio` (throwaway CI values) |
-| Bucket | `ostro-test` (created with a one-off `minio/mc` container: `mc alias set m http://127.0.0.1:9000 ostro ostrominio && mc mb -p m/ostro-test`) |
-| Job env | `OSTRO_TEST_S3_URL=http://127.0.0.1:9000`, `OSTRO_TEST_S3_ACCESS_KEY=ostro`, `OSTRO_TEST_S3_SECRET_KEY=ostrominio`, `OSTRO_TEST_S3_BUCKET=ostro-test` (region `us-east-1`, path-style) |
+| Image and command | `docker run -d --name seaweedfs -p 8333:8333 -e AWS_ACCESS_KEY_ID=ostro -e AWS_SECRET_ACCESS_KEY=ostroseaweed -e S3_BUCKET=ostro-test chrislusf/seaweedfs:4.54 mini -dir=/data` (a `docker run` step, because GitHub service containers cannot pass the `mini` command; `weed mini` serves S3 on :8333. Pin 4.54 = GitHub's latest release; if the pull fails, fall back to the newest release tag confirmed on Docker Hub) |
+| Health wait | `curl -sf -o /dev/null -I --aws-sigv4 "aws:amz:us-east-1:s3" --user ostro:ostroseaweed http://127.0.0.1:8333/ostro-test` (poll until 200) |
+| Credentials | access key `ostro`, secret key `ostroseaweed` (throwaway CI values; passed as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) |
+| Bucket | `ostro-test` (created by SeaweedFS from `S3_BUCKET=ostro-test`; fallback: a SigV4 `PUT http://127.0.0.1:8333/ostro-test` via `curl --aws-sigv4`) |
+| Job env | `OSTRO_TEST_S3_URL=http://127.0.0.1:8333`, `OSTRO_TEST_S3_ACCESS_KEY=ostro`, `OSTRO_TEST_S3_SECRET_KEY=ostroseaweed`, `OSTRO_TEST_S3_BUCKET=ostro-test` (region `us-east-1`, path-style) |
 | Local | human_needed (no Docker in WSL) |
+| Fallback store (documented only) | RustFS `rustfs/rustfs:1.0.6`, env `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY`, S3 on :9000; use only if SeaweedFS cannot be pulled or fails the conditional-PUT smoke |
 
 ## Standing rules (every Phase 6 plan carries them in `<phase_rules>`)
 

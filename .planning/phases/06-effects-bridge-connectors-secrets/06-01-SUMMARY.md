@@ -151,3 +151,5 @@ Otherwise none: the plan was executed as written. No code changed.
 - FOUND: .planning/phases/06-effects-bridge-connectors-secrets/06-01-SUMMARY.md
 - FOUND: commit 8abba5e
 - Task 1 verify and Task 2 verify both pass on main `8abba5e`.
+
+Note 2026-11-20: MinIO replaced by SeaweedFS per user direction (see DECISIONS).

@@ -214,7 +214,7 @@ Plans:
   3. A canary secret referenced as `{{secret:name}}` never appears on disk, in the journal, in logs, in OTLP or in object storage, and is never readable by the guest. Grants bound to other origins are refused, templated requests don't follow redirects, and echoed values are scrubbed from responses.
   4. The SSRF bypass table is blocked: private, link-local and metadata ranges, IPv4-mapped IPv6, NAT64, decimal/octal literals, `fd00:ec2::254`, redirects and env proxies. Per-module allow-lists and per-target rate limits are enforced.
   5. Object-store get/put/presign works against S3-compatible and local backends. Secrets resolve from the sealed store, env/file, Vault and Kubernetes providers.
-**Plans**: 20 plans (8 waves; 06-01 is the PHASE-6 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only, + WIT freeze in place) and checking the code against .planning/RESERVATIONS.md (P6 block: Cmd 13, Intent 9/10, InvalidCode 15, effects rows); 06-02 lands deps/skeletons/contract; decisions D-FX1–D-FX9 + P-1–P-21 adopted in 06-DECISIONS.md, user may override; MySQL/MinIO legs env-gated → CI service containers / human_needed; the OTLP canary leg closes at the Phase 8 gate)
+**Plans**: 20 plans (8 waves; 06-01 is the PHASE-6 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only, + WIT freeze in place) and checking the code against .planning/RESERVATIONS.md (P6 block: Cmd 13, Intent 9/10, InvalidCode 15, effects rows); 06-02 lands deps/skeletons/contract; decisions D-FX1–D-FX9 + P-1–P-21 adopted in 06-DECISIONS.md, user may override; MySQL/SeaweedFS legs env-gated → CI service containers / human_needed; the OTLP canary leg closes at the Phase 8 gate)
 
 Plans:
 - [x] 06-01-PLAN.md — PHASE-6 GATE (Phase 5 + WIT freeze, code vs RESERVATIONS) + decisions to STATE + FX-05 wording + RESERVATIONS names and canonical InvalidCode placeholder names (docs only) (all FX)
@@ -234,8 +234,8 @@ Plans:
 - [ ] 06-15-PLAN.md — Seam e2e (in-process): intent before I/O, journal delivery, crash re-drive instead of unsupported repair, 1 MiB blob outcome, evicted-run wake, children regression (FX-01, FX-03, FX-06)
 - [ ] 06-16-PLAN.md — Server admin impl (sealed secrets, grants, connections, egress, presign route) + CLI verbs + API-based e2e helpers (FX-05..FX-08, FX-10)
 - [ ] 06-17-PLAN.md — E2E SC1/SC4: kill -9 re-drive with same key, window → effect_outcome_unknown, SSRF table via guest (classifier reasons asserted), env proxy, allow-lists, rate limits (FX-01, FX-02, FX-03, FX-08, FX-09)
-- [ ] 06-18-PLAN.md — E2E SC2: kill -9 between COMMIT and effect_completed on PG (+ MySQL in CI), CI service containers (shared MinIO spec), ci-local env gating (FX-04)
-- [ ] 06-19-PLAN.md — E2E SC3/SC5: canary harness (OTLP hook for Phase 8; mocks isolated from capture), grant/redirect/echo, object via guest (local + MinIO), five secret providers (FX-05, FX-06, FX-07, FX-10)
+- [ ] 06-18-PLAN.md — E2E SC2: kill -9 between COMMIT and effect_completed on PG (+ MySQL in CI), CI service containers (shared S3 test spec, SeaweedFS), ci-local env gating (FX-04)
+- [ ] 06-19-PLAN.md — E2E SC3/SC5: canary harness (OTLP hook for Phase 8; mocks isolated from capture), grant/redirect/echo, object via guest (local + SeaweedFS), five secret providers (FX-05, FX-06, FX-07, FX-10)
 - [ ] 06-20-PLAN.md — PHASE GATE: docs (connectors/egress/secrets incl. normative error table, docs/03 + docs/02 fixes), effect replay-corpus entries, RESERVATIONS flip, freeze/deny re-check, full ci-local, VALIDATION (all)
 **Research flag**: SSRF and secret binding; MySQL implicit-commit list; provider idempotency windows
 
@@ -290,7 +290,7 @@ Plans:
 Plans:
 - [x] 08-01-PLAN.md — PHASE-8 GATE (Phase 5 complete, code vs RESERVATIONS.md) + decisions to STATE + contract (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23, config/trait stubs) + every Phase 8 dependency + crate skeletons (ostro-objstore only if absent) + anchored forbidden-crate check (all)
 - [ ] 08-02-PLAN.md — OSNP v1 snapshot format: batch-consistent export, staged verified install (ingestion spike), blob-ref visitor, docs/snapshot-format.md (BACK-04)
-- [x] 08-03-PLAN.md — ostro-objstore frozen object-safe trait + LocalFs + S3 (rusty-s3) + conformance; s3s-fs/deny spike; MinIO CI leg (BACK-01)
+- [x] 08-03-PLAN.md — ostro-objstore frozen object-safe trait + LocalFs + S3 (rusty-s3) + conformance; s3s-fs/deny spike; SeaweedFS CI leg (BACK-01)
 - [ ] 08-04-PLAN.md — Telemetry foundation: Phase 8 config contract, OTLP traces/logs, Prometheus /metrics, JSON logs, OstroIdGenerator, services seam, testkit OTLP collector (OBS-01/02/03)
 - [x] 08-05-PLAN.md — Cron engine (TDD): croner behind jiff-0.2 adapter, shared TZif, DST vectors, latest-before + catch-up planning keeping newest fires (TRIG-02/03)
 - [ ] 08-06-PLAN.md — Webhook verifiers (TDD): Stripe/GitHub/Slack/Standard/generic HMAC, idempotency extractors (TRIG-01)
@@ -307,7 +307,7 @@ Plans:
 - [ ] 08-17-PLAN.md — Guest logs: rate limits, per-run caps, ring buffer + /v1/runs/{id}/logs, JSON + OTLP LogRecords (OBS-03)
 - [ ] 08-18-PLAN.md — Restore (manifest validation, two-step in-files verified replay, meta bootstrap spike, WAL import) + tar backup online/offline + CLI (BACK-02/03)
 - [ ] 08-19-PLAN.md — Blob GC: mtime touch, GC lock, mark/sweep with grace, delayed remote deletion ledger (BACK-01)
-- [ ] 08-20-PLAN.md — End-to-end proofs SC1–SC4: Stripe round trip, cron kill loop, restore RPO loop, MinIO leg, Phase 8 campaign faults (TRIG, BACK)
+- [ ] 08-20-PLAN.md — End-to-end proofs SC1–SC4: Stripe round trip, cron kill loop, restore RPO loop, SeaweedFS leg, Phase 8 campaign faults (TRIG, BACK)
 - [ ] 08-21-PLAN.md — SC5 observability e2e + outbound traceparent via ostro-bridge (B2) + OTLP canary (D-FX6) (OBS-01/02/03)
 - [ ] 08-22-PLAN.md — PHASE GATE: full ci-local, >= 10,000-fault campaign, RESERVATIONS flip, docs, VALIDATION (all)
 **Research flag**: Snapshot format (designed once for restore + follower install)
@@ -421,7 +421,7 @@ Plans:
   2. With RF=3, HW = min(LEO over ISR). Fetches with a stale epoch are rejected. After a leader dies holding unreplicated writes, its divergent tail is truncated on rejoin, including in object storage, and the suite stays 100% green.
   3. Leaders are elected only from the published ISR. Writes stop when the ISR drops below `min_insync_replicas`.
   4. Followers apply committed entries as hot standbys and bootstrap from a snapshot. Leader failover p99 is < 10 s and runs resume automatically. RF=1 still uses exactly the same code path.
-**Plans**: 18 plans (9 waves; 12-01 is the PHASE-12 GATE requiring Phase 8 complete (all 08-*-SUMMARY + 08-VERIFICATION passed, or human_needed with by-design items only) and Phase 7 complete (cluster CA with node SAN identity, mTLS cluster listener); contracts in 12-02; the conformance suite and ten permanent `repl::mutant::*` failpoint mutants are written and run red in wave 4 (12-06/12-07), before integration in 12-14 (wave 6); decisions D-P12-1..D-P12-26 adopted in 12-DECISIONS.md (revised after the plan check), user reviews D-P12-2 (static multi-voter meta pulled forward from CLUS-05), D-P12-3 (cluster-wide restore deferred) and D-P12-4 (parsed-base rule for a torn first record of an anchored log); ordinals only from the P12 block (MetaCommand 4-6, ext tag 80); native-Linux failover p99/benchmark and MinIO legs human_needed)
+**Plans**: 18 plans (9 waves; 12-01 is the PHASE-12 GATE requiring Phase 8 complete (all 08-*-SUMMARY + 08-VERIFICATION passed, or human_needed with by-design items only) and Phase 7 complete (cluster CA with node SAN identity, mTLS cluster listener); contracts in 12-02; the conformance suite and ten permanent `repl::mutant::*` failpoint mutants are written and run red in wave 4 (12-06/12-07), before integration in 12-14 (wave 6); decisions D-P12-1..D-P12-26 adopted in 12-DECISIONS.md (revised after the plan check), user reviews D-P12-2 (static multi-voter meta pulled forward from CLUS-05), D-P12-3 (cluster-wide restore deferred) and D-P12-4 (parsed-base rule for a torn first record of an anchored log); ordinals only from the P12 block (MetaCommand 4-6, ext tag 80); native-Linux failover p99/benchmark and SeaweedFS legs human_needed)
 
 Plans:
 - [ ] 12-01-PLAN.md — PHASE-12 GATE (Phase 8 + Phase 7 complete, seam signatures, reservations incl. env/metric names) + decisions/USER REVIEW to STATE + every dependency + FAILPOINT_CRATES sync (all CLUS) (W1)

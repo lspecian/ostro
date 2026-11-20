@@ -150,3 +150,5 @@ completed: 2026-11-20
 
 - All 7 created files and 4 modified files are present at 7709fc6.
 - Commit 7709fc6 is on main, and `git show --stat main` shows 11 files: ci.yml, Cargo.lock and the objstore crate only.
+
+Note 2026-11-20: MinIO replaced by SeaweedFS per user direction (see DECISIONS).

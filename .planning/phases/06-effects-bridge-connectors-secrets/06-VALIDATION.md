@@ -20,7 +20,7 @@ created: 2026-11-19
 |----------|-------|
 | **Framework** | `cargo test` (libtest), plus proptest 1.12, insta 1 and `fail` 0.5.1 failpoints (via `bridge_fail!`, P-13). Spawned-binary tests use `CARGO_BIN_EXE_ostro` under `--features failpoints`. Mock HTTP, Vault and K8s servers use axum. The canary harness lives in `ostro-testkit` (feature `canary`). |
 | **Config file** | None beyond Cargo.toml. `scripts/ci-local.sh` `FAILPOINT_CRATES` must equal the ci.yml "Failpoint suites" step (06-02 adds ostro-bridge). |
-| **External services** | PG 14 runs locally (`OSTRO_TEST_PG_URL`, mandatory, from the untracked `.ostro-test-env`). MySQL 8.4 (`OSTRO_TEST_MYSQL_URL`) and MinIO (`OSTRO_TEST_S3_*`) are env-gated: loud SKIP locally, CI service containers (06-18). Vault/K8s use mocks (a real Vault is optional). |
+| **External services** | PG 14 runs locally (`OSTRO_TEST_PG_URL`, mandatory, from the untracked `.ostro-test-env`). MySQL 8.4 (`OSTRO_TEST_MYSQL_URL`) and SeaweedFS (`OSTRO_TEST_S3_*`) are env-gated: loud SKIP locally, CI service containers (06-18). Vault/K8s use mocks (a real Vault is optional). |
 | **Guest build** | `cargo build --release --target wasm32-wasip2 --manifest-path guests/Cargo.toml --target-dir target/guests` (fx-http, fx-sql, fx-object, fx-canary, fx-ssrf from 06-09) |
 | **Quick run command** | `cargo test -p ostro-bridge --locked` (unit, no DB) |
 | **Full suite command** | `bash scripts/ci-local.sh --no-musl` |
@@ -97,7 +97,7 @@ created: 2026-11-19
 | 6-17-01 | 17 | 7 | FX-01, FX-02, FX-03, FX-08, FX-09 | SC1 in-process (fx_http_e2e.rs) + kill -9 re-drive with the failpoint  | `bash -c 'set -euo pipefail; cargo test -p ostro-server --test fx_http_e2e --locked -- --test-threads=1; cargo test -p ostro-server --features failpoints --test fx_http_e2e --locked -- --test-threads=1; cargo test -p ostro --fea…` | ⬜ pending |
 | 6-17-02 | 17 | 7 | FX-01, FX-02, FX-03, FX-08, FX-09 | SC4 through a guest: SSRF table, env proxy, allow-lists (fx_ssrf_e2e.r | `bash -c 'set -euo pipefail; cargo test -p ostro-server --test fx_ssrf_e2e --locked -- --test-threads=1; cargo test -p ostro-server --test fx_rate_e2e --locked -- --test-threads=1; cargo clippy -p ostro-server -p ostro --all-tar…` | ⬜ pending |
 | 6-18-01 | 18 | 7 | FX-04 | SC2 crash test on PG (+ MySQL when available) | `bash -c 'set -euo pipefail; test -n "${OSTRO_TEST_PG_URL:-}" \|\| { echo "export OSTRO_TEST_PG_URL (06-11 SUMMARY form)"; exit 1; }; cargo test -p ostro --features failpoints --test fx_sql_crash --locked -- --test-threads=1 --n…` | ⬜ pending |
-| 6-18-02 | 18 | 7 | FX-04 | CI service containers + ci-local env gating | `bash -c 'set -euo pipefail; grep -q "mysql:8.4" .github/workflows/ci.yml; grep -q "postgres:17" .github/workflows/ci.yml; grep -q "minio" .github/workflows/ci.yml; grep -q "OSTRO_TEST_MYSQL_URL" scripts/ci-local.sh; for c in $(…` | ⬜ pending |
+| 6-18-02 | 18 | 7 | FX-04 | CI service containers + ci-local env gating | `bash -c 'set -euo pipefail; grep -q "mysql:8.4" .github/workflows/ci.yml; grep -q "postgres:17" .github/workflows/ci.yml; grep -q "seaweedfs" .github/workflows/ci.yml; grep -q "OSTRO_TEST_MYSQL_URL" scripts/ci-local.sh; for c in $(…` | ⬜ pending |
 | 6-19-01 | 19 | 7 | FX-05, FX-06, FX-07, FX-10 | Canary harness (ostro-testkit, feature canary) | `bash -c 'set -euo pipefail; cargo test -p ostro-testkit --features canary --locked; cargo clippy -p ostro-testkit --all-features --all-targets --locked -- -D warnings'` | ⬜ pending |
 | 6-19-02 | 19 | 7 | FX-05, FX-06, FX-07, FX-10 | SC3 end to end (fx_canary.rs) | `bash -c 'set -euo pipefail; cargo test -p ostro-server --test fx_canary --locked -- --test-threads=1'` | ⬜ pending |
 | 6-19-03 | 19 | 7 | FX-05, FX-06, FX-07, FX-10 | SC5 end to end: object store via guest (fx_object_e2e.rs) and provider | `bash -c 'set -euo pipefail; cargo test -p ostro-server --test fx_object_e2e --locked -- --test-threads=1; cargo test -p ostro-server --test fx_providers_e2e --locked -- --test-threads=1; cargo clippy -p ostro-server --all-targe…` | ⬜ pending |
@@ -125,7 +125,7 @@ Test files are created by the task that first needs them (TDD tasks write tests 
 - [ ] **ostro-testkit** (features): `mock_provider.rs` (06-10), `db.rs` (06-11), `canary.rs` (06-19)
 - [ ] **Guests**: fx-http, fx-sql, fx-object, fx-canary, fx-ssrf (06-09)
 - [ ] **Failpoint sites**: `bridge::http::before_send`, `bridge::http::after_response`, `bridge::sql::before_user_stmt`, `bridge::sql::after_commit`, `bridge::object::before_put`, `bridge::effect::before_complete_submit`
-- [ ] **CI**: ci.yml services postgres:17 and mysql:8.4, MinIO via `docker run`, env exports (06-18)
+- [ ] **CI**: ci.yml services postgres:17 and mysql:8.4, SeaweedFS via `docker run`, env exports (06-18)
 
 ---
 
@@ -134,7 +134,7 @@ Test files are created by the task that first needs them (TDD tasks write tests 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
 | SC2 on MySQL 8.4 (exactly one row per run after kill -9) and the sql_mysql suite | FX-04 | No mysqld and no Docker in WSL (D-FX5) | After the first push the CI service container runs it. Locally: install mysql-server 8.4, then `OSTRO_TEST_MYSQL_URL='mysql://root:…@127.0.0.1:3306/ostro?ssl-mode=REQUIRED' cargo test -p ostro --features failpoints --test fx_sql_crash -- --test-threads=1` and `cargo test -p ostro-bridge --test sql_mysql`. |
-| Object store on S3-compatible storage (MinIO) incl. presign | FX-05 | No Docker in WSL | CI MinIO step. Locally: `OSTRO_TEST_S3_URL=http://127.0.0.1:9000 OSTRO_TEST_S3_ACCESS_KEY=… OSTRO_TEST_S3_SECRET_KEY=… OSTRO_TEST_S3_BUCKET=… cargo test -p ostro-objstore -p ostro-bridge --test object_s3 && cargo test -p ostro-server --test fx_object_e2e`. |
+| Object store on S3-compatible storage (SeaweedFS) incl. presign | FX-05 | No Docker in WSL | CI SeaweedFS step. Locally: `OSTRO_TEST_S3_URL=http://127.0.0.1:8333 OSTRO_TEST_S3_ACCESS_KEY=… OSTRO_TEST_S3_SECRET_KEY=… OSTRO_TEST_S3_BUCKET=… cargo test -p ostro-objstore -p ostro-bridge --test object_s3 && cargo test -p ostro-server --test fx_object_e2e`. |
 | GCS through S3 interoperability | FX-05 | Needs a GCS bucket and HMAC keys (MEDIUM confidence) | Point the `OSTRO_TEST_S3_*` vars at `https://storage.googleapis.com`, region `auto`, and run the object suites. |
 | Canary absent from OTLP export | FX-06 (SC3) | OTLP export lands in Phase 8 (D-FX6) | Phase 8 registers an OTLP mock collector with `ostro_testkit::canary::register_sink` and re-runs `fx_canary`. |
 | Remote CI legs (aarch64-musl, macOS) | all | No git remote yet (FOUND-05) | Confirm green after the first push. |

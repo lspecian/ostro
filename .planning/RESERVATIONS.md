@@ -343,7 +343,7 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Metric prefix | `ostro_effect_` | P6 (P-14) |
 | Env vars | `OSTRO_SEALING_KEY`, `OSTRO_SECRET_*`, `OSTRO_TEST_PG_*`, `OSTRO_TEST_MYSQL_*`, `OSTRO_TEST_S3_*` | P6 (P-14) |
 | Testkit features | `ostro-testkit` features `mock-http`, `db`, `canary` | P6 (P-12/P-14) |
-| Test spec | Shared MinIO/S3 test spec (image, health wait, credentials, bucket `ostro-test`, job env): canonical table in `.planning/phases/06-effects-bridge-connectors-secrets/06-DECISIONS.md` § Test environment variables → "Shared MinIO / S3 test spec". Phase 8 (08-03) references the same table; whichever phase lands first adds the CI step | P6 / P8 (W13) |
+| Test spec | Shared S3 test spec (SeaweedFS) (image, health wait, credentials, bucket `ostro-test`, job env): canonical table in `.planning/phases/06-effects-bridge-connectors-secrets/06-DECISIONS.md` § Test environment variables → "Shared S3 test spec". Phase 8 (08-03) references the same table; whichever phase lands first adds the CI step | P6 / P8 (W13) |
 | Git tag | `wit/ostro-runtime-v0.1.0` (local) | P5 (05-20) |
 | Crate | `ostro-conformance` (SDK conformance; Phase 12's replication suite must use a different name) | P9 |
 | Failpoint prefix | `child::` | P9 |
