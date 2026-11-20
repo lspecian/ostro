@@ -1,8 +1,8 @@
 ---
 phase: 5
 slug: workflow-semantics-core-hardening
-status: gate_red_check_vendored
-nyquist_compliant: false
+status: gate_green_human_needed
+nyquist_compliant: true
 wave_0_complete: true
 updated: 2026-11-20
 created: 2026-11-19
@@ -111,7 +111,7 @@ created: 2026-11-19
 | 5-19-02 | 19 | 9 | QA-01 (smoke) | integration (`#[ignore]`, run by ci-local) | `rm -rf target/campaign-smoke`; `OSTRO_CAMPAIGN_STATE_DIR=target/campaign-smoke OSTRO_CAMPAIGN_FAULTS=20 … --test server_campaign -- --ignored campaign` then `report` (kills ≥ 20, 0 violations) | ❌ W0 | ✅ green |
 | 5-20-01 | 20 | 10 | QA-01 | gate (long-running, sharded) | Clean `target/campaign-gate`, fixed seed. Report: `kills ≥ 10000`, `lost_acked_runs=0`, `duplicate_journal_entries=0`, `non_terminal_runs=0` | n/a | ✅ green (checker v2 / D26, 2026-11-20) |
 | 5-20-02 | 20 | 10 | WIT-07, QA-02 (+ meta golden pinned, RESERVATIONS rows flipped to exists) | gate | `cargo test -p ostro-witcheck && cargo test -p ostro-types --test golden_frozen && cargo test -p ostro-engine --test replay_corpus && cargo test -p ostro-partition --test format_corpus` + local tag, no remote | n/a | ✅ green |
-| 5-20-03 | 20 | 10 | all | gate | `bash scripts/ci-local.sh` | n/a | ❌ red (check-vendored.sh check 4, see Gate results) |
+| 5-20-03 | 20 | 10 | all | gate | `bash scripts/ci-local.sh` | n/a | ✅ green (check-vendored.sh passes after the six corpus entries were re-recorded path-neutrally in `da6c7a9`; the other 20 steps were green on `3a6c592`; see Gate results §3) |
 
 | 5-21-01/02 | 21 | 2 | QA-01 (P12 F3 empty-log anchoring) | integration | `cargo test -p ostro-log --test recovery_empty_anchor && cargo test -p ostro-partition --test startup_order` + both failpoint suites | ❌ W0 | ✅ green |
 | 5-22-01/02 | 22 | 3 | API-05, WF-09 (P7 F3/F7, F9/F10, PF-F1) | integration | `cargo test -p ostro-partition --test apply_ready_attempts --test dispatcher --test apply_phase4` | ❌ W0 | ✅ green |
@@ -205,7 +205,7 @@ inside ci-local's `cargo test` step (x86_64 gnu) and `musl zigbuild test` (x86_6
 FROZEN.toml sha256 `611d2982b88e0884d55f0acb8f47691edbcc4c4b2a8918efaad4a7092d6bd98e`; the
 local tag `wit/ostro-runtime-v0.1.0` points at `fc47569`; no git remote.
 
-### 3. ci-local (full, with musl): 1 step FAILED
+### 3. ci-local (full, with musl): 1 step FAILED, fixed by `da6c7a9`
 
 ```text
 ================ ci-local summary ================
@@ -254,6 +254,28 @@ musl), but the gate is red. Fixing it needs a decision: re-record the six entrie
 build in a neutral path (they are new in this plan, but their `module_sha256` changes) or
 exempt corpus `module.wasm` files from check 4. Not fixed here; listed in deferred-items.md.
 
+**Resolved (2026-11-20, `da6c7a9`): re-recorded, check 4 not weakened.** The six entries
+were re-recorded from guests built with the new `scripts/corpus-guest-build.sh`
+(`--remap-path-prefix` for the repository root, cargo home, rustup home, target dir and the
+toolchain's rust-src). The order-saga flows ran again on a fresh `ostro dev`. The crash
+samples come from a new shard-00 campaign run with the gate settings (seed 0x0520, 20
+shards, 500 kills: `kills=500 lost_acked_runs=0 duplicate_journal_entries=0
+non_terminal_runs=0 lost_acked_signals=0 wrong_results=0 other_violations=0`, shard final
+`ok`). They are runs `s00-562`, `s00-1421` and `s00-3929`: completed, 7-8 leader epochs
+between start and completion, 5 grants, step retries. `record_corpus`, `export_run` and the
+campaign's crash-saga build now use the script, and the recorders refuse modules with local
+paths. Corpus: 30 entries, **377 events** (was 383), green under `cargo test -p ostro-engine
+--test replay_corpus` (gnu) and `cargo-zigbuild test` (musl). `bash scripts/check-vendored.sh`:
+
+```text
+PASS  1 every vendor/ file has a VENDORED.md row
+PASS  2 no forbidden references, no [patch], no CHRONIK_* env reads
+PASS  3 no git sources, all path packages inside the repo
+PASS  4 no session paths in tracked files, no build references to the upstream repo
+PASS  5 vendored manifests use edition 2021 and have no [workspace]
+check-vendored: all checks passed
+```
+
 ### 4. Performance (WSL2 advisory, D15)
 
 Profile A, inproc, P=16, release, fsync on; quiet machine (load 1.2 at start), raw fsync p50
@@ -290,8 +312,9 @@ d. **Optional real-ENOSPC leg:** `sudo mount -t tmpfs -o size=64m tmpfs /mnt/ost
 e. **User review** of the adopted decisions D7, D8 and D14 and of the freeze flip
    (`05-DECISIONS.md`, `docs/wit-0.1-freeze-review.md`). The user has already chosen to keep
    the freeze commit `fc47569` and tag as they are, and approved D26.
-f. **Decision on the check-vendored failure** (Gate results §3): re-record the six corpus
-   entries from a neutral build path, or exempt corpus `module.wasm` from check 4.
+f. ~~**Decision on the check-vendored failure** (Gate results §3): re-record the six corpus
+   entries from a neutral build path, or exempt corpus `module.wasm` from check 4.~~
+   **Resolved:** the user chose to re-record; done in `da6c7a9` (Gate results §3).
 
 ---
 
@@ -302,6 +325,6 @@ f. **Decision on the check-vendored failure** (Gate results §3): re-record the 
 - [x] Wave 0 covers all MISSING references
 - [x] No watch-mode flags
 - [x] Feedback latency < 60 s for task-level checks
-- [ ] `nyquist_compliant: true` set in frontmatter (not set: row 5-20-03, ci-local, is red on check-vendored.sh)
+- [x] `nyquist_compliant: true` set in frontmatter (row 5-20-03 green after `da6c7a9`; no red rows remain)
 
-**Approval:** pending (gate red on check-vendored.sh; human_needed items a-f)
+**Approval:** pending (human_needed items a-e)

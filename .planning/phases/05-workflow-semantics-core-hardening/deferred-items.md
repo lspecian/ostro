@@ -31,3 +31,7 @@ Out-of-scope discoveries logged by executors (not fixed in the plan that found t
   on their hashes yet), or exempt corpus `module.wasm` files from check 4. Future corpus
   exports should build guests from the main checkout or a neutral path (e.g. with
   `--remap-path-prefix`).
+  **Resolved by 05-20 (`da6c7a9`):** the six entries were re-recorded from guests built with
+  `scripts/corpus-guest-build.sh` (`--remap-path-prefix`); `record_corpus`, `export_run` and
+  the campaign's crash-saga build use it, and the recorders refuse modules with local paths.
+  check-vendored.sh passes; the corpus is 30 entries / 377 events.

@@ -187,6 +187,8 @@ Earlier attempts, kept for diagnosis:
 ## Task 2: corpora and freeze (committed earlier, unchanged here)
 
 - `82c9333`: the replay corpus now has 30 entries and 383 events, all green on gnu and musl.
+  (Superseded by `da6c7a9`: the six new entries were re-recorded path-neutrally for
+  check-vendored check 4; the corpus is now 30 entries and 377 events.)
   New: `order-saga-happy/-compensated/-cancelled`, exported after the 05-17 CLI flows, and
   `crash-campaign-s00-a/b/c`, completed runs 7-8 leader epochs apart.
 - `82c9333`: format corpus `tests/format-corpus/v0.1`: P=2, 48 runs, 418,768 bytes, one blob,
