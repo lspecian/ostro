@@ -186,7 +186,7 @@ Retention expiry (§2.2, `EXPIRE_OP`) deletes a run from `state/` only. Its WAL 
 
 The frozen Phase 2 on-disk format (directory layout, WAL record and envelope bytes, command field numbers, keyspaces and key encodings, outcome codes, rolling hash and digest, recovery rules) is specified in [storage-format.md](storage-format.md). The leader-epoch history is not stored separately: recovery rebuilds it from the epochs in the envelopes.
 
-**Bottomless (D9):** an uploader task copies sealed WAL segments, periodic `state/pNNNN` (fjall) snapshots, metadata snapshots and blobs to object storage (S3/GCS/Azure/local backends from `chronik-storage::object_store`). `ostro restore --from s3://…` rebuilds a node: metadata snapshot → per-partition state snapshot → segment tail.
+**Bottomless (D9):** an uploader task copies sealed WAL segments, periodic `state/pNNNN` (fjall) snapshots, metadata snapshots and blobs to object storage (S3-compatible and local backends from the in-house `ostro-objstore` crate on rusty-s3, D19; this supersedes the earlier plan to extract a Chronik object-store crate, and Azure Blob is deferred until a native backend exists). `ostro restore --from s3://…` rebuilds a node: metadata snapshot → per-partition state snapshot → segment tail.
 
 ---
 
@@ -253,7 +253,8 @@ Activate{run, attempt, module_sha, journal (or cursor), input}
 ```
 
 - **Hot wait** (default ≤ 2 s per queue): keep the instance resident while short effects complete; otherwise **evict** (drop the call future and Store) and let the timer/signal/effect completion re-dispatch the run, which replays.
-- **In-flight effect recovery** needs no separate sweeper: a re-dispatched run replays to an `effect_scheduled` without `effect_completed` and re-executes it with the **same idempotency key**.
+- **In-flight effect recovery** (Phase 6) has no sweeper that re-sends from the journal, but it does need a wake. A re-dispatched run replays to an `effect_scheduled` without `effect_completed` and re-drives it with the **same idempotency key** (HTTP) or the same token (exactly-once SQL). A run that evicted on a hot-wait timeout with an effect in flight is not due anywhere, so a crash would strand it. Every in-flight effect therefore has an `effects` row (keyspace #12, `Intent::RegisterEffect`), and an accepted `LeaderAnnounced` gives every `Scheduled` run that still has one a ready row: runs suspended on in-flight effects are woken on leader start through their effects rows. Completions arrive only as `Cmd::CompleteEffect` (attempt-independent, first wins). See [connectors.md](connectors.md) §1.
+- **`EffectDriver` seam.** The engine never performs I/O itself. `ActivationSink::effect_driver()` (default `None`) hands it an `EffectDriver`; the engine calls `start` only after the append carrying `EffectScheduled` has committed, and again with `redrive = true` from replay. On server nodes the driver is the in-process bridge (`ServerEffectDriver` over `ostro-bridge`). In Phase 7 a worker supplies its own worker-side driver (the bridge runs in the worker; secrets come through `ResolveSecret`, completions through the server) and reuses `ostro_types::live` and `ostro-bridge` unchanged.
 
 ### 5.3 Worker protocol (gRPC, bidirectional stream per server node)
 
@@ -652,6 +653,7 @@ ostro/
 │   ├── ostro/                   # the binary: clap subcommands dev|server|worker|deploy|run|…
 │   ├── ostro-engine/            # replay, journal model, Wasmtime host, module cache, executor
 │   ├── ostro-bridge/            # I/O: http, sql, object store, secrets, egress, rate limits
+│   ├── ostro-objstore/          # S3-compatible + local object storage (rusty-s3; D19): effects, backups, blob GC
 │   ├── ostro-partition/         # partition log + state machine + dispatcher + timer wheel
 │   ├── ostro-meta/              # metadata StateMachine (on chronik-raft driver)
 │   ├── ostro-api/               # HTTP/gRPC API, webhooks, auth, UI assets
@@ -661,7 +663,7 @@ ostro/
 │   ├── chronik-wal              # segments, group commit, truncation, sparse index
 │   ├── chronik-raft             # RaftDriver, RaftLogStore, transport (+ vendored raft-rs)
 │   ├── chronik-replication      # (extracted) follower fetch, leader epochs, ISR tracking
-│   └── chronik-object-store     # (extracted) S3/GCS/Azure/local backends
+│   └── (object storage)         # superseded: ostro-objstore (crates/, rusty-s3; D19), not extracted from Chronik
 ├── sdks/{rust,python,typescript}/
 ├── conformance/
 │   ├── sdk/                     # language-neutral workflow scenarios

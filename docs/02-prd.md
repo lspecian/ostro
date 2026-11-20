@@ -130,11 +130,13 @@ HTTP/JSON (OpenAPI) and gRPC with identical semantics; thin client libraries for
 |---|---|---|
 | FR-4.1 | HTTP: timeouts, size caps, redirect policy, automatic `Idempotency-Key`, retries per policy, `{{secret:…}}` templating | P0 (Phase 2) |
 | FR-4.2 | SQL (Postgres, MySQL): named connections, parameterised statements, **transactional idempotency token** for exactly-once writes ([01 §5.2](01-research.md#52-what-changes-without-a-host-database-sql-effects)) | P1 |
-| FR-4.3 | Object store (S3/GCS/Azure/local): get/put/presign; large-payload offload | P1 |
+| FR-4.3 | Object store (S3/GCS/Azure/local)[^fr43]: get/put/presign; large-payload offload | P1 |
 | FR-4.4 | Egress allow-list per module; SSRF protection (metadata/link-local/private ranges blocked unless allowed; DNS-rebinding-safe connect) | P0 (Phase 2) |
 | FR-4.5 | Per-target rate limits (token buckets owned by a metadata-assigned partition) | P1 |
 | FR-4.6 | Kafka/Chronik produce connector | P2 |
 | FR-4.7 | Polyglot connector components composed at build time | P2 |
+
+[^fr43]: Azure Blob deferred until a native backend exists (Phase 6 D-FX1). GCS is reached through its S3 interoperability (HMAC keys), which is not yet verified; see [connectors.md](connectors.md) §4.1.
 
 ### FR-5 Execution placement & spillover
 
