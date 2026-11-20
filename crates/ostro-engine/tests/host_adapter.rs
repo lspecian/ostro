@@ -393,8 +393,10 @@ async fn host_surface_journals_every_command() {
             }
             EventBody::EffectScheduled(e) => {
                 if let ostro_types::journal::EffectRequest::Http(r) = &e.request {
-                    // Header values (secret templates) are journaled verbatim.
-                    assert_eq!(r.headers[0].value, "{{secret:tok}}");
+                    // X-Token is named in `redact`: journaled as "[redacted]" (06-06, W3);
+                    // un-redacted values (secret templates included) stay verbatim.
+                    assert_eq!(r.headers[0].value, "[redacted]");
+                    assert_eq!(r.headers[1].value, "*/*");
                 }
             }
             EventBody::OpCancelled(c) => {

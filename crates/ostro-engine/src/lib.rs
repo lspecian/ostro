@@ -6,6 +6,8 @@
 pub mod activation;
 pub mod cache;
 pub mod config;
+/// Effect I/O seam (Phase 6, plan 06-06): `EffectDriver`.
+pub mod effects_driver;
 pub mod engine;
 pub mod env;
 pub mod error;
@@ -20,6 +22,10 @@ pub mod telemetry;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 pub mod validate;
+
+/// The effect I/O seam (06-06) and the live request it carries (06-02).
+pub use effects_driver::EffectDriver;
+pub use ostro_types::live::LiveEffect;
 
 /// Await-token API (05-03) for the server's token completion endpoint (05-13):
 /// `parse` (routing fields, no MAC check) and `verify` (constant-time HMAC check under

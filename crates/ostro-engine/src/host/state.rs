@@ -13,16 +13,19 @@
 //! [`build_linker`] assembles the single production linker: ostro bindings + WASI shim +
 //! the store-aware per-step fuel functions (`begin-step`, `[method]step.complete`).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ostro_types::journal::{
     CommandArgs, CommandHash, CommandKind, CommandMeta, Continuation, Event, EventBody, Failure,
-    HASH_VER, Payload, RunCompleted, RunContinuedAsNew, RunFailed, command_hash,
+    HASH_VER, OpId, Payload, RunCompleted, RunContinuedAsNew, RunFailed, command_hash,
 };
+use ostro_types::live::LiveEffect;
 use wasmtime::component::{HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Engine, StoreContextMut};
 
+use crate::effects_driver::EffectDriver;
 use crate::env::{Clock, GuestEnv, RandomStream, StdStream};
 use crate::error::{NonDeterminism, ProtocolViolation};
 use crate::host::bindings::Workflow;
@@ -201,6 +204,12 @@ pub struct HostState {
     pub(crate) retry_cancel: Option<tokio_util::sync::CancellationToken>,
     /// The open live step (timeout deadline + interrupt attribution).
     pub(crate) open_step: Option<OpenStep>,
+    /// Effect I/O driver of this activation (`sink.effect_driver()`, fetched once; 06-06).
+    pub(crate) driver: Option<Arc<dyn EffectDriver>>,
+    /// Full live requests of effects scheduled in this activation and not yet committed
+    /// (kept only when a driver is present). Started and removed by [`Self::flush`] once
+    /// the append carrying their `EffectScheduled` returns `Ok` (FX-01).
+    pub(crate) pending_effects: BTreeMap<OpId, LiveEffect>,
 }
 
 impl std::fmt::Debug for HostState {
@@ -218,6 +227,7 @@ impl HostState {
     pub fn new(init: HostInit) -> Result<Self, ReplayError> {
         let replay = ReplayState::new(init.journal, init.clock)?;
         let insecure_seed = replay.insecure_seed();
+        let driver = init.sink.as_ref().and_then(|s| s.effect_driver());
         Ok(Self {
             replay,
             table: ResourceTable::new(),
@@ -241,6 +251,8 @@ impl HostState {
             retry_cancel: None,
             open_step: None,
             hot: init.hot,
+            driver,
+            pending_effects: BTreeMap::new(),
         })
     }
 
@@ -309,6 +321,12 @@ impl HostState {
     ///
     /// On success the events stay in the replay journal as committed. Without a sink
     /// this is a no-op and the events stay pending.
+    ///
+    /// With an effect driver (06-06), only **after** the append returned `Ok` every effect
+    /// whose `EffectScheduled` is in the batch is started (FX-01: I/O only after commit),
+    /// and every effect cancelled by an `OpCancelled` in the batch is cancelled. An effect
+    /// scheduled and cancelled in the same batch is never started. A failed append starts
+    /// nothing and drops the batch's pending requests.
     pub async fn flush(&mut self) -> Result<(), AppendError> {
         let Some(sink) = self.sink.clone() else {
             return Ok(());
@@ -318,9 +336,50 @@ impl HostState {
             return Ok(());
         };
         let from_seq = first.seq;
-        sink.append(&self.run, self.attempt, from_seq, pending)
-            .await
-            .map(|_| ())
+        let (scheduled, cancelled) = self.effect_ops(&pending);
+        let r = sink
+            .append(&self.run, self.attempt, from_seq, pending)
+            .await;
+        let started: Vec<LiveEffect> = scheduled
+            .iter()
+            .filter_map(|op| self.pending_effects.remove(op))
+            .filter(|e| !cancelled.contains(&e.op))
+            .collect();
+        r?;
+        if let Some(driver) = &self.driver {
+            for effect in started {
+                driver.start(&self.run, self.attempt, effect);
+            }
+            for op in cancelled.into_iter().filter(|op| !scheduled.contains(op)) {
+                driver.cancel(&self.run, op);
+            }
+        }
+        Ok(())
+    }
+
+    /// Ops of the effects scheduled in `batch` and of the effects cancelled by an
+    /// `OpCancelled` in `batch` (empty without a driver).
+    fn effect_ops(&self, batch: &[Event]) -> (Vec<OpId>, Vec<OpId>) {
+        let mut scheduled = Vec::new();
+        let mut cancelled = Vec::new();
+        if self.driver.is_none() {
+            return (scheduled, cancelled);
+        }
+        for ev in batch {
+            match &ev.body {
+                EventBody::EffectScheduled(_) => scheduled.push(ev.seq),
+                EventBody::OpCancelled(c)
+                    if self
+                        .replay
+                        .op_kind(c.op)
+                        .is_some_and(|e| matches!(e.body, EventBody::EffectScheduled(_))) =>
+                {
+                    cancelled.push(c.op);
+                }
+                _ => {}
+            }
+        }
+        (scheduled, cancelled)
     }
 
     /// Hash a guest command with the recorded hash version (replay) or [`HASH_VER`].

@@ -27,6 +27,7 @@ use ostro_types::journal::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_util::sync::CancellationToken;
 
+use crate::effects_driver::EffectDriver;
 use crate::env::Clock;
 use crate::error::EvictReason;
 use crate::runtime::{Prepared, Runtime};
@@ -264,9 +265,22 @@ pub struct FakeState {
 }
 
 /// In-memory [`ActivationSink`]: the Phase 3 stand-in for the partition leader.
-#[derive(Debug, Default)]
+///
+/// [`FakeSink::with_effect_driver`] attaches an [`EffectDriver`] (06-06); without one
+/// `effect_driver()` is `None` and nothing is ever started (Phase 4/5 behaviour).
+#[derive(Default)]
 pub struct FakeSink {
     state: Arc<Mutex<FakeState>>,
+    driver: Option<Arc<dyn EffectDriver>>,
+}
+
+impl std::fmt::Debug for FakeSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeSink")
+            .field("state", &self.state)
+            .field("effect_driver", &self.driver.is_some())
+            .finish()
+    }
 }
 
 fn lock_state(state: &Mutex<FakeState>) -> MutexGuard<'_, FakeState> {
@@ -340,6 +354,12 @@ impl FakeSink {
             }
         }
         sink
+    }
+
+    /// Attach an effect driver: `effect_driver()` returns it (06-06).
+    pub fn with_effect_driver(mut self, driver: Arc<dyn EffectDriver>) -> Self {
+        self.driver = Some(driver);
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, FakeState> {
@@ -494,6 +514,10 @@ impl ActivationSink for FakeSink {
 
     async fn done(&self, run: &RunRef, attempt: u32, outcome: ActivationOutcome) {
         self.lock().done.push((run.clone(), attempt, outcome));
+    }
+
+    fn effect_driver(&self) -> Option<Arc<dyn EffectDriver>> {
+        self.driver.clone()
     }
 }
 

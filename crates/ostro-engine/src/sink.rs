@@ -5,6 +5,7 @@
 
 use ostro_types::journal::{Continuation, Event, Failure, Payload};
 
+use crate::effects_driver::EffectDriver;
 use crate::error::{AttemptFailure, EvictReason};
 
 /// Identifies a run on a partition.
@@ -53,7 +54,7 @@ pub enum AppendError {
     Unavailable(String),
 }
 
-/// Durable storage as seen by the engine. Secrets are Phase 6 and deliberately absent.
+/// Durable storage as seen by the engine. Secrets are resolved by the effect driver, never here.
 #[async_trait::async_trait]
 pub trait ActivationSink: Send + Sync {
     /// Append `events` starting at `from_seq` for this attempt; returns the next seq.
@@ -70,4 +71,12 @@ pub trait ActivationSink: Send + Sync {
 
     /// Report the activation outcome.
     async fn done(&self, run: &RunRef, attempt: u32, outcome: ActivationOutcome);
+
+    /// The driver that performs effect I/O for activations on this sink (Phase 6, P-1).
+    ///
+    /// Fetched once per activation. The default `None` keeps the Phase 4/5 behaviour:
+    /// effects are journaled and nothing is ever started (see [`crate::effects_driver`]).
+    fn effect_driver(&self) -> Option<std::sync::Arc<dyn EffectDriver>> {
+        None
+    }
 }

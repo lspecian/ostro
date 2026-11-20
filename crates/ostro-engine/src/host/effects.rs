@@ -35,6 +35,7 @@ use crate::host::bindings::ostro::runtime::types::{Datetime, Payload};
 use crate::host::state::{HostState, HotWait, trap, violation};
 use crate::replay::{CommandResult, WaitOutcome, token};
 use crate::sink::AppendError;
+use ostro_types::live::{EffectRetry, LiveEffect};
 
 fn evict<T>(reason: EvictReason) -> wasmtime::Result<T> {
     Err(wasmtime::Error::new(Evict { reason }))
@@ -79,21 +80,72 @@ impl HostState {
         }
     }
 
-    fn schedule_effect(&mut self, req: EffectRequest) -> wasmtime::Result<OpId> {
-        let args = command_args(&req);
+    /// Schedule an effect (06-06).
+    ///
+    /// `live` is the guest's full request (real header values); `journaled` is the copy
+    /// written to the journal (values of `redact` headers replaced, see
+    /// [`convert::redact_http_request`]). Header values are not hashed, so both hash the
+    /// same; the hash is computed over `live`.
+    ///
+    /// With an effect driver: a live command keeps a [`LiveEffect`] in
+    /// `pending_effects` for `flush` to start after commit (FX-01). A replayed command
+    /// whose op has no completion in the loaded journal is re-driven at once
+    /// (`redrive = true`, F1): its `EffectScheduled` is already durable.
+    fn schedule_effect(
+        &mut self,
+        live: EffectRequest,
+        journaled: EffectRequest,
+        http_retry: Option<EffectRetry>,
+    ) -> wasmtime::Result<OpId> {
+        let args = command_args(&live);
         let kind = args.kind();
         let hash = self.hash(&args)?;
-        let actual = match &req {
+        let actual = match &live {
             EffectRequest::Http(r) => format!("http {} {}", r.method, r.url),
             EffectRequest::Sql(r) => format!("sql {:?}", r.connection),
             EffectRequest::Object(r) => format!("object {} {:?}", r.op, r.key),
         };
-        self.issue(kind, hash, &|| actual.clone(), |_| {
-            EventBody::EffectScheduled(EffectScheduled {
-                meta: meta(hash),
-                request: req,
+        let res = self
+            .replay
+            .command(kind, hash, &|| actual.clone(), |_| {
+                EventBody::EffectScheduled(EffectScheduled {
+                    meta: meta(hash),
+                    request: journaled,
+                })
             })
-        })
+            .map_err(trap)?;
+        let (op, ts, redrive) = match res {
+            CommandResult::Replayed(ev) => (ev.seq, ev.ts_nanos, true),
+            CommandResult::Live { seq, ts_nanos } => (seq, ts_nanos, false),
+        };
+        let Some(driver) = self.driver.clone() else {
+            return Ok(op);
+        };
+        let effect = LiveEffect {
+            op,
+            request: live,
+            http_retry,
+            scheduled_ts_nanos: ts,
+            redrive,
+        };
+        if !redrive {
+            self.pending_effects.insert(op, effect);
+        } else if self.replay.completion_for(op).is_none() {
+            driver.start(&self.run, self.attempt, effect);
+        }
+        Ok(op)
+    }
+
+    /// Schedule an HTTP effect: journal the redacted copy, keep the full request.
+    fn schedule_http(&mut self, req: HttpRequest) -> wasmtime::Result<OpId> {
+        let http_retry = req.retry.clone().map(convert::effect_retry_from_wit);
+        let live = convert::http_request_from_wit(req);
+        let journaled = convert::redact_http_request(&live);
+        self.schedule_effect(
+            EffectRequest::Http(live),
+            EffectRequest::Http(journaled),
+            http_retry,
+        )
     }
 
     fn schedule_timer(
@@ -248,15 +300,17 @@ fn nanos(at: &Datetime) -> u64 {
 
 impl Host for HostState {
     async fn http_fetch(&mut self, req: HttpRequest) -> wasmtime::Result<OpId> {
-        self.schedule_effect(EffectRequest::Http(convert::http_request_from_wit(req)))
+        self.schedule_http(req)
     }
 
     async fn sql_query(&mut self, req: SqlRequest) -> wasmtime::Result<OpId> {
-        self.schedule_effect(EffectRequest::Sql(convert::sql_request_from_wit(req)))
+        let r = EffectRequest::Sql(convert::sql_request_from_wit(req));
+        self.schedule_effect(r.clone(), r, None)
     }
 
     async fn object_store(&mut self, req: ObjectRequest) -> wasmtime::Result<OpId> {
-        self.schedule_effect(EffectRequest::Object(convert::object_request_from_wit(req)))
+        let r = EffectRequest::Object(convert::object_request_from_wit(req));
+        self.schedule_effect(r.clone(), r, None)
     }
 
     async fn sleep(&mut self, duration_ms: u64) -> wasmtime::Result<OpId> {
@@ -474,8 +528,38 @@ pub(crate) mod convert {
         }
     }
 
-    /// Header values may hold `{{secret:..}}` templates: journaled, never hashed.
-    /// The retry policy is applied by the host and not journaled.
+    /// The value journaled for a header named in `http-request.redact` (W3, F2).
+    pub(crate) const REDACTED: &str = "[redacted]";
+
+    /// The journaled copy of a live HTTP request: the value of every header whose name
+    /// is in `redact` (ASCII case-insensitive) becomes [`REDACTED`]. Other values,
+    /// `{{secret:..}}` templates included (they hold no secret), are kept verbatim.
+    /// Header values are not hashed, so the command hash is unchanged.
+    pub(crate) fn redact_http_request(r: &j::HttpRequest) -> j::HttpRequest {
+        let mut out = r.clone();
+        for h in &mut out.headers {
+            if r.redact.iter().any(|n| n.eq_ignore_ascii_case(&h.name)) {
+                h.value = REDACTED.to_owned();
+            }
+        }
+        out
+    }
+
+    /// The guest's `retry-policy` for an HTTP effect (applied by the bridge, never
+    /// journaled).
+    pub(crate) fn effect_retry_from_wit(p: t::RetryPolicy) -> ostro_types::live::EffectRetry {
+        ostro_types::live::EffectRetry {
+            max_attempts: p.max_attempts,
+            initial_interval_ms: p.initial_interval_ms,
+            max_interval_ms: p.max_interval_ms,
+            backoff_coefficient: p.backoff_coefficient,
+            non_retryable_kinds: p.non_retryable_kinds,
+        }
+    }
+
+    /// The full (live) request: real header values. The journaled copy is
+    /// [`redact_http_request`] of this. The retry policy is mapped separately
+    /// ([`effect_retry_from_wit`]); the journal mirror has no field for it (F1).
     pub(crate) fn http_request_from_wit(r: wit::HttpRequest) -> j::HttpRequest {
         j::HttpRequest {
             method: r.method,
