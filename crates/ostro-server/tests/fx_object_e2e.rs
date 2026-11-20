@@ -73,8 +73,10 @@ fn tamper(url: &str) -> String {
     let at = url.find("sig=").expect("sig param") + 4;
     let end = url[at..].find('&').map_or(url.len(), |e| at + e);
     let mut s = url.to_owned();
+    // Change the digit's value, not just its case: the verifier decodes hex
+    // case-insensitively, so `a` -> `A` would still be a valid signature.
     let last = &url[end - 1..end];
-    let repl = if last == "A" { "B" } else { "A" };
+    let repl = if last == "0" { "1" } else { "0" };
     s.replace_range(end - 1..end, repl);
     s
 }
