@@ -822,13 +822,18 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
     let completed: Arc<Mutex<BTreeMap<RunId, usize>>> = Arc::default();
     let live: Arc<Mutex<BTreeMap<(RunId, AttemptToken), usize>>> = Arc::default();
     let overlaps = Arc::new(AtomicUsize::new(0));
-    let (c2, l2, o2) = (
+    // Executor jobs between `execute` and their return (after recording a completion).
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let (c2, l2, o2, i2) = (
         Arc::clone(&completed),
         Arc::clone(&live),
         Arc::clone(&overlaps),
+        Arc::clone(&inflight),
     );
     let fake = Fake::new(move |job, _| {
         let (completed, live, overlaps) = (Arc::clone(&c2), Arc::clone(&l2), Arc::clone(&o2));
+        let inflight = Arc::clone(&i2);
+        inflight.fetch_add(1, Ordering::SeqCst);
         boxed(async move {
             let key = (job.run, job.token);
             {
@@ -843,7 +848,7 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
             sleep(Duration::from_millis(u64::from(job.run.as_bytes()[17] % 3))).await;
             let out = job.handle.submit_one(complete_cmd(&job)).await;
             *live.lock().expect("lock").get_mut(&key).expect("live") -= 1;
-            match out {
+            let outcome = match out {
                 Ok(ApplyOutcome::Accepted) => {
                     *completed.lock().expect("lock").entry(job.run).or_default() += 1;
                     ExecOutcome::Released
@@ -859,7 +864,10 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
                     ..
                 })) => ExecOutcome::Reactivate,
                 other => panic!("unexpected append outcome {other:?}"),
-            }
+            };
+            // Not reached on a panic: the wait below then times out instead of hiding it.
+            inflight.fetch_sub(1, Ordering::SeqCst);
+            outcome
         })
     });
     let o = Opts::new(&fake);
@@ -900,8 +908,31 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
         o.stats.grants_rejected.load(Ordering::Relaxed) >= n_faulted as u64,
         "every injected rejection is seen by the ack check"
     );
+    // Apply makes `Completed` readable before the accepting job's `submit_one` returns and
+    // records it (ack resolve + task wake-up, milliseconds under load), so wait for the
+    // executor's side too: every run recorded and no job still in flight (a duplicate
+    // completion would be recorded by then). A completion without an executor recording,
+    // or a job that panicked, never satisfies this and fails below.
+    let deadline = Instant::now() + T;
+    loop {
+        let recorded = completed.lock().expect("lock").len();
+        let jobs = inflight.load(Ordering::SeqCst);
+        if (recorded == RUNS && jobs == 0) || Instant::now() >= deadline {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        inflight.load(Ordering::SeqCst),
+        0,
+        "executor jobs still in flight"
+    );
     let completed = completed.lock().expect("lock").clone();
-    assert_eq!(completed.len(), RUNS);
+    assert_eq!(
+        completed.len(),
+        RUNS,
+        "every completed run is recorded by its executor job"
+    );
     assert!(
         completed.values().all(|n| *n == 1),
         "every run completes exactly once"
