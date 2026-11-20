@@ -13,11 +13,11 @@
 //! this file; none needed correcting.
 
 use ostro_triggers::extract::{
-    default_for, ExtractError, IdempotencyExtractor, InputSelector, MAX_KEY_LEN,
+    ExtractError, IdempotencyExtractor, InputSelector, MAX_KEY_LEN, default_for,
 };
 use ostro_triggers::webhook::{
-    slack_challenge, verify, GenericHmacSpec, HmacAlgorithm, HookError, SigEncoding,
-    SignedTemplate, VerifiedDelivery, VerifierKind, VerifierSpec, DEFAULT_TOLERANCE_S,
+    DEFAULT_TOLERANCE_S, GenericHmacSpec, HmacAlgorithm, HookError, SigEncoding, SignedTemplate,
+    VerifiedDelivery, VerifierKind, VerifierSpec, slack_challenge, verify,
 };
 use sha2::{Digest, Sha256};
 
@@ -102,7 +102,10 @@ fn github_vendor_vector_accepted() {
     let hs = h(&[("X-Hub-Signature-256", GH_SIG)]);
     verify(&VerifierSpec::GitHub, GH_SECRET, &hs, GH_BODY, 0).unwrap();
     // Uppercase hex is accepted too.
-    let hs = h(&[("x-hub-signature-256", &GH_SIG.to_ascii_uppercase().replace("SHA256=", "sha256="))]);
+    let hs = h(&[(
+        "x-hub-signature-256",
+        &GH_SIG.to_ascii_uppercase().replace("SHA256=", "sha256="),
+    )]);
     verify(&VerifierSpec::GitHub, GH_SECRET, &hs, GH_BODY, 0).unwrap();
 }
 
@@ -170,17 +173,41 @@ fn slack() -> VerifierSpec {
 
 #[test]
 fn slack_vendor_vector_accepted() {
-    verify(&slack(), SLACK_SECRET, &slack_headers(SLACK_SIG), SLACK_BODY, SLACK_TS).unwrap();
+    verify(
+        &slack(),
+        SLACK_SECRET,
+        &slack_headers(SLACK_SIG),
+        SLACK_BODY,
+        SLACK_TS,
+    )
+    .unwrap();
     // Within tolerance on both sides.
-    verify(&slack(), SLACK_SECRET, &slack_headers(SLACK_SIG), SLACK_BODY, SLACK_TS + 300).unwrap();
-    verify(&slack(), SLACK_SECRET, &slack_headers(SLACK_SIG), SLACK_BODY, SLACK_TS - 300).unwrap();
+    verify(
+        &slack(),
+        SLACK_SECRET,
+        &slack_headers(SLACK_SIG),
+        SLACK_BODY,
+        SLACK_TS + 300,
+    )
+    .unwrap();
+    verify(
+        &slack(),
+        SLACK_SECRET,
+        &slack_headers(SLACK_SIG),
+        SLACK_BODY,
+        SLACK_TS - 300,
+    )
+    .unwrap();
 }
 
 #[test]
 fn slack_independent_hmac_matches_vendor_vector() {
     let mut msg = b"v0:1531420618:".to_vec();
     msg.extend_from_slice(SLACK_BODY);
-    assert_eq!(format!("v0={}", hex(&hmac_sha256_by_hand(SLACK_SECRET, &msg))), SLACK_SIG);
+    assert_eq!(
+        format!("v0={}", hex(&hmac_sha256_by_hand(SLACK_SECRET, &msg))),
+        SLACK_SIG
+    );
 }
 
 #[test]
@@ -203,10 +230,19 @@ fn slack_rejections() {
         Err(HookError::BadSignature)
     );
     assert_eq!(
-        verify(&slack(), SLACK_SECRET, &slack_headers(&SLACK_SIG[3..]), SLACK_BODY, SLACK_TS),
+        verify(
+            &slack(),
+            SLACK_SECRET,
+            &slack_headers(&SLACK_SIG[3..]),
+            SLACK_BODY,
+            SLACK_TS
+        ),
         Err(HookError::Malformed)
     );
-    let bad_ts = h(&[("x-slack-request-timestamp", "soon"), ("x-slack-signature", SLACK_SIG)]);
+    let bad_ts = h(&[
+        ("x-slack-request-timestamp", "soon"),
+        ("x-slack-signature", SLACK_SIG),
+    ]);
     assert_eq!(
         verify(&slack(), SLACK_SECRET, &bad_ts, SLACK_BODY, SLACK_TS),
         Err(HookError::Malformed)
@@ -234,9 +270,15 @@ fn slack_url_verification_challenge() {
         slack_challenge(&p, br#"{"token":"t","challenge":"3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P","type":"url_verification"}"#),
         Some("3eZbrw1aBm2rZgRNFdxV2595E9CY3gmdALWMmHkvFXO7tYXAYM8P".to_string())
     );
-    assert_eq!(slack_challenge(&p, br#"{"type":"event_callback","challenge":"x"}"#), None);
+    assert_eq!(
+        slack_challenge(&p, br#"{"type":"event_callback","challenge":"x"}"#),
+        None
+    );
     assert_eq!(slack_challenge(&p, br#"{"type":"url_verification"}"#), None);
-    assert_eq!(slack_challenge(&p, br#"{"type":"url_verification","challenge":7}"#), None);
+    assert_eq!(
+        slack_challenge(&p, br#"{"type":"url_verification","challenge":7}"#),
+        None
+    );
     assert_eq!(slack_challenge(&p, b"token=a&b=c"), None);
     assert_eq!(slack_challenge(&p, b""), None);
 }
@@ -296,7 +338,13 @@ fn stripe_unknown_entries_ignored_and_never_used() {
     );
     verify(&stripe(), STRIPE_SECRET, &stripe_hdr(&v), STRIPE_BODY, NOW).unwrap();
     assert_eq!(
-        verify(&stripe(), STRIPE_SECRET, &stripe_hdr(&v), &flip(STRIPE_BODY), NOW),
+        verify(
+            &stripe(),
+            STRIPE_SECRET,
+            &stripe_hdr(&v),
+            &flip(STRIPE_BODY),
+            NOW
+        ),
         Err(HookError::BadSignature)
     );
 }
@@ -316,17 +364,38 @@ fn stripe_rejections() {
     verify(&stripe(), STRIPE_SECRET, &hs, STRIPE_BODY, NOW + 300).unwrap();
     // A custom tolerance is honoured.
     let tight = VerifierSpec::Stripe { tolerance_s: 10 };
-    assert_eq!(verify(&tight, STRIPE_SECRET, &hs, STRIPE_BODY, NOW + 11), Err(HookError::Stale));
     assert_eq!(
-        verify(&stripe(), STRIPE_SECRET, &stripe_hdr(&format!("v1={good}")), STRIPE_BODY, NOW),
+        verify(&tight, STRIPE_SECRET, &hs, STRIPE_BODY, NOW + 11),
+        Err(HookError::Stale)
+    );
+    assert_eq!(
+        verify(
+            &stripe(),
+            STRIPE_SECRET,
+            &stripe_hdr(&format!("v1={good}")),
+            STRIPE_BODY,
+            NOW
+        ),
         Err(HookError::Malformed)
     );
     assert_eq!(
-        verify(&stripe(), STRIPE_SECRET, &stripe_hdr(&format!("t=abc,v1={good}")), STRIPE_BODY, NOW),
+        verify(
+            &stripe(),
+            STRIPE_SECRET,
+            &stripe_hdr(&format!("t=abc,v1={good}")),
+            STRIPE_BODY,
+            NOW
+        ),
         Err(HookError::Malformed)
     );
     assert_eq!(
-        verify(&stripe(), STRIPE_SECRET, &stripe_hdr(&format!("t={NOW},v0={good}")), STRIPE_BODY, NOW),
+        verify(
+            &stripe(),
+            STRIPE_SECRET,
+            &stripe_hdr(&format!("t={NOW},v0={good}")),
+            STRIPE_BODY,
+            NOW
+        ),
         Err(HookError::BadSignature)
     );
     assert_eq!(
@@ -343,7 +412,13 @@ fn stripe_rejections() {
     );
     // Extreme timestamps do not overflow.
     assert_eq!(
-        verify(&stripe(), STRIPE_SECRET, &stripe_hdr(&format!("t={},v1={good}", i64::MIN)), STRIPE_BODY, i64::MAX),
+        verify(
+            &stripe(),
+            STRIPE_SECRET,
+            &stripe_hdr(&format!("t={},v1={good}", i64::MIN)),
+            STRIPE_BODY,
+            i64::MAX
+        ),
         Err(HookError::Stale)
     );
 }
@@ -395,7 +470,10 @@ fn standard_webhooks_signed_content_and_multiple_signatures() {
     ];
     let mut msg = format!("{SW_ID}.{SW_TS}.").into_bytes();
     msg.extend_from_slice(SW_BODY);
-    assert_eq!(format!("v1,{}", b64(&hmac_sha256_by_hand(&key, &msg))), SW_SIG);
+    assert_eq!(
+        format!("v1,{}", b64(&hmac_sha256_by_hand(&key, &msg))),
+        SW_SIG
+    );
 
     let other = b64(&hmac_sha256_by_hand(b"another key", &msg));
     for sig in [
@@ -409,7 +487,13 @@ fn standard_webhooks_signed_content_and_multiple_signatures() {
     // A v1a (asymmetric) entry carrying the right bytes is not treated as v1.
     let wrong_version = SW_SIG.replacen("v1,", "v1a,", 1);
     assert_eq!(
-        verify(&sw(), SW_SECRET, &sw_headers(&wrong_version), SW_BODY, SW_TS),
+        verify(
+            &sw(),
+            SW_SECRET,
+            &sw_headers(&wrong_version),
+            SW_BODY,
+            SW_TS
+        ),
         Err(HookError::BadSignature)
     );
 }
@@ -425,13 +509,22 @@ fn standard_webhooks_rejections() {
         Err(HookError::BadSignature)
     );
     assert_eq!(
-        verify(&sw(), b"whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", &sw_headers(SW_SIG), SW_BODY, SW_TS),
+        verify(
+            &sw(),
+            b"whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            &sw_headers(SW_SIG),
+            SW_BODY,
+            SW_TS
+        ),
         Err(HookError::BadSignature)
     );
     // A tampered id changes the signed content.
     let mut hs = sw_headers(SW_SIG);
     hs[0].1 = b"msg_other".to_vec();
-    assert_eq!(verify(&sw(), SW_SECRET, &hs, SW_BODY, SW_TS), Err(HookError::BadSignature));
+    assert_eq!(
+        verify(&sw(), SW_SECRET, &hs, SW_BODY, SW_TS),
+        Err(HookError::BadSignature)
+    );
     // The secret must be base64 after `whsec_`.
     assert_eq!(
         verify(&sw(), b"whsec_***", &sw_headers(SW_SIG), SW_BODY, SW_TS),
@@ -441,7 +534,10 @@ fn standard_webhooks_rejections() {
         verify(&sw(), SW_SECRET, &sw_headers("garbage"), SW_BODY, SW_TS),
         Err(HookError::Malformed)
     );
-    let missing_id = h(&[("webhook-timestamp", "1614265330"), ("webhook-signature", SW_SIG)]);
+    let missing_id = h(&[
+        ("webhook-timestamp", "1614265330"),
+        ("webhook-signature", SW_SIG),
+    ]);
     assert_eq!(
         verify(&sw(), SW_SECRET, &missing_id, SW_BODY, SW_TS),
         Err(HookError::MissingHeader("webhook-id"))
@@ -478,7 +574,13 @@ fn generic_sha256_hex_no_prefix_body() {
     let sig = hex(&hmac_sha256_by_hand(G_SECRET, G_BODY));
     verify(&spec, G_SECRET, &h(&[("x-signature", &sig)]), G_BODY, NOW).unwrap();
     assert_eq!(
-        verify(&spec, G_SECRET, &h(&[("x-signature", &sig)]), &flip(G_BODY), NOW),
+        verify(
+            &spec,
+            G_SECRET,
+            &h(&[("x-signature", &sig)]),
+            &flip(G_BODY),
+            NOW
+        ),
         Err(HookError::BadSignature)
     );
     assert_eq!(
@@ -497,9 +599,22 @@ fn generic_sha256_hex_no_prefix_body() {
 
 #[test]
 fn generic_sha256_hex_with_prefix() {
-    let spec = generic(Some("sha256="), HmacAlgorithm::Sha256, SigEncoding::Hex, None, None);
+    let spec = generic(
+        Some("sha256="),
+        HmacAlgorithm::Sha256,
+        SigEncoding::Hex,
+        None,
+        None,
+    );
     let sig = hex(&hmac_sha256_by_hand(G_SECRET, G_BODY));
-    verify(&spec, G_SECRET, &h(&[("x-signature", &format!("sha256={sig}"))]), G_BODY, NOW).unwrap();
+    verify(
+        &spec,
+        G_SECRET,
+        &h(&[("x-signature", &format!("sha256={sig}"))]),
+        G_BODY,
+        NOW,
+    )
+    .unwrap();
     assert_eq!(
         verify(&spec, G_SECRET, &h(&[("x-signature", &sig)]), G_BODY, NOW),
         Err(HookError::Malformed)
@@ -517,16 +632,37 @@ fn generic_sha256_base64() {
     );
     // A hex signature under a base64 spec does not verify.
     let hex_sig = hex(&hmac_sha256_by_hand(G_SECRET, G_BODY));
-    assert!(verify(&spec, G_SECRET, &h(&[("x-signature", &hex_sig)]), G_BODY, NOW).is_err());
+    assert!(
+        verify(
+            &spec,
+            G_SECRET,
+            &h(&[("x-signature", &hex_sig)]),
+            G_BODY,
+            NOW
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn generic_legacy_sha1_hex_rfc2202() {
-    let spec = generic(Some("sha1="), HmacAlgorithm::LegacySha1, SigEncoding::Hex, None, None);
+    let spec = generic(
+        Some("sha1="),
+        HmacAlgorithm::LegacySha1,
+        SigEncoding::Hex,
+        None,
+        None,
+    );
     let body = b"what do ya want for nothing?";
-    let hs = h(&[("x-signature", "sha1=effcdf6ae5eb2fa2d27416d5f184df9c259a7c79")]);
+    let hs = h(&[(
+        "x-signature",
+        "sha1=effcdf6ae5eb2fa2d27416d5f184df9c259a7c79",
+    )]);
     verify(&spec, b"Jefe", &hs, body, NOW).unwrap();
-    assert_eq!(verify(&spec, b"Jefe", &hs, &flip(body), NOW), Err(HookError::BadSignature));
+    assert_eq!(
+        verify(&spec, b"Jefe", &hs, &flip(body), NOW),
+        Err(HookError::BadSignature)
+    );
     // The SHA-256 MAC of the same input is not accepted by a SHA-1 spec.
     let s256 = format!("sha1={}", hex(&hmac_sha256_by_hand(b"Jefe", body)));
     assert_eq!(
@@ -537,7 +673,13 @@ fn generic_legacy_sha1_hex_rfc2202() {
 
 #[test]
 fn generic_legacy_sha1_base64() {
-    let spec = generic(None, HmacAlgorithm::LegacySha1, SigEncoding::Base64, None, None);
+    let spec = generic(
+        None,
+        HmacAlgorithm::LegacySha1,
+        SigEncoding::Base64,
+        None,
+        None,
+    );
     // base64 of effcdf6ae5eb2fa2d27416d5f184df9c259a7c79 (RFC 2202 case 2).
     let hs = h(&[("x-signature", "7/zfauXrL6LSdBbV8YTfnCWafHk=")]);
     verify(&spec, b"Jefe", &hs, b"what do ya want for nothing?", NOW).unwrap();
@@ -558,17 +700,29 @@ fn generic_timestamp_template_with_tolerance() {
     let ts = NOW.to_string();
     let hs = h(&[("x-signature", &sig), ("x-timestamp", &ts)]);
     verify(&spec, G_SECRET, &hs, G_BODY, NOW + 60).unwrap();
-    assert_eq!(verify(&spec, G_SECRET, &hs, G_BODY, NOW + 61), Err(HookError::Stale));
+    assert_eq!(
+        verify(&spec, G_SECRET, &hs, G_BODY, NOW + 61),
+        Err(HookError::Stale)
+    );
     // The timestamp is part of the signed content.
     let later = (NOW + 1).to_string();
     let tampered = h(&[("x-signature", &sig), ("x-timestamp", &later)]);
-    assert_eq!(verify(&spec, G_SECRET, &tampered, G_BODY, NOW), Err(HookError::BadSignature));
+    assert_eq!(
+        verify(&spec, G_SECRET, &tampered, G_BODY, NOW),
+        Err(HookError::BadSignature)
+    );
     assert_eq!(
         verify(&spec, G_SECRET, &h(&[("x-signature", &sig)]), G_BODY, NOW),
         Err(HookError::MissingHeader("timestamp"))
     );
     assert_eq!(
-        verify(&spec, G_SECRET, &h(&[("x-signature", &sig), ("x-timestamp", "x")]), G_BODY, NOW),
+        verify(
+            &spec,
+            G_SECRET,
+            &h(&[("x-signature", &sig), ("x-timestamp", "x")]),
+            G_BODY,
+            NOW
+        ),
         Err(HookError::Malformed)
     );
 }
@@ -602,7 +756,10 @@ fn generic_invalid_combinations_are_config_errors() {
         template: SignedTemplate::TsDotBody,
         tolerance_s: None,
     });
-    assert_eq!(verify(&spec, G_SECRET, &h(&[("x-signature", "00")]), G_BODY, NOW), Err(HookError::Config));
+    assert_eq!(
+        verify(&spec, G_SECRET, &h(&[("x-signature", "00")]), G_BODY, NOW),
+        Err(HookError::Config)
+    );
     // A timestamp header with the {body} template would be an unsigned timestamp.
     let spec = generic(
         None,
@@ -611,13 +768,28 @@ fn generic_invalid_combinations_are_config_errors() {
         Some(("x-timestamp", SignedTemplate::Body)),
         Some(60),
     );
-    assert_eq!(verify(&spec, G_SECRET, &h(&[("x-signature", "00")]), G_BODY, NOW), Err(HookError::Config));
+    assert_eq!(
+        verify(&spec, G_SECRET, &h(&[("x-signature", "00")]), G_BODY, NOW),
+        Err(HookError::Config)
+    );
     // A tolerance without a timestamp header.
-    let spec = generic(None, HmacAlgorithm::Sha256, SigEncoding::Hex, None, Some(60));
-    assert_eq!(verify(&spec, G_SECRET, &h(&[("x-signature", "00")]), G_BODY, NOW), Err(HookError::Config));
+    let spec = generic(
+        None,
+        HmacAlgorithm::Sha256,
+        SigEncoding::Hex,
+        None,
+        Some(60),
+    );
+    assert_eq!(
+        verify(&spec, G_SECRET, &h(&[("x-signature", "00")]), G_BODY, NOW),
+        Err(HookError::Config)
+    );
     // An empty secret.
     let spec = generic(None, HmacAlgorithm::Sha256, SigEncoding::Hex, None, None);
-    assert_eq!(verify(&spec, b"", &h(&[("x-signature", "00")]), G_BODY, NOW), Err(HookError::Config));
+    assert_eq!(
+        verify(&spec, b"", &h(&[("x-signature", "00")]), G_BODY, NOW),
+        Err(HookError::Config)
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -701,10 +873,14 @@ fn from_meta_defaults_and_round_trip() {
             tolerance_s: None,
         })
     );
-    let sha1 = VerifierSpec::from_meta(4, br#"{"header":"x-sig","algorithm":"legacy_sha1"}"#, 0).unwrap();
+    let sha1 =
+        VerifierSpec::from_meta(4, br#"{"header":"x-sig","algorithm":"legacy_sha1"}"#, 0).unwrap();
     assert!(matches!(
         sha1,
-        VerifierSpec::GenericHmac(GenericHmacSpec { algorithm: HmacAlgorithm::LegacySha1, .. })
+        VerifierSpec::GenericHmac(GenericHmacSpec {
+            algorithm: HmacAlgorithm::LegacySha1,
+            ..
+        })
     ));
     // Plain "sha1" is not accepted: the opt-in name is explicit.
     assert_eq!(
@@ -721,7 +897,10 @@ fn from_meta_defaults_and_round_trip() {
         VerifierSpec::from_meta(4, br#"{"header":"x-sig","template":"{ts}.{body}"}"#, 0),
         Err(HookError::Config)
     );
-    assert_eq!(VerifierSpec::from_meta(4, br#"{"header":"x-sig"}"#, 60), Err(HookError::Config));
+    assert_eq!(
+        VerifierSpec::from_meta(4, br#"{"header":"x-sig"}"#, 60),
+        Err(HookError::Config)
+    );
 
     for spec in [
         VerifierSpec::None,
@@ -763,7 +942,8 @@ fn errors_never_display_header_values() {
 fn webhook_rs_has_no_equality_on_signatures() {
     // Constant time: every signature comparison goes through `Mac::verify_slice`. The simplest
     // enforceable rule is that the module's code contains no `==`/`!=` at all.
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/webhook.rs")).unwrap();
+    let src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/webhook.rs")).unwrap();
     assert!(src.contains("verify_slice"));
     for (i, line) in src.lines().enumerate() {
         let code = line.split("//").next().unwrap_or("");
@@ -788,9 +968,24 @@ fn extractor_parse() {
         IdempotencyExtractor::parse("json:/data/object/id"),
         Ok(IdempotencyExtractor::JsonPointer("/data/object/id".into()))
     );
-    assert_eq!(IdempotencyExtractor::parse("none"), Ok(IdempotencyExtractor::None));
-    for bad in ["", "header:", "json:", "json:id", "header:bad header", "cookie:x", "NONE"] {
-        assert_eq!(IdempotencyExtractor::parse(bad), Err(ExtractError::Syntax), "{bad:?}");
+    assert_eq!(
+        IdempotencyExtractor::parse("none"),
+        Ok(IdempotencyExtractor::None)
+    );
+    for bad in [
+        "",
+        "header:",
+        "json:",
+        "json:id",
+        "header:bad header",
+        "cookie:x",
+        "NONE",
+    ] {
+        assert_eq!(
+            IdempotencyExtractor::parse(bad),
+            Err(ExtractError::Syntax),
+            "{bad:?}"
+        );
     }
     for s in ["header:x-github-delivery", "json:/data/object/id", "none"] {
         assert_eq!(IdempotencyExtractor::parse(s).unwrap().to_string(), s);
@@ -815,7 +1010,11 @@ fn extractor_header_and_json() {
     );
     assert_eq!(ex.extract(&p, &[], br#"{"data":{}}"#).unwrap(), None);
     assert_eq!(
-        IdempotencyExtractor::parse("json:/n").unwrap().extract(&p, &[], br#"{"n":42}"#).unwrap().as_deref(),
+        IdempotencyExtractor::parse("json:/n")
+            .unwrap()
+            .extract(&p, &[], br#"{"n":42}"#)
+            .unwrap()
+            .as_deref(),
         Some("42")
     );
     assert_eq!(ex.extract(&p, &[], b"{oops"), Err(ExtractError::BadJson));
@@ -823,7 +1022,12 @@ fn extractor_header_and_json() {
         ex.extract(&p, &[], br#"{"data":{"object":{"id":{"x":1}}}}"#),
         Err(ExtractError::NotScalar)
     );
-    assert_eq!(IdempotencyExtractor::None.extract(&p, &hs, STRIPE_BODY).unwrap(), None);
+    assert_eq!(
+        IdempotencyExtractor::None
+            .extract(&p, &hs, STRIPE_BODY)
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -832,31 +1036,53 @@ fn extractor_rejects_long_keys() {
     let ok = "k".repeat(MAX_KEY_LEN);
     let long = "k".repeat(MAX_KEY_LEN + 1);
     let ex = IdempotencyExtractor::parse("header:x-key").unwrap();
-    assert_eq!(ex.extract(&p, &h(&[("x-key", &ok)]), b"").unwrap().as_deref(), Some(ok.as_str()));
-    assert_eq!(ex.extract(&p, &h(&[("x-key", &long)]), b""), Err(ExtractError::TooLong));
+    assert_eq!(
+        ex.extract(&p, &h(&[("x-key", &ok)]), b"")
+            .unwrap()
+            .as_deref(),
+        Some(ok.as_str())
+    );
+    assert_eq!(
+        ex.extract(&p, &h(&[("x-key", &long)]), b""),
+        Err(ExtractError::TooLong)
+    );
     let body = format!(r#"{{"id":"{long}"}}"#);
     let ex = IdempotencyExtractor::parse("json:/id").unwrap();
-    assert_eq!(ex.extract(&p, &[], body.as_bytes()), Err(ExtractError::TooLong));
+    assert_eq!(
+        ex.extract(&p, &[], body.as_bytes()),
+        Err(ExtractError::TooLong)
+    );
     let bin = vec![("x-key".to_string(), vec![0xff, 0xfe])];
     assert_eq!(
-        IdempotencyExtractor::parse("header:x-key").unwrap().extract(&p, &bin, b""),
+        IdempotencyExtractor::parse("header:x-key")
+            .unwrap()
+            .extract(&p, &bin, b""),
         Err(ExtractError::NotUtf8)
     );
 }
 
 #[test]
 fn vendor_default_extractors() {
-    assert_eq!(default_for(VerifierKind::Stripe), IdempotencyExtractor::JsonPointer("/id".into()));
+    assert_eq!(
+        default_for(VerifierKind::Stripe),
+        IdempotencyExtractor::JsonPointer("/id".into())
+    );
     assert_eq!(
         default_for(VerifierKind::GitHub),
         IdempotencyExtractor::Header("x-github-delivery".into())
     );
-    assert_eq!(default_for(VerifierKind::Slack), IdempotencyExtractor::JsonPointer("/event_id".into()));
+    assert_eq!(
+        default_for(VerifierKind::Slack),
+        IdempotencyExtractor::JsonPointer("/event_id".into())
+    );
     assert_eq!(
         default_for(VerifierKind::StandardWebhooks),
         IdempotencyExtractor::Header("webhook-id".into())
     );
-    assert_eq!(default_for(VerifierKind::GenericHmac), IdempotencyExtractor::None);
+    assert_eq!(
+        default_for(VerifierKind::GenericHmac),
+        IdempotencyExtractor::None
+    );
     assert_eq!(default_for(VerifierKind::None), IdempotencyExtractor::None);
 }
 
@@ -870,9 +1096,18 @@ fn input_selector() {
     );
     assert_eq!(InputSelector::from_meta("data"), Err(ExtractError::Syntax));
     // Body: the raw bytes, untouched (not even required to be JSON).
-    assert_eq!(InputSelector::Body.select(&p, b"a=b&c").unwrap(), b"a=b&c".to_vec());
+    assert_eq!(
+        InputSelector::Body.select(&p, b"a=b&c").unwrap(),
+        b"a=b&c".to_vec()
+    );
     let sel = InputSelector::from_meta("/data/object").unwrap();
-    assert_eq!(sel.select(&p, STRIPE_BODY).unwrap(), br#"{"id":"cs_9"}"#.to_vec());
-    assert_eq!(sel.select(&p, br#"{"data":1}"#), Err(ExtractError::PointerNotFound));
+    assert_eq!(
+        sel.select(&p, STRIPE_BODY).unwrap(),
+        br#"{"id":"cs_9"}"#.to_vec()
+    );
+    assert_eq!(
+        sel.select(&p, br#"{"data":1}"#),
+        Err(ExtractError::PointerNotFound)
+    );
     assert_eq!(sel.select(&p, b"nope"), Err(ExtractError::BadJson));
 }
