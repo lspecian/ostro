@@ -288,7 +288,7 @@ Plans:
 **Plans**: 22 plans (7 waves; 08-01 is the PHASE-8 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only; freeze + 05-07 Schedule fields/Webhook landed), checks code vs .planning/RESERVATIONS.md and allocates only from the Phase 8 block (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23); decisions P8-D1–D24 adopted in 08-DECISIONS.md, user may override; runs in parallel with Phases 6–7, shared files coordinated in 08-01; revised after plan check)
 
 Plans:
-- [ ] 08-01-PLAN.md — PHASE-8 GATE (Phase 5 complete, code vs RESERVATIONS.md) + decisions to STATE + contract (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23, config/trait stubs) + every Phase 8 dependency + crate skeletons (ostro-objstore only if absent) + anchored forbidden-crate check (all)
+- [x] 08-01-PLAN.md — PHASE-8 GATE (Phase 5 complete, code vs RESERVATIONS.md) + decisions to STATE + contract (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23, config/trait stubs) + every Phase 8 dependency + crate skeletons (ostro-objstore only if absent) + anchored forbidden-crate check (all)
 - [ ] 08-02-PLAN.md — OSNP v1 snapshot format: batch-consistent export, staged verified install (ingestion spike), blob-ref visitor, docs/snapshot-format.md (BACK-04)
 - [ ] 08-03-PLAN.md — ostro-objstore frozen object-safe trait + LocalFs + S3 (rusty-s3) + conformance; s3s-fs/deny spike; MinIO CI leg (BACK-01)
 - [ ] 08-04-PLAN.md — Telemetry foundation: Phase 8 config contract, OTLP traces/logs, Prometheus /metrics, JSON logs, OstroIdGenerator, services seam, testkit OTLP collector (OBS-01/02/03)
