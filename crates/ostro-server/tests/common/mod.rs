@@ -32,6 +32,10 @@ use tokio::time::{Instant, sleep, timeout};
 /// Phase 8 helpers (08-10): `Phase8Server` builder, webhook signers, REST helpers.
 pub mod phase8;
 
+/// Phase 6 API-based helpers (06-16): `configure(..).apply()`, `start_fx_run`,
+/// `wait_terminal`, `history` over REST, for the effects e2e plans (06-17..06-19).
+pub mod fx;
+
 /// Generous default timeout for harness operations.
 pub const T: Duration = Duration::from_secs(20);
 

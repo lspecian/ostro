@@ -5,6 +5,7 @@
 //! ([`Conn`]: `--server`, `--json`, `--timeout`) itself, so they are accepted after the
 //! verb and do not leak into `ostro dev`.
 
+pub mod bridge;
 pub mod deploy;
 pub mod lifecycle;
 pub mod runs;
@@ -82,6 +83,27 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: webhooks::WebhooksCommand,
     },
+    /// Manage sealed secrets (set, ls, rm); values are write-only and read from stdin,
+    /// a file or an env var, never from the command line.
+    Secret {
+        #[command(subcommand)]
+        command: bridge::SecretCommand,
+    },
+    /// Manage secret grants (add, ls, rm): which module may send which secret where.
+    Grant {
+        #[command(subcommand)]
+        command: bridge::GrantCommand,
+    },
+    /// Manage connections (set, ls, get, rm): SQL databases, object stores, HTTP targets.
+    Connection {
+        #[command(subcommand)]
+        command: bridge::ConnectionCommand,
+    },
+    /// Manage module egress policies (set, ls, get, rm).
+    Egress {
+        #[command(subcommand)]
+        command: bridge::EgressCommand,
+    },
 }
 
 /// Run a verb to completion on a current-thread runtime.
@@ -116,6 +138,10 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Deploy(a) => &a.conn,
         ClientCommand::Schedules { command } => command.conn(),
         ClientCommand::Webhooks { command } => command.conn(),
+        ClientCommand::Secret { command } => command.conn(),
+        ClientCommand::Grant { command } => command.conn(),
+        ClientCommand::Connection { command } => command.conn(),
+        ClientCommand::Egress { command } => command.conn(),
     };
     let out = conn.out();
     let client = match conn.client() {
@@ -138,6 +164,12 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Deploy(a) => deploy::deploy(&client, out, a).await,
         ClientCommand::Schedules { command } => schedules::run(&client, out, command).await,
         ClientCommand::Webhooks { command } => webhooks::run(&client, out, command).await,
+        ClientCommand::Secret { command } => bridge::run_secret(&client, out, command).await,
+        ClientCommand::Grant { command } => bridge::run_grant(&client, out, command).await,
+        ClientCommand::Connection { command } => {
+            bridge::run_connection(&client, out, command).await
+        }
+        ClientCommand::Egress { command } => bridge::run_egress(&client, out, command).await,
     };
     match res {
         Ok(o) => o,

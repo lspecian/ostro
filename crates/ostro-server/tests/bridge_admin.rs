@@ -631,3 +631,48 @@ async fn local_presign_route_serves_signed_urls_without_auth() {
     );
     s.shutdown().await;
 }
+
+/// The API-based e2e helpers (`common::fx`) used by 06-17..06-19.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fx_helpers_configure_and_run_over_rest() {
+    use common::fx::{configure, history, start_fx_run, wait_terminal};
+    let mut s = server().await;
+    let roots = tempfile::tempdir().expect("tempdir");
+    configure(&s)
+        .secret("api/token", "fx-helper-value-1")
+        .tenant_secret("acme", "api/token", [0xffu8, 0, 1, 2, 3, 4, 5, 6, 7])
+        .grant("timeouts", "api/token", &["http://127.0.0.1:9"], false)
+        .connection(
+            "files",
+            "object",
+            json!({ "v": 1, "backend": "local", "root": roots.path() }),
+        )
+        .connection("http://127.0.0.1:9", "http-target", json!({ "v": 1 }))
+        .egress("timeouts", &["http://127.0.0.1:9", "connection:files"])
+        .apply()
+        .await;
+    let (_, v) = get(&s, "/v1/secrets?tenant=acme").await;
+    assert_eq!(v["secrets"][0]["name"], "api/token", "{v}");
+    let (_, v) = get(&s, "/v1/connections").await;
+    assert_eq!(v["connections"].as_array().unwrap().len(), 2, "{v}");
+    let (_, v) = get(&s, "/v1/egress/timeouts").await;
+    assert_eq!(v["allow"][1], "connection:files", "{v}");
+
+    let run = start_fx_run(
+        &s,
+        "timeouts",
+        "timeouts",
+        json!({ "mode": "sleep_ms", "n": 10 }),
+    )
+    .await;
+    let info = wait_terminal(&s, &run, common::T).await;
+    assert_eq!(
+        serde_json::to_value(info.status).unwrap(),
+        "completed",
+        "{info:?}"
+    );
+    let events = history(&s, &run).await;
+    assert!(events.len() >= 2, "{events:?}");
+    assert_eq!(events[0].seq, 0);
+    s.shutdown().await;
+}

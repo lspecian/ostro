@@ -4,7 +4,8 @@
 //! - [`output`]: `--json` / human output and the exit-code mapping
 //!   (0 ok, 1 API/server error, 2 usage, 3 `--wait` ended not completed).
 //! - [`commands`]: clap verbs, embedded in the `ostro` clap tree with
-//!   `#[command(flatten)]`, and their dispatch.
+//!   `#[command(flatten)]`, and their dispatch. Phase 6 (06-16) adds the bridge admin
+//!   verbs `secret`, `grant`, `connection` and `egress` ([`commands::bridge`]).
 
 pub mod client;
 pub mod commands;
