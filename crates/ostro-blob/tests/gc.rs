@@ -152,15 +152,25 @@ fn concurrent_put_never_loses_a_blob() {
                     std::thread::yield_now();
                 }
                 let got = store.put(&bytes).unwrap();
-                assert!(store.contains(&got), "iteration {i}: blob missing right after put");
+                assert!(
+                    store.contains(&got),
+                    "iteration {i}: blob missing right after put"
+                );
                 got
             })
         };
         let rep = sweeper.join().unwrap();
         let got = putter.join().unwrap();
         assert_eq!(got, r);
-        assert!(store.contains(&r), "iteration {i}: put returned Ok but the blob is gone");
-        assert_eq!(store.get(&r).unwrap(), *bytes, "iteration {i}: content intact");
+        assert!(
+            store.contains(&r),
+            "iteration {i}: put returned Ok but the blob is gone"
+        );
+        assert_eq!(
+            store.get(&r).unwrap(),
+            *bytes,
+            "iteration {i}: content intact"
+        );
         if rep.deleted == 1 {
             deleted_runs += 1;
         } else {
@@ -189,4 +199,50 @@ fn put_between_mark_and_sweep_survives() {
     let rep = store.sweep(&mark, gc_start - HOUR).unwrap();
     assert_eq!(rep.deleted, 0);
     assert!(store.contains(&r));
+}
+
+/// Timing of one sweep over 100k blobs (reported in 08-19-SUMMARY; run explicitly with
+/// `--ignored --nocapture`). Files are written straight into the layout (no fsync) to keep
+/// setup fast; half are referenced, a quarter are young, a quarter are deleted.
+#[test]
+#[ignore = "timing report, not a correctness check"]
+fn sweep_100k_timing() {
+    use sha2::{Digest as _, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let store = BlobStore::open(dir.path()).unwrap();
+    let old = SystemTime::now() - 2 * HOUR;
+    let mut mark = HashSet::new();
+    let t0 = std::time::Instant::now();
+    for i in 0..100_000u32 {
+        let bytes = i.to_le_bytes();
+        let sha: [u8; 32] = Sha256::digest(bytes).into();
+        let r = BlobRef {
+            sha256: sha,
+            len: 4,
+        };
+        let path = store.path_of(&r);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        if i % 4 != 0 {
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        if i % 2 == 1 {
+            mark.insert(sha);
+        }
+    }
+    let setup = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let rep = store.sweep(&mark, cutoff()).unwrap();
+    let sweep = t1.elapsed();
+    eprintln!(
+        "100k blobs: setup {setup:?}, sweep {sweep:?}: scanned {}, deleted {}, kept_marked {}, kept_young {}",
+        rep.scanned, rep.deleted, rep.kept_marked, rep.kept_young
+    );
+    assert_eq!(rep.scanned, 100_000);
+    assert_eq!(rep.deleted, 25_000);
 }

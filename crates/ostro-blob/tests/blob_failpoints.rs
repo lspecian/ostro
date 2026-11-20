@@ -106,7 +106,10 @@ fn gc_panic_before_unlink_is_safe_and_rerun_completes() {
         let keep = store.put(&keep_bytes).unwrap();
         let drops: Vec<BlobRef> = drop_bytes.iter().map(|b| store.put(b).unwrap()).collect();
         for r in drops.iter().chain([&keep]) {
-            let f = OpenOptions::new().write(true).open(store.path_of(r)).unwrap();
+            let f = OpenOptions::new()
+                .write(true)
+                .open(store.path_of(r))
+                .unwrap();
             f.set_modified(SystemTime::now() - 2 * hour).unwrap();
         }
         (keep, drops)
@@ -117,9 +120,8 @@ fn gc_panic_before_unlink_is_safe_and_rerun_completes() {
     {
         let store = BlobStore::open(dir.path()).unwrap();
         fail::cfg("blobgc::before_unlink", "1*off->panic").unwrap();
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            store.sweep(&mark, cutoff)
-        }));
+        let res =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.sweep(&mark, cutoff)));
         fail::remove("blobgc::before_unlink");
         assert!(res.is_err(), "sweep must have panicked at the failpoint");
         assert!(store.contains(&keep), "referenced blob kept");
@@ -131,7 +133,10 @@ fn gc_panic_before_unlink_is_safe_and_rerun_completes() {
     assert!(store.contains(&keep));
     assert_eq!(store.get(&keep).unwrap(), keep_bytes);
     let gone_after_crash = drops.iter().filter(|r| !store.contains(r)).count();
-    assert_eq!(gone_after_crash, 1, "exactly the unlink before the panic happened");
+    assert_eq!(
+        gone_after_crash, 1,
+        "exactly the unlink before the panic happened"
+    );
     let rep = store.sweep(&mark, cutoff).unwrap();
     assert_eq!(rep.deleted, 3, "the rerun completes the sweep");
     assert!(drops.iter().all(|r| !store.contains(r)));
