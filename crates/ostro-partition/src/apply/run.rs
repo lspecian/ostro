@@ -476,6 +476,10 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
             // Phase 5 seams: validated by `waits.rs` (05-08; stubs reject until then).
             Intent::RegisterWait(w) => waits::check_register_wait(cur, w)?,
             Intent::CancelWait(w) => waits::check_cancel_wait(cur, w)?,
+            // Phase 6: implemented in 06-03 (temporary reject arm).
+            Intent::RegisterEffect(_) | Intent::CancelEffect(_) => {
+                return Err(invalid(InvalidCode::BadIntent));
+            }
             Intent::ScheduleTimer(_) | Intent::CancelTimer(_) => {}
             Intent::EnqueueReady(_) => enqueued = true,
             Intent::SendMessage(m) => {
@@ -644,6 +648,8 @@ pub(crate) fn apply_events_appended(
             }
             Intent::RegisterWait(w) => waits::register_wait(b, &run, &mut rec, w, actions)?,
             Intent::CancelWait(w) => waits::cancel_wait(b, &run, &mut rec, w, actions)?,
+            // Phase 6: rejected by `check_intents` until 06-03.
+            Intent::RegisterEffect(_) | Intent::CancelEffect(_) => {}
             Intent::CompleteRun(c) => {
                 let status = terminal_status(c.status)
                     .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;

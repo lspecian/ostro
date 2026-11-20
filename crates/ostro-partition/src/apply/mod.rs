@@ -140,6 +140,10 @@ fn dispatch(
         Cmd::RetryRun(r) => lifecycle::retry_run(b, cur, r, actions),
         // Phase 8: implemented in 08-07 (rejects with Invalid(NotImplemented) until then).
         Cmd::ScheduleFire(s) => schedule::apply_schedule_fire(b, cur, s, actions),
+        // Phase 6: implemented in 06-03 (temporary reject arm).
+        Cmd::CompleteEffect(_) => Ok(ApplyOutcome::Rejected(RejectReason::Invalid(
+            InvalidCode::NotImplemented,
+        ))),
     }
 }
 

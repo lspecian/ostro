@@ -7,8 +7,9 @@
 //!   fields, new oneof variants, new enum values.
 //! - Field numbers and oneof tags are never reused or renumbered. A removed field's number is
 //!   retired forever.
-//! - Reserved for future use: `Cmd` tags `13..=26` and `28..=63` (blocks per phase in
-//!   `.planning/RESERVATIONS.md`; 27 is Phase 8's `ScheduleFire`).
+//! - Reserved for future use: `Cmd` tags `14..=26` and `28..=63` (blocks per phase in
+//!   `.planning/RESERVATIONS.md`; 13 is Phase 6's `CompleteEffect`, 27 is Phase 8's
+//!   `ScheduleFire`).
 //!   Unknown fields are skipped on decode, so an
 //!   older binary can read a log that carries newer optional fields.
 //! - The bytes are pinned by `tests/golden/commands.txt`.
@@ -60,6 +61,21 @@
 //! `[EVENT_CODEC_VER] ‖ postcard((ts_nanos, body))`, ts included, no seq (see
 //! `crate::journal`). The submitter builds them; apply stores or forwards them verbatim and never
 //! decodes them.
+//!
+//! # Phase 6 additions (plan 06-02, post-freeze, additive)
+//!
+//! Every number comes from the P6 block of `.planning/RESERVATIONS.md`; decision ids refer to
+//! `06-DECISIONS.md`.
+//!
+//! - [`Cmd::CompleteEffect`] at tag 13 (FX-01/FX-03, P-10): the bridge's completion of an
+//!   http/sql/object effect. Attempt-independent, first completion wins (mirrors
+//!   [`CompleteToken`]). **B2:** `outcome` is the PayloadRef of the fully encoded
+//!   `EffectCompleted{op, outcome}` (kind 65) event ([`complete_effect_payload`]), stored
+//!   verbatim by apply like D21's submitter-encoded events; there is no codec field.
+//! - [`derived::Intent`] tags 9..=10: [`RegisterEffect`], [`CancelEffect`] (rows in the existing
+//!   `effects` keyspace, #12).
+//! - Golden vectors appended (`complete_effect_*`, `events_appended_effects`); every older line
+//!   is byte-identical. Apply rejects all three until 06-03.
 //!
 //! The helpers in this module are pure and never panic on malformed input: they return errors so
 //! apply can produce deterministic `Rejected(Invalid)` outcomes.
@@ -120,8 +136,10 @@ pub const fn is_reserved_op(op: u64) -> bool {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Command {
     /// The command variant. `None` only for malformed/empty input (apply rejects it as invalid).
-    /// Tags 13..=26 and 28..=63 are reserved for future variants (`.planning/RESERVATIONS.md` §1).
-    #[prost(oneof = "Cmd", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 27")]
+    /// Tags 14..=26 and 28..=63 are reserved for future variants (`.planning/RESERVATIONS.md` §1;
+    /// 13 is Phase 6's `CompleteEffect`, 27 is Phase 8's `ScheduleFire`).
+    // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
+    #[prost(oneof = "Cmd", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 27")]
     pub cmd: Option<Cmd>,
 }
 
@@ -173,6 +191,11 @@ pub enum Cmd {
     // RESERVATIONS.md: P8 = 27..33
     #[prost(message, tag = "27")]
     ScheduleFire(ScheduleFire),
+    /// Complete an http/sql/object effect (Phase 6, FX-01/FX-03, P-10). Attempt-independent;
+    /// the first completion wins.
+    // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
+    #[prost(message, tag = "13")]
+    CompleteEffect(CompleteEffect),
 }
 
 /// A new leader epoch.
@@ -397,7 +420,8 @@ pub struct EventsAppended {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Derived {
     /// The intent.
-    #[prost(oneof = "derived::Intent", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
+    // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
+    #[prost(oneof = "derived::Intent", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub intent: Option<derived::Intent>,
 }
 
@@ -434,6 +458,13 @@ pub mod derived {
         /// Cancel a registered wait (Phase 5).
         #[prost(message, tag = "8")]
         CancelWait(super::CancelWait),
+        /// Record an in-flight http/sql/object effect (Phase 6, FX-01/FX-03).
+        // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
+        #[prost(message, tag = "9")]
+        RegisterEffect(super::RegisterEffect),
+        /// Drop an in-flight effect's row (Phase 6): the op was cancelled or abandoned.
+        #[prost(message, tag = "10")]
+        CancelEffect(super::CancelEffect),
     }
 }
 
@@ -471,6 +502,45 @@ impl Derived {
     pub fn cancel_wait(op: u64) -> Self {
         Self::new(derived::Intent::CancelWait(CancelWait { op }))
     }
+
+    /// A [`RegisterEffect`] intent (Phase 6). `kind` is
+    /// [`crate::live::EffectKind`] as `u32` (Http 0, Sql 1, Object 2).
+    pub fn register_effect(op: u64, kind: u32, scheduled_at_ms: u64) -> Self {
+        Self::new(derived::Intent::RegisterEffect(RegisterEffect {
+            op,
+            kind,
+            scheduled_at_ms,
+        }))
+    }
+
+    /// A [`CancelEffect`] intent (Phase 6).
+    pub fn cancel_effect(op: u64) -> Self {
+        Self::new(derived::Intent::CancelEffect(CancelEffect { op }))
+    }
+}
+
+/// Register an in-flight host effect for operation `op` (Phase 6, `Derived` tag 9; FX-01/FX-03).
+/// Submitted with the `EffectScheduled` event; apply records a row in the `effects` keyspace
+/// (#12) so a leader change can re-drive the effect (06-03).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RegisterEffect {
+    /// Operation id.
+    #[prost(uint64, tag = "1")]
+    pub op: u64,
+    /// Connector family: [`crate::live::EffectKind`] as `u32` (Http 0, Sql 1, Object 2).
+    #[prost(uint32, tag = "2")]
+    pub kind: u32,
+    /// Timestamp (ms) of the `EffectScheduled` event.
+    #[prost(uint64, tag = "3")]
+    pub scheduled_at_ms: u64,
+}
+
+/// Drop the in-flight effect row of operation `op` (Phase 6, `Derived` tag 10).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CancelEffect {
+    /// Operation id.
+    #[prost(uint64, tag = "1")]
+    pub op: u64,
 }
 
 /// What a [`RegisterWait`] waits for.
@@ -914,6 +984,51 @@ pub fn cron_manual_idempotency_key(schedule: &str, request_id: &[u8]) -> String 
     k
 }
 
+/// Complete an http/sql/object effect (Phase 6, `Cmd` tag 13; FX-01/FX-03, P-10).
+///
+/// Attempt-independent: no fencing token, and the first completion wins (a later one for the
+/// same `(run_id, op)` is a duplicate). Same shape as [`CompleteToken`].
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CompleteEffect {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// The effect's operation id, repeated so apply can validate without decoding `outcome`.
+    #[prost(uint64, tag = "2")]
+    pub op: u64,
+    /// B2: the PayloadRef (inline, or a blob ref above 256 KiB) of the fully encoded
+    /// `EffectCompleted{op, outcome}` (kind 65) journal event bytes, ts = `completed_at`, no
+    /// seq ([`complete_effect_payload`]). Apply stores it verbatim as
+    /// `JournalEvent{seq: next_seq, kind: 65, payload}` and never decodes it. There is no codec
+    /// field: the codec version is the first byte of the encoded event.
+    #[prost(message, optional, tag = "3")]
+    pub outcome: Option<PayloadRef>,
+    /// Completion time (ms), set by the submitter (the bridge).
+    #[prost(uint64, tag = "4")]
+    pub completed_at_ms: u64,
+}
+
+/// The encoded `EffectCompleted{op, outcome}` journal event (kind 65) carried by
+/// [`CompleteEffect::outcome`] (B2): `encode_event(Event{ts_nanos: completed_at_nanos,
+/// body: EffectCompleted{op, outcome}}).1`, i.e. `[EVENT_CODEC_VER] ‖ postcard((ts, payload))`.
+/// The seq is not part of the bytes.
+pub fn complete_effect_payload(
+    op: u64,
+    outcome: &crate::journal::RecordedResult,
+    completed_at_nanos: u64,
+) -> Vec<u8> {
+    use crate::journal::{EffectCompleted, Event, EventBody, encode_event};
+    encode_event(&Event {
+        seq: 0,
+        ts_nanos: completed_at_nanos,
+        body: EventBody::EffectCompleted(EffectCompleted {
+            op,
+            outcome: outcome.clone(),
+        }),
+    })
+    .1
+}
+
 /// Encode a command to its frozen protobuf bytes.
 pub fn encode_command(c: &Command) -> Bytes {
     Bytes::from(c.encode_to_vec())
@@ -999,6 +1114,11 @@ impl Command {
         Self::of(Cmd::ScheduleFire(s))
     }
 
+    /// `CompleteEffect` (Phase 6).
+    pub fn complete_effect(c: CompleteEffect) -> Self {
+        Self::of(Cmd::CompleteEffect(c))
+    }
+
     /// Variant name (for logs and metrics); `"None"` for an empty command.
     pub fn kind_name(&self) -> &'static str {
         match &self.cmd {
@@ -1016,6 +1136,7 @@ impl Command {
             Some(Cmd::RetryRun(_)) => "RetryRun",
             Some(Cmd::CompleteToken(_)) => "CompleteToken",
             Some(Cmd::ScheduleFire(_)) => "ScheduleFire",
+            Some(Cmd::CompleteEffect(_)) => "CompleteEffect",
         }
     }
 }
@@ -1128,6 +1249,13 @@ impl ScheduleFire {
     /// The overlap policy; `None` for a value outside `0..=4`.
     pub fn overlap_policy(&self) -> Option<OverlapPolicy> {
         OverlapPolicy::from_u32(self.overlap)
+    }
+}
+
+impl CompleteEffect {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
     }
 }
 

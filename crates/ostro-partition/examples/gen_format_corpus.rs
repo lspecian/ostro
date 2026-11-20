@@ -216,6 +216,8 @@ fn intent_name(i: &derived::Intent) -> &'static str {
         derived::Intent::Suspend(_) => "Suspend",
         derived::Intent::RegisterWait(_) => "RegisterWait",
         derived::Intent::CancelWait(_) => "CancelWait",
+        derived::Intent::RegisterEffect(_) => "RegisterEffect",
+        derived::Intent::CancelEffect(_) => "CancelEffect",
     }
 }
 

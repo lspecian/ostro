@@ -29,7 +29,8 @@
 //! bytes are folded anyway, and they determine the detail). `InvalidCode`
 //! variants are append-only as well (02-09 added `BadIntent`,
 //! `FieldTooLong`; 02-10 added `BadSource`, `TruncateBeyondEnd`; 04-12 added `BadLength`,
-//! `NotRunning`; 08-01 added Phase 8's `BadScheduleFire` (22) and `ScheduleOwnerMismatch` (23)).
+//! `NotRunning`; 08-01 added Phase 8's `BadScheduleFire` (22) and `ScheduleOwnerMismatch` (23);
+//! 06-02 renamed the placeholder at 15 to Phase 6's `BadEffectCompletion`).
 //!
 //! `InvalidCode` is declaration-indexed, so a phase landing above an absent lower slot declares
 //! `#[doc(hidden)]`, never-emitted placeholders named `Reserved<Phase>_<index>`
@@ -115,13 +116,15 @@ pub enum InvalidCode {
     BadLength,
     /// A `Suspend` intent for a run whose status is not `Running`. Added by 04-12.
     NotRunning,
-    // RESERVATIONS.md §8: placeholders for other phases' slots 13..=21 (never emitted).
+    // RESERVATIONS.md §8: placeholders for other phases' slots 13..=21 (never emitted);
+    // 06-02 renamed ReservedP6_15 in place (P-15).
     #[doc(hidden)]
     ReservedP5_13,
     #[doc(hidden)]
     ReservedP5_14,
-    #[doc(hidden)]
-    ReservedP6_15,
+    /// A malformed `CompleteEffect`: missing or wrong-kind outcome, or an op that does not
+    /// match a registered effect. Phase 6 (06-02; emitted from 06-03), index 15.
+    BadEffectCompletion,
     #[doc(hidden)]
     ReservedP6_16,
     #[doc(hidden)]
@@ -300,7 +303,7 @@ mod tests {
             InvalidCode::NotRunning,
             InvalidCode::ReservedP5_13,
             InvalidCode::ReservedP5_14,
-            InvalidCode::ReservedP6_15,
+            InvalidCode::BadEffectCompletion,
             InvalidCode::ReservedP6_16,
             InvalidCode::ReservedP6_17,
             InvalidCode::ReservedP7_18,
@@ -315,6 +318,12 @@ mod tests {
         }
         // Phase 8 (RESERVATIONS §8): 22 BadScheduleFire, 23 ScheduleOwnerMismatch.
         assert_eq!(InvalidCode::BadScheduleFire as usize, 22);
+        // Phase 6 (RESERVATIONS §8, P-15): 15 BadEffectCompletion.
+        assert_eq!(InvalidCode::BadEffectCompletion as usize, 15);
+        assert_eq!(
+            ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::BadEffectCompletion)).code(),
+            26
+        );
         assert_eq!(InvalidCode::ScheduleOwnerMismatch as usize, 23);
         assert_eq!(
             ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::BadScheduleFire)).code(),

@@ -7,6 +7,7 @@ pub mod command;
 pub mod envelope;
 pub mod ids;
 pub mod journal;
+pub mod live;
 pub mod payload;
 pub mod routing;
 

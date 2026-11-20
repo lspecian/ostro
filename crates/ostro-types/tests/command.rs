@@ -6,11 +6,12 @@
 
 use bytes::Bytes;
 use ostro_types::command::{
-    self, AttemptGranted, AttemptTokenMsg, CancelTimer, CancelWait, ChildCompleted, CompleteRun,
-    CompleteToken, ConflictPolicy, CronStart, Derived, EnqueueReady, EventsAppended, InboundBatch,
-    InboundMsg, JournalEvent, OutboxMsg, OutboxTruncated, ParentRef, RegisterWait, RequestCancel,
-    RetryRun, ScheduleTimer, SendMessage, Signal, SignalRun, StartChild, StartRun, Suspend,
-    TerminalStatus, TerminateRun, TimerFired, WaitKind, decode_command, encode_command,
+    self, AttemptGranted, AttemptTokenMsg, CancelEffect, CancelTimer, CancelWait, ChildCompleted,
+    CompleteEffect, CompleteRun, CompleteToken, ConflictPolicy, CronStart, Derived, EnqueueReady,
+    EventsAppended, InboundBatch, InboundMsg, JournalEvent, OutboxMsg, OutboxTruncated, ParentRef,
+    RegisterEffect, RegisterWait, RequestCancel, RetryRun, ScheduleTimer, SendMessage, Signal,
+    SignalRun, StartChild, StartRun, Suspend, TerminalStatus, TerminateRun, TimerFired, WaitKind,
+    decode_command, encode_command,
 };
 use ostro_types::command::{
     MAX_REQUEST_ID_LEN, OverlapPolicy, ScheduleFire, ScheduleFireKind, cron_idempotency_key,
@@ -444,7 +445,74 @@ fn all_golden() -> Vec<(&'static str, Command)> {
     v.extend(golden_appended());
     v.extend(golden_appended_v5());
     v.extend(golden_appended_v8());
+    v.extend(golden_appended_v6());
     v
+}
+
+// ---- Plan 06-02: Phase 6 contract ---------------------------------------------------------
+
+/// The fixed `Ok(Http)` effect outcome of the `complete_effect_inline` vector.
+fn sample_effect_outcome() -> ostro_types::journal::RecordedResult {
+    use ostro_types::journal::{Failure, Header, HttpResponse, OpOutput, encode_result};
+    let r: Result<OpOutput, Failure> = Ok(OpOutput::Http(HttpResponse {
+        status: 201,
+        headers: vec![Header {
+            name: "content-type".into(),
+            value: "application/json".into(),
+        }],
+        body: b"{\"id\":\"ch_1\"}".to_vec(),
+    }));
+    encode_result(&r)
+}
+
+/// `completed_at_ms` of the Phase 6 vectors (the event ts is the same instant in ns).
+const EFFECT_COMPLETED_AT_MS: u64 = 9_100;
+
+/// Vectors appended by plan 06-02 (Phase 6 contract; FX-01/FX-03, P-10, B2).
+fn golden_appended_v6() -> Vec<(&'static str, Command)> {
+    let inline = command::complete_effect_payload(
+        12,
+        &sample_effect_outcome(),
+        EFFECT_COMPLETED_AT_MS * 1_000_000,
+    );
+    vec![
+        (
+            "complete_effect_inline",
+            Command::complete_effect(CompleteEffect {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                op: 12,
+                outcome: Some(PayloadRef::inline(Bytes::from(inline))),
+                completed_at_ms: EFFECT_COMPLETED_AT_MS,
+            }),
+        ),
+        (
+            "complete_effect_blob",
+            Command::complete_effect(CompleteEffect {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                op: 13,
+                outcome: Some(PayloadRef::blob([0x6C; 32], 2_097_152)),
+                completed_at_ms: EFFECT_COMPLETED_AT_MS + 1,
+            }),
+        ),
+        (
+            "events_appended_effects",
+            Command::events_appended(EventsAppended {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                token: token(7, 2),
+                from_seq: 15,
+                events: vec![JournalEvent {
+                    seq: 15,
+                    kind: 18,
+                    payload: Some(PayloadRef::inline(Bytes::from_static(b"effect-scheduled"))),
+                }],
+                derived: vec![
+                    Derived::register_effect(12, 0, 10_500),
+                    Derived::register_effect(13, 2, 10_500),
+                    Derived::cancel_effect(11),
+                ],
+            }),
+        ),
+    ]
 }
 
 fn hex(b: &[u8]) -> String {
@@ -1176,10 +1244,11 @@ fn phase8_golden_lines_are_appended_last() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.split_once('\t').expect("name<TAB>hex").0)
         .collect();
-    assert_eq!(names.len(), 24);
+    // 06-02 appended Phase 6 lines after these (append-only), so check the 21..24 window.
+    assert!(names.len() >= 24);
     assert_eq!(names[20], "inbound_batch_v5");
     assert_eq!(
-        &names[21..],
+        &names[21..24],
         [
             "schedule_fire_fire",
             "schedule_fire_manual",
@@ -1227,4 +1296,169 @@ fn phase8_cron_idempotency_keys_and_limits() {
     assert!(s.check_limits().is_ok());
     s.request_id.push(1);
     assert!(s.check_limits().is_err());
+}
+
+#[test]
+fn phase6_vectors_round_trip() {
+    for (name, c) in golden_appended_v6() {
+        let back = decode_command(&encode_command(&c)).expect("decode");
+        assert_eq!(back, c, "{name} round trip");
+    }
+    let names: Vec<&str> = golden_appended_v6()
+        .iter()
+        .map(|(_, c)| c.kind_name())
+        .collect();
+    assert_eq!(
+        names,
+        ["CompleteEffect", "CompleteEffect", "EventsAppended"]
+    );
+}
+
+#[test]
+fn phase6_tags_from_first_principles() {
+    use prost::Message as _;
+    // Cmd tag 13 (LEN): key 0x6a.
+    assert_eq!(
+        hex(&encode_command(&Command::complete_effect(
+            CompleteEffect::default()
+        ))),
+        "6a00"
+    );
+    // CompleteEffect fields: run_id 1 bytes, op 2 varint, outcome 3 LEN, completed_at_ms 4.
+    let ce = CompleteEffect {
+        run_id: vec![0xAB],
+        op: 1,
+        outcome: Some(PayloadRef::default()),
+        completed_at_ms: 2,
+    };
+    assert_eq!(hex(&ce.encode_to_vec()), "0a01ab10011a002002");
+    // Derived oneof tags 9 / 10 (LEN): keys 0x4a / 0x52.
+    assert_eq!(
+        hex(&Derived::new(command::derived::Intent::RegisterEffect(
+            RegisterEffect::default()
+        ))
+        .encode_to_vec()),
+        "4a00"
+    );
+    assert_eq!(
+        hex(&Derived::new(command::derived::Intent::CancelEffect(
+            CancelEffect::default()
+        ))
+        .encode_to_vec()),
+        "5200"
+    );
+    // RegisterEffect: op 1, kind 2 (u32), scheduled_at_ms 3.
+    let Some(command::derived::Intent::RegisterEffect(re)) =
+        Derived::register_effect(1, 2, 3).intent
+    else {
+        panic!("wrong intent")
+    };
+    assert_eq!(hex(&re.encode_to_vec()), "080110021803");
+    let Some(command::derived::Intent::CancelEffect(c)) = Derived::cancel_effect(4).intent else {
+        panic!("wrong intent")
+    };
+    assert_eq!(hex(&c.encode_to_vec()), "0804");
+    // EffectKind values used as RegisterEffect.kind.
+    use ostro_types::live::EffectKind;
+    assert_eq!(EffectKind::Http as u32, 0);
+    assert_eq!(EffectKind::Sql as u32, 1);
+    assert_eq!(EffectKind::Object as u32, 2);
+}
+
+#[test]
+fn complete_effect_payload_is_the_encoded_effect_completed_event() {
+    use ostro_types::journal::{
+        EVENT_CODEC_VER, EffectCompleted, Event, EventBody, EventKind, decode_event, encode_event,
+    };
+    let outcome = sample_effect_outcome();
+    let ts = EFFECT_COMPLETED_AT_MS * 1_000_000;
+    let bytes = command::complete_effect_payload(12, &outcome, ts);
+    assert_eq!(bytes[0], EVENT_CODEC_VER);
+    // Any seq: the seq is not inside the bytes.
+    for seq in [0, 15, u64::MAX] {
+        let ev = decode_event(seq, EventKind::EffectCompleted.code(), &bytes).expect("decode");
+        assert_eq!(ev.seq, seq);
+        assert_eq!(ev.ts_nanos, ts);
+        assert_eq!(
+            ev.body,
+            EventBody::EffectCompleted(EffectCompleted {
+                op: 12,
+                outcome: outcome.clone(),
+            })
+        );
+    }
+    let (kind, enc) = encode_event(&Event {
+        seq: 99,
+        ts_nanos: ts,
+        body: EventBody::EffectCompleted(EffectCompleted {
+            op: 12,
+            outcome: outcome.clone(),
+        }),
+    });
+    assert_eq!(kind, 65);
+    assert_eq!(enc, bytes);
+    // The inline golden vector carries exactly these bytes.
+    let Some(command::Cmd::CompleteEffect(ce)) =
+        decode_command(&golden_line("complete_effect_inline"))
+            .unwrap()
+            .cmd
+    else {
+        panic!("wrong variant")
+    };
+    assert_eq!(ce.op, 12);
+    assert_eq!(ce.completed_at_ms, EFFECT_COMPLETED_AT_MS);
+    let Some(p) = &ce.outcome else {
+        panic!("outcome")
+    };
+    assert_eq!(p.inline_len(), Some(bytes.len()));
+    assert_eq!(
+        p,
+        &PayloadRef::inline(Bytes::from(bytes)),
+        "inline outcome = encoded event"
+    );
+    assert_eq!(
+        CompleteEffect {
+            run_id: run(5, 0x11).as_bytes().to_vec(),
+            ..Default::default()
+        }
+        .run_id(),
+        Ok(run(5, 0x11))
+    );
+}
+
+#[test]
+fn old_bytes_decode_unchanged_after_phase6() {
+    // Every line written before 06-02 (including 08-01's) decodes and re-encodes byte-identically.
+    let pre: Vec<(&str, Command)> = {
+        let mut v = golden_commands();
+        v.extend(golden_appended());
+        v.extend(golden_appended_v5());
+        v.extend(golden_appended_v8());
+        v
+    };
+    for (name, c) in pre {
+        let old = golden_line(name);
+        let back = decode_command(&old).expect("old bytes decode");
+        assert_eq!(back, c, "{name}");
+        assert_eq!(encode_command(&back).as_ref(), old.as_slice(), "{name}");
+    }
+}
+
+#[test]
+fn phase6_golden_lines_follow_phase8() {
+    // Append-only: the Phase 6 lines come after the 21 frozen lines and 08-01's three.
+    let names: Vec<&str> = GOLDEN
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split_once('\t').expect("name<TAB>hex").0)
+        .collect();
+    assert_eq!(
+        &names[24..27],
+        [
+            "complete_effect_inline",
+            "complete_effect_blob",
+            "events_appended_effects"
+        ]
+    );
 }
