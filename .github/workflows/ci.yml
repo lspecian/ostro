@@ -223,6 +223,16 @@ jobs:
         run: |
           test -n "${OSTRO_TEST_S3_URL:-}"
           cargo test -p ostro-objstore --test s3 --locked -- --nocapture
+      - if: matrix.name == 'linux-x86_64-gnu'
+        name: bottomless restore leg against S3 (SeaweedFS)
+        # 08-20 SC3: a server backing up to s3://$OSTRO_TEST_S3_BUCKET/<unique prefix> is
+        # killed with SIGKILL, `ostro restore --from s3://...` rebuilds a fresh data dir
+        # (state hashes verified) and a server on it serves the completed runs. Same
+        # SeaweedFS as the objstore leg above; fails loudly if the OSTRO_TEST_S3_* env is
+        # missing (the test itself SKIPs when it is unset).
+        run: |
+          test -n "${OSTRO_TEST_S3_URL:-}"
+          cargo test -p ostro --test bottomless_s3 --locked -- --nocapture
       - if: ${{ !matrix.zig }}
         name: semantics sleepers (serial)
         # WF-04 1,000-sleeper test: #[ignore]d in the parallel run, own process, one

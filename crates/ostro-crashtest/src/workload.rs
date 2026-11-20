@@ -22,7 +22,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -642,4 +642,104 @@ impl Workload {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ Phase 8 config
+
+/// Phase 8 campaign settings (plan 08-20): tiny thresholds, so the snapshot service, the
+/// bottomless uploader, retention and blob GC all run inside a campaign iteration's kill
+/// window (20 ms .. a few seconds after ready).
+///
+/// - `[snapshots]`: `interval = 1s`, `min_interval = 500ms`, `bytes = 32 KiB`, `keep = 2`;
+/// - `[backup]`: `url = file://<shard>/bucket`, `seal_interval = 500ms`,
+///   `remote_snapshots_keep = 2` (retention moves `chain_start` and deletes old chunks);
+/// - `[blob_gc]`: `interval = 2s`, `grace = 30s` (well above any put-to-apply latency, so
+///   the only unlink candidates are the orphans the harness plants, see
+///   [`plant_orphan_blobs`]).
+///
+/// WAL retention runs on its fixed 60 s leader interval (no server knob), so the
+/// `trim::after_delete` scenario waits up to [`TRIM_WAIT`] for its first pass.
+pub fn phase8_env(shard_dir: &Path) -> Vec<(String, String)> {
+    let bucket = shard_dir.join("bucket");
+    [
+        ("OSTRO_SNAPSHOTS__ENABLED", "true".to_owned()),
+        ("OSTRO_SNAPSHOTS__INTERVAL", "1s".to_owned()),
+        ("OSTRO_SNAPSHOTS__MIN_INTERVAL", "500ms".to_owned()),
+        ("OSTRO_SNAPSHOTS__BYTES", "32768".to_owned()),
+        ("OSTRO_SNAPSHOTS__KEEP", "2".to_owned()),
+        ("OSTRO_BACKUP__URL", format!("file://{}", bucket.display())),
+        ("OSTRO_BACKUP__SEAL_INTERVAL", "500ms".to_owned()),
+        ("OSTRO_BACKUP__REMOTE_SNAPSHOTS_KEEP", "2".to_owned()),
+        ("OSTRO_BLOB_GC__ENABLED", "true".to_owned()),
+        ("OSTRO_BLOB_GC__INTERVAL", "2s".to_owned()),
+        ("OSTRO_BLOB_GC__GRACE", "30s".to_owned()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect()
+}
+
+/// How long the `trim::after_delete` scenario waits for the first retention pass (the
+/// leader's fixed 60 s interval plus slack).
+pub const TRIM_WAIT: Duration = Duration::from_secs(75);
+
+/// Plant `n` unreferenced blobs (random bytes, stored under their sha256 in the
+/// `<data>/blobs/<hex[0:2]>/<hex>` layout) with an mtime 2 h in the past, while the server
+/// is down. Blob GC (grace 30 s) deletes them on its first pass, which is what the
+/// `blobgc::before_unlink` scenario kills into. Returns the planted paths.
+pub fn plant_orphan_blobs(data_dir: &Path, n: usize, seed: u64) -> std::io::Result<Vec<PathBuf>> {
+    use sha2::{Digest, Sha256};
+    let mut rng = Rng::new(seed ^ 0x000b_10b5);
+    let old = std::time::SystemTime::now() - Duration::from_secs(2 * 3600);
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let len = rng.range(64, 4096) as usize;
+        let bytes = rng.bytes(len);
+        let sha: [u8; 32] = Sha256::digest(&bytes).into();
+        let hex: String = sha.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = data_dir.join("blobs").join(&hex[..2]);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(&hex);
+        let mut f = File::create(&path)?;
+        f.write_all(&bytes)?;
+        f.set_modified(old)?;
+        f.sync_all()?;
+        out.push(path);
+    }
+    Ok(out)
+}
+
+/// Delete every `state/pNNNN` directory of a stopped data dir, so the next start rebuilds
+/// each partition from its newest local snapshot plus the log tail (or a full replay when
+/// it has none). The `snapshot::install_*` scenario uses it to force installs at startup.
+/// Returns the number of partitions removed.
+pub fn drop_partition_states(data_dir: &Path) -> std::io::Result<usize> {
+    let state = data_dir.join("state");
+    let mut n = 0;
+    let rd = match std::fs::read_dir(&state) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    for e in rd {
+        let e = e?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.len() == 5 && name.starts_with('p') && e.file_type()?.is_dir() {
+            std::fs::remove_dir_all(e.path())?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Whether partition `p` of a stopped data dir holds at least one local snapshot.
+pub fn has_local_snapshot(data_dir: &Path, p: u16) -> bool {
+    std::fs::read_dir(data_dir.join("snapshots").join(format!("p{p:04}")))
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.ends_with(".osnap") && !n.starts_with(".tmp-")
+            })
+        })
+        .unwrap_or(false)
 }

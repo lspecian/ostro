@@ -11,6 +11,7 @@
 //! | `OSTRO_CAMPAIGN_STATE_DIR` | `target/campaign` | state dir (relative = repo root). Smoke: `target/campaign-smoke` (wiped first), timing: `target/campaign-timing` (wiped first), gate: `target/campaign-gate` (started clean by 05-20). Never share one between run types. |
 //! | `OSTRO_CAMPAIGN_SEED` | 0x0519 | campaign seed |
 //! | `OSTRO_CAMPAIGN_RATE` | 8 | new runs per second per shard |
+//! | `OSTRO_CAMPAIGN_PHASE8` | off | `1`: Phase 8 scenarios on (see below); part of the resume identity |
 //!
 //! # One iteration = one counted fault, always ending in `kill -9`
 //!
@@ -33,6 +34,35 @@
 //! `shard-NN.json` is rewritten (atomically) after every iteration and the next run resumes
 //! from it. It records the run identity (`shards`, `faults`, `seed`); the runner refuses to
 //! resume a file whose identity differs from the current environment.
+//!
+//! # Phase 8 scenarios (plan 08-20, `OSTRO_CAMPAIGN_PHASE8=1`)
+//!
+//! Every server of the shard runs with [`phase8_env`]: snapshots every second (32 KiB
+//! threshold), bottomless backup into `<shard>/bucket` every 500 ms, blob GC every 2 s. The
+//! variant mix becomes plain 50%, failpoint 18%, enospc 7% and **phase8** 25%, one entry of
+//! [`PHASE8_MENU`]:
+//!
+//! - kill during snapshot: `snapshot::before_rename`, `snapshot::before_dir_fsync`
+//!   (`return`), and a `sleep` window at `before_rename`;
+//! - kill during trim: `trim::after_delete` (the first retention pass comes after the fixed
+//!   60 s leader interval, so this one waits up to [`TRIM_WAIT`]);
+//! - kill during upload: `upload::before_manifest` (`return`, and a `sleep` window);
+//! - kill during GC: `blobgc::before_unlink` (`sleep` window) after [`plant_orphan_blobs`]
+//!   planted 20 unreferenced, old blobs, so the first GC pass has unlink work;
+//! - kill during install: `snapshot::install_before_swap` (`1*return`: the first install
+//!   fails, startup falls back to the next older local snapshot or a full replay) after
+//!   [`drop_partition_states`] removed every `state/pNNNN`, so startup installs the newest
+//!   local snapshot of each partition. With a plain `return` every candidate fails, a
+//!   trimmed partition legitimately reports `snapshot required` on the armed server and
+//!   the armed start never reaches its ready line (five 60 s spawn attempts, then a plain
+//!   fallback), so the scenario arms one failure only.
+//!
+//! Extra invariants after a phase8 kill: the clean restart never logs `snapshot required`
+//! (a trimmed log always keeps a valid local snapshot), and the dead data dir goes through
+//! `rebuild_and_compare` (digest equality of the live state and newest snapshot + log
+//! tail) after **every** phase8 kill, not only every 25 kills. At the shard's end the bucket
+//! is restored with `ostro restore --from file://<shard>/bucket` into a fresh directory; the
+//! restore must pass its own state-hash and consistency checks.
 //!
 //! # Timing (05-19 measurements, WSL2, 12 cores, release failpoint binary)
 //!
@@ -65,7 +95,9 @@ use crate::check::{
 use crate::server_target::{
     KillOutcome, ServerTarget, deploy_crash_saga, failpoint_bin, kill_stale, repo_root,
 };
-use crate::workload::{AckLog, WORKFLOW, Workload};
+use crate::workload::{
+    AckLog, TRIM_WAIT, WORKFLOW, Workload, drop_partition_states, phase8_env, plant_orphan_blobs,
+};
 use crate::{Rng, rebuild_and_compare};
 
 /// Measured timing, kept next to the code that 05-20 will run (filled in by 05-19).
@@ -89,6 +121,8 @@ pub struct CampaignCfg {
     pub state_dir: PathBuf,
     pub seed: u64,
     pub rate: f64,
+    /// Phase 8 scenarios (`OSTRO_CAMPAIGN_PHASE8=1`, plan 08-20).
+    pub phase8: bool,
 }
 
 fn env_u64(name: &str, default: u64) -> Result<u64, String> {
@@ -161,6 +195,8 @@ impl CampaignCfg {
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .unwrap_or(8.0);
+        let phase8 = std::env::var("OSTRO_CAMPAIGN_PHASE8")
+            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
         Ok(Self {
             faults,
             shards,
@@ -169,6 +205,7 @@ impl CampaignCfg {
             state_dir,
             seed,
             rate,
+            phase8,
         })
     }
 }
@@ -180,6 +217,8 @@ pub struct ByVariant {
     pub plain: u64,
     pub failpoint: u64,
     pub enospc: u64,
+    #[serde(default)]
+    pub phase8: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -198,6 +237,9 @@ pub struct ShardState {
     pub shards: u32,
     pub faults: u64,
     pub seed: u64,
+    /// Phase 8 scenarios on (resume identity, plan 08-20).
+    #[serde(default)]
+    pub phase8: bool,
     pub shard: u32,
     pub quota: u64,
     // progress
@@ -222,6 +264,9 @@ pub struct ShardState {
     /// Seconds spent in kill iterations (all resumes), excluding the final settle.
     pub kill_secs: f64,
     pub max_restart_ms: u64,
+    /// Phase 8: `ostro restore` of the shard's bucket at the shard's end passed.
+    #[serde(default)]
+    pub restore_checked: bool,
 }
 
 pub fn shard_path(state_dir: &Path, shard: u32) -> PathBuf {
@@ -237,18 +282,24 @@ pub fn load_shard(path: &Path, cfg: &CampaignCfg) -> Result<Option<ShardState>, 
     };
     let s: ShardState =
         serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))?;
-    if s.shards != cfg.shards || s.faults != cfg.faults || s.seed != cfg.seed {
+    if s.shards != cfg.shards
+        || s.faults != cfg.faults
+        || s.seed != cfg.seed
+        || s.phase8 != cfg.phase8
+    {
         return Err(format!(
-            "refusing to resume {}: it belongs to SHARDS={} FAULTS={} SEED={:#x}, this run is \
-             SHARDS={} FAULTS={} SEED={:#x}; wipe the state dir {} (or pick another \
-             OSTRO_CAMPAIGN_STATE_DIR)",
+            "refusing to resume {}: it belongs to SHARDS={} FAULTS={} SEED={:#x} PHASE8={}, this \
+             run is SHARDS={} FAULTS={} SEED={:#x} PHASE8={}; wipe the state dir {} (or pick \
+             another OSTRO_CAMPAIGN_STATE_DIR)",
             path.display(),
             s.shards,
             s.faults,
             s.seed,
+            s.phase8,
             cfg.shards,
             cfg.faults,
             cfg.seed,
+            cfg.phase8,
             cfg.state_dir.display()
         ));
     }
@@ -274,6 +325,8 @@ pub enum Variant {
     Plain,
     Failpoint,
     Enospc,
+    /// A Phase 8 storage scenario ([`PHASE8_MENU`], plan 08-20).
+    Phase8,
 }
 
 /// Failpoint menu (05-18 sites + Phase 2 storage sites).
@@ -303,6 +356,81 @@ pub const ENOSPC_MENU: &[&str] = &[
     "meta::log_append=1%return(enospc)",
     "meta::fsync=1%return(enospc)",
 ];
+
+/// Phase 8 scenarios (plan 08-20): kills during snapshot, trim, upload, blob GC and
+/// snapshot install. See [`Phase8Setup`] / [`phase8_setup`] for the per-site preparation and
+/// kill window.
+pub const PHASE8_MENU: &[&str] = &[
+    "snapshot::before_rename=return",
+    "snapshot::before_dir_fsync=return",
+    "snapshot::before_rename=sleep(300)",
+    "trim::after_delete=return",
+    "upload::before_manifest=return",
+    "upload::before_manifest=sleep(300)",
+    "blobgc::before_unlink=sleep(200)",
+    "snapshot::install_before_swap=1*return",
+];
+
+/// What a Phase 8 scenario prepares while the server is down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase8Setup {
+    None,
+    /// [`plant_orphan_blobs`] (20 unreferenced, old blobs).
+    PlantOrphans,
+    /// [`drop_partition_states`] (startup installs local snapshots).
+    DropStates,
+}
+
+/// `(setup, kill deadline range after ready in ms)` of a [`PHASE8_MENU`] entry. The kill
+/// comes 0..300 ms after the first injected-fault log line, or at the deadline.
+pub fn phase8_setup(spec: &str) -> (Phase8Setup, (u64, u64)) {
+    if spec.starts_with("trim::") {
+        // The first retention pass runs one fixed 60 s interval after the leader starts.
+        let t = TRIM_WAIT.as_millis() as u64;
+        (Phase8Setup::None, (t, t + 1))
+    } else if spec.starts_with("blobgc::") {
+        // The first GC pass runs 2 s after start; 20 unlinks x 200 ms follow.
+        (Phase8Setup::PlantOrphans, (2_200, 6_000))
+    } else if spec.starts_with("snapshot::install") {
+        (Phase8Setup::DropStates, (300, 3_000))
+    } else {
+        // The first snapshot needs one 1 s interval; uploads every 500 ms.
+        (Phase8Setup::None, (1_200, 4_000))
+    }
+}
+
+/// [`pick_variant`], or with Phase 8 scenarios on: plain 50%, failpoint 18%, enospc 7%,
+/// phase8 25%. With `phase8 == false` it is exactly [`pick_variant`] (the 05-19 mix).
+pub fn pick_variant_cfg(
+    seed: u64,
+    shard: u32,
+    iter: u64,
+    phase8: bool,
+) -> (u64, Variant, Option<&'static str>) {
+    if !phase8 {
+        return pick_variant(seed, shard, iter);
+    }
+    let s = seed ^ (u64::from(shard) << 40) ^ iter.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x0820;
+    let mut r = Rng::new(s);
+    match r.below(100) {
+        0..50 => (s, Variant::Plain, None),
+        50..68 => (
+            s,
+            Variant::Failpoint,
+            Some(FAILPOINT_MENU[r.below(FAILPOINT_MENU.len() as u64) as usize]),
+        ),
+        68..75 => (
+            s,
+            Variant::Enospc,
+            Some(ENOSPC_MENU[r.below(ENOSPC_MENU.len() as u64) as usize]),
+        ),
+        _ => (
+            s,
+            Variant::Phase8,
+            Some(PHASE8_MENU[r.below(PHASE8_MENU.len() as u64) as usize]),
+        ),
+    }
+}
 
 /// The variant and FAILPOINTS spec of iteration `iter` of `shard`.
 pub fn pick_variant(seed: u64, shard: u32, iter: u64) -> (u64, Variant, Option<&'static str>) {
@@ -532,6 +660,8 @@ struct Shard {
     bin: PathBuf,
     http: reqwest::Client,
     st: ShardState,
+    /// `OSTRO_*` config overrides of every server of the shard (Phase 8: [`phase8_env`]).
+    env: Vec<(String, String)>,
 }
 
 impl Shard {
@@ -547,7 +677,16 @@ impl Shard {
     async fn spawn(&mut self, fp: Option<&str>) -> Result<ServerTarget, String> {
         let mut last = String::new();
         for _ in 0..5 {
-            match ServerTarget::spawn(&self.bin, &self.data, fp, &self.http, READY_LIMIT).await {
+            match ServerTarget::spawn_env(
+                &self.bin,
+                &self.data,
+                fp,
+                &self.env,
+                &self.http,
+                READY_LIMIT,
+            )
+            .await
+            {
                 Ok(s) => {
                     return Ok(s);
                 }
@@ -652,12 +791,26 @@ impl Shard {
         let secs_base = self.st.kill_secs;
         while self.st.kills < self.st.quota {
             let iter = self.st.iterations;
-            let (iseed, mut variant, mut spec) = pick_variant(self.cfg.seed, self.id, iter);
+            let (iseed, mut variant, mut spec) =
+                pick_variant_cfg(self.cfg.seed, self.id, iter, self.cfg.phase8);
             let mut rng = Rng::new(iseed ^ 0x6b);
+            let mut window = (300, 3000);
             if variant != Variant::Plain {
                 wl.set_target(None);
                 if let KillOutcome::Killed = srv.kill9().await? {
                     self.st.extra_kills += 1;
+                }
+                if variant == Variant::Phase8 {
+                    let (setup, w) = phase8_setup(spec.unwrap_or_default());
+                    window = w;
+                    let prepared = match setup {
+                        Phase8Setup::None => Ok(()),
+                        Phase8Setup::PlantOrphans => {
+                            plant_orphan_blobs(&self.data, 20, iseed).map(|_| ())
+                        }
+                        Phase8Setup::DropStates => drop_partition_states(&self.data).map(|_| ()),
+                    };
+                    prepared.map_err(|e| format!("phase8 setup for {spec:?}: {e}"))?;
                 }
                 match self.spawn(spec).await {
                     Ok(s) => srv = s,
@@ -678,7 +831,8 @@ impl Shard {
                     tokio::time::sleep_until(at.into()).await;
                 }
                 _ => {
-                    let deadline = srv.ready_at + Duration::from_millis(rng.range(300, 3000));
+                    let deadline =
+                        srv.ready_at + Duration::from_millis(rng.range(window.0, window.1));
                     let after_hit = Duration::from_millis(rng.range(0, 300));
                     loop {
                         if srv.fault_lines() > 0 {
@@ -704,6 +858,7 @@ impl Shard {
                         Variant::Plain => self.st.by_variant.plain += 1,
                         Variant::Failpoint => self.st.by_variant.failpoint += 1,
                         Variant::Enospc => self.st.by_variant.enospc += 1,
+                        Variant::Phase8 => self.st.by_variant.phase8 += 1,
                     }
                     *self
                         .st
@@ -720,7 +875,11 @@ impl Shard {
                     ));
                 }
             }
-            if outcome == KillOutcome::Killed && self.st.kills.is_multiple_of(REBUILD_EVERY) {
+            // Phase 8: digest-after-rebuild after every phase8 kill (snapshot / trim / upload /
+            // GC / install leave the dead data dir in their most delicate state).
+            if outcome == KillOutcome::Killed
+                && (self.st.kills.is_multiple_of(REBUILD_EVERY) || variant == Variant::Phase8)
+            {
                 self.st.rebuilds += 1;
                 if let Err(e) = rebuild_and_compare(&self.data, PARTITIONS).await {
                     let vs = vec![check_error(
@@ -734,6 +893,13 @@ impl Shard {
             }
             srv = self.spawn_clean().await?;
             wl.set_target(Some(srv.base.clone()));
+            if self.cfg.phase8 && !self.record(snapshot_required(&srv), "clean restart") {
+                self.save()?;
+                return Err(format!(
+                    "shard {}: 'snapshot required' with a valid snapshot",
+                    self.id
+                ));
+            }
             let vs = check_after_restart(
                 &self.http,
                 &srv.base,
@@ -857,6 +1023,22 @@ impl Shard {
             self.save()?;
             return Err(format!("shard {}: final rebuild mismatch: {e}", self.id));
         }
+        if self.cfg.phase8 {
+            match restore_bucket(&self.bin, &self.dir) {
+                Ok(msg) => {
+                    self.log(&msg);
+                    self.st.restore_checked = true;
+                }
+                Err(e) => {
+                    self.record(
+                        vec![check_error("", format!("restore of the bucket: {e}"))],
+                        "final restore",
+                    );
+                    self.save()?;
+                    return Err(format!("shard {}: restore failed: {e}", self.id));
+                }
+            }
+        }
         summary.secs = t.elapsed().as_secs_f64();
         self.log(&format!(
             "final: runs {} statuses {:?} ({:.1} s)",
@@ -876,6 +1058,65 @@ impl Shard {
     }
 }
 
+/// Phase 8 invariant: a clean restart never reports `snapshot required` (retention keeps a
+/// valid local snapshot at or below `log_start`, so every partition can rebuild).
+fn snapshot_required(srv: &ServerTarget) -> Vec<Violation> {
+    srv.tail(400)
+        .lines()
+        .filter(|l| l.contains("snapshot required"))
+        .take(3)
+        .map(|l| check_error("", format!("clean restart logged: {l}")))
+        .collect()
+}
+
+/// `ostro restore --from file://<shard>/bucket --data-dir <fresh> --json` with the shard's
+/// (failpoint, unarmed) binary; Ok = exit 0 (manifest, state hashes at every verify offset
+/// and the cross-partition consistency check all passed).
+pub fn restore_bucket(bin: &Path, shard_dir: &Path) -> Result<String, String> {
+    let bucket = shard_dir.join("bucket");
+    if !bucket.join("manifest/current").is_file() {
+        return Err(format!("no manifest/current in {}", bucket.display()));
+    }
+    let target = shard_dir.join("restored");
+    let _ = std::fs::remove_dir_all(&target);
+    let mut cmd = std::process::Command::new(bin);
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("OSTRO_") {
+            cmd.env_remove(&k);
+        }
+    }
+    let out = cmd
+        .env_remove("FAILPOINTS")
+        .arg("restore")
+        .arg("--from")
+        .arg(format!("file://{}", bucket.display()))
+        .arg("--data-dir")
+        .arg(&target)
+        .arg("--json")
+        .output()
+        .map_err(|e| format!("spawn restore: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ostro restore exited {}: {}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| {
+        format!(
+            "restore report: {e}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })?;
+    let parts = v["partitions"].as_array().map_or(0, Vec::len);
+    let _ = std::fs::remove_dir_all(&target);
+    Ok(format!(
+        "restore of the bucket ok: generation {} partitions {parts} total {} ms",
+        v["generation"], v["durations"]["total_ms"]
+    ))
+}
+
 /// Run (or resume) one shard to completion.
 pub async fn run_shard(cfg: &CampaignCfg, id: u32) -> Result<ShardState, String> {
     let dir = cfg.state_dir.join(format!("shard-{id:02}"));
@@ -887,10 +1128,16 @@ pub async fn run_shard(cfg: &CampaignCfg, id: u32) -> Result<ShardState, String>
             shards: cfg.shards,
             faults: cfg.faults,
             seed: cfg.seed,
+            phase8: cfg.phase8,
             shard: id,
             quota: quota(cfg.faults, cfg.shards, id),
             ..ShardState::default()
         },
+    };
+    let env = if cfg.phase8 {
+        phase8_env(&dir)
+    } else {
+        Vec::new()
     };
     let http = reqwest::Client::builder()
         .pool_max_idle_per_host(16)
@@ -905,6 +1152,7 @@ pub async fn run_shard(cfg: &CampaignCfg, id: u32) -> Result<ShardState, String>
         bin: failpoint_bin(),
         http,
         st,
+        env,
     };
     shard.run().await
 }
@@ -919,13 +1167,14 @@ pub async fn run_campaign(cfg: &CampaignCfg) -> Result<Vec<ShardState>, String> 
     let bin = failpoint_bin();
     crate::server_target::crash_saga_wasm();
     println!(
-        "campaign: faults {} shards {} ids {:?} parallel {} seed {:#x} rate {}/s state {} bin {}",
+        "campaign: faults {} shards {} ids {:?} parallel {} seed {:#x} rate {}/s phase8 {} state {} bin {}",
         cfg.faults,
         cfg.shards,
         cfg.shard_ids,
         cfg.parallel,
         cfg.seed,
         cfg.rate,
+        cfg.phase8,
         cfg.state_dir.display(),
         bin.display()
     );
@@ -987,6 +1236,10 @@ pub fn report(cfg: &CampaignCfg) -> Result<(String, bool), String> {
         by.plain += s.by_variant.plain;
         by.failpoint += s.by_variant.failpoint;
         by.enospc += s.by_variant.enospc;
+        by.phase8 += s.by_variant.phase8;
+        if cfg.phase8 && s.final_checked && !s.restore_checked {
+            failures.push(format!("shard {}: bucket restore not checked", s.shard));
+        }
         for (k, n) in &s.by_site {
             *sites.entry(k.clone()).or_insert(0) += n;
         }
@@ -1015,7 +1268,8 @@ pub fn report(cfg: &CampaignCfg) -> Result<(String, bool), String> {
         "kills={kills} lost_acked_runs={} duplicate_journal_entries={} non_terminal_runs={} \
          lost_acked_signals={} wrong_results={} other_violations={}\n\
          faults_target={} shards={}/{} incomplete={incomplete:?} by_variant=plain:{} failpoint:{} \
-         enospc:{} failpoint_hits={hits} extra_kills={extra} rebuilds={rebuilds} acked_runs={runs}\n",
+         enospc:{} phase8:{} failpoint_hits={hits} extra_kills={extra} rebuilds={rebuilds} \
+         acked_runs={runs} phase8_scenarios={}\n",
         tally.lost_acked_runs,
         tally.duplicate_journal_entries,
         tally.non_terminal_runs,
@@ -1028,6 +1282,8 @@ pub fn report(cfg: &CampaignCfg) -> Result<(String, bool), String> {
         by.plain,
         by.failpoint,
         by.enospc,
+        by.phase8,
+        cfg.phase8,
     );
     text.push_str(&table);
     text.push_str("by site:\n");
@@ -1063,6 +1319,7 @@ mod tests {
             state_dir: dir.to_path_buf(),
             seed,
             rate: 1.0,
+            phase8: false,
         }
     }
 
@@ -1092,6 +1349,65 @@ mod tests {
             n[a.1 as usize] += 1;
         }
         assert!(n.iter().all(|&c| c > 50), "{n:?}");
+    }
+
+    #[test]
+    fn phase8_variants_cover_the_menu_and_keep_the_05_19_mix_when_off() {
+        let mut sites = BTreeSet::new();
+        let mut n = [0u32; 4];
+        for i in 0..4000 {
+            assert_eq!(pick_variant_cfg(3, 1, i, false), pick_variant(3, 1, i));
+            let a = pick_variant_cfg(3, 1, i, true);
+            assert_eq!(a, pick_variant_cfg(3, 1, i, true));
+            n[a.1 as usize] += 1;
+            if a.1 == Variant::Phase8 {
+                sites.insert(a.2.expect("spec"));
+            }
+        }
+        assert!(n.iter().all(|&c| c > 100), "{n:?}");
+        assert_eq!(sites.len(), PHASE8_MENU.len(), "{sites:?}");
+        for site in [
+            "snapshot::before_rename",
+            "snapshot::before_dir_fsync",
+            "trim::after_delete",
+            "upload::before_manifest",
+            "blobgc::before_unlink",
+            "snapshot::install_before_swap",
+        ] {
+            assert!(PHASE8_MENU.iter().any(|m| m.starts_with(site)), "{site}");
+        }
+        assert_eq!(
+            phase8_setup("blobgc::before_unlink=sleep(200)").0,
+            Phase8Setup::PlantOrphans
+        );
+        assert_eq!(
+            phase8_setup("snapshot::install_before_swap=return").0,
+            Phase8Setup::DropStates
+        );
+        assert!(phase8_setup("trim::after_delete=return").1.0 >= 60_000);
+    }
+
+    #[test]
+    fn phase8_is_part_of_the_resume_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let st = ShardState {
+            shards: 1,
+            faults: 20,
+            seed: 7,
+            phase8: true,
+            quota: 20,
+            ..ShardState::default()
+        };
+        let p = shard_path(d.path(), 0);
+        save_shard(&p, &st).unwrap();
+        let mut c = cfg(d.path(), 1, 20, 7);
+        let e = load_shard(&p, &c).unwrap_err();
+        assert!(
+            e.contains("PHASE8=true") && e.contains("wipe the state dir"),
+            "{e}"
+        );
+        c.phase8 = true;
+        assert_eq!(load_shard(&p, &c).unwrap(), Some(st));
     }
 
     #[test]

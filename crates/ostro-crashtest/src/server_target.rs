@@ -164,6 +164,20 @@ impl ServerTarget {
         http: &reqwest::Client,
         limit: Duration,
     ) -> Result<Self, String> {
+        Self::spawn_env(bin, data_dir, failpoints, &[], http, limit).await
+    }
+
+    /// [`Self::spawn`] with extra environment variables, set after the inherited `OSTRO_*`
+    /// and `RUST_LOG` are stripped: `OSTRO_<SECTION>__<KEY>` config overrides such as the
+    /// Phase 8 campaign's tiny snapshot / backup / blob GC settings (plan 08-20).
+    pub async fn spawn_env(
+        bin: &Path,
+        data_dir: &Path,
+        failpoints: Option<&str>,
+        env: &[(String, String)],
+        http: &reqwest::Client,
+        limit: Duration,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| format!("mkdir data dir: {e}"))?;
         let mut cmd = Command::new(bin);
         for (k, _) in std::env::vars_os() {
@@ -172,6 +186,9 @@ impl ServerTarget {
             }
         }
         cmd.env_remove("RUST_LOG");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         match failpoints {
             Some(fp) => cmd.env("FAILPOINTS", fp),
             None => cmd.env_remove("FAILPOINTS"),
