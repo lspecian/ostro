@@ -4,7 +4,12 @@
 //! `dev` / `server` / `openapi` / `build-info`. Every verb carries the connection flags
 //! ([`Conn`]: `--server`, `--json`, `--timeout`) itself, so they are accepted after the
 //! verb and do not leak into `ostro dev`.
+//!
+//! [`backup`] holds the `ostro backup` / `ostro restore` arguments (08-18); the binary
+//! embeds them as its own subcommands because restore and offline backup need the storage
+//! crates.
 
+pub mod backup;
 pub mod bridge;
 pub mod deploy;
 pub mod lifecycle;

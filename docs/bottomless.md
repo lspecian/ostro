@@ -5,7 +5,8 @@ partition logs as uploader-sealed chunks, partition snapshots, the metadata snap
 blob store. Restore (`ostro restore`, plan 08-18) rebuilds a node from that prefix at any
 retained manifest generation.
 
-Implementation: `crates/ostro-backup` (`chunk`, `manifest`, `fence`, `uploader`) and the
+Implementation: `crates/ostro-backup` (`chunk`, `manifest`, `fence`, `uploader`, and the
+08-18 `restore` / `archive` modules behind `ostro restore` / `ostro backup`) and the
 server service `crates/ostro-server/src/services/uploader.rs`. Decisions: P8-D3, P8-D4,
 P8-D5, P8-D23 in `.planning/phases/08-triggers-bottomless-observability/08-DECISIONS.md`.
 
@@ -217,3 +218,129 @@ Other metrics: `ostro_backup_upload_bytes_total{kind}` (`chunk`, `snapshot`, `me
 copy one into the image. The bundled webpki roots are not shipped (their licence, CDLA, is
 excluded by D-FX2), so `tls_roots = "webpki"` is a configuration error that points at the
 file option.
+
+## Restore runbook
+
+`ostro restore` (plan 08-18, P8-D6) rebuilds a node's data directory from a bucket prefix or
+a backup file and **verifies** it on the way. It never runs on its own: a node whose state is
+missing and whose log was trimmed refuses to start with "snapshot required: run 'ostro
+restore'".
+
+### Prerequisites
+
+- The `ostro` binary of the same or a newer version (the manifest records `ostro_version`).
+- An **empty or absent** target directory. Restore refuses anything else. If a restore was
+  interrupted (crash, Ctrl-C, a verification error), delete the directory and run it again.
+- Read access to the source. For S3, credentials come only from the environment:
+  `OSTRO_BACKUP_ACCESS_KEY_ID`, `OSTRO_BACKUP_SECRET_ACCESS_KEY` and optionally
+  `OSTRO_BACKUP_SESSION_TOKEN`, else the standard `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. No flag takes secret material, and the
+  report never prints credentials. Endpoint and region: `--endpoint` / `--region`, else
+  `OSTRO_BACKUP_ENDPOINT` / `AWS_ENDPOINT_URL` and `OSTRO_BACKUP_REGION` / `AWS_REGION`.
+
+### Commands
+
+```sh
+# From a bucket (current manifest):
+ostro restore --from s3://my-bucket/ostro/prod-1 --data-dir /var/lib/ostro-restored \
+  --endpoint http://127.0.0.1:8333 --allow-http          # SeaweedFS / local store only
+
+# From a local prefix or a backup file:
+ostro restore --from file:///var/backups/ostro --data-dir ./restored
+ostro restore --from ./ostro-backup.tar --data-dir ./restored
+
+# A backup file: online from a running server, or offline from a stopped data directory.
+ostro backup --to ./ostro-backup.tar --server http://127.0.0.1:7700
+ostro backup --to ./ostro-backup.tar --data-dir /var/lib/ostro      # server stopped
+```
+
+A backup file is a tar of the same layout as a bucket prefix (`manifest/`, `p/<pppp>/seg/`,
+`p/<pppp>/snap/`, `meta/`, `blobs/`, `LOCK`), so a file restore uses the same code path. The
+online backup (`GET /v1/admin/backup`) takes a fresh snapshot per partition, then runs one
+upload round into a temporary directory (a fresh fence identity; the server's own bucket,
+upload floor and remote retention are untouched) and streams the tar. The offline backup
+opens the stopped directory in Inspect mode (no append), starts the metadata group on a
+temporary copy (the directory is never written), and refuses a directory whose `LOCK` is
+held by a running server. Pass `--node-id` when the server's `[node] node_id` is not 1.
+
+Then start the server on the restored directory with the same partition count
+(`[node] partitions`); `node.toml` records it, together with the new `incarnation` and
+`restored_from`.
+
+### Choosing the restore point: `--at`
+
+- `--at 42`: manifest generation 42 (`manifest/gen/00000000000000000042`, or the current
+  manifest if it is generation 42).
+- `--at 2026-11-20T14:00:00Z` (RFC 3339): the newest retained manifest cut at or before that
+  time.
+
+Generation copies exist for every manifest that changed a referenced snapshot, and remote
+retention deletes those that reference deleted objects, so `--at` reaches back about
+`remote_snapshots_keep` snapshot cadences.
+
+### What restore does and checks
+
+1. Loads the manifest; its sha256 trailer, format and ordering rules (`snapshot_offset <=
+   verify_offset <= cut_offset`, chain start) are checked before anything is written.
+2. Writes `node.toml` with a **new incarnation**.
+3. Installs the metadata snapshot natively into the metadata Raft log (identical state,
+   applied index preserved).
+4. Downloads every blob, checking each sha256.
+5. Per partition, in parallel (`--parallelism`, default 4): downloads and installs the
+   snapshot (sha256 checked), walks the chunk chain back from the manifest head (forked
+   chunks are ignored) and verifies it forward.
+6. Writes the partition log up to `verify_offset`, replays it in Inspect mode and compares
+   the state hash with the manifest. A mismatch fails the restore and names the partition.
+   Then it appends the log up to `cut_offset` and replays again.
+7. Checks cross-partition consistency: no partition has seen an outbox message its sender
+   does not have.
+
+### Verifying the report
+
+`ostro restore` prints one row per partition (`--json` prints the full report):
+
+```text
+restored ./restored from s3://… (generation 812, cut at 1763648400123 ms, cluster c-…, 41 blobs, meta index 2210)
+   P      SNAPSHOT        VERIFY           CUT   CHUNKS  STATE_HASH        DIGEST
+   0         10240         10377         10377        3  5c1f0e…           9a7d22…
+   …
+verified: every partition's state hash matched at its verify offset; new incarnation 3f…
+took 1830 ms (manifest 12, meta 40, blobs 210, partitions 950, replay 610)
+```
+
+`--json` fields: `data_dir`, `source`, `generation`, `cluster_id`, `node_id`,
+`source_incarnation`, `incarnation`, `cut_at_ms`, `meta_index`, `blobs`, `takeover`,
+`partitions[]` (`p`, `snapshot_offset`, `chain_start`, `verify_offset`,
+`verify_state_hash`, `cut_offset`, `digest`, `chunks`, `envelopes`) and `durations`
+(`manifest_ms`, `meta_ms`, `blobs_ms`, `partitions_ms`, `replay_ms`, `total_ms`). The data
+lost by the restore is everything acknowledged after `cut_at_ms`. Restoring the same
+source twice yields the same digests.
+
+### Takeover or a new prefix
+
+The restored node has a new incarnation, so the source prefix's `LOCK` names another node:
+
+- **New prefix (default):** set `[backup] url` to a new prefix. The old prefix stays a
+  read-only restore source.
+- **Takeover:** `ostro restore --takeover` records the intent and prints the reminder; start
+  the server with the same `[backup] url` and `takeover = true`. Make sure the old node is
+  gone for good: after the takeover the old writer is fenced at its next manifest PUT.
+
+### RPO expectations
+
+RPO ≈ `seal_interval` + upload latency (see "RPO measurement"). With the default 1 s seal
+interval a crash loses at most the last couple of seconds of acknowledged work; the restore
+report's `cut_at_ms` says exactly where the restored history ends. Backup files have the RPO
+of the moment they were taken. The SC3 timing and RPO numbers are measured by 08-20.
+
+### Fresh-machine checklist
+
+1. Install the `ostro` binary.
+2. Export the S3 credentials (`OSTRO_BACKUP_*` or `AWS_*`), and the endpoint/region for a
+   non-AWS store.
+3. On a `FROM scratch` image (no `/etc/ssl/certs`), mount a CA bundle and pass
+   `--tls-roots-file /etc/ostro/ca.pem` (see "TLS roots for scratch images").
+4. `ostro restore --from s3://… --data-dir /var/lib/ostro` and read the report.
+5. Configure the server: same `[node] partitions` and `node_id`, and either a new
+   `[backup] url` or the old one with `takeover = true`.
+6. `ostro server --config …`; check `/readyz` and a few known runs.

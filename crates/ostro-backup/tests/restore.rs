@@ -591,3 +591,49 @@ async fn an_interrupted_restore_leaves_a_directory_the_next_restore_refuses() {
         assert_matches(&f.store, &f.last, &r).await;
     }
 }
+
+/// Restore timing at P=16 with 10k runs on LocalFs (reported in the 08-18 SUMMARY; run with
+/// `--ignored --nocapture`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "timing report"]
+async fn restore_timing_p16_10k_runs() {
+    const P16: u16 = 16;
+    let src = tempfile::tempdir().expect("src");
+    let remote = tempfile::tempdir().expect("remote");
+    let store = local_store(remote.path(), true);
+    let mut cfg = node_cfg(src.path(), P16);
+    cfg.wal.rotation_size_bytes = 64 * 1024 * 1024;
+    let node = open(cfg).await;
+    // 10k runs: 9k before the snapshots, 1k in the tail.
+    for p in 0..P16 {
+        for _ in 0..9 {
+            start_runs(&node, p, 9000 / 16 / 9).await;
+        }
+        node.snapshot_now(PartitionId(p)).await.expect("snapshot");
+    }
+    for p in 0..P16 {
+        start_runs(&node, p, 1000 / 16).await;
+    }
+    let up = uploader(&node, up_cfg());
+    let t = std::time::Instant::now();
+    let m = up
+        .round(&store)
+        .await
+        .expect("round")
+        .manifest
+        .expect("manifest");
+    println!("upload round: {:?}", t.elapsed());
+    drop(up);
+    shutdown(node).await;
+    let dst = tempfile::tempdir().expect("dst");
+    let mut o = opts(dst.path());
+    o.parallelism = 4;
+    let r = restore(RestoreSource::Store(Arc::clone(&store)), o)
+        .await
+        .expect("restore");
+    let runs: u64 = m.cut.iter().map(|e| e.cut_offset).sum();
+    println!(
+        "restore P=16, ~{runs} commands: {}",
+        serde_json::to_string(&r.durations).expect("json")
+    );
+}

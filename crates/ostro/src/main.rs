@@ -4,6 +4,10 @@
 //! talk to a server over REST (`--server` / `OSTRO_SERVER`, default
 //! `http://127.0.0.1:7700`).
 //!
+//! `ostro backup` / `ostro restore` (08-18): the online backup downloads
+//! `GET /v1/admin/backup`; the offline backup (`--data-dir`) and restore run here on
+//! [`ostro_backup`] (see docs/bottomless.md, "Restore runbook").
+//!
 //! `dev` and `server` load the layered configuration (base profile < optional TOML file
 //! < `OSTRO_<SECTION>__<KEY>` env < flags), start [`ostro_server::Server`], print one
 //! ready line on stdout, then wait for SIGINT / SIGTERM (or the API server stopping) and
@@ -62,6 +66,10 @@ enum Command {
     Openapi,
     /// Print build information (version, target triple, allocator).
     BuildInfo,
+    /// Write a backup file (tar): online from a running server, or offline (--data-dir).
+    Backup(ostro_cli::commands::backup::BackupArgs),
+    /// Rebuild a data directory from a bucket (s3://, file://) or a backup file, verified.
+    Restore(Box<ostro_cli::commands::backup::RestoreArgs>),
     #[command(flatten)]
     Client(Box<ostro_cli::ClientCommand>),
 }
@@ -141,6 +149,8 @@ fn main() -> ExitCode {
             }
             run_server("ostro server", cfg, started)
         }
+        Some(Command::Backup(a)) => run_backup(&a),
+        Some(Command::Restore(a)) => run_restore(&a),
         Some(Command::Client(cmd)) => ostro_cli::run(*cmd).into(),
         None => {
             use clap::CommandFactory;
@@ -157,6 +167,107 @@ fn fail(msg: impl std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
+fn runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("ostro")
+        .build()
+        .map_err(|e| fail(format!("cannot start the async runtime: {e}")))
+}
+
+/// `ostro backup`: online (REST download) or offline (`--data-dir`, Inspect mode).
+fn run_backup(a: &ostro_cli::commands::backup::BackupArgs) -> ExitCode {
+    use ostro_cli::commands::backup as cli;
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    let Some(dir) = &a.data_dir else {
+        return rt.block_on(cli::run_online(a)).into();
+    };
+    // The server's default clock (the one injectable clock, system time here).
+    let clock = ostro_server::ServerOptions::default().clock;
+    match rt.block_on(ostro_backup::archive::backup_offline(
+        dir, a.node_id, clock, &a.to,
+    )) {
+        Ok(rep) => cli::print_backup(
+            &serde_json::json!({
+                "file": a.to.display().to_string(),
+                "mode": "offline",
+                "bytes": rep.bytes,
+                "entries": rep.entries,
+                "generation": rep.manifest.generation,
+            }),
+            a.json,
+        )
+        .into(),
+        Err(e) => fail(format!("offline backup: {e}")),
+    }
+}
+
+/// `ostro restore`.
+fn run_restore(a: &ostro_cli::commands::backup::RestoreArgs) -> ExitCode {
+    use ostro_backup::restore::{At, RestoreOptions, RestoreSource, restore};
+    use ostro_cli::commands::backup as cli;
+    let env = |k: &str| std::env::var(k).ok();
+    let source = match cli::classify_from(&a.from) {
+        cli::FromArg::Url(url) => {
+            let (access_key_id, secret_access_key, session_token) = cli::env_credentials(env);
+            let (endpoint, region) = cli::endpoint_and_region(a, env);
+            let cfg = ostro_backup::BackupConfig {
+                url: Some(url.clone()),
+                endpoint,
+                region,
+                url_style: match a.url_style {
+                    cli::UrlStyleArg::Path => ostro_backup::UrlStyle::Path,
+                    cli::UrlStyleArg::Virtual => ostro_backup::UrlStyle::Virtual,
+                },
+                access_key_id,
+                secret_access_key,
+                session_token,
+                allow_http: a.allow_http,
+                tls_roots: a.tls_roots_file.clone().map_or(
+                    ostro_backup::TlsRoots::Platform,
+                    ostro_backup::TlsRoots::File,
+                ),
+                ..ostro_backup::BackupConfig::default()
+            };
+            RestoreSource::Url {
+                url,
+                options: ostro_backup::fence::store_options(&cfg),
+            }
+        }
+        cli::FromArg::File(p) => {
+            if !p.is_file() {
+                return fail(format!(
+                    "--from {}: not a file (use s3://bucket/prefix, file:///abs/path or a .tar backup file)",
+                    p.display()
+                ));
+            }
+            RestoreSource::Tar(p)
+        }
+    };
+    let mut opts = RestoreOptions::new(&a.data_dir);
+    opts.at = a.at.map(|at| match at {
+        cli::AtArg::Generation(g) => At::Generation(g),
+        cli::AtArg::TimeMs(t) => At::TimeMs(t),
+    });
+    opts.takeover = a.takeover;
+    opts.parallelism = a.parallelism.max(1);
+    opts.node_id = a.node_id;
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    match rt.block_on(restore(source, opts)) {
+        Ok(report) => match serde_json::to_value(&report) {
+            Ok(v) => cli::print_restore_report(&v, a.json).into(),
+            Err(e) => fail(format!("restore report: {e}")),
+        },
+        Err(e) => fail(format!("restore failed: {e}")),
+    }
+}
+
 /// Start the server, print the ready line, wait for a signal, shut down.
 fn run_server(name: &str, cfg: ServerConfig, started: Instant) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -167,7 +278,7 @@ fn run_server(name: &str, cfg: ServerConfig, started: Instant) -> ExitCode {
         Ok(rt) => rt,
         Err(e) => return fail(format!("cannot start the async runtime: {e}")),
     };
-    init_tracing(&cfg.log);
+    init_tracing(&cfg.effective_log_section());
     rt.block_on(async move {
         // Register the handlers before startup so a signal during startup is not lost
         // (it is delivered as soon as startup finishes) and does not kill the process
