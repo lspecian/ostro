@@ -146,3 +146,11 @@ These come from 06-03 and are out of scope.
 
 - Created files exist on main: schedules.rs, webhooks.rs, tests/phase8_verbs.rs, crates/ostro/tests/cli_phase8.rs.
 - Commits 5d28348 and 407c8f4 are on main.
+
+## Post-plan fixes (2026-11-20, 4a5007a)
+
+- `cli_phase8::round_trip_against_ostro_dev` still accepted only the stub answer, and failed with `workflow "greet" does not exist` once 08-14/08-15 landed the controllers. It now drives the real success path against `ostro dev`:
+  - deploys `signals`;
+  - schedules: create, get, ls, update, pause, resume, trigger (request-id dedupe) and delete, plus the 400, 404 and 409 cases;
+  - webhooks: create, get, ls, update and delete, with a github verifier whose secret is sealed via `secret set --from-env`, plus an unknown secret_ref (400).
+- The secret-material checks stay: no `--secret` flag, and the canary never appears in CLI output or in the server debug log.

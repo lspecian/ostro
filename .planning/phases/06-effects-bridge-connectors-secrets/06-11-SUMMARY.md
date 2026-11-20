@@ -172,3 +172,18 @@ All results are from the worktree rebased onto main at 6e86dc2.
 
 - All 10 files in files_modified exist on main.
 - Commits 6532976 (Task 1) and 6e86dc2 (Task 2) are on main.
+
+## Post-plan fixes (2026-11-20, eb89cea)
+
+06-18 ran the PG leg for the first time. 2 of the 13 `sql_pg` tests failed. Both are fixed. Re-run against a private PG 14: 10/10 without failpoints and 13/13 with `--features failpoints`, with no SKIP. `ostro:fx_sql_crash` PG legs also pass (MySQL legs still SKIP, no MySQL).
+
+- **`pg_value_round_trip` (numeric scale). Product bug, fixed.**
+  - Cause: sqlx 0.9.1 decodes a binary PG `numeric` from its base-10000 digit groups and ignores the `dscale` header. So `12345678901234567890.125` came back as `...1250` and `10000` as `1E+4`. BigDecimal Display also prints `1E-9` past 5 leading zeros.
+  - **Decision:** `Numeric` carries the server's `numeric::text` exactly, meaning the server's scale in plain notation. Unconstrained `numeric` keeps the stored scale, and `numeric(30,4)` 1.5 is `"1.5000"`.
+  - Fix: `value.rs` re-applies the wire `dscale` and uses `to_plain_string`. MySQL DECIMAL uses the same plain notation.
+  - The round-trip expectation was kept. New assertions pin scale, plain notation and equality with `n::text`.
+- **`pg_schema_isolates_connections`. Test defect, not an isolation bug.**
+  - `search_path` is a per-pool connect option, and each named connection has its own pool, keyed by name and config bytes.
+  - Connection `a` had created its own `ostro_effects` in its own schema, because the token DDL runs on the first pool build (this plan, `manage_schema`). The test assumed that table would not exist.
+  - The test now asserts each schema's tables, nothing in `public`, none of `b`'s rows in `a`'s token table, and `current_schema()` per connection.
+  - Design note: with `manage_schema = true`, even a read-only first use runs the DDL. A connection whose user lacks CREATE needs `manage_schema = false`.
