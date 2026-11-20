@@ -8,7 +8,9 @@
 //!   so concurrent appends share group commits. A `Semaphore(max_inflight_appends)` bounds
 //!   the batches between enqueue and fsync.
 //! - **HW** (W9): published by the node's WAL commit callback (after fsync) through
-//!   [`compute_hw`](crate::compute_hw); see [`LogNode`](crate::LogNode).
+//!   [`compute_hw`](crate::compute_hw) and [`HwVector::publish_hw`] (the single HW
+//!   publication point, which also feeds the consistent cut); see [`LogNode`](crate::LogNode).
+//!   Truncation lowers it through [`HwVector::retract_hw`].
 //! - **Fail-stop** (STOR-07): a WAL write/fsync error (the vendored WAL poisons the partition)
 //!   turns health `Failed` and role `Offline` exactly once; waiters get an error, later appends
 //!   fail, the HW never covers the failed batch. There is no retry and no reopen: the
@@ -34,11 +36,14 @@ use tokio::sync::{Mutex, RwLock, Semaphore, watch};
 use tracing::{error, info, warn};
 
 use crate::barrier::TrimPermit;
+use crate::cut::HwVector;
 use crate::epoch_cache::EpochCache;
 use crate::error::LogError;
 use crate::node::LogNodeConfig;
 use crate::recovery::{RecoveryReport, TOPIC, list_segments, segment_dir};
-use crate::replicated::{AppendReceipt, EpochHistory, Isr, LogHealth, ReplicatedLog, Role};
+use crate::replicated::{
+    AppendReceipt, EpochHistory, Isr, LogHealth, RawBatch, ReplicatedLog, Role, push_raw,
+};
 use crate::verify::{VerifiedBatch, verify_record};
 
 /// Sequencer state, guarded by the per-partition async mutex.
@@ -111,7 +116,10 @@ pub struct Rf1Log {
     /// Mirror of `seq.next` for lock-free `log_end`.
     leo: AtomicU64,
     log_start: AtomicU64,
+    /// This partition's HW watch (read side; written only through `hw_vector`).
     hw: Arc<watch::Sender<Offset>>,
+    /// The node's HW publication point (truncation lowers the HW through it).
+    hw_vector: Arc<HwVector>,
     epochs: std::sync::Mutex<EpochCache>,
     status: Arc<Status>,
     /// Reads take it shared; trim and truncate take it exclusive (segment files change).
@@ -133,17 +141,21 @@ impl std::fmt::Debug for Rf1Log {
 }
 
 impl Rf1Log {
-    /// Build from a successful recovery. `hw` is the sender the node's commit callback
-    /// advances; it starts at `recovery.leo` (recovery left every retained segment durable).
+    /// Build from a successful recovery. `hw_vector` holds the HW watch the node's commit
+    /// callback advances; it starts at `recovery.leo` (recovery left every retained segment
+    /// durable).
     /// The sequencer starts at `recovery.leo` too, so an empty log anchored at the floor
     /// (Phase 12 F3) assigns its first append exactly that offset.
     pub(crate) fn new(
         pid: PartitionId,
         cfg: &LogNodeConfig,
         wal: Arc<GroupCommitWal>,
-        hw: Arc<watch::Sender<Offset>>,
+        hw_vector: Arc<HwVector>,
         recovery: RecoveryReport,
     ) -> Self {
+        let hw = hw_vector
+            .sender(pid)
+            .expect("hw watch exists for a recovered partition");
         let (node_id, max_envelope_bytes) = (cfg.node_id, cfg.max_envelope_bytes);
         let epochs = EpochCache::from_pairs(&recovery.epochs);
         let current_epoch = epochs.latest_epoch().unwrap_or_default();
@@ -165,6 +177,7 @@ impl Rf1Log {
             leo: AtomicU64::new(recovery.leo.0),
             log_start: AtomicU64::new(recovery.log_start.0),
             hw,
+            hw_vector,
             epochs: std::sync::Mutex::new(epochs),
             status: Arc::new(Status {
                 pid,
@@ -297,6 +310,78 @@ impl Rf1Log {
             .read_from_bounded(from.as_i64(), max_records, max_bytes)
             .await
             .map_err(|e| format!("segment read failed: {e}"))
+    }
+}
+
+impl Rf1Log {
+    /// The verified read loop behind [`ReplicatedLog::read`] and
+    /// [`ReplicatedLog::read_envelopes`]: whole batches inside `[from, min(upto, HW))`, each
+    /// verified, then mapped through `f` together with its WAL record.
+    async fn read_with<T>(
+        &self,
+        from: Offset,
+        upto: Offset,
+        max_bytes: usize,
+        mut f: impl FnMut(VerifiedBatch, WalRecord) -> T,
+    ) -> Result<Vec<T>, LogError> {
+        let _layout = self.layout.read().await;
+        if from < self.log_start() || from > self.log_end() {
+            return Err(LogError::OutOfRange(from));
+        }
+        let upto = upto.min(self.hw_now());
+        let mut out: Vec<T> = Vec::new();
+        if from >= upto {
+            return Ok(out);
+        }
+        let mut next = from;
+        let mut bytes = 0usize;
+        'fill: while next < upto {
+            let want = usize::try_from(upto - next).unwrap_or(usize::MAX);
+            let budget = max_bytes.saturating_sub(bytes).max(1);
+            let recs = match self.fetch(next, want, budget).await {
+                Ok(r) => r,
+                Err(e) => return Err(self.read_failure(next, &e)),
+            };
+            let mut progressed = false;
+            for rec in recs {
+                let (base, last) = (rec.get_base_offset(), rec.get_last_offset());
+                if last < next.as_i64() {
+                    continue;
+                }
+                if base < next.as_i64() {
+                    if next == from && out.is_empty() {
+                        // Caller error: `from` is inside a batch.
+                        return Err(LogError::OutOfRange(from));
+                    }
+                    return Err(self.read_failure(next, "overlapping batch"));
+                }
+                let len = match &rec {
+                    WalRecord::V2 { canonical_data, .. } => canonical_data.len(),
+                    WalRecord::V1 { .. } => 0,
+                };
+                let batch = match verify_record(&rec, next, self.pid) {
+                    Ok(b) => b,
+                    Err(c) => return Err(self.read_failure(next, &c.to_string())),
+                };
+                if batch.end() > upto {
+                    break 'fill;
+                }
+                if !out.is_empty() && bytes.saturating_add(len) > max_bytes {
+                    break 'fill;
+                }
+                bytes = bytes.saturating_add(len);
+                next = batch.end();
+                out.push(f(batch, rec));
+                progressed = true;
+                if bytes >= max_bytes || next >= upto {
+                    break 'fill;
+                }
+            }
+            if !progressed {
+                return Err(self.read_failure(next, "no batch starts at this offset"));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -470,62 +555,28 @@ impl ReplicatedLog for Rf1Log {
         upto: Offset,
         max_bytes: usize,
     ) -> Result<Vec<VerifiedBatch>, LogError> {
-        let _layout = self.layout.read().await;
-        if from < self.log_start() || from > self.log_end() {
-            return Err(LogError::OutOfRange(from));
-        }
-        let upto = upto.min(self.hw_now());
-        let mut out: Vec<VerifiedBatch> = Vec::new();
-        if from >= upto {
-            return Ok(out);
-        }
-        let mut next = from;
-        let mut bytes = 0usize;
-        'fill: while next < upto {
-            let want = usize::try_from(upto - next).unwrap_or(usize::MAX);
-            let budget = max_bytes.saturating_sub(bytes).max(1);
-            let recs = match self.fetch(next, want, budget).await {
-                Ok(r) => r,
-                Err(e) => return Err(self.read_failure(next, &e)),
-            };
-            let mut progressed = false;
-            for rec in recs {
-                let (base, last) = (rec.get_base_offset(), rec.get_last_offset());
-                if last < next.as_i64() {
-                    continue;
-                }
-                if base < next.as_i64() {
-                    if next == from && out.is_empty() {
-                        // Caller error: `from` is inside a batch.
-                        return Err(LogError::OutOfRange(from));
-                    }
-                    return Err(self.read_failure(next, "overlapping batch"));
-                }
-                let len = match &rec {
-                    WalRecord::V2 { canonical_data, .. } => canonical_data.len(),
-                    WalRecord::V1 { .. } => 0,
+        self.read_with(from, upto, max_bytes, |batch, _| batch)
+            .await
+    }
+
+    async fn read_envelopes(
+        &self,
+        from: Offset,
+        max_bytes: usize,
+    ) -> Result<Vec<RawBatch>, LogError> {
+        let pieces = self
+            .read_with(from, Offset(u64::MAX), max_bytes, |batch, rec| {
+                let env = match rec {
+                    WalRecord::V2 { canonical_data, .. } => Bytes::from(canonical_data),
+                    // verify_record accepts V2 records only.
+                    WalRecord::V1 { .. } => Bytes::new(),
                 };
-                let batch = match verify_record(&rec, next, self.pid) {
-                    Ok(b) => b,
-                    Err(c) => return Err(self.read_failure(next, &c.to_string())),
-                };
-                if batch.end() > upto {
-                    break 'fill;
-                }
-                if !out.is_empty() && bytes.saturating_add(len) > max_bytes {
-                    break 'fill;
-                }
-                bytes = bytes.saturating_add(len);
-                next = batch.end();
-                out.push(batch);
-                progressed = true;
-                if bytes >= max_bytes || next >= upto {
-                    break 'fill;
-                }
-            }
-            if !progressed {
-                return Err(self.read_failure(next, "no batch starts at this offset"));
-            }
+                (batch.epoch, batch.base, batch.end(), env)
+            })
+            .await?;
+        let mut out = Vec::new();
+        for (epoch, base, end, env) in pieces {
+            push_raw(&mut out, epoch, base, end, env);
         }
         Ok(out)
     }
@@ -585,14 +636,7 @@ impl ReplicatedLog for Rf1Log {
             .max(start);
         seq.next = new;
         self.leo.store(new.0, Ordering::Release);
-        self.hw.send_if_modified(|h| {
-            if *h > new {
-                *h = new;
-                true
-            } else {
-                false
-            }
-        });
+        self.hw_vector.retract_hw(self.pid, new);
         self.epochs_lock().truncate_from_end(new);
         *self.index.lock().await = None;
         self.status.truncations.send_modify(|g| *g += 1);

@@ -6,7 +6,9 @@
 //!    WAL opens a NEW segment on a partition's first append (W4); recovery must have finished
 //!    cutting files before that can happen;
 //! 3. register ONE commit callback that advances each partition's HW through
-//!    [`compute_hw`] (monotonic, after fsync, W9);
+//!    [`compute_hw`] (monotonic, after fsync, W9) and publishes it through
+//!    [`HwVector::publish_hw`], the single HW publication point that also feeds the
+//!    consistent cut ([`LogNode::cut`], W7);
 //! 4. build an [`Rf1Log`] for every partition that recovered. Per-partition recovery errors
 //!    are returned per slot; the other partitions still open.
 
@@ -17,9 +19,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use ostro_types::envelope::DEFAULT_MAX_ENVELOPE_BYTES;
 use ostro_types::{Offset, PartitionCount, PartitionId};
 use ostro_wal::{GroupCommitConfig, GroupCommitWal};
-use tokio::sync::watch;
 use tracing::{error, info};
 
+use crate::cut::HwVector;
 use crate::error::LogError;
 use crate::hw::{ReplicaProgress, compute_hw};
 use crate::recovery::{RecoveryReport, TOPIC, recover_partition};
@@ -61,6 +63,7 @@ pub struct LogNode {
     wal: Arc<GroupCommitWal>,
     commit_batches: Arc<AtomicU64>,
     partitions: PartitionCount,
+    hw_vector: Arc<HwVector>,
 }
 
 impl std::fmt::Debug for LogNode {
@@ -118,18 +121,16 @@ impl LogNode {
         // (2) only now the shared WAL.
         let wal = Arc::new(GroupCommitWal::new(cfg.wal_dir.clone(), cfg.wal.clone()));
 
-        // (3) one commit callback: partition -> HW sender, monotonic via compute_hw.
-        let hws: Arc<[Option<Arc<watch::Sender<Offset>>>]> = reports
+        // (3) one commit callback: partition -> HwVector::publish_hw (vector, then watch),
+        //     monotonic via compute_hw.
+        let initial: Vec<Option<Offset>> = reports
             .iter()
-            .map(|r| {
-                r.as_ref()
-                    .ok()
-                    .map(|rep| Arc::new(watch::channel(rep.leo).0))
-            })
+            .map(|r| r.as_ref().ok().map(|rep| rep.leo))
             .collect();
+        let hw_vector = Arc::new(HwVector::new(&initial));
         let commit_batches = Arc::new(AtomicU64::new(0));
         {
-            let hws = Arc::clone(&hws);
+            let hw_vector = Arc::clone(&hw_vector);
             let counter = Arc::clone(&commit_batches);
             let node = cfg.node_id;
             wal.set_commit_callback(Arc::new(
@@ -138,26 +139,18 @@ impl LogNode {
                         return;
                     }
                     counter.fetch_add(1, Ordering::Relaxed);
-                    let Some(Some(tx)) = usize::try_from(partition).ok().and_then(|i| hws.get(i))
-                    else {
+                    let Ok(pid) = u16::try_from(partition).map(PartitionId) else {
                         return;
                     };
                     let Some(durable_end) = max.checked_add(1).and_then(Offset::from_i64) else {
                         return;
                     };
-                    tx.send_if_modified(|hw| {
-                        let new = compute_hw(&[ReplicaProgress {
-                            node,
-                            leo: durable_end,
-                            in_isr: true,
-                        }]);
-                        if new > *hw {
-                            *hw = new;
-                            true
-                        } else {
-                            false
-                        }
-                    });
+                    let hw = compute_hw(&[ReplicaProgress {
+                        node,
+                        leo: durable_end,
+                        in_isr: true,
+                    }]);
+                    hw_vector.publish_hw(pid, hw);
                 },
             ));
         }
@@ -176,10 +169,13 @@ impl LogNode {
                         torn_cut = ?rep.torn.as_ref().map(|t| (t.segment.display().to_string(), t.byte_pos)),
                         "partition log recovered"
                     );
-                    let hw = hws[pid.index()]
-                        .clone()
-                        .expect("hw sender exists for a recovered partition");
-                    Ok(Arc::new(Rf1Log::new(pid, &cfg, Arc::clone(&wal), hw, rep)))
+                    Ok(Arc::new(Rf1Log::new(
+                        pid,
+                        &cfg,
+                        Arc::clone(&wal),
+                        Arc::clone(&hw_vector),
+                        rep,
+                    )))
                 }
                 Err(e) => {
                     error!(partition = pid.0, error = %e, "partition log recovery failed");
@@ -193,6 +189,7 @@ impl LogNode {
                 wal,
                 commit_batches,
                 partitions: cfg.partitions,
+                hw_vector,
             },
             logs,
         ))
@@ -201,6 +198,22 @@ impl LogNode {
     /// Number of WAL group commits (commit-callback invocations) since open, all partitions.
     pub fn commit_batches(&self) -> u64 {
         self.commit_batches.load(Ordering::Relaxed)
+    }
+
+    /// The consistent cut: every partition's HW, read atomically under one lock (W7).
+    ///
+    /// Causally closed: an HW enters the cut before anyone can observe it through the HW
+    /// watch (see [`HwVector`]), so if the cut contains a record that was appended after
+    /// observing another partition's HW `x`, it also contains `x`. A partition whose
+    /// recovery failed reports 0.
+    pub fn cut(&self) -> Vec<Offset> {
+        self.hw_vector.cut()
+    }
+
+    /// The node's [`HwVector`] (Phase 12's tracker publishes through it; tests use it for
+    /// the negative control).
+    pub fn hw_vector(&self) -> &Arc<HwVector> {
+        &self.hw_vector
     }
 
     /// Partition count.

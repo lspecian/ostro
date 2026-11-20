@@ -8,6 +8,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
+use ostro_types::envelope;
 use ostro_types::{Epoch, Offset, PartitionId};
 use tokio::sync::watch;
 
@@ -58,6 +59,49 @@ pub enum LogHealth {
         /// What failed.
         reason: String,
     },
+}
+
+/// Raw envelopes of consecutive batches written under one epoch (bottomless upload, P8-D3).
+///
+/// `envelopes` are the stored OSTR envelope bytes, one per log batch, in offset order,
+/// byte-identical to `envelope::encode` of the batch's commands. Batch boundaries are
+/// preserved (one element per batch, never merged or split), and a `RawBatch` never spans
+/// an epoch change: [`ReplicatedLog::read_envelopes`] starts a new one when the epoch moves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawBatch {
+    /// First offset of the first envelope.
+    pub base: Offset,
+    /// Exclusive end of the last envelope.
+    pub end: Offset,
+    /// Leader epoch every envelope here was written under.
+    pub epoch: u32,
+    /// The envelopes, one per batch, contiguous: each starts where the previous ended.
+    pub envelopes: Vec<Bytes>,
+}
+
+/// Append one batch's envelope (`[base, end)`, written under `epoch`) to `out`, extending
+/// the last [`RawBatch`] when it has the same epoch and ends at `base`.
+pub(crate) fn push_raw(
+    out: &mut Vec<RawBatch>,
+    epoch: Epoch,
+    base: Offset,
+    end: Offset,
+    env: Bytes,
+) {
+    if let Some(last) = out.last_mut()
+        && last.epoch == epoch.0
+        && last.end == base
+    {
+        last.end = end;
+        last.envelopes.push(env);
+        return;
+    }
+    out.push(RawBatch {
+        base,
+        end,
+        epoch: epoch.0,
+        envelopes: vec![env],
+    });
 }
 
 /// Snapshot of the leader-epoch history: each epoch with the first offset it wrote, ascending.
@@ -131,6 +175,31 @@ pub trait ReplicatedLog: Send + Sync + 'static {
         upto: Offset,
         max_bytes: usize,
     ) -> impl Future<Output = Result<Vec<VerifiedBatch>, LogError>> + Send;
+
+    /// The stored envelope bytes of whole batches inside `[from, HW)`, starting at `from` (a
+    /// batch boundary), up to about `max_bytes` (at least one batch when one fits), grouped
+    /// into [`RawBatch`]es that never span an epoch change. Every batch is verified like
+    /// [`read`](Self::read). HW-capped: never returns data that is not committed.
+    ///
+    /// The default re-encodes [`read`](Self::read)'s verified batches (envelope encoding is
+    /// deterministic, so this is byte-identical to the stored bytes); implementations that
+    /// hold the raw bytes return them directly ([`Rf1Log`](crate::Rf1Log) does).
+    fn read_envelopes(
+        &self,
+        from: Offset,
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<Vec<RawBatch>, LogError>> + Send {
+        async move {
+            let batches = self.read(from, Offset(u64::MAX), max_bytes).await?;
+            let p = self.partition();
+            let mut out = Vec::new();
+            for b in batches {
+                let env = Bytes::from(envelope::encode(p, b.epoch, b.base, &b.commands));
+                push_raw(&mut out, b.epoch, b.base, b.end(), env);
+            }
+            Ok(out)
+        }
+    }
 
     /// Leader-epoch history snapshot.
     fn epochs(&self) -> EpochHistory;
