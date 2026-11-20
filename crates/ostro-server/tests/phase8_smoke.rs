@@ -52,10 +52,17 @@ async fn phase8_routes_reach_controller_stubs() {
         Some("application/x-tar")
     );
     let tar = r.bytes().await.expect("tar body");
-    assert!(tar.len() > 512 && tar.len() % 512 == 0, "{} bytes", tar.len());
+    assert!(
+        tar.len() > 512 && tar.len() % 512 == 0,
+        "{} bytes",
+        tar.len()
+    );
     assert_eq!(&tar[257..262], b"ustar", "a tar archive");
     let has = |name: &[u8]| tar.windows(name.len()).any(|w| w == name);
-    assert!(has(b"manifest/current") && has(b"LOCK"), "bottomless layout");
+    assert!(
+        has(b"manifest/current") && has(b"LOCK"),
+        "bottomless layout"
+    );
 
     // 08-14 implemented the schedule controller: real answers instead of the stub.
     let (st, v) = s.get_json("/v1/schedules").await;
