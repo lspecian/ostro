@@ -104,16 +104,16 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Effects, Connectors & Secrets
 
-- [ ] **FX-01**: HTTP effect: request intent committed before I/O; timeouts, response size cap, redirect policy, retries per policy [FR-4.1]
-- [ ] **FX-02**: Every HTTP effect carries a stable idempotency key (run, op, name), overridable by the user
-- [ ] **FX-03**: In-flight effects are re-driven by replay with the same key; if the provider's idempotency window has elapsed, the effect fails with `effect_outcome_unknown` instead of resending
+- [x] **FX-01**: HTTP effect: request intent committed before I/O; timeouts, response size cap, redirect policy, retries per policy [FR-4.1]
+- [x] **FX-02**: Every HTTP effect carries a stable idempotency key (run, op, name), overridable by the user
+- [x] **FX-03**: In-flight effects are re-driven by replay with the same key; if the provider's idempotency window has elapsed, the effect fails with `effect_outcome_unknown` instead of resending
 - [ ] **FX-04**: SQL connector (Postgres, MySQL) with named connections; `exactly-once` mode wraps statements in a transaction with an `ostro_effects` idempotency token [FR-4.2]
 - [ ] **FX-05**: Object store connector through the shared `ostro-objstore` crate: S3-compatible backends (AWS S3, SeaweedFS, R2, Ceph; GCS via S3-interoperability HMAC keys) and the local filesystem, with get/put/delete/head/presign. Azure Blob is deferred until a native backend exists [FR-4.3]
-- [ ] **FX-06**: Secrets are referenced as `{{secret:name}}`, resolved only in the host bridge, zeroized after use, never journaled or logged, and never visible to guests
-- [ ] **FX-07**: Secret grants are bound to (module, secret, destination origins); templated requests do not auto-follow redirects; responses are scrubbed of secret values
-- [ ] **FX-08**: Per-module egress allow-lists; SSRF guard blocks private/link-local/metadata ranges incl. IPv4-mapped IPv6, NAT64, decimal/octal literals, cloud metadata IPv6, redirects and env proxies (resolve once, pin address, no proxy) [FR-4.4]
-- [ ] **FX-09**: Per-target rate limits for connectors [FR-4.5]
-- [ ] **FX-10**: Pluggable secret providers: built-in sealed store, env/file, HashiCorp Vault, Kubernetes Secrets
+- [x] **FX-06**: Secrets are referenced as `{{secret:name}}`, resolved only in the host bridge, zeroized after use, never journaled or logged, and never visible to guests
+- [x] **FX-07**: Secret grants are bound to (module, secret, destination origins); templated requests do not auto-follow redirects; responses are scrubbed of secret values
+- [x] **FX-08**: Per-module egress allow-lists; SSRF guard blocks private/link-local/metadata ranges incl. IPv4-mapped IPv6, NAT64, decimal/octal literals, cloud metadata IPv6, redirects and env proxies (resolve once, pin address, no proxy) [FR-4.4]
+- [x] **FX-09**: Per-target rate limits for connectors [FR-4.5]
+- [x] **FX-10**: Pluggable secret providers: built-in sealed store, env/file, HashiCorp Vault, Kubernetes Secrets
 
 ### Workers & Placement
 
@@ -311,16 +311,16 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | TRIG-01 | Phase 8 | Pending |
 | TRIG-02 | Phase 8 | Pending |
 | TRIG-03 | Phase 8 | Pending |
-| FX-01 | Phase 6 | Pending |
-| FX-02 | Phase 6 | Pending |
-| FX-03 | Phase 6 | Pending |
-| FX-04 | Phase 6 | Pending |
-| FX-05 | Phase 6 | Pending |
-| FX-06 | Phase 6 | Pending |
-| FX-07 | Phase 6 | Pending |
-| FX-08 | Phase 6 | Pending |
-| FX-09 | Phase 6 | Pending |
-| FX-10 | Phase 6 | Pending |
+| FX-01 | Phase 6 | Complete |
+| FX-02 | Phase 6 | Complete |
+| FX-03 | Phase 6 | Complete |
+| FX-04 | Phase 6 | Partial (PG legs verified locally; MySQL 8.4 legs human_needed until first CI push) |
+| FX-05 | Phase 6 | Partial (LocalFs + in-process S3 verified; SeaweedFS legs human_needed until first CI push) |
+| FX-06 | Phase 6 | Complete |
+| FX-07 | Phase 6 | Complete |
+| FX-08 | Phase 6 | Complete |
+| FX-09 | Phase 6 | Complete |
+| FX-10 | Phase 6 | Complete |
 | WORK-01 | Phase 7 | Pending |
 | WORK-02 | Phase 7 | Pending |
 | WORK-03 | Phase 7 | Pending |
