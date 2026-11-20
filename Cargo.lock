@@ -3177,6 +3177,7 @@ name = "ostro-engine"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "bytes",
  "chacha20",
  "fail",

@@ -210,6 +210,9 @@ pub struct HostState {
     /// (kept only when a driver is present). Started and removed by [`Self::flush`] once
     /// the append carrying their `EffectScheduled` returns `Ok` (FX-01).
     pub(crate) pending_effects: BTreeMap<OpId, LiveEffect>,
+    /// Trace state of this activation (08-11); `None` outside the activation driver.
+    /// Step spans are emitted by [`Self::flush`] only after their append committed.
+    pub(crate) trace: Option<crate::telemetry::ActivationTrace>,
 }
 
 impl std::fmt::Debug for HostState {
@@ -253,6 +256,7 @@ impl HostState {
             hot: init.hot,
             driver,
             pending_effects: BTreeMap::new(),
+            trace: None,
         })
     }
 
@@ -337,6 +341,11 @@ impl HostState {
         };
         let from_seq = first.seq;
         let (scheduled, cancelled) = self.effect_ops(&pending);
+        let steps = self
+            .trace
+            .as_mut()
+            .map(|t| t.collect_steps(&pending))
+            .unwrap_or_default();
         let r = sink
             .append(&self.run, self.attempt, from_seq, pending)
             .await;
@@ -346,6 +355,9 @@ impl HostState {
             .filter(|e| !cancelled.contains(&e.op))
             .collect();
         r?;
+        if let Some(t) = &self.trace {
+            t.emit_steps(steps);
+        }
         if let Some(driver) = &self.driver {
             for effect in started {
                 driver.start(&self.run, self.attempt, effect);

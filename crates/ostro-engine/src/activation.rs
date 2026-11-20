@@ -23,7 +23,7 @@
 //! dropped, the memory budget released).
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use ostro_types::journal::Failure;
 use tracing::Instrument;
@@ -41,6 +41,7 @@ use crate::limits::{Breach, HasLimits};
 use crate::replay::ReplayError;
 use crate::runtime::{Prepared, Runtime};
 use crate::sink::{Activate, ActivationOutcome, ActivationSink, AppendError};
+use crate::telemetry::{ActivationSpan, RunTrace, current_traceparent};
 
 /// Result of classifying an error returned by `call_run` (a trap).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +162,16 @@ pub(crate) async fn run_activation(
     let run = act.run.clone();
     let attempt = act.attempt;
     let started = Instant::now();
-    let outcome = execute(rt, p, act, sink.clone()).instrument(span).await;
+    // OBS-01 (08-11): the activation span. Its counter is the committed journal length at
+    // activation start, so every activation of an attempt gets a distinct, reproducible id.
+    let counter = u32::try_from(act.journal.len()).unwrap_or(u32::MAX);
+    let run_trace = RunTrace::new(&run.run_id, current_traceparent().as_deref());
+    // clock-exempt: span timestamps only (telemetry never feeds the journal).
+    let mut aspan = ActivationSpan::start(run_trace, attempt, counter, SystemTime::now());
+    let outcome = execute(rt, p, act, sink.clone(), &mut aspan)
+        .instrument(span)
+        .await;
+    aspan.end(&outcome, outcome_code(&outcome), SystemTime::now()); // clock-exempt: span timestamp
     metrics::counter!("ostro_activation_outcomes_total", "outcome" => outcome_code(&outcome))
         .increment(1);
     if let ActivationOutcome::Evicted { reason } = &outcome {
@@ -180,6 +190,7 @@ async fn execute(
     p: &Prepared,
     act: Activate,
     sink: Arc<dyn ActivationSink>,
+    aspan: &mut ActivationSpan,
 ) -> ActivationOutcome {
     let engine = rt.engine();
     let cfg = engine.config();
@@ -191,6 +202,7 @@ async fn execute(
         cancel,
         ..
     } = act;
+    let replayed_events = journal.len() as u64;
     // Without an input channel every unsatisfied wait evicts.
     let hot = inputs.map(|inputs| HotWait {
         inputs,
@@ -219,6 +231,8 @@ async fn execute(
             },
         )
     };
+    aspan.set_details(&workflow, replayed_events);
+    state.trace = Some(aspan.trace().clone());
     let mut store = Store::new(engine.engine(), state);
     if let Err(e) = configure_store(&mut store, cfg.activation_fuel) {
         return ActivationOutcome::AttemptFailed(AttemptFailure::Trap(format!("{e:#}")));

@@ -76,6 +76,7 @@ use crate::host::effects::{convert, flush_trap};
 use crate::host::state::{HostState, HotWait, OpenStep, StepFuel, trap, violation};
 use crate::replay::{ReplayError, StepBegin};
 use crate::retry::{self, RetryDecision, RetryPolicy};
+use crate::telemetry;
 
 fn retry_policy_from_wit(p: wit_types::RetryPolicy) -> RetryPolicy {
     RetryPolicy {
@@ -199,6 +200,10 @@ impl HostState {
                     deadline: attempt_deadline(rep.timeout_ms),
                     rep: rep.clone(),
                 });
+                // 08-11: live step attempt start (span timestamp only; never journaled).
+                if let Some(t) = &mut self.trace {
+                    telemetry::ActivationTrace::step_started(t, seq, attempt);
+                }
                 let rep = GuestEnv::table(self).push(rep)?;
                 Ok((StepStart::Execute(rep), set))
             }
@@ -313,6 +318,9 @@ impl HostState {
                 self.retry_backoff(&step, delay).await?;
                 // The next attempt's timeout starts when its body starts (after the sleep).
                 let next_rep = GuestEnv::table(self).get(&step)?.clone();
+                if let Some(t) = &mut self.trace {
+                    t.step_started(next_rep.seq, next_rep.attempt);
+                }
                 self.open_step = Some(OpenStep {
                     deadline: attempt_deadline(next_rep.timeout_ms),
                     rep: next_rep,
