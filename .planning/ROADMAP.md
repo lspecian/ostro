@@ -289,7 +289,7 @@ Plans:
 
 Plans:
 - [x] 08-01-PLAN.md — PHASE-8 GATE (Phase 5 complete, code vs RESERVATIONS.md) + decisions to STATE + contract (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23, config/trait stubs) + every Phase 8 dependency + crate skeletons (ostro-objstore only if absent) + anchored forbidden-crate check (all)
-- [ ] 08-02-PLAN.md — OSNP v1 snapshot format: batch-consistent export, staged verified install (ingestion spike), blob-ref visitor, docs/snapshot-format.md (BACK-04)
+- [x] 08-02-PLAN.md — OSNP v1 snapshot format: batch-consistent export, staged verified install (ingestion spike), blob-ref visitor, docs/snapshot-format.md (BACK-04)
 - [x] 08-03-PLAN.md — ostro-objstore frozen object-safe trait + LocalFs + S3 (rusty-s3) + conformance; s3s-fs/deny spike; SeaweedFS CI leg (BACK-01)
 - [x] 08-04-PLAN.md — Telemetry foundation: Phase 8 config contract, OTLP traces/logs, Prometheus /metrics, JSON logs, OstroIdGenerator, services seam, testkit OTLP collector (OBS-01/02/03)
 - [x] 08-05-PLAN.md — Cron engine (TDD): croner behind jiff-0.2 adapter, shared TZif, DST vectors, latest-before + catch-up planning keeping newest fires (TRIG-02/03)
