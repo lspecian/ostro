@@ -28,6 +28,8 @@ pub use config::{BackupConfig, TlsRoots, UrlStyle};
 // Dependencies declared by plan 08-01 for the modules above (P8-D21), anchored so cargo's
 // unused-dependency lint stays quiet until the owning plans consume them.
 mod dep_anchors {
+    #[cfg(feature = "failpoints")]
+    use fail as _;
     use metrics as _;
     use ostro_blob as _;
     use ostro_log as _;
