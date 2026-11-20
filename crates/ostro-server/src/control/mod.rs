@@ -13,6 +13,8 @@
 //! - [`lifecycle`]: signal, cancel, terminate, retry and await-token completion, each with
 //!   a no-effect `dry_run` (API-05/06/07, 05-13).
 //! - [`watch`]: the long-poll [`RunWatchers`] hub and `await_result` (05-13).
+//! - [`bridge`]: Phase 6 bridge administration: sealed secrets, grants, connections,
+//!   egress policies and the local presign route (06-16).
 //!
 //! Phase 8 (08-10): the controllers behind `ostro_api::phase8`, each holding the one
 //! [`ControlCtx`] built in `server.rs` and installed through [`phase8_extensions`]:
@@ -34,9 +36,10 @@ use std::sync::{Arc, Weak};
 
 use ostro_api::domain::{
     ActivateWorkflow, AwaitResultRequest, AwaitResultResponse, CancelRequest, CancelResponse,
-    CompleteTokenRequest, CompleteTokenResponse, ControlPlane, HistoryPage, HistoryRequest,
-    ListRunsRequest, ModuleInfo, RetryRequest, RetryResponse, RunInfo, RunPage, RunPolicy,
-    SignalRequest, SignalResponse, StartRunRequest, StartRunResult, TerminateRequest,
+    CompleteTokenRequest, CompleteTokenResponse, ConnectionInfo, ControlPlane, EgressInfo,
+    GrantInfo, HistoryPage, HistoryRequest, ListRunsRequest, ModuleInfo, PresignedObjectRequest,
+    PresignedObjectResponse, PutSecret, RetryRequest, RetryResponse, RunInfo, RunPage, RunPolicy,
+    SecretInfo, SignalRequest, SignalResponse, StartRunRequest, StartRunResult, TerminateRequest,
     TerminateResponse, UploadModule, UploadModuleResult, WorkflowInfo,
 };
 use ostro_api::{ApiError, ApiExtensions};
@@ -54,6 +57,7 @@ use crate::services::guest_logs::GuestLogSink;
 pub use watch::RunWatchers;
 
 pub mod admin;
+pub mod bridge;
 pub mod history;
 pub mod lifecycle;
 pub mod list;
@@ -274,6 +278,71 @@ impl ControlPlane for ServerControlPlane {
 
     async fn get_queue_policy(&self, queue: String) -> Result<RunPolicy, ApiError> {
         policy::get_queue_policy(self, queue).await
+    }
+
+    // --- Phase 6 bridge administration (06-16): see [`bridge`] ---
+
+    async fn put_secret(&self, req: PutSecret) -> Result<SecretInfo, ApiError> {
+        bridge::put_secret(self, req).await
+    }
+
+    async fn list_secrets(&self, tenant: Option<String>) -> Result<Vec<SecretInfo>, ApiError> {
+        bridge::list_secrets(self, tenant).await
+    }
+
+    async fn delete_secret(&self, name: String, tenant: Option<String>) -> Result<(), ApiError> {
+        bridge::delete_secret(self, name, tenant).await
+    }
+
+    async fn put_grant(&self, g: GrantInfo) -> Result<GrantInfo, ApiError> {
+        bridge::put_grant(self, g).await
+    }
+
+    async fn list_grants(&self, module: Option<String>) -> Result<Vec<GrantInfo>, ApiError> {
+        bridge::list_grants(self, module).await
+    }
+
+    async fn delete_grant(&self, id: String) -> Result<(), ApiError> {
+        bridge::delete_grant(self, id).await
+    }
+
+    async fn put_connection(&self, c: ConnectionInfo) -> Result<ConnectionInfo, ApiError> {
+        bridge::put_connection(self, c).await
+    }
+
+    async fn get_connection(&self, name: String) -> Result<ConnectionInfo, ApiError> {
+        bridge::get_connection(self, name).await
+    }
+
+    async fn list_connections(&self) -> Result<Vec<ConnectionInfo>, ApiError> {
+        bridge::list_connections(self).await
+    }
+
+    async fn delete_connection(&self, name: String) -> Result<(), ApiError> {
+        bridge::delete_connection(self, name).await
+    }
+
+    async fn put_egress(&self, e: EgressInfo) -> Result<EgressInfo, ApiError> {
+        bridge::put_egress(self, e).await
+    }
+
+    async fn get_egress(&self, module: String) -> Result<EgressInfo, ApiError> {
+        bridge::get_egress(self, module).await
+    }
+
+    async fn list_egress(&self) -> Result<Vec<EgressInfo>, ApiError> {
+        bridge::list_egress(self).await
+    }
+
+    async fn delete_egress(&self, module: String) -> Result<(), ApiError> {
+        bridge::delete_egress(self, module).await
+    }
+
+    async fn presigned_object(
+        &self,
+        req: PresignedObjectRequest,
+    ) -> Result<PresignedObjectResponse, ApiError> {
+        bridge::presigned_object(self, req).await
     }
 
     /// Serving, meta has a leader, and every partition slot is `Ready` and not failed.

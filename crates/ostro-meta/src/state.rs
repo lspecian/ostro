@@ -549,6 +549,22 @@ impl MetaState {
         self.grants.values()
     }
 
+    /// Every sealed secret, ordered by full record name (Phase 6, 06-16: the admin API
+    /// lists names and key ids, never values).
+    pub fn secrets(&self) -> impl Iterator<Item = &Versioned<SealedSecret>> {
+        self.secrets.values()
+    }
+
+    /// Every connection, ordered by name (Phase 6, 06-16).
+    pub fn connections(&self) -> impl Iterator<Item = &Versioned<Connection>> {
+        self.connections.values()
+    }
+
+    /// Every egress policy, ordered by module (Phase 6, 06-16).
+    pub fn egress_policies(&self) -> impl Iterator<Item = &Versioned<EgressPolicy>> {
+        self.egress.values()
+    }
+
     /// The await-token HMAC key written by `InitCluster` (Phase 4: stored as
     /// plaintext in a [`SealedSecret`]; see [`TOKEN_KEY_SECRET`]).
     pub fn token_key(&self) -> Option<[u8; 32]> {
