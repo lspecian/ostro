@@ -14,7 +14,10 @@
 //!   reads every regular file fully and follows no symlinks.
 //! - [`CaptureLayer`]: a `tracing_subscriber::Layer` that records every span's and event's
 //!   fields, at TRACE, into one process-wide buffer ([`CaptureLayer::install_global`],
-//!   [`CaptureLayer::captured`]). `log` records are bridged too.
+//!   [`CaptureLayer::captured`], capped at [`MAX_CAPTURE_BYTES`]). `log` records are bridged
+//!   too. [`CaptureLayer::watch`] scans every line for a canary as it is recorded, so the
+//!   cap never hides a leak. Only the wasm compiler's targets are left out
+//!   ([`EXCLUDED_TARGET_PREFIXES`]: IR dumps of guest code, which holds no secret value).
 //! - [`register_sink`] / [`scan_sinks`]: extra byte sources scanned by every report. This
 //!   is the **D-FX6 hook**: Phase 6 covers tracing output through [`CaptureLayer`]; Phase 8
 //!   registers an OTLP mock collector here (`register_sink("otlp", ..)`) so the same canary
@@ -87,6 +90,7 @@ impl fmt::Debug for Needle {
 /// A canary secret value. `Debug` prints `Canary(<redacted>)`.
 #[derive(Clone)]
 pub struct Canary {
+    id: u64,
     value: Vec<u8>,
     needles: Vec<Needle>,
 }
@@ -130,7 +134,11 @@ impl Canary {
         let value = value.into();
         assert!(value.len() >= 8, "a canary needs at least 8 bytes");
         let needles = build_needles(&value);
-        Self { value, needles }
+        Self {
+            id: random_u64(),
+            value,
+            needles,
+        }
     }
 
     /// The raw value, for configuring the secret under test. Never print it.
@@ -420,10 +428,29 @@ impl<'a> Report<'a> {
         self
     }
 
-    /// Scan [`CaptureLayer::captured`].
+    /// Scan [`CaptureLayer::captured`] plus the hits streamed for this canary since
+    /// [`CaptureLayer::watch`]. Panics when the buffer was truncated and the canary was
+    /// never watched (the scan would be incomplete).
     pub fn tracing(&mut self) -> &mut Self {
         let buf = CaptureLayer::captured();
-        self.bytes("tracing", &buf)
+        self.bytes("tracing (buffer)", &buf);
+        let stats = CaptureLayer::stats();
+        match CaptureLayer::streamed_hits(self.canary) {
+            Some(hits) => {
+                self.locations.push(Location {
+                    label: "tracing (streamed)".into(),
+                    files: 1,
+                    bytes: stats.bytes,
+                    hits: hits.len(),
+                });
+                self.hits.extend(hits);
+            }
+            None => assert!(
+                !stats.truncated,
+                "the capture buffer was truncated and this canary was not watched"
+            ),
+        }
+        self
     }
 
     /// Scan every registered sink ([`register_sink`]).
@@ -515,13 +542,45 @@ pub fn scan_sinks(canary: &Canary) -> Vec<Hit> {
 // CaptureLayer
 // ---------------------------------------------------------------------------------
 
-fn buffer() -> &'static Mutex<Vec<u8>> {
-    static BUF: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
-    BUF.get_or_init(|| Mutex::new(Vec::new()))
+/// Largest buffer [`CaptureLayer::captured`] keeps (256 MiB). Lines past it are still
+/// scanned for every watched canary ([`CaptureLayer::watch`]), just not stored.
+pub const MAX_CAPTURE_BYTES: usize = 256 << 20;
+
+/// Targets the capture leaves disabled: the wasm compiler (cranelift / regalloc2 and
+/// wasmtime's cranelift glue). At TRACE they dump the IR of every compiled guest function
+/// (gigabytes per module in a debug build), and their only input is guest wasm code, which
+/// never holds a secret value: secrets are resolved by the bridge at send time, long after
+/// compilation. Everything else, down to TRACE, is captured.
+pub const EXCLUDED_TARGET_PREFIXES: &[&str] = &[
+    "cranelift",
+    "regalloc2",
+    "wasmtime_cranelift",
+    "wasmtime_internal_cranelift",
+    "wasmtime_environ::compile",
+];
+
+#[derive(Default)]
+struct Capture {
+    buf: Vec<u8>,
+    /// Every byte formatted (stored or not).
+    total: usize,
+    lines: usize,
+    truncated: bool,
+    /// (canary id, needles, streamed hits).
+    watched: Vec<(u64, Vec<Needle>, Vec<Hit>)>,
+    /// target -> (lines, bytes).
+    per_target: std::collections::BTreeMap<String, (usize, usize)>,
+}
+
+fn capture() -> &'static Mutex<Capture> {
+    static CAP: OnceLock<Mutex<Capture>> = OnceLock::new();
+    CAP.get_or_init(|| Mutex::new(Capture::default()))
 }
 
 /// A layer recording every span's and event's fields (Debug and Display forms) into
-/// one process-wide buffer. No level filter: everything down to TRACE.
+/// one process-wide buffer, down to TRACE (`RUST_LOG` ignored). Lines are also scanned as
+/// they are recorded for every watched canary, so the buffer cap never hides a leak. See
+/// [`EXCLUDED_TARGET_PREFIXES`] for the only targets left out.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CaptureLayer;
 
@@ -553,6 +612,12 @@ impl Visit for Writer {
     }
 }
 
+fn excluded(target: &str) -> bool {
+    EXCLUDED_TARGET_PREFIXES
+        .iter()
+        .any(|p| target.starts_with(p))
+}
+
 fn skipped(meta: &Metadata<'_>) -> bool {
     meta.target().starts_with(MOCK_TARGET_PREFIX)
         || std::thread::current()
@@ -560,16 +625,58 @@ fn skipped(meta: &Metadata<'_>) -> bool {
             .is_some_and(|n| n.starts_with(QUIET_THREAD_PREFIX))
 }
 
-fn push(line: String) {
-    let mut b = buffer().lock().unwrap_or_else(PoisonError::into_inner);
-    b.extend_from_slice(line.as_bytes());
-    b.push(b'\n');
+fn push(target: &str, line: String) {
+    let mut c = capture().lock().unwrap_or_else(PoisonError::into_inner);
+    let bytes = line.as_bytes();
+    let base = c.total;
+    for (_, needles, hits) in c.watched.iter_mut() {
+        for n in needles.iter() {
+            let mut from = 0;
+            while let Some(at) = find(&bytes[from..], &n.bytes) {
+                hits.push(Hit {
+                    label: "tracing (streamed)".into(),
+                    encoding: n.encoding.clone(),
+                    offset: base + from + at,
+                });
+                from += at + 1;
+            }
+        }
+    }
+    c.total += bytes.len() + 1;
+    c.lines += 1;
+    match c.per_target.get_mut(target) {
+        Some(e) => {
+            e.0 += 1;
+            e.1 += bytes.len() + 1;
+        }
+        None => {
+            c.per_target.insert(target.to_owned(), (1, bytes.len() + 1));
+        }
+    }
+    if c.buf.len() + bytes.len() < MAX_CAPTURE_BYTES {
+        c.buf.extend_from_slice(bytes);
+        c.buf.push(b'\n');
+    } else {
+        c.truncated = true;
+    }
 }
 
 impl<S> Layer<S> for CaptureLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn enabled(&self, meta: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+        !excluded(meta.target())
+    }
+
+    fn register_callsite(&self, meta: &'static Metadata<'static>) -> tracing::subscriber::Interest {
+        if excluded(meta.target()) {
+            tracing::subscriber::Interest::never()
+        } else {
+            tracing::subscriber::Interest::always()
+        }
+    }
+
     fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
         let meta = attrs.metadata();
         if skipped(meta) {
@@ -582,18 +689,18 @@ where
             meta.name()
         ));
         attrs.record(&mut w);
-        push(w.0);
+        push(meta.target(), w.0);
     }
 
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
-        if let Some(meta) = ctx.metadata(id)
-            && skipped(meta)
-        {
-            return;
-        }
+        let target = match ctx.metadata(id) {
+            Some(meta) if skipped(meta) => return,
+            Some(meta) => meta.target(),
+            None => "?",
+        };
         let mut w = Writer(String::from("record"));
         values.record(&mut w);
-        push(w.0);
+        push(target, w.0);
     }
 
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
@@ -603,8 +710,21 @@ where
         }
         let mut w = Writer(format!("event {} {}", meta.level(), meta.target()));
         event.record(&mut w);
-        push(w.0);
+        push(meta.target(), w.0);
     }
+}
+
+/// Capture statistics ([`CaptureLayer::stats`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CaptureStats {
+    /// Lines recorded.
+    pub lines: usize,
+    /// Bytes formatted (stored or not).
+    pub bytes: usize,
+    /// Whether the buffer hit [`MAX_CAPTURE_BYTES`].
+    pub truncated: bool,
+    /// The ten busiest targets: (target, lines, bytes).
+    pub top_targets: Vec<(String, usize, usize)>,
 }
 
 impl CaptureLayer {
@@ -624,12 +744,49 @@ impl CaptureLayer {
         });
     }
 
-    /// A copy of everything captured so far.
+    /// Scan every line recorded from now on for `canary` as it is recorded (independent of
+    /// the buffer cap). [`Report::tracing`] includes these hits.
+    pub fn watch(canary: &Canary) {
+        let mut c = capture().lock().unwrap_or_else(PoisonError::into_inner);
+        if !c.watched.iter().any(|(id, _, _)| *id == canary.id) {
+            c.watched
+                .push((canary.id, canary.needles.clone(), Vec::new()));
+        }
+    }
+
+    fn streamed_hits(canary: &Canary) -> Option<Vec<Hit>> {
+        let c = capture().lock().unwrap_or_else(PoisonError::into_inner);
+        c.watched
+            .iter()
+            .find(|(id, _, _)| *id == canary.id)
+            .map(|(_, _, h)| h.clone())
+    }
+
+    /// A copy of the stored buffer (at most [`MAX_CAPTURE_BYTES`]).
     pub fn captured() -> Vec<u8> {
-        buffer()
+        capture()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .buf
             .clone()
+    }
+
+    /// Lines, bytes, truncation and the busiest targets so far.
+    pub fn stats() -> CaptureStats {
+        let c = capture().lock().unwrap_or_else(PoisonError::into_inner);
+        let mut top: Vec<(String, usize, usize)> = c
+            .per_target
+            .iter()
+            .map(|(t, (l, b))| (t.clone(), *l, *b))
+            .collect();
+        top.sort_by_key(|t| std::cmp::Reverse(t.2));
+        top.truncate(10);
+        CaptureStats {
+            lines: c.lines,
+            bytes: c.total,
+            truncated: c.truncated,
+            top_targets: top,
+        }
     }
 }
 
@@ -889,6 +1046,9 @@ mod tests {
         CaptureLayer::install_global();
         let marker = Canary::new();
         let quiet_marker = Canary::new();
+        CaptureLayer::watch(&marker);
+        CaptureLayer::watch(&quiet_marker);
+        tracing::trace!(target: "cranelift_codegen::context", value = %quiet_marker.expose_str(), "ir");
         let m = marker.expose_str().to_owned();
         tracing::trace!(field = %m, "trace event");
         let span = tracing::trace_span!("s", f = tracing::field::Empty);
@@ -917,7 +1077,14 @@ mod tests {
         );
         assert!(
             quiet_marker.scan_bytes("tracing", &buf).is_empty(),
-            "quiet thread and mock target are not captured"
+            "quiet thread, mock target and compiler target are not captured"
         );
+        let mut r = Report::new(&marker);
+        r.tracing();
+        assert!(r.hits().iter().any(|h| h.label == "tracing (streamed)"));
+        let mut r = Report::new(&quiet_marker);
+        r.tracing();
+        r.assert_clean();
+        assert!(CaptureLayer::stats().lines > 0);
     }
 }
