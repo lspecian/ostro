@@ -13,7 +13,7 @@
 //! | `ANY /echo[?gzip=1]` | 200 JSON `{"method", "path", "headers": [[name, value], ...], "body_b64"}`; header values are echoed verbatim (lossy UTF-8). `gzip=1` labels the response `Content-Encoding: gzip` (the body stays plain JSON bytes: a connector must refuse it before decoding). |
 //! | `GET /redirect?to=<url>[&code=302]` | Status `code` (default 302) with `Location: <url>` (percent-decoded). |
 //! | `GET /slow?ms=N` | Sleeps `N` ms, then 200 `slow`. |
-//! | `GET /big?bytes=N[&no_length=1]` | 200 with `N` bytes of `x`. `no_length=1` sends `Transfer-Encoding: chunked` and no `Content-Length`. |
+//! | `GET /big?bytes=N[&no_length=1]` | 200 with `N` bytes of `x`. `no_length=1` streams it chunked, without `Content-Length`. |
 //! | `GET /status/{code}` | That status, body `status <code>`. |
 //! | `GET /flaky?fail=N` | The first `N` requests per path+query get 503 `flaky`; then 200 `ok`. |
 //! | `GET /set-header?name=<n>&value=<v>` | 200 `ok` with response header `n: v`. |
@@ -279,14 +279,13 @@ async fn handle(
         }
         "/big" => {
             let n = usize::try_from(num(&q, "bytes")).unwrap_or(usize::MAX);
-            let mut r = resp(StatusCode::OK, vec![b'x'; n]);
+            let body = Body::from(vec![b'x'; n]);
             if q.contains_key("no_length") {
-                r.headers_mut().insert(
-                    header::TRANSFER_ENCODING,
-                    HeaderValue::from_static("chunked"),
-                );
+                // A stream body has no size hint: hyper sends it chunked, without a length.
+                resp(StatusCode::OK, Body::from_stream(body.into_data_stream()))
+            } else {
+                resp(StatusCode::OK, body)
             }
-            r
         }
         "/flaky" => {
             let fail = usize::try_from(num(&q, "fail")).unwrap_or(usize::MAX);
