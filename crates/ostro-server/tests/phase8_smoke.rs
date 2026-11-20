@@ -1,6 +1,7 @@
 //! Phase 8 API wiring smoke (08-10): on the real server every Phase 8 route reaches its
 //! controller: a stub (503 `unavailable` naming the owning plan, never 404) until the
-//! plan lands, the real controller after (webhooks since 08-15, schedules since 08-14). The gRPC services are
+//! plan lands, the real controller after (webhooks since 08-15, schedules since 08-14,
+//! run logs since 08-17, the online backup since 08-18). The gRPC services are
 //! mounted (not UNIMPLEMENTED), the hook route enforces
 //! `[triggers] webhook_body_limit`, a start-run `traceparent` header is validated, and
 //! the `tests/common/phase8.rs` signers agree with ostro-triggers' verifiers.
@@ -36,23 +37,25 @@ async fn phase8_routes_reach_controller_stubs() {
     s.wait_ready(Duration::from_secs(10)).await;
     assert!(s.collector.is_some());
 
-    for (method, path, body, owner) in [("GET", "/v1/admin/backup", Value::Null, "08-18")] {
-        let mut req = s.http.request(method.parse().unwrap(), s.url(path));
-        if !body.is_null() {
-            req = req.json(&body);
-        }
-        let r = req.send().await.expect("request");
-        let st = r.status();
-        let v: Value = r.json().await.expect("json error body");
-        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{method} {path}: {v}");
-        assert_eq!(v["error"]["code"], "unavailable", "{method} {path}");
-        let msg = v["error"]["message"].as_str().unwrap_or_default();
-        assert_eq!(
-            msg,
-            format!("not yet implemented ({owner})"),
-            "{method} {path}"
-        );
-    }
+    // 08-18 implemented the online backup: a tar of the bottomless layout.
+    let r = s
+        .http
+        .get(s.url("/v1/admin/backup"))
+        .send()
+        .await
+        .expect("backup");
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(
+        r.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-tar")
+    );
+    let tar = r.bytes().await.expect("tar body");
+    assert!(tar.len() > 512 && tar.len() % 512 == 0, "{} bytes", tar.len());
+    assert_eq!(&tar[257..262], b"ustar", "a tar archive");
+    let has = |name: &[u8]| tar.windows(name.len()).any(|w| w == name);
+    assert!(has(b"manifest/current") && has(b"LOCK"), "bottomless layout");
 
     // 08-14 implemented the schedule controller: real answers instead of the stub.
     let (st, v) = s.get_json("/v1/schedules").await;

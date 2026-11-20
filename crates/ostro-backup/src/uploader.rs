@@ -259,6 +259,9 @@ pub struct Uploader {
     session: tokio::sync::Mutex<Option<Session>>,
     fenced: AtomicBool,
     hook: Mutex<Option<Hook>>,
+    /// Upload from a node opened in Inspect mode (offline backup, 08-18): the closed
+    /// readiness barriers do not stop the round.
+    inspect: bool,
 }
 
 impl std::fmt::Debug for Uploader {
@@ -348,7 +351,15 @@ impl Uploader {
             session: tokio::sync::Mutex::new(None),
             fenced: AtomicBool::new(false),
             hook: Mutex::new(None),
+            inspect: false,
         }
+    }
+
+    /// Allow rounds over a node opened in Inspect mode (offline backup, 08-18): its
+    /// barriers stay closed and nothing appends, so the cut is the recovered log end.
+    pub fn for_inspect_node(mut self) -> Self {
+        self.inspect = true;
+        self
     }
 
     /// The LOCK identity this uploader writes under.
@@ -443,7 +454,7 @@ impl Uploader {
             let pid = PartitionId(p);
             if self.node.handle(pid).is_some() {
                 any = true;
-                if !self.node.barrier(pid).is_some_and(|b| b.is_open()) {
+                if !self.inspect && !self.node.barrier(pid).is_some_and(|b| b.is_open()) {
                     report.barrier_closed = true;
                     return Ok(report);
                 }

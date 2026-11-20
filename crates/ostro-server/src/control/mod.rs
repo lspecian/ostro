@@ -21,10 +21,10 @@
 //!
 //! | File | Traits | Owner | Now |
 //! |---|---|---|---|
-//! | [`schedules`] | `ScheduleApi` | 08-14 | stub |
+//! | [`schedules`] | `ScheduleApi` | 08-14 | done |
 //! | [`webhooks`] | `WebhookApi`, `HookIngress` | 08-15 | done |
-//! | [`run_logs`] | `RunLogsApi` | 08-17 | stub |
-//! | [`admin`] | `AdminApi` | 08-18 | stub |
+//! | [`run_logs`] | `RunLogsApi` | 08-17 | done |
+//! | [`admin`] | `AdminApi` | 08-18 | done |
 //!
 //! A stub method answers `Unavailable` (HTTP 503, gRPC `UNAVAILABLE`) with the message
 //! `not yet implemented (08-NN)`. Feature plans fill only their controller file;
@@ -363,11 +363,6 @@ impl ControlPlane for ServerControlPlane {
 // ---------------------------------------------------------------------------------
 // Phase 8 controllers (08-10)
 // ---------------------------------------------------------------------------------
-
-/// The answer of every Phase 8 stub method: `Unavailable`, naming the owning plan.
-pub(crate) fn not_yet(owner: &str) -> ApiError {
-    ApiError::unavailable(format!("not yet implemented ({owner})"))
-}
 
 /// Read access to sealed meta secrets (webhook verifier secrets, 08-15).
 ///
