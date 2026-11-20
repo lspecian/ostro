@@ -46,7 +46,6 @@ async fn phase8_routes_reach_controller_stubs() {
         ("POST", "/v1/schedules/n/pause", Value::Null, "08-14"),
         ("POST", "/v1/schedules/n/resume", Value::Null, "08-14"),
         ("POST", "/v1/schedules/n/trigger", Value::Null, "08-14"),
-        ("GET", "/v1/runs/run-1/logs", Value::Null, "08-17"),
         ("GET", "/v1/admin/backup", Value::Null, "08-18"),
     ] {
         let mut req = s.http.request(method.parse().unwrap(), s.url(path));
@@ -73,6 +72,11 @@ async fn phase8_routes_reach_controller_stubs() {
     let (st, _, _) = s.deliver_hook("h", &[], br#"{"any":"body"}"#).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
+    // 08-17 implemented run logs: an unknown run is an empty list (best effort, not 404).
+    let (st, v) = s.get_json("/v1/runs/run-1/logs").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({"run_id": "run-1", "lines": [], "dropped": 0}));
+
     // The hook route has its own limit ([triggers] webhook_body_limit = 4096 here).
     let r = s
         .http
@@ -96,15 +100,14 @@ async fn phase8_routes_reach_controller_stubs() {
         .await
         .expect("webhooks implemented (08-15)");
     assert!(listed.into_inner().webhooks.is_empty());
-    let e = pb::run_logs_client::RunLogsClient::new(ch)
+    let logs = pb::run_logs_client::RunLogsClient::new(ch)
         .get_run_logs(pb::GetRunLogsRequest {
             run_id: "run-1".into(),
             ..Default::default()
         })
         .await
-        .expect_err("stub");
-    assert_eq!(e.code(), tonic::Code::Unavailable, "{e:?}");
-    assert!(e.message().contains("08-17"));
+        .expect("run logs implemented (08-17)");
+    assert!(logs.into_inner().lines.is_empty());
 
     // Inbound traceparent: an invalid header is rejected before the control plane.
     let r = s

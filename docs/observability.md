@@ -189,7 +189,114 @@ carries `traceparent`. The executor wraps every activation in `with_traceparent(
 
 ## Guest logs
 
-*Filled by 08-17:*
-- rate limits per run and per node, and lifetime caps (`[guest_logs]`);
-- the per-run ring buffer at `GET /v1/runs/{id}/logs`;
-- the OTLP LogRecord attributes (`run.id`, `workflow`, `attempt`, trace/span ids).
+Workflows log through `ostro:runtime/log` (Rust SDK: `ctx.log_with(level, message,
+&[(key, value), ..])`). Decision P8-D16, plan 08-17 (OBS-03).
+
+**Never journaled, never replayed.** A guest line is dropped while the activation is
+replaying, so a run that is evicted, re-activated or resumed after a restart emits each
+line once, when its code first runs live. Logs are not part of the run's durable state.
+
+### Pipeline
+
+1. **Engine** (`ostro-engine/src/host/log.rs`): replay check, then the per-activation
+   bound of **1,000 lines / 1 MiB** (message + keys + values). Lines over it are dropped
+   with reason `activation_bound`. A kept line goes to the activation sink with the run
+   id, workflow, attempt, fields, timestamp and the activation span's trace/span ids.
+2. **Node sink** (`ostro-server/src/services/guest_logs.rs`, `GuestLogSink`), in this
+   order:
+   1. node token bucket, `node_rate_per_sec` lines/s (burst: one second's worth). Drop
+      reason `node_rate`;
+   2. per-run token bucket, `rate_per_sec` lines/s with `burst`. Drop reason `run_rate`;
+   3. per-run lifetime cap, `run_lines_cap` lines or `run_bytes_cap` bytes. Drop reason
+      `run_cap`. The node logs one `warn` per run when the cap is first hit.
+
+   A line is charged against the buckets only when it passes all three checks, so a
+   capped run does not drain the node bucket.
+3. An accepted line goes to three places:
+   - the run's ring buffer;
+   - the node log;
+   - one OTLP LogRecord.
+
+### `[guest_logs]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `rate_per_sec` | `50` | Per-run refill (lines/s). |
+| `burst` | `500` | Per-run bucket size. |
+| `run_lines_cap` | `10000` | Lines accepted per run over its lifetime. |
+| `run_bytes_cap` | `10485760` (10 MiB) | Bytes accepted per run over its lifetime. |
+| `ring_lines` | `1000` | Lines kept per run for `GET /v1/runs/{id}/logs`. |
+| `ring_budget_bytes` | `67108864` (64 MiB) | Node-wide budget for all ring buffers. |
+| `node_rate_per_sec` | `5000` | Node-wide bucket (lines/s). |
+
+**Caps reset on restart.** The limiter state and the lifetime counters live in memory
+only (P8-D16, best effort). After a restart a run starts with a fresh bucket and a fresh
+cap. A run's state is also forgotten after 1 h without a line once its ring is empty, and
+the node tracks at most 100,000 runs (least recently seen go first).
+
+### Metrics
+
+| Series | Labels |
+|---|---|
+| `ostro_guest_log_lines_total` | `level` (`trace` .. `error`) |
+| `ostro_guest_log_dropped_total` | `reason`: `activation_bound`, `node_rate`, `run_rate`, `run_cap` |
+
+The labels never carry a run id (P8-D15). Per-run drop counts are in the endpoint's
+`dropped` field.
+
+### `GET /v1/runs/{id}/logs`
+
+Query `?limit=N` (default 100, max 1000) and `&level=` (minimum level). gRPC:
+`ostro.api.v1.RunLogs/GetRunLogs`.
+
+```json
+{"run_id":"…","lines":[{"ts_ms":1763629200000,"level":"info","message":"charged",
+  "fields":{"order":"42"},"attempt":1}],"dropped":0}
+```
+
+- Lines are returned oldest first: the last `N` accepted lines at or above `level`.
+- The ring keeps the last `ring_lines` lines per run. All rings share `ring_budget_bytes`
+  (line bytes + 64 bytes of overhead per line). Over budget, the **least recently written
+  run loses its whole ring**. A single run larger than the budget loses its oldest lines
+  instead.
+- The ring is non-durable and best effort. An unknown run, a forgotten run, a run whose
+  ring was evicted, or any run after a restart answers **200 with `lines: []`**, never
+  404.
+- `dropped` counts this run's lines lost to `node_rate`, `run_rate`, `run_cap` and ring
+  eviction since the node started. `activation_bound` drops happen in the engine and are
+  only in the metric. A non-zero `dropped` with fewer lines than asked for marks a
+  truncated or evicted ring.
+
+### Node log line
+
+The node log line uses target `ostro::guest` at the guest's level, with the fields
+`run_id`, `workflow`, `attempt` and `guest.fields`. `tracing` field names are static, so
+the guest's dynamic keys travel as **one JSON object string** under `guest.fields`.
+Under `format = "json"` a line looks like this:
+
+```json
+{"timestamp":"…","level":"WARN","fields":{"message":"payment failed","run_id":"…","workflow":"billing","attempt":1,"guest.fields":"{\"order\":\"42\",\"reason\":\"card declined\"}"},"target":"ostro::guest"}
+```
+
+To get real keys, parse `fields["guest.fields"]` a second time. tracing-subscriber's
+JSON formatter writes string fields as strings. Flattening them needs `valuable`, which
+requires the unstable `tracing_unstable` cfg, so it is not used. The OTLP LogRecord has
+the fields as real attributes.
+
+### OTLP LogRecord
+
+When `[telemetry] otlp_endpoint` is set and `logs = true`, each accepted line becomes
+exactly one LogRecord. The OTLP log bridge excludes `ostro::guest`, so the node log line
+is not exported a second time.
+
+| Part | Value |
+|---|---|
+| Instrumentation scope | `ostro.guest` |
+| Body | the message |
+| Severity | `TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` (number and text) |
+| Timestamp | the activation's live clock at emission; observed timestamp = node clock |
+| Attributes | every guest field (string), plus `run.id`, `workflow`, `attempt` (int) |
+| Trace context | trace id = the run's trace (its `traceparent`, else the id derived from the run id); span id = the emitting `activation` span (08-11); flags sampled |
+
+The node's `[log] level` / `RUST_LOG` filter applies only to the node log line. OTLP
+export and the ring buffer see every accepted line, whatever its level.
