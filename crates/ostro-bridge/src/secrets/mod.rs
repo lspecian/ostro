@@ -6,12 +6,18 @@
 //! "Zeroized" covers Ostro-owned buffers only: hyper/rustls internals and `HeaderValue`
 //! bytes are outside our control.
 
+pub mod config;
 pub mod grants;
 pub mod providers;
+pub mod scrub;
+pub mod sealed;
 pub mod template;
 pub mod value;
 
+pub use config::SecretsConfig;
 pub use grants::{GrantError, GrantSpec, check_grant};
+pub use scrub::Scrubber;
+pub use sealed::{SealError, SealedStore, SealingKeyRing};
 pub use template::{Placeholder, TemplateError};
 pub use value::{MIN_TEMPLATE_LEN, SecretValue};
 

@@ -3,11 +3,21 @@
 //! also hold `ENV`).
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 
 use ostro_bridge::origin::{Origin, OriginPattern};
-use ostro_bridge::secrets::{GrantSpec, SecretValue, TemplateError, check_grant, template};
+use ostro_bridge::secrets::{
+    GrantSpec, Scrubber, SealedStore, SealingKeyRing, SecretValue, SecretsConfig, TemplateError,
+    check_grant, template,
+};
 use ostro_types::journal::Failure;
 use url::Url;
+
+/// Serialises environment mutation (tests also run with `--test-threads=1`).
+static ENV: Mutex<()> = Mutex::new(());
 
 /// A canary value: must never show up in any `Debug` output, error or message.
 const CANARY: &[u8] = b"CANARY-0b5e7d1c-4f2a-value";
@@ -110,4 +120,43 @@ fn secret_value_debug_never_leaks() {
     let short = SecretValue::new(b"short".to_vec());
     let k = nr_kind(short.for_templating().unwrap_err());
     assert_eq!(k, ostro_bridge::kinds::SECRET_NOT_GRANTED);
+}
+
+#[test]
+fn scrubber_removes_canary_from_echoed_body() {
+    let v = SecretValue::new(CANARY.to_vec());
+    let s = Scrubber::new(&[&v]);
+    let mut body = format!(
+        r#"{{"headers":{{"authorization":"Bearer {}","x-b64":"{}"}}}}"#,
+        std::str::from_utf8(CANARY).unwrap(),
+        STANDARD.encode(CANARY)
+    )
+    .into_bytes();
+    assert_eq!(s.scrub_bytes(&mut body), 2);
+    assert_no_canary(&String::from_utf8_lossy(&body));
+    assert_no_canary(&format!("{s:?}"));
+}
+
+#[test]
+fn sealing_key_from_env_round_trips() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let key = STANDARD.encode([0x5au8; 32]);
+    // SAFETY: env mutation is serialised by `ENV` and the suite runs single-threaded.
+    unsafe { std::env::set_var("OSTRO_SEALING_KEY", &key) };
+    let ring = SealingKeyRing::load(&SecretsConfig::default(), dir.path(), false);
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("OSTRO_SEALING_KEY") };
+    let ring = ring.unwrap().expect("key from env");
+    assert_no_canary(&format!("{ring:?}"));
+    let store = SealedStore::new(Arc::new(ring));
+    let rec = store.seal("_/api-key", CANARY).unwrap();
+    assert!(rec.key_id.starts_with("aes256gcm:"));
+    assert_eq!(store.open(&rec).unwrap().expose(), CANARY);
+    // Without the env var and outside dev mode there is no key.
+    assert!(
+        SealingKeyRing::load(&SecretsConfig::default(), dir.path(), false)
+            .unwrap()
+            .is_none()
+    );
 }
