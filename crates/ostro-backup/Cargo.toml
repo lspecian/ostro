@@ -32,5 +32,10 @@ metrics.workspace = true
 thiserror.workspace = true
 fail = { workspace = true, optional = true }
 
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+bytes.workspace = true
+
 [lints]
 workspace = true
