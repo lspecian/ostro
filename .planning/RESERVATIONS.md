@@ -38,7 +38,7 @@ Sources:
 | 13 | CompleteEffect | reserved P6 |
 | 14–19 | spare | reserved P6 |
 | 20–26 | (unspecified) | reserved P7 |
-| 27 | ScheduleFire | reserved P8 |
+| 27 | ScheduleFire | exists (P8, 08-01) |
 | 28–33 | spare | reserved P8 |
 | 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9 |
 | 41–42 | — (contingency, expected use 0) | reserved P12 |
@@ -165,7 +165,7 @@ Rules:
 | 13 | running | exists (P4; per 04-12 plan) |
 | 14 | waits | exists (P5, 05-02) |
 | 15 | signal_seen | exists (P5, 05-02) |
-| 16 | schedule_state | reserved P8 (ScheduleState) |
+| 16 | schedule_state | exists (P8, 08-01; `Table::ScheduleState`, rows from 08-07) |
 | 17 | p7_a | reserved P7. **Not needed if 07-RESEARCH F1 lands** (05-02 adds `RunRecord.pause`). If F1 is rejected, rename to `run_pauses` in a docs-only commit before any placeholder is declared. |
 | 18 | p7_b | reserved P7. Not needed if F1 lands. |
 | 19 | p9_a | reserved P9 (placeholder rule applies) |
@@ -196,8 +196,8 @@ Rules:
 | 15 | BadEffectCompletion | reserved P6 |
 | 16–17 | spare | reserved P6 |
 | 18–21 | — | reserved P7 |
-| 22 | BadScheduleFire (malformed `ScheduleFire`: kind/start/request_id mismatch; name chosen by 08-01) | reserved P8 (08-01) |
-| 23 | ScheduleOwnerMismatch (`ScheduleFire` applied on a partition that is not `schedule_owner(name, P)`; name chosen by 08-01) | reserved P8 (08-01) |
+| 22 | BadScheduleFire (malformed `ScheduleFire`: kind/start/request_id mismatch; name chosen by 08-01) | exists (P8, 08-01) |
+| 23 | ScheduleOwnerMismatch (`ScheduleFire` applied on a partition that is not `schedule_owner(name, P)`; name chosen by 08-01) | exists (P8, 08-01) |
 | 24 | spare | reserved P8 |
 | 25–28 | — (P9 spare, incl. fallback) | reserved P9 |
 | 29 | BadRerunPrefix | reserved P11 |
