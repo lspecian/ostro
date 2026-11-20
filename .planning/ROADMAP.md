@@ -235,7 +235,7 @@ Plans:
 - [x] 06-16-PLAN.md — Server admin impl (sealed secrets, grants, connections, egress, presign route) + CLI verbs + API-based e2e helpers (FX-05..FX-08, FX-10)
 - [x] 06-17-PLAN.md — E2E SC1/SC4: kill -9 re-drive with same key, window → effect_outcome_unknown, SSRF table via guest (classifier reasons asserted), env proxy, allow-lists, rate limits (FX-01, FX-02, FX-03, FX-08, FX-09)
 - [ ] 06-18-PLAN.md — E2E SC2: kill -9 between COMMIT and effect_completed on PG (+ MySQL in CI), CI service containers (shared S3 test spec, SeaweedFS), ci-local env gating (FX-04)
-- [ ] 06-19-PLAN.md — E2E SC3/SC5: canary harness (OTLP hook for Phase 8; mocks isolated from capture), grant/redirect/echo, object via guest (local + SeaweedFS), five secret providers (FX-05, FX-06, FX-07, FX-10)
+- [x] 06-19-PLAN.md — E2E SC3/SC5: canary harness (OTLP hook for Phase 8; mocks isolated from capture), grant/redirect/echo, object via guest (local + SeaweedFS), five secret providers (FX-05, FX-06, FX-07, FX-10)
 - [ ] 06-20-PLAN.md — PHASE GATE: docs (connectors/egress/secrets incl. normative error table, docs/03 + docs/02 fixes), effect replay-corpus entries, RESERVATIONS flip, freeze/deny re-check, full ci-local, VALIDATION (all)
 **Research flag**: SSRF and secret binding; MySQL implicit-commit list; provider idempotency windows
 
