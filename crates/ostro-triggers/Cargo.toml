@@ -15,10 +15,14 @@ publish.workspace = true
 croner.workspace = true
 jiff02.workspace = true
 jiff.workspace = true
+jiff-tzdb.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lints]
 workspace = true

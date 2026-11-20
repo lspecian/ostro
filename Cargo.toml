@@ -92,6 +92,9 @@ futures-util = "0.3.34"
 # 0.2, so jiff02 is a second jiff major, used only inside ostro-triggers' adapter.
 croner = { version = "4.0.3", default-features = false, features = ["jiff"] }
 jiff02 = { package = "jiff", version = "0.2.46", default-features = false, features = ["alloc", "std"] }
+# the bundled TZif bytes behind jiff 1.0 `tzdb-bundle-always` (same crate and version), read
+# directly by ostro-triggers so both jiff majors parse identical bytes (08-05)
+jiff-tzdb = "1.0.0"
 # backup tar files (P8-D7); snapshot frame compression (same major as lsm-tree's lz4_flex)
 tar = "0.4.46"
 lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
