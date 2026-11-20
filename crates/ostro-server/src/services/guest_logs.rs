@@ -50,7 +50,7 @@ use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, LoggerProvider 
 use opentelemetry::{SpanId, TraceFlags, TraceId};
 use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use ostro_engine::sink::{GuestLogRecord, guest_log_metrics as m};
-use ostro_partition::clock::{Clock, SystemClock};
+use ostro_partition::clock::Clock;
 
 use crate::config::GuestLogsSection;
 
@@ -320,7 +320,9 @@ impl std::fmt::Debug for GuestLogSink {
 impl GuestLogSink {
     /// A sink with the `[guest_logs]` limits, the system clock and no OTLP export.
     pub fn new(cfg: &GuestLogsSection) -> Self {
-        Self::build(cfg.clone(), Arc::new(SystemClock), None)
+        // server.rs replaces this default through `with_clock` (the injected clock).
+        let clock = Arc::new(ostro_partition::clock::SystemClock); // clock-exempt: default only
+        Self::build(cfg.clone(), clock, None)
     }
 
     fn build(cfg: GuestLogsSection, clock: Arc<dyn Clock>, logger: Option<SdkLogger>) -> Self {
