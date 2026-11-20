@@ -31,7 +31,9 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 #   cargo test -p <crate> --features failpoints [--test <target>] --locked -- --test-threads=1
 # `<crate>:<target>` restricts a crate whose full suite would take over 5 min single-threaded
 # to its failpoint test target (plan 05-18); the whole crate is still linted with the feature.
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge)
+# `ostro:<target>` entries are the spawned-binary Phase 6 crash tests (06-17 fx_redrive,
+# 06-18 fx_sql_crash); the crate is linted once (check_failpoints de-duplicates).
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)
@@ -60,6 +62,39 @@ FAILPOINT_LINT_ONLY=(ostro)
 # a shard file from another SHARDS/FAULTS/seed). Commands: crates/ostro-crashtest/tests/
 # server_campaign.rs.
 WORKFLOW=".github/workflows/ci.yml"
+
+# Phase 6 external services (06-18, D-FX5). The DB / S3 legs read these variables and SKIP
+# loudly when they are unset; ci.yml sets them on the linux-x86_64-gnu leg (postgres:17 and
+# mysql:8.4 service containers, SeaweedFS via docker run).
+#   OSTRO_TEST_PG_URL     postgres://<user>:<password>@127.0.0.1:5432/postgres[?sslmode=disable]
+#   OSTRO_TEST_MYSQL_URL  mysql://<user>:<password>@127.0.0.1:3306/<db>?ssl-mode=REQUIRED
+#   OSTRO_TEST_S3_URL, OSTRO_TEST_S3_ACCESS_KEY, OSTRO_TEST_S3_SECRET_KEY, OSTRO_TEST_S3_BUCKET
+# A password in a URL must be at least 8 bytes (it travels as a sealed secret).
+#
+# Local credentials live in an untracked `.ostro-test-env` at the repo root (gitignored),
+# one `KEY=value` per line, `#` comments and blank lines ignored, no quoting, no shell
+# expansion (the value is everything after the first `=`), e.g.
+#   OSTRO_TEST_PG_URL=postgres://ostro:<password>@127.0.0.1:5432/postgres?sslmode=disable
+# Only OSTRO_TEST_* keys are read and exported. ci-local refuses to run if the file is
+# tracked by git.
+TEST_ENV_FILE=".ostro-test-env"
+if git ls-files --error-unmatch "$TEST_ENV_FILE" >/dev/null 2>&1; then
+  echo "error: $TEST_ENV_FILE is tracked by git; it holds local credentials." >&2
+  echo "       git rm --cached $TEST_ENV_FILE (it is in .gitignore)" >&2
+  exit 1
+fi
+if [[ -f "$TEST_ENV_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^(OSTRO_TEST_[A-Z0-9_]+)=(.*)$ ]]; then
+      export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+    else
+      echo "warning: $TEST_ENV_FILE: ignoring a line that is not OSTRO_TEST_<NAME>=value" >&2
+    fi
+  done < "$TEST_ENV_FILE"
+  echo "loaded $TEST_ENV_FILE (values not shown)"
+fi
 
 declare -a NAMES=() RESULTS=() TIMES=()
 
@@ -151,8 +186,12 @@ check_campaign_smoke() {
 
 check_failpoints() {
   local c crate cmd
+  local -A linted=()
   for c in "${FAILPOINT_CRATES[@]}" "${FAILPOINT_LINT_ONLY[@]}"; do
     crate="${c%%:*}"
+    # A crate listed more than once (`crate:target` entries) is linted once.
+    [[ -n "${linted[$crate]:-}" ]] && continue
+    linted[$crate]=1
     # ostro-wal is vendored and excluded from workspace clippy; lint the rest.
     if [[ "$crate" != "ostro-wal" ]]; then
       cargo clippy -p "$crate" --features failpoints --all-targets --locked -- -D warnings || return 1
@@ -279,6 +318,35 @@ check_musl_test() {
   cargo-zigbuild test --workspace --locked --target "$MUSL_TARGET"
 }
 
+# "Phase 6 external services" banner (06-18): one loud SKIP line per unset variable, each
+# also recorded as a SKIP row in the summary. Variable names match ci.yml.
+external_services_banner() {
+  local var legs any=0
+  local -a vars=(OSTRO_TEST_PG_URL OSTRO_TEST_MYSQL_URL OSTRO_TEST_S3_URL)
+  local -A what=(
+    [OSTRO_TEST_PG_URL]="ostro-bridge sql_pg, ostro fx_sql_crash pg_after_commit/pg_before_user_stmt"
+    [OSTRO_TEST_MYSQL_URL]="ostro-bridge sql_mysql, ostro fx_sql_crash mysql_after_commit/mysql_before_user_stmt"
+    [OSTRO_TEST_S3_URL]="ostro-objstore s3, ostro-bridge object S3 legs, ostro-server fx_object_e2e S3 legs"
+  )
+  echo
+  echo "==> Phase 6 external services"
+  for var in "${vars[@]}"; do
+    legs="${what[$var]}"
+    if [[ -n "${!var:-}" ]]; then
+      echo "    set: ${var} (${legs})"
+    else
+      any=1
+      echo "    ###################################################################"
+      echo "    SKIP (human_needed): ${var} unset — ${legs}"
+      echo "    ###################################################################"
+      record "external: ${var}" SKIP "-"
+    fi
+  done
+  if [[ "$any" -eq 1 ]]; then
+    echo "    (set them in ${TEST_ENV_FILE} or the environment; see the comment at the top)"
+  fi
+}
+
 step "toolchain 1.100.0" check_toolchain
 step "cargo fmt --check" cargo fmt --all --check
 step "cargo clippy -D warnings" check_clippy
@@ -287,6 +355,7 @@ step "sdk workspace fmt + clippy" check_sdk_lint
 step "sdk workspace test + wasm build" check_sdk_test
 step "guests build (wasm32-wasip2)" check_guests
 step "order-saga example" check_order_saga
+external_services_banner
 step "cargo test" cargo test --workspace --locked
 step "semantics sleepers (serial)" check_sleepers
 step "failpoint list sync (ci.yml)" check_failpoint_sync

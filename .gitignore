@@ -13,3 +13,5 @@ ci/deny-fixtures/**/target/
 guests/Cargo.lock
 # sdks/rust/: separate SDK workspace; versions pinned exactly in its manifests (target/ above).
 sdks/rust/Cargo.lock
+# 06-18: local OSTRO_TEST_* credentials for scripts/ci-local.sh (KEY=value lines); never commit
+.ostro-test-env

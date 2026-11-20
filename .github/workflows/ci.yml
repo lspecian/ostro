@@ -90,6 +90,48 @@ jobs:
             zig: false
     env:
       T: ${{ matrix.target }}
+    # Phase 6 DB legs (06-18, D-FX5): postgres:17 and mysql:8.4 on the linux-x86_64-gnu leg
+    # only. Service containers exist only on Linux runners, so every other leg gets an empty
+    # image, which skips the service. The passwords are throwaway CI values (>= 8 bytes: the
+    # connector receives them as sealed secrets, whose minimum is 8 bytes). The URLs are
+    # exported to that leg by the "Export Phase 6 DB service URLs" step.
+    services:
+      postgres:
+        image: ${{ matrix.name == 'linux-x86_64-gnu' && 'postgres:17' || '' }}
+        env:
+          POSTGRES_PASSWORD: ostro-ci-pw
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        # TLS: 8.4 generates its own certificates at first start (ssl-mode=REQUIRED works).
+        image: ${{ matrix.name == 'linux-x86_64-gnu' && 'mysql:8.4' || '' }}
+        env:
+          MYSQL_ROOT_PASSWORD: ostro-ci-pw
+          MYSQL_DATABASE: ostro
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -postro-ci-pw"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      # Optional (not required; 06-13's mock covers the default suite): a real Vault dev
+      # server for the OSTRO_TEST_VAULT_* legs.
+      # vault:
+      #   image: ${{ matrix.name == 'linux-x86_64-gnu' && 'hashicorp/vault:1.20' || '' }}
+      #   env:
+      #     VAULT_DEV_ROOT_TOKEN_ID: ostro-ci-vault-token
+      #     VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      #   ports:
+      #     - 8200:8200
+      #   options: --cap-add IPC_LOCK
+      # (then export OSTRO_TEST_VAULT_ADDR=http://127.0.0.1:8200 and
+      #  OSTRO_TEST_VAULT_TOKEN=ostro-ci-vault-token in the export step below)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain (rust-toolchain.toml) + target
@@ -160,6 +202,16 @@ jobs:
             echo "OSTRO_TEST_S3_SECRET_KEY=ostroseaweed"
             echo "OSTRO_TEST_S3_BUCKET=ostro-test"
           } >> "$GITHUB_ENV"
+      - if: matrix.name == 'linux-x86_64-gnu'
+        name: Export Phase 6 DB service URLs
+        # 06-18: the postgres / mysql service containers above (healthy before the first
+        # step). Same variable names as scripts/ci-local.sh; this leg only, so the other
+        # legs keep SKIPping the DB legs.
+        run: |
+          {
+            echo "OSTRO_TEST_PG_URL=postgres://postgres:ostro-ci-pw@127.0.0.1:5432/postgres"
+            echo "OSTRO_TEST_MYSQL_URL=mysql://root:ostro-ci-pw@127.0.0.1:3306/ostro?ssl-mode=REQUIRED"
+          } >> "$GITHUB_ENV"
       - if: ${{ !matrix.zig }}
         name: cargo test
         run: cargo test --workspace --locked
@@ -206,6 +258,8 @@ jobs:
           cargo test -p ostro-server --features failpoints --test failpoints_phase5 --locked -- --test-threads=1
           cargo test -p ostro-backup --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-bridge --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro --features failpoints --test fx_redrive --locked -- --test-threads=1
+          cargo test -p ostro --features failpoints --test fx_sql_crash --locked -- --test-threads=1
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Server campaign smoke (20 kills)
         # QA-01 whole-server kill campaign (plan 05-19) from a freshly wiped state dir; keep
