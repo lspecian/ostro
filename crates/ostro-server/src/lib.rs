@@ -26,11 +26,15 @@
 //! Phase 6 (06-14): [`bridge_services::BridgeServices`] builds the effects bridge once per
 //! server over [`meta_view::MetaHandleView`]; [`effects`] adapts it to the engine's
 //! `EffectDriver` (completions through `Cmd::CompleteEffect`, the pre-send gate).
+//!
+//! Phase 8 (08-21): [`effect_trace::TraceEffectHooks`] fills the effect hooks with outbound
+//! `traceparent` propagation (live request copy only) and `effect:<kind>` spans.
 
 pub mod bridge_services;
 pub mod config;
 pub mod control;
 pub mod derive;
+pub mod effect_trace;
 pub mod effects;
 pub mod executor;
 pub mod journal_io;

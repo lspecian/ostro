@@ -314,6 +314,19 @@ async fn start_inner(
         }
     };
 
+    // 2c. OBS-01 effect tracing (08-21): outbound traceparent + effect spans, with traces on.
+    if telemetry
+        .as_ref()
+        .and_then(TelemetryGuard::tracer_provider)
+        .is_some()
+    {
+        bridge
+            .driver()
+            .set_hooks(Arc::new(crate::effect_trace::TraceEffectHooks::new(
+                Arc::clone(bridge.partitions()),
+            )));
+    }
+
     // 3. engine runtime.
     let t = Instant::now();
     let runtime = match Runtime::new(

@@ -138,8 +138,15 @@ pub trait EffectHooks: Send + Sync {
     /// Called in [`ServerEffectDriver::start`] on the **live** copy of an HTTP request (the
     /// intent is already journaled), right before `Bridge::start`, so a header added here
     /// (e.g. `traceparent`) never reaches the journal. Runs on the activation task: must
-    /// not block.
-    fn decorate_live_request(&self, _run: &RunRecord, _op: u64, _req: &mut HttpRequest) {}
+    /// not block. `run` names the run (08-21: the record carries no run id).
+    fn decorate_live_request(
+        &self,
+        _run: &RunRef,
+        _rec: &RunRecord,
+        _op: u64,
+        _req: &mut HttpRequest,
+    ) {
+    }
 
     /// Called by [`PartitionCompletionSink`] after a completion was submitted (accepted or a
     /// duplicate). `started` is when [`ServerEffectDriver::start`] first saw `(run, op)` on
@@ -325,7 +332,7 @@ impl EffectDriver for ServerEffectDriver {
         if let EffectRequest::Http(req) = &mut effect.request {
             self.seam
                 .hooks()
-                .decorate_live_request(&rec, effect.op, req);
+                .decorate_live_request(run, &rec, effect.op, req);
         }
         // clock-exempt: span timing for the tracing hooks only, never used for logic.
         let now = SystemTime::now();
@@ -502,7 +509,11 @@ mod tests {
         };
         let mut live = req.clone();
         let rec = RunRecord::default();
-        NoopEffectHooks.decorate_live_request(&rec, 3, &mut live);
+        let rref = RunRef {
+            partition: 0,
+            run_id: "r".into(),
+        };
+        NoopEffectHooks.decorate_live_request(&rref, &rec, 3, &mut live);
         assert_eq!(live, req);
         let hooks: Arc<dyn EffectHooks> = Arc::new(NoopEffectHooks);
         hooks.on_effect_complete(
