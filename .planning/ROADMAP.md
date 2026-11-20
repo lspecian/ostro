@@ -217,7 +217,7 @@ Plans:
 **Plans**: 20 plans (8 waves; 06-01 is the PHASE-6 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only, + WIT freeze in place) and checking the code against .planning/RESERVATIONS.md (P6 block: Cmd 13, Intent 9/10, InvalidCode 15, effects rows); 06-02 lands deps/skeletons/contract; decisions D-FX1–D-FX9 + P-1–P-21 adopted in 06-DECISIONS.md, user may override; MySQL/MinIO legs env-gated → CI service containers / human_needed; the OTLP canary leg closes at the Phase 8 gate)
 
 Plans:
-- [ ] 06-01-PLAN.md — PHASE-6 GATE (Phase 5 + WIT freeze, code vs RESERVATIONS) + decisions to STATE + FX-05 wording + RESERVATIONS names and canonical InvalidCode placeholder names (docs only) (all FX)
+- [x] 06-01-PLAN.md — PHASE-6 GATE (Phase 5 + WIT freeze, code vs RESERVATIONS) + decisions to STATE + FX-05 wording + RESERVATIONS names and canonical InvalidCode placeholder names (docs only) (all FX)
 - [ ] 06-02-PLAN.md — All Phase 6 deps + ostro-bridge contract skeleton + ostro-objstore skeleton (08-03 signatures, if absent) + ostro-types contract (CompleteEffect 13 = encoded EffectCompleted payload, RegisterEffect/CancelEffect 9/10, BadEffectCompletion 15) (all FX)
 - [ ] 06-03-PLAN.md — Partition apply: effects rows (#12), RegisterEffect/CancelEffect, first-wins CompleteEffect stored verbatim, resumable-aware cleanup, LeaderAnnounced wake (FX-01, FX-03)
 - [ ] 06-04-PLAN.md — Egress core: URL gate, IANA classifier + mapped/NAT64/6to4 unwrap, allow-lists, hickory resolver with pinning, guarded client, capped reader, full [egress] config, SSRF table (FX-08)
