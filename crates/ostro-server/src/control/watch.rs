@@ -309,7 +309,7 @@ pub(crate) async fn await_result(
     r: AwaitResultRequest,
 ) -> Result<AwaitResultResponse, ApiError> {
     let wait = Duration::from_millis(effective_wait_ms(r.wait_ms));
-    let deadline = tokio::time::Instant::now() + wait;
+    let deadline = tokio::time::Instant::now() + wait; // clock-exempt: long-poll deadline
     let mut run = parse_run_id(cp, &r.run_id)?;
     // Bounds the chain walk (a continue-as-new chain never cycles; stay total anyway).
     let mut hops = 0u32;
@@ -324,7 +324,7 @@ pub(crate) async fn await_result(
             // after `continued_to` is set: poll briefly until it exists.
             Err(e) if e.code == ostro_api::ErrorCode::NotFound && pred.is_some() => {
                 drop(waiter);
-                let now = tokio::time::Instant::now();
+                let now = tokio::time::Instant::now(); // clock-exempt: long-poll deadline
                 if now >= deadline {
                     let (p, rec, payload) = pred.take().expect("checked");
                     return Ok(response(p, &rec, payload.as_deref()));
@@ -348,7 +348,8 @@ pub(crate) async fn await_result(
             }
             return Ok(response(run, &rec, payload.as_deref()));
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now(); // clock-exempt: long-poll deadline
+        if now >= deadline {
             return Ok(response(run, &rec, None));
         }
         let woken = tokio::time::timeout_at(deadline, waiter.notified())
