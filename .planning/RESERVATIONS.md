@@ -11,6 +11,7 @@
    - `exists`: in code today.
    - `planned` followed by the phase tag and owning plan (e.g. for Phase 5: "planned", then "P5", then the plan id): allocated to that phase's plan. 05-20 flips its rows to `exists`. **Done 2026-11-19 (05-20): every Phase 5 row was verified against the code at the freeze and now reads `exists (P5, <plan>)`.**
    - `reserved P6/P7/P8`: block held for that phase.
+     **Phase 6 gate 2026-11-20 (06-20):** every Phase 6 ordinal in code was verified against this file. Used rows read `exists (P6, <plan>)`: Cmd 13 `CompleteEffect`, Intent 9 `RegisterEffect` / 10 `CancelEffect`, InvalidCode 15 `BadEffectCompletion` and the keyspace #12 `effects` rows. Unused spares (Cmd 14–19, StartRun 24–27, Intent 11–12, EventKind 72–79, RejectReason 12–14, InvalidCode 16–17, Outbox 7, MetaKind 17–18, ext tags 16–31) stay `reserved P6`.
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -161,7 +162,7 @@ Rules:
 | 9 | inbound_seen | exists (P2) |
 | 10 | children | exists (P2) |
 | 11 | dlq | exists (P2) |
-| 12 | effects | exists (P2, no rows). **P6 writes rows** (`run ‖ op BE → EffectRow{kind, scheduled_at_ms}`). 0 new keyspaces for P6. |
+| 12 | effects | exists (P2); rows exists (P6, 06-03): `run ‖ op BE → EffectRow{kind, scheduled_at_ms}`, written by `RegisterEffect`, deleted by `CancelEffect`/`CompleteEffect`/terminal cleanup, scanned on `LeaderAnnounced`. 0 new keyspaces for P6. Verified at the Phase 6 gate (06-20). |
 | 13 | running | exists (P4; per 04-12 plan) |
 | 14 | waits | exists (P5, 05-02) |
 | 15 | signal_seen | exists (P5, 05-02) |

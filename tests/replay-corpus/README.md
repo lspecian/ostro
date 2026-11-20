@@ -167,8 +167,20 @@ re-run it over an existing entry.
 | `crash-campaign-s00-a` | crash-saga (server export from a shard-00 run of the 05-20 gate settings: seed 0x0520, 20 shards, 500 kills in the shard) | run `s00-562`: completed, start and completion 8 leader epochs apart (it lived through repeated kill -9 + restart), 5 grants, a step retry | completed |
 | `crash-campaign-s00-b` | crash-saga (same shard-00 run) | run `s00-1421`: 7 epochs apart, 5 grants, step retries (one step failing twice) | completed |
 | `crash-campaign-s00-c` | crash-saga (same shard-00 run, later in the shard) | run `s00-3929`: 7 epochs apart, 5 grants, step retries | completed |
+| `fx-http-pay` | fx-http (server export, 06-20) | key-carrying POST `/pay` through the effects bridge: `EffectScheduled` with the guest request, `EffectCompleted` http 200 from the journal | completed |
+| `fx-http-redrive` | fx-http (server export, 06-20, failpoint binary) | `bridge::effect::before_complete_submit=return(hang)`, charge, kill -9, restart: the replay re-drove `/pay` with the same derived key; one `EffectCompleted` (http 200, `idempotent-replayed: true`); provider saw 2 requests, 1 key, 1 charge | completed |
+| `fx-sql-exactly-once` | fx-sql (server export, 06-20, PostgreSQL 14) | exactly-once `INSERT … RETURNING` on a `sql-postgres` connection with a templated password: tagged `text`/`int8` cells, `rows_affected` 1 | completed |
+| `fx-object-local` | fx-object (server export, 06-20) | local object connection: put → get → head → presign-get (Ostro HMAC route URL) → delete → get `not_found` (W7 encodings) | completed |
+| `fx-canary-scrubbed` | fx-canary (server export, 06-20) | `X-Api-Key: {{secret:canary-key}}` towards an echo provider: the echoed header is `[REDACTED]`; a canary scan of the entry (raw, base64 at 3 alignments, hex, percent) found 0 hits | completed |
 
 05-20 adds the final entries (order-saga and crash-campaign samples) at the freeze.
+
+06-20 (Phase 6 gate) adds the `fx-*` effect entries. They were exported from throwaway
+`ostro server` data dirs against a loopback mock provider and a private PostgreSQL 14 cluster,
+with guests built by `scripts/corpus-guest-build.sh`. They replay with **no `EffectDriver`**:
+every completion comes from the journal, so the replay never contacts a provider or database.
+Before committing, every file of the five entries was scanned for the canary secret and the
+database password (raw, base64 std/url at all three alignments, hex, percent): 0 hits.
 
 The six 05-20 entries (`order-saga-*`, `crash-campaign-s00-*`) were first exported from
 guests built inside a session worktree, so their modules embedded that local path and
