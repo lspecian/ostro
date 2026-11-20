@@ -26,5 +26,14 @@ tracing.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 
+[dev-dependencies]
+# In-process S3 server for the protocol conformance leg (08-03 Task 1 spike: cargo-deny with
+# exclude-dev = true accepts s3s-fs's chrono; chrono stays out of the normal graph). Same
+# hyper 1.x / http 1.x as the rest of the workspace, so no duplicate majors.
+s3s = "0.17"
+s3s-fs = "0.17"
+hyper-util = { version = "0.1.21", features = ["server", "server-auto", "tokio", "http1"] }
+tempfile.workspace = true
+
 [lints]
 workspace = true
