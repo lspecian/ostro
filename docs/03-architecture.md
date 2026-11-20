@@ -176,17 +176,20 @@ The single-node data directory as it exists today (`ostro dev` uses `./.ostro`, 
 ├── wal/p/<id>/wal_<id>_<seg>.log   # partition <id>'s log (vendored ostro-wal, one shared group-commit
 │                              #   WAL per node, topic `p`); one OSTR envelope per record, leader epoch in
 │                              #   every envelope; e.g. wal/p/7/wal_7_0.log
-├── state/pNNNN/               # partition NNNN's state machine: one fjall database (16 keyspaces)
+├── state/pNNNN/               # partition NNNN's state machine: one fjall database (17 keyspaces incl. Phase 8 schedule_state)
+│                              #   (+ transient .install-pNNNN / .old-pNNNN during a snapshot install)
+├── snapshots/pNNNN/<applied 20d>.osnap   # local OSNP v1 snapshots (+ .blobrefs), keep 2 (Phase 8)
+├── backup/gc-ledger           # remote blob deletion ledger (only with bottomless on, Phase 8)
 ├── blobs/<hh>/<sha256>        # content-addressed: uploaded components and payloads > 256 KiB
 ├── cache/aot/                 # Wasmtime AOT artefacts (rebuildable; HMAC-keyed)
 └── tmp/                       # in-flight blob writes (renamed into blobs/ when complete)
 ```
 
-Retention expiry (§2.2, `EXPIRE_OP`) deletes a run from `state/` only. Its WAL records stay on disk until Phase 8 trims the log behind snapshots (`snapshot_floor = 0` until then), and blobs referenced by expired runs are not garbage-collected in Phase 5. Node open, backup/restore and blob GC ignore unknown data-dir entries (for example a future `<data>/audit/`).
+Retention expiry (§2.2, `EXPIRE_OP`) deletes a run from `state/` only. Since Phase 8 the log is trimmed behind local snapshots: retention deletes whole WAL segments below `min(durable checkpoint, oldest retained snapshot, upload floor if bottomless is on)`, so `log_start ≤ applied_offset(oldest retained snapshot)` always holds, and a partition whose state is lost reinstalls the newest usable local snapshot plus the log tail (or fails with "snapshot required: run `ostro restore`"). Blobs no longer referenced (expired runs) are removed by blob GC (mark/sweep with a 1 h grace; module blobs are kept). Formats: [storage-format.md](storage-format.md) §15, [snapshot-format.md](snapshot-format.md). Node open, backup/restore and blob GC ignore unknown data-dir entries (for example a future `<data>/audit/`).
 
 The frozen Phase 2 on-disk format (directory layout, WAL record and envelope bytes, command field numbers, keyspaces and key encodings, outcome codes, rolling hash and digest, recovery rules) is specified in [storage-format.md](storage-format.md). The leader-epoch history is not stored separately: recovery rebuilds it from the epochs in the envelopes.
 
-**Bottomless (D9):** an uploader task copies sealed WAL segments, periodic `state/pNNNN` (fjall) snapshots, metadata snapshots and blobs to object storage (S3-compatible and local backends from the in-house `ostro-objstore` crate on rusty-s3, D19; this supersedes the earlier plan to extract a Chronik object-store crate, and Azure Blob is deferred until a native backend exists). `ostro restore --from s3://…` rebuilds a node: metadata snapshot → per-partition state snapshot → segment tail.
+**Bottomless (D9, Phase 8):** one node-level uploader (leader services only) takes an HwVector consistent cut every `seal_interval` (default 1 s) and uploads blobs, then per-partition **uploader-sealed OSEG v1 chunks** of the raw WAL envelopes (hash-chained, split at epoch boundaries; the WAL's own segment files are never uploaded), the **logical OSNP v1 partition snapshots** the local snapshot service already wrote (fjall directories are never copied), a metadata snapshot, and finally `manifest/current` under prefix fencing (`LOCK` + conditional PUT). The object stores are the in-house `ostro-objstore` crate (S3-compatible on rusty-s3, and a durable local filesystem backend; D19). It supersedes the earlier plan to extract a Chronik object-store crate; Azure Blob is deferred until a native backend exists. `ostro restore --from s3://…|file://…|backup.tar` rebuilds a node: manifest → `node.toml` with a new incarnation → native Raft install of the metadata snapshot → blobs → per partition: OSNP install, chunk-chain verification, two-step verified replay up to the cut. Details: [bottomless.md](bottomless.md).
 
 ---
 
@@ -688,6 +691,6 @@ pub trait ActivationSink: Send + Sync {
 pub trait StateStore: Send + Sync {
     fn apply_batch(&self, offset: u64, cmds: &[Command]) -> Result<()>;
     fn applied_offset(&self) -> Result<u64>;
-    fn snapshot_to(&self, w: &mut dyn std::io::Write) -> Result<()>;
+    fn snapshot_to(&self, w: &mut dyn std::io::Write) -> Result<()>;   // OSNP v1 (snapshot-format.md); as built: PartitionStore::export_snapshot
 }
 ```

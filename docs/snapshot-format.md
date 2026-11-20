@@ -1,12 +1,16 @@
 # OSNP v1: Ostro partition snapshot format
 
-Status: Phase 8 (plan 08-02, decision P8-D1). Implementation: `crates/ostro-partition/src/store/snapshot.rs`
+**Status: v1, designed for Phase 12 follower install** (final at the Phase 8 gate, plan 08-22;
+format defined by plan 08-02, decision P8-D1). The byte layout below is normative: Phase 12
+streams these exact bytes to followers, and bottomless (08-13) uploads them unchanged. Changes
+follow the evolution rules of [storage-format.md](storage-format.md) §14.2 (additive frame kinds
+≥ 128 are skippable; anything else bumps `snap_ver`). Implementation: `crates/ostro-partition/src/store/snapshot.rs`
 (writer, reader, export, install) and `store/blobrefs.rs` (blob-ref visitor). Tests:
 `crates/ostro-partition/tests/snapshot.rs`, `tests/blobrefs.rs`.
 
 All integers are little-endian unless stated otherwise. Row keys and values are copied
 verbatim from the state keyspaces (their own encodings, big-endian keys included, are
-described in [storage-format.md](storage-format.md) §6, §7 and §13).
+described in [storage-format.md](storage-format.md) §6, §7, §13, §15 and §16).
 
 ## 1. Purpose
 
@@ -194,6 +198,13 @@ The object is immutable and written with `put_if_absent` (same sha = success, di
 fenced). A manifest only references snapshots with `snapshot_offset ≤ cut` (P8-D3). The sha256
 covers the whole file; the frame CRCs and the trailer digest are checked again on install.
 
+Cross-reference: the full remote layout (`LOCK`, `manifest/current`, `manifest/gen/<gen>`,
+`meta/<index>.msnap`, `blobs/<sha>`, `p/<pppp>/seg/<epoch>-<base>-<end>.oseg` chunks next to
+these `snap/` objects), the manifest's `snapshot_offset ≤ verify_offset ≤ cut_offset` rule
+and remote retention (K = 3 snapshots per partition) are in [bottomless.md](bottomless.md)
+§ Remote layout. Restore (`ostro restore`, 08-18) installs the referenced snapshot with the
+same staged install as §7 and replays the chunk chain from `snapshot_offset`.
+
 ## 9. Streaming (Phase 12 follower install)
 
 `OsnpReader` reads the header on construction, then one CRC-verified frame at a time
@@ -218,3 +229,35 @@ tail after `applied_offset` (fencing and divergence checks need the epoch bounda
 the log prefix was trimmed). `inbound_seen` rows (per-source shuffler dedupe watermarks) are an
 ordinary table and are exported with it, which keeps cross-partition exactly-once across a
 snapshot install.
+
+## 11. Phase 12 checklist
+
+What Phase 12 (replication, follower install) must build on top of OSNP v1, and what it may
+rely on without change:
+
+- [ ] **Frame streaming.** Forward `RawFrame`s from `OsnpReader::next_raw()` over the
+  `ostro.cluster.v1` replication stream; never re-encode. The follower writes them through the
+  same staged install (§7: `.install-pNNNN`, reopen + digest check, rename swap), so a partial
+  transfer never touches the live state.
+- [ ] **Resumption.** Resume at a frame boundary (frame index *i*, header kept); the 1 MiB
+  `Rows` target bounds the lost work. The leader must stream from the same snapshot file
+  (identified by `applied_offset` + sha256) or restart the transfer; a retained snapshot can
+  be deleted by `keep` retention, so the leader pins the file for the transfer's duration.
+- [ ] **Epoch history.** Read `cursor.epoch_history` from the installed state (§10) and seed the
+  follower's log epoch cache from it (`Rf1Log::seed_epochs` pattern, storage-format §10 step 3
+  / §14.5 F5) before fetching the tail from `applied_offset`.
+- [ ] **Divergent-tail truncation, local.** After install the follower's log starts at
+  `applied_offset` (empty-log anchoring, storage-format §10); anything it held above that is
+  discarded, then the tail is fetched under the leader's epoch history (KIP-101/279).
+- [ ] **Divergent-tail truncation in object storage.** Bottomless chains are hash-linked
+  (`prev_chunk_sha256`) and split at epoch boundaries; a new leader for a partition must not
+  extend a remote chain whose last chunk ends in a tail it truncated. Per-partition chain
+  repair (Phase 12 F12c): fence per-partition writers by leader epoch, walk back from the
+  manifest head (F12b) to the last chunk at or below the new leader's divergence point, and
+  start a new chain segment from there (or from a fresh snapshot, the chain start rule in
+  bottomless.md). LOCK and the single manifest writer stay single-node constructs.
+- [ ] **HW publication.** Publish tracker-driven HW through `HwVector::publish_hw` (the single
+  publication point, F12a) so the uploader's consistent cut stays correct with replication.
+- [x] Already in v1: header `partition` / `partition_count` (install refuses a mismatch),
+  `state_format` + migrators (§6), the trailer `logical_digest` (§5), blob refs (followers
+  fetch missing blobs before install), `inbound_seen` rows (cross-partition exactly-once).

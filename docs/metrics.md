@@ -126,8 +126,10 @@ other executor code maps to `other`.
 | `ostro_blob_gc_bytes_freed_total` | C | — | bytes | Bytes freed by blob GC. | `services/blob_gc.rs` | 08-19 |
 | `ostro_blob_gc_duration_seconds` | H | — | s | Duration of one GC pass. | `services/blob_gc.rs` | 08-19 |
 
-The three blob GC series belong to 08-19, which may land after this page. 08-22 re-checks
-this list against the code.
+Re-checked at the Phase 8 gate (08-22): every `"ostro_*"` series literal in `crates/*/src`
+(`grep -rhoE '"ostro_[a-z0-9_]+"' crates/*/src | sort -u`, 64 series) has a row on this page,
+and every row names a series that exists in the code. The blob GC series are the
+`METRIC_*` constants of `services/blob_gc.rs` (08-19).
 
 ## Triggers
 

@@ -68,8 +68,8 @@ When `[telemetry] metrics = false`, `/metrics` is not routed.
 Set `[telemetry] otlp_endpoint`, or `OSTRO_TELEMETRY__OTLP_ENDPOINT`. The node then exports
 over OTLP/gRPC:
 - **Traces:** node-internal `tracing` spans, through `tracing-opentelemetry` (for example,
-  tower-http's `request` span at `debug` level for REST requests). Run, activation, step and
-  effect spans follow in 08-11.
+  tower-http's `request` span at `debug` level for REST requests), plus the run, activation,
+  step and effect spans of the span model below (08-11, 08-21).
 - **Logs:** node `tracing` events, through `opentelemetry-appender-tracing`. The event target
   becomes the instrumentation scope name.
 
@@ -93,6 +93,14 @@ about their own exports:
 
 `ostro::guest` events are excluded too: the guest log sink exports each guest line as its own
 LogRecord (08-17), so bridging would export it twice.
+
+The span layer has the same guard (08-22): spans and events of the crates
+`opentelemetry`, `opentelemetry_sdk`, `opentelemetry_otlp`, `tonic`, `h2` and `tower` never
+reach `tracing-opentelemetry` (`logging::SPAN_EXCLUDED_TARGETS`, matched at the crate
+boundary, so tower-http's `request` span is still exported). At `trace` level the exporter's own gRPC spans would
+otherwise be exported by the exporter they describe (08-21 measured 120k spans in 40 s and
+dropped batch records). The outbound HTTP path of the effects bridge (`hyper`, `reqwest`)
+stays visible to the span layer.
 
 The log level is the node's `[log] level` / `RUST_LOG` filter, which applies to stdout and
 OTLP alike.
@@ -140,7 +148,7 @@ instrumentation scope `ostro-engine`; node-internal `tracing` spans (API request
 | `workflow.run` | ostro-server `services/run_spans.rs`, on the post-apply `Action::RunCompleted` | the caller's span from the run's `traceparent`; none (root) otherwise | `run`, 0 | `created_at_ms` / `completed_at_ms` of the run record | `ostro.run_id`, `ostro.workflow`, `ostro.status`; status Ok for `completed` / `continued_as_new`, Error otherwise |
 | `activation` | the engine, once per activation | `workflow.run` | `activation`, `attempt << 32 \| counter` (counter = committed journal length at activation start) | activation start / end (wall clock) | `ostro.run_id`, `ostro.workflow`, `ostro.attempt`, `ostro.replayed_events`, `ostro.outcome`; status Error on a failed attempt (trap, fuel, nondeterminism, ...) |
 | `<step name>` | the engine, after the append carrying the step's `StepCompleted` / `StepAttemptFailed` committed | the activation that ran the step live | `step`, journal seq | attempt start / the journaled completion ts | `ostro.run_id`, `ostro.seq`, `ostro.attempt`, `ostro.outcome` (`ok`, `retry`, `cancelled`, `timeout`, `error`) |
-| `effect:<kind>` | the effect driver (08-21 wires it into ostro-server's `ServerEffectDriver`) | `workflow.run` | `effect`, op id | effect I/O start / end | `ostro.run_id`, `ostro.op`, `ostro.effect_kind`, `ostro.outcome` |
+| `effect:<kind>` (`http`, `sql`, `object`) | ostro-server `effect_trace.rs` (`TraceEffectHooks`, installed on `ServerEffectDriver` when OTLP traces are on), once per completed effect | `workflow.run` | `effect`, op id | effect I/O start / end | `ostro.run_id`, `ostro.op`, `ostro.effect_kind`, `ostro.outcome` (`ok` or the bounded failure kind: `ErrorInfo.kind`, `timeout`, `cancelled`, `undecodable`) |
 
 ### Id derivation
 
@@ -186,6 +194,17 @@ pub async fn with_traceparent<F: Future>(traceparent: Option<String>, f: F) -> F
 formats the W3C header itself when no propagator is installed, so outbound HTTP always
 carries `traceparent`. The executor wraps every activation in `with_traceparent(record
 .traceparent)`.
+
+### Outbound `traceparent` (B2, plan 08-21)
+
+With OTLP traces on, `TraceEffectHooks` (`crates/ostro-server/src/effect_trace.rs`)
+decorates the **live** copy of every outbound HTTP effect request with
+`traceparent: 00-<run trace id>-<span_id(run, "effect", op)>-01`, after the intent was
+journaled, so the journal never contains it (journal bytes are the same with and without
+telemetry). A guest-supplied `traceparent` header (any case) wins and is sent unchanged; the
+effect span is still emitted. A crash re-drive sends the identical header. With traces off
+the driver keeps the no-op hooks and the outbound request equals the journaled intent.
+Evidence: `crates/ostro-server/tests/outbound_traceparent.rs`.
 
 ## Guest logs
 

@@ -33,6 +33,27 @@ floor** (it starts at the current `log_start` when the node opens), so nothing t
 yet safely uploaded is ever trimmed. Credentials go in the dedicated fields, never in the
 URL: `open_url` rejects userinfo, and the startup log prints the URL only.
 
+Two related sections control what bottomless uploads and what the node may delete locally
+(keys and defaults checked against `crates/ostro-server/src/config.rs` at the Phase 8 gate,
+08-22; durations take h/m/s/ms, `d` is rejected):
+
+```toml
+[snapshots]              # local OSNP snapshots (08-09); the uploader uploads the same files
+enabled = true
+interval = "1h"          # snapshot at least this often when something was applied
+min_interval = "60s"     # never more often than this
+bytes = 268435456        # ... or when this many envelope bytes were appended since the last one
+keep = 2                 # local snapshots kept; the oldest kept one is the local trim floor
+
+[blob_gc]                # local mark/sweep (08-19) + remote delayed deletion with bottomless on
+enabled = true
+interval = "1h"
+grace = "1h"             # only unreferenced blobs older than this are deleted
+```
+
+Local WAL trimming needs a retained snapshot: with `[snapshots] enabled = false` the local
+floor stays 0 and nothing is trimmed (storage-format §15.1).
+
 ## Remote layout
 
 Everything lives under the configured prefix.
@@ -170,6 +191,15 @@ Per P8-D23 the RPO has two measured parts:
 
 So RPO ≈ `seal_interval` + upload latency. After a crash, the data-loss window is the newest
 lost acknowledgement minus the manifest's `cut_at_ms`.
+
+Measured (08-20 `restore_rpo`, P=16, seal 1 s, 10 kill/restore iterations, release binary on a
+loaded WSL2 machine, `file://` bucket): cut lag p50 1,044 ms / max 1,203 ms (asserted ≤ seal +
+500 ms), upload latency p50 681 ms / max 849 ms for the restored rounds (all rounds: p50 733 ms,
+max 2,030 ms), data-loss window p50 1,680 ms / max 2,449 ms. Every acknowledgement older than
+the cut was restored (22,379 acks). Uploads are sequential across partitions inside a round
+(08-13); at P=16 under load the round is fsync-bound on LocalFs (08-13: p50 1.02 s, max 9.73 s
+at seal 250 ms). Parallel per-partition uploads are the next lever if a deployment needs a
+smaller window. Real S3/R2 numbers are a human_needed item of the Phase 8 gate.
 
 ## Cost
 
@@ -331,7 +361,9 @@ The restored node has a new incarnation, so the source prefix's `LOCK` names ano
 RPO ≈ `seal_interval` + upload latency (see "RPO measurement"). With the default 1 s seal
 interval a crash loses at most the last couple of seconds of acknowledged work; the restore
 report's `cut_at_ms` says exactly where the restored history ends. Backup files have the RPO
-of the moment they were taken. The SC3 timing and RPO numbers are measured by 08-20.
+of the moment they were taken. Measured numbers: "RPO measurement" above. Restore time:
+P=16 with ~10k runs restores in about 9 s (debug build, LocalFs, `--parallelism 4`; partition
+installs dominate); the 08-20 backup-file round trip (16 partitions, 2,045 runs) took 13.4 s.
 
 ### Fresh-machine checklist
 

@@ -27,7 +27,9 @@ POST /hooks/{name}
   body is rejected with `413` before the webhook is even looked up.
 - There is no gRPC form: a signature covers the raw HTTP body and headers.
 - The replay window defaults to 300 s for Stripe, Slack and Standard Webhooks (see
-  `tolerance_s` below).
+  `tolerance_s` below). The node-level key `[triggers] webhook_tolerance` (default `300s`) is
+  parsed and validated but **not wired yet** (Phase 8 gate finding, 08-22): the per-webhook
+  `tolerance_s`, else the built-in 300 s default, is what the verifier uses.
 
 ## Defining a webhook
 
