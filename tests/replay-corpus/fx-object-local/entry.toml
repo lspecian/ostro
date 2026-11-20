@@ -1,0 +1,21 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+# Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
+name = "fx-object-local"
+workflow = "fx-object"
+input_json = "{\"connection\":\"files\",\"ops\":[{\"body_b64\":\"aGVsbG8=\",\"key\":\"a/b.txt\",\"op\":\"put\"},{\"key\":\"a/b.txt\",\"op\":\"get\"},{\"key\":\"a/b.txt\",\"op\":\"head\"},{\"key\":\"a/b.txt\",\"op\":\"presign-get\"},{\"key\":\"a/b.txt\",\"op\":\"delete\"},{\"key\":\"a/b.txt\",\"op\":\"get\"}]}"
+expected = "completed"
+partition = 0
+run_id = "000038fsepv60wekn84rbvar6rn1t"
+token_key_hex = "8a24e75c3e6eb27917cd006e5517dc440d14a5abd76c4a1a3deed4afb20fea94"
+terminal_payload_sha256 = "1b97304d082596e9c034b48fecf199bc177379c62edba5b48f703a930083dded"
+journal_events = 20
+module_sha256 = "e854c8581f28d80be7dbdfeb663b2e23c98e1c29e681faa6ec05c856fe921573"
+journal_sha256 = "894be5cd031c486617366fce6914612e0aa50e3ae72c655a826c89eb933ff935"
+
+[recorded_with]
+ostro = "wit/ostro-runtime-v0.1.0-128-g398af207c5d0"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-20"
+tool = "export_run"
+command = "export_run --run 000038fsepv60wekn84rbvar6rn1t --entry fx-object-local"

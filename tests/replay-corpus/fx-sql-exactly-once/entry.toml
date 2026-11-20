@@ -1,0 +1,21 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+# Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
+name = "fx-sql-exactly-once"
+workflow = "fx-sql"
+input_json = "{\"connection\":\"orders\",\"exactly_once\":true,\"params\":[\"k-0620\",1000],\"statement\":\"INSERT INTO orders (k, amount) VALUES ($1, $2) RETURNING k, amount\"}"
+expected = "completed"
+partition = 0
+run_id = "000038fsepv5ex6agggfrxpbqmfm8"
+token_key_hex = "8a24e75c3e6eb27917cd006e5517dc440d14a5abd76c4a1a3deed4afb20fea94"
+terminal_payload_sha256 = "0e73f59e1f2856409e3b693e07193fe277fb65e27100c42fafe0b3214662232b"
+journal_events = 5
+module_sha256 = "9261ffbcbf7d5523aa3071f8574a41f7f2b464c2e3b732b25c77ba5c9720dbbb"
+journal_sha256 = "0f103c23abccd9c00140fa7116f9af47f5bebf7e583bed92c519e2458ed8ea4b"
+
+[recorded_with]
+ostro = "wit/ostro-runtime-v0.1.0-128-g398af207c5d0"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-20"
+tool = "export_run"
+command = "export_run --run 000038fsepv5ex6agggfrxpbqmfm8 --entry fx-sql-exactly-once"

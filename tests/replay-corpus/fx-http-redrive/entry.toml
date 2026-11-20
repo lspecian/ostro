@@ -1,0 +1,21 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+# Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
+name = "fx-http-redrive"
+workflow = "fx-http"
+input_json = "{\"requests\":[{\"body_b64\":\"eyJhbW91bnQiOjI1MDAsImN1cnJlbmN5IjoiZXVyIn0=\",\"headers\":[[\"content-type\",\"application/json\"]],\"method\":\"POST\",\"url\":\"http://127.0.0.1:46639/pay\"}]}"
+expected = "completed"
+partition = 2
+run_id = "001038fserbg0xczgj6hr35pvd03e"
+token_key_hex = "f5319b310b44b110dbddb897c5c883591f13d49ebaa05fdd524468f0f5805644"
+terminal_payload_sha256 = "da4292f84a5ef9bcf07112aab0249d6f70952ec1a69cad0963a9c7ebcf64abf3"
+journal_events = 5
+module_sha256 = "cc3eea946cfb5553784a39049a4ee75b4257fa9a3e5f7540ab32435f9914bfd9"
+journal_sha256 = "69640f7e9b0abe142aed07a9c8da09834fe987aad997d2a72bfde0d6fc68e9ca"
+
+[recorded_with]
+ostro = "wit/ostro-runtime-v0.1.0-128-g398af207c5d0"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-20"
+tool = "export_run"
+command = "export_run --run 001038fserbg0xczgj6hr35pvd03e --entry fx-http-redrive"
