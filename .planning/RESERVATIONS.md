@@ -35,7 +35,7 @@ Sources:
 | 10 | TerminateRun | exists (P5, 05-01) |
 | 11 | RetryRun | exists (P5, 05-01) |
 | 12 | CompleteToken | exists (P5, 05-01) |
-| 13 | CompleteEffect | reserved P6 |
+| 13 | CompleteEffect | exists (P6, 06-02) |
 | 14–19 | spare | reserved P6 |
 | 20–26 | (unspecified) | reserved P7 |
 | 27 | ScheduleFire | exists (P8, 08-01) |
@@ -95,8 +95,8 @@ State value fields (positional postcard, pre-freeze only; listed for cross-phase
 | 6 | Suspend | exists (P4, 04-09; per 04-12 plan) |
 | 7 | RegisterWait | exists (P5, 05-01) |
 | 8 | CancelWait | exists (P5, 05-01) |
-| 9 | RegisterEffect `{op, kind u8, scheduled_at_ms}` | reserved P6 |
-| 10 | CancelEffect `{op}` | reserved P6 |
+| 9 | RegisterEffect `{op, kind u8, scheduled_at_ms}` | exists (P6, 06-02) |
+| 10 | CancelEffect `{op}` | exists (P6, 06-02) |
 | 11–12 | spare | reserved P6 |
 | 13–16 | — | reserved P7 |
 | 17–18 | — (P8 declared 0 needs) | reserved P8 |
@@ -193,7 +193,7 @@ Rules:
 | 11 | BadLength | exists (P4; per 04-12 plan) |
 | 12 | NotRunning | exists (P4; per 04-12 plan) |
 | 13–14 | spare (P5 plans currently reuse BadIntent / NotImplemented) | reserved P5 |
-| 15 | BadEffectCompletion | reserved P6 |
+| 15 | BadEffectCompletion | exists (P6, 06-02) |
 | 16–17 | spare | reserved P6 |
 | 18–21 | — | reserved P7 |
 | 22 | BadScheduleFire (malformed `ScheduleFire`: kind/start/request_id mismatch; name chosen by 08-01) | exists (P8, 08-01) |
