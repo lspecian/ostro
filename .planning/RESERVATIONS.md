@@ -12,6 +12,7 @@
    - `planned` followed by the phase tag and owning plan (e.g. for Phase 5: "planned", then "P5", then the plan id): allocated to that phase's plan. 05-20 flips its rows to `exists`. **Done 2026-11-19 (05-20): every Phase 5 row was verified against the code at the freeze and now reads `exists (P5, <plan>)`.**
    - `reserved P6/P7/P8`: block held for that phase.
      **Phase 6 gate 2026-11-20 (06-20):** every Phase 6 ordinal in code was verified against this file. Used rows are flipped to `exists (P6)` (written `exists (P6, <plan>)`): Cmd 13 `CompleteEffect`, Intent 9 `RegisterEffect` / 10 `CancelEffect`, InvalidCode 15 `BadEffectCompletion` and the keyspace #12 `effects` rows. Unused spares (Cmd 14–19, StartRun 24–27, Intent 11–12, EventKind 72–79, RejectReason 12–14, InvalidCode 16–17, Outbox 7, MetaKind 17–18, ext tags 16–31) stay `reserved P6`.
+     **Phase 8 gate 2026-11-20 (08-22):** every Phase 8 ordinal in code was re-verified against this file (`08-22-rescheck.py`: every Cmd tag, keyspace and InvalidCode in code is `exists` or a placeholder; RESERVATIONS CHECK: PASS). The ordinal rows were flipped by 08-01 (Cmd 27 `ScheduleFire`, keyspace 16 `schedule_state`, InvalidCode 22 `BadScheduleFire` / 23 `ScheduleOwnerMismatch`) and are confirmed; the §11 Phase 8 names that shipped now read `exists (P8, <plan>)`. Unused Phase 8 slots stay `reserved P8`: Cmd 28–33, StartRun 32–35, Intent 17–18, EventKind 88–95, RejectReason 18–19, InvalidCode 24, Outbox kind 10, MetaKind 21, meta ext tags 48–63, and the `cron::` failpoint prefix.
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -319,25 +320,26 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Failpoint prefix | `bridge::` | P6 |
 | REST paths | `/v1/runs/{id}/signals/{name}`, `/cancel`, `/terminate`, `/retry`, `/result`; `/v1/tokens/complete`; `/v1/workflows/{name}/policy`; `/v1/queues/{name}/policy` | P5 (05-04/05-13) |
 | REST prefixes | `/v1/secrets`, `/v1/grants`, `/v1/connections`, `/v1/egress`, `/v1/objects/{connection}/{key}` | P6 |
-| REST path | `POST /hooks/{name}` (+ webhook CRUD under `/v1/webhooks`) | P8 |
+| REST path | `POST /hooks/{name}` (+ webhook CRUD under `/v1/webhooks`) | exists (P8, 08-10 routes; 08-15 controller) |
 | gRPC service | `ostro.api.v1.Tokens` | P5 (05-04) |
 | Sealed-secret prefix | `__ostro/` (exists: `__ostro/token-key`; P6 adds `__ostro/presign/<connection>`) | P4 / P6 |
 | Grant id prefix | `secret:` | P6 |
-| Dedupe key namespace | `__cron/<schedule>` | P8 |
-| Dedupe / idempotency namespace | `__hook/<name>/<key>` (webhook deliveries, 08-15) | P8 |
-| Config sections | `[telemetry]`, `[snapshots]`, `[backup]`, `[blob_gc]`, `[triggers]`, `[guest_logs]` (P8-D22; parsed by 08-04) | P8 |
-| Failpoint prefixes | `snapshot::`, `trim::`, `upload::`, `restore::`, `blobgc::`, `cron::` | P8 |
-| REST paths | `GET /metrics`; `/v1/schedules` (+ `/v1/schedules/{name}/pause`, `/resume`, `/trigger`); `GET /v1/runs/{id}/logs`; `GET /v1/admin/backup` | P8 (08-10) |
-| gRPC services | `ostro.api.v1.Schedules`, `ostro.api.v1.Webhooks` | P8 (08-10) |
-| gRPC service + RPC | `ostro.api.v1.RunLogs` / `GetRunLogs` (in `schedules.proto`). 08-10 did not append to `Runs`: runs.proto stays untouched so the Phase 8 surface lives in its own proto files and 06-08 shares no proto edit. Hook ingress and the admin backup are REST-only | P8 (08-10) |
-| node.toml keys | `incarnation` (08-08; additive, F6), `restored_from` (08-18) | P8 |
-| Object-store prefixes (bottomless layout, under the configured prefix) | `LOCK`, `manifest/` (`manifest/current`, `manifest/gen/<gen 20d>`), `meta/`, `blobs/`, `p/<pppp>/snap/`, `p/<pppp>/seg/` | P8 |
-| Data-dir entries | `snapshots/pNNNN/` (local OSNP snapshots), `state/.install-pNNNN` (snapshot install staging) | P8 (08-02/08-09) |
-| Run tag | `ostro.schedule` (runs started by a schedule, 08-14) | P8 |
-| Env prefix | `OSTRO_BACKUP_*` (backup/restore CLI, 08-18) | P8 |
+| Dedupe key namespace | `__cron/<schedule>` (`__cron/<schedule>/<fire_time_ms>`, `__cron/<schedule>/manual/<hex>`) | exists (P8, 08-01 key shape; 08-07/08-14) |
+| Dedupe / idempotency namespace | `__hook/<name>/<key>` (webhook deliveries, 08-15) | exists (P8, 08-15) |
+| Config sections | `[telemetry]`, `[snapshots]`, `[backup]`, `[blob_gc]`, `[triggers]`, `[guest_logs]` (P8-D22; parsed by 08-04) | exists (P8, 08-04) |
+| Failpoint prefixes | `snapshot::` (08-02/08-09), `trim::` (08-09), `upload::` (08-13), `restore::` (08-18), `blobgc::` (08-19) | exists (P8, 08-02/08-09/08-13/08-18/08-19) |
+| Failpoint prefix | `cron::` (no site shipped in Phase 8) | reserved P8 |
+| REST paths | `GET /metrics`; `/v1/schedules` (+ `/v1/schedules/{name}/pause`, `/resume`, `/trigger`); `GET /v1/runs/{id}/logs`; `GET /v1/admin/backup` | exists (P8, 08-10; controllers 08-14/08-15/08-17/08-18) |
+| gRPC services | `ostro.api.v1.Schedules`, `ostro.api.v1.Webhooks` | exists (P8, 08-10) |
+| gRPC service + RPC | `ostro.api.v1.RunLogs` / `GetRunLogs` (in `schedules.proto`). 08-10 did not append to `Runs`: runs.proto stays untouched so the Phase 8 surface lives in its own proto files and 06-08 shares no proto edit. Hook ingress and the admin backup are REST-only | exists (P8, 08-10; 08-17) |
+| node.toml keys | `incarnation` (08-08; additive, F6), `restored_from` (08-18) | exists (P8, 08-08/08-18) |
+| Object-store prefixes (bottomless layout, under the configured prefix) | `LOCK`, `manifest/` (`manifest/current`, `manifest/gen/<gen 20d>`), `meta/`, `blobs/`, `p/<pppp>/snap/`, `p/<pppp>/seg/` | exists (P8, 08-13) |
+| Data-dir entries | `snapshots/pNNNN/` (local OSNP snapshots, `.blobrefs` sidecars, `.tmp-*` in flight), `state/.install-pNNNN` (snapshot install staging), `state/.old-pNNNN` (replaced state during the install swap; recorded at the gate, shipped by 08-02), `backup/gc-ledger` (remote blob deletion ledger; recorded at the gate, shipped by 08-19) | exists (P8, 08-02/08-09/08-19) |
+| Run tag | `ostro.schedule` (runs started by a schedule, 08-14) | exists (P8, 08-14) |
+| Env prefix | `OSTRO_BACKUP_*` (backup/restore CLI, 08-18) | exists (P8, 08-18) |
 | Crates | `ostro-witcheck` | P5 (05-05) |
 | Crates | `ostro-objstore` (shared P6/P8, first runner creates it; D19), `ostro-bridge` | P6 / P8 |
-| Crates | `ostro-backup`, `ostro-triggers` | P8 |
+| Crates | `ostro-backup`, `ostro-triggers` | exists (P8, 08-01) |
 | gRPC services | `ostro.api.v1.Secrets` (secrets, grants), `ostro.api.v1.Connectors` (connections, egress policies) | P6 (P-14) |
 | Proto file | `ostro/api/v1/bridge.proto` | P6 (P-14) |
 | CLI verbs | `ostro secret`, `ostro grant`, `ostro connection`, `ostro egress` | P6 (P-14) |
