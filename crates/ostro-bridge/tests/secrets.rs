@@ -3,21 +3,25 @@
 //! also hold `ENV`).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
+use ostro_bridge::meta_view::{MetaView, StaticMetaView};
 use ostro_bridge::origin::{Origin, OriginPattern};
 use ostro_bridge::secrets::{
-    GrantSpec, Scrubber, SealedStore, SealingKeyRing, SecretValue, SecretsConfig, TemplateError,
-    check_grant, template,
+    EnvProvider, FileProvider, GrantSpec, ProviderChain, ProviderError, ResolveCtx, Scrubber,
+    SealedProvider, SealedStore, SealingKeyRing, SecretProvider, SecretResolver, SecretValue,
+    SecretsConfig, TemplateError, check_grant, template,
 };
 use ostro_types::journal::Failure;
+use secrecy::{ExposeSecret, SecretBox};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use url::Url;
 
 /// Serialises environment mutation (tests also run with `--test-threads=1`).
-static ENV: Mutex<()> = Mutex::new(());
+static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// A canary value: must never show up in any `Debug` output, error or message.
 const CANARY: &[u8] = b"CANARY-0b5e7d1c-4f2a-value";
@@ -139,7 +143,7 @@ fn scrubber_removes_canary_from_echoed_body() {
 
 #[test]
 fn sealing_key_from_env_round_trips() {
-    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV.blocking_lock();
     let dir = tempfile::tempdir().unwrap();
     let key = STANDARD.encode([0x5au8; 32]);
     // SAFETY: env mutation is serialised by `ENV` and the suite runs single-threaded.
@@ -159,4 +163,150 @@ fn sealing_key_from_env_round_trips() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn env_provider_reads_mapped_variable() {
+    let _g = ENV.lock().await;
+    let p = EnvProvider::default();
+    let var = p.var_name("stripe/live-key.v2");
+    assert_eq!(var, "OSTRO_SECRET_STRIPE_LIVE_KEY_V2");
+    // SAFETY: env mutation is serialised by `ENV` and the suite runs single-threaded.
+    unsafe { std::env::set_var(&var, std::str::from_utf8(CANARY).unwrap()) };
+    let got = p.get("stripe/live-key.v2").await;
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(&var) };
+    assert_eq!(got.unwrap().unwrap().expose_secret(), CANARY);
+    assert!(p.get("stripe/live-key.v2").await.unwrap().is_none());
+    assert!(matches!(
+        p.get("__ostro/token-key").await,
+        Err(ProviderError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn file_provider_reads_per_call() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("db-pass"), b"first-value-123\n").unwrap();
+    let p = FileProvider::new(dir.path());
+    assert_eq!(
+        p.get("db-pass").await.unwrap().unwrap().expose_secret(),
+        b"first-value-123"
+    );
+    std::fs::write(dir.path().join("db-pass"), b"second-value-456").unwrap();
+    assert_eq!(
+        p.get("db-pass").await.unwrap().unwrap().expose_secret(),
+        b"second-value-456"
+    );
+    assert!(p.get("../db-pass").await.is_err());
+}
+
+struct Counting(AtomicUsize);
+
+#[async_trait::async_trait]
+impl SecretProvider for Counting {
+    fn name(&self) -> &'static str {
+        "counting"
+    }
+    async fn get(&self, _: &str) -> Result<Option<SecretBox<[u8]>>, ProviderError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(SecretBox::new(CANARY.into())))
+    }
+}
+
+#[tokio::test]
+async fn resolver_end_to_end_over_sealed_env_file_chain() {
+    let _g = ENV.lock().await;
+    let store = SealedStore::new(Arc::new(SealingKeyRing::from_bytes([0x33; 32])));
+    let grant = GrantSpec {
+        module: "acme/billing".into(),
+        secret: "stripe/key".into(),
+        origins: vec![OriginPattern::parse("https://api.stripe.com").unwrap()],
+        body: false,
+    };
+    let file_grant = GrantSpec {
+        secret: "from-file".into(),
+        ..grant.clone()
+    };
+    let meta = StaticMetaView::new()
+        .insert_grant(grant.to_record())
+        .insert_grant(file_grant.to_record())
+        .insert_sealed_secret(store.seal("acme/stripe/key", CANARY).unwrap());
+    let meta: Arc<dyn MetaView> = Arc::new(meta);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("from-file"), b"file-provided-value").unwrap();
+    let chain = ProviderChain::new(vec![
+        Arc::new(SealedProvider::new(
+            meta.clone(),
+            store.clone(),
+            Some("acme".into()),
+        )) as Arc<dyn SecretProvider>,
+        Arc::new(EnvProvider::default()),
+        Arc::new(FileProvider::new(dir.path())),
+    ]);
+    let r = SecretResolver::new(meta.clone(), chain).with_sealed_store(store);
+    let ctx = ResolveCtx {
+        module: "acme/billing",
+        tenant: Some("acme"),
+        run_id: "r1",
+        attempt: 1,
+    };
+    let o = origin("https://api.stripe.com/v1/charges");
+    assert_eq!(
+        r.resolve(&ctx, "stripe/key", &o, false)
+            .await
+            .unwrap()
+            .expose(),
+        CANARY
+    );
+    assert_eq!(
+        r.resolve(&ctx, "from-file", &o, false)
+            .await
+            .unwrap()
+            .expose(),
+        b"file-provided-value"
+    );
+    let k = nr_kind(
+        r.resolve(&ctx, "stripe/key", &origin("https://evil.test"), false)
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(k, ostro_bridge::kinds::SECRET_NOT_GRANTED);
+    let k = nr_kind(r.resolve(&ctx, "stripe/key", &o, true).await.unwrap_err());
+    assert_eq!(k, ostro_bridge::kinds::SECRET_NOT_GRANTED);
+    assert_no_canary(&format!("{r:?}"));
+}
+
+#[tokio::test]
+async fn missing_grant_never_calls_provider() {
+    let counting = Arc::new(Counting(AtomicUsize::new(0)));
+    let chain = ProviderChain::new(vec![counting.clone() as Arc<dyn SecretProvider>]);
+    let r = SecretResolver::new(Arc::new(StaticMetaView::new()), chain);
+    let ctx = ResolveCtx {
+        module: "acme/billing",
+        tenant: None,
+        run_id: "r1",
+        attempt: 2,
+    };
+    let k = nr_kind(
+        r.resolve(&ctx, "stripe/key", &origin("https://api.stripe.com"), false)
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(k, ostro_bridge::kinds::SECRET_NOT_GRANTED);
+    assert_eq!(counting.0.load(Ordering::SeqCst), 0);
+    // Operator resolution needs no grant and does call the chain.
+    assert_eq!(
+        r.resolve_operator("stripe/key").await.unwrap().expose(),
+        CANARY
+    );
+    assert_eq!(counting.0.load(Ordering::SeqCst), 1);
+    // Reserved names never go through the chain.
+    assert!(
+        r.resolve_reserved("__ostro/presign/objs")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(counting.0.load(Ordering::SeqCst), 1);
 }

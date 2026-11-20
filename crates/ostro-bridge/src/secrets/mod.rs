@@ -9,6 +9,7 @@
 pub mod config;
 pub mod grants;
 pub mod providers;
+pub mod resolver;
 pub mod scrub;
 pub mod sealed;
 pub mod template;
@@ -16,6 +17,12 @@ pub mod value;
 
 pub use config::SecretsConfig;
 pub use grants::{GrantError, GrantSpec, check_grant};
+pub use providers::chain::ProviderChain;
+pub use providers::env::EnvProvider;
+pub use providers::file::FileProvider;
+pub use providers::sealed::SealedProvider;
+pub use providers::{ProviderError, SecretProvider};
+pub use resolver::{ResolveCtx, SecretResolver};
 pub use scrub::Scrubber;
 pub use sealed::{SealError, SealedStore, SealingKeyRing};
 pub use template::{Placeholder, TemplateError};
