@@ -32,6 +32,8 @@ lz4_flex.workspace = true
 crc32c.workspace = true
 # 08-09: sha256 of each local snapshot file (SnapshotTaken; the 08-13 remote key)
 sha2.workspace = true
+# 08-14: the cron driver evaluates schedules (next_after / latest_at_or_before / plan_catchup)
+ostro-triggers = { path = "../ostro-triggers" }
 
 [dev-dependencies]
 tempfile.workspace = true

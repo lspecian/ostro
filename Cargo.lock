@@ -3274,6 +3274,7 @@ dependencies = [
  "ostro-blob",
  "ostro-log",
  "ostro-testkit",
+ "ostro-triggers",
  "ostro-types",
  "postcard",
  "proptest",

@@ -418,6 +418,17 @@ impl Node {
         }
 
         if cfg.mode == StartMode::Leader {
+            // 08-14: the cron driver runs on every Leader-mode partition when a schedule
+            // source is configured (it drives only the schedules the partition owns).
+            let mut leader_cfg = cfg.leader.clone();
+            if leader_cfg.cron.is_none()
+                && let Some(source) = &cfg.schedule_source
+            {
+                leader_cfg.cron = Some(leader::cron::CronService {
+                    config: cfg.cron.clone(),
+                    source: Arc::clone(source),
+                });
+            }
             let services_router: Arc<dyn PartitionRouter> = match &cfg.router_wrapper {
                 Some(wrap) => wrap(Arc::clone(&router)),
                 None => Arc::clone(&router) as Arc<dyn PartitionRouter>,
@@ -449,7 +460,7 @@ impl Node {
                         snapshots: extras.snapshots.clone(),
                     };
                     extras.ctx = Some(ctx.clone());
-                    leaders.push(leader::spawn_all(ctx, &cfg.leader));
+                    leaders.push(leader::spawn_all(ctx, &leader_cfg));
                     events.push(StartupEvent::LeaderServicesStarted { p: p.0 });
                 }
             }

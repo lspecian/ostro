@@ -60,6 +60,9 @@ pub struct LeaderConfig {
     pub retention: retention::RetentionConfig,
     /// The dispatcher runs only when this is `Some` (Phase 2 suites run without it).
     pub dispatcher: Option<dispatcher::DispatcherConfig>,
+    /// The cron driver runs only when this is `Some` (08-14). `Node::open` fills it from
+    /// `NodeConfig::{cron, schedule_source}` when a schedule source is configured.
+    pub cron: Option<cron::CronService>,
 }
 
 impl std::fmt::Debug for LeaderConfig {
@@ -69,6 +72,7 @@ impl std::fmt::Debug for LeaderConfig {
             .field("timers", &self.timers)
             .field("retention", &self.retention)
             .field("dispatcher", &self.dispatcher)
+            .field("cron", &self.cron)
             .finish()
     }
 }
@@ -91,7 +95,7 @@ impl LeaderTasks {
 }
 
 /// Spawn shuffler, timers, the snapshot ticker (if enabled), retention and (if configured)
-/// the dispatcher for
+/// the dispatcher and the cron driver for
 /// `ctx.partition`. They stop when either
 /// `ctx.shutdown` turns true or [`LeaderTasks::shutdown`] is called.
 pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
@@ -118,6 +122,9 @@ pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
     ];
     if let Some(d) = &cfg.dispatcher {
         tasks.push(dispatcher::spawn(child.clone(), d.clone()));
+    }
+    if let Some(c) = &cfg.cron {
+        tasks.push(cron::spawn(child.clone(), c.clone()));
     }
     if let Some(s) = &child.snapshots
         && s.config().enabled
