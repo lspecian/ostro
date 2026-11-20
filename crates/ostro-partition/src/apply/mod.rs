@@ -32,6 +32,8 @@ mod outbox;
 pub mod outcome;
 mod retention;
 pub(crate) mod run;
+// Phase 8 (08-01 seam): `schedule.rs` is filled by 08-07.
+mod schedule;
 mod terminal;
 mod timer;
 mod waits;
@@ -136,6 +138,8 @@ fn dispatch(
         Cmd::CompleteToken(c) => waits::complete_token(b, cur, c, actions),
         Cmd::TerminateRun(t) => lifecycle::terminate_run(b, cur, t, actions),
         Cmd::RetryRun(r) => lifecycle::retry_run(b, cur, r, actions),
+        // Phase 8: implemented in 08-07 (rejects with Invalid(NotImplemented) until then).
+        Cmd::ScheduleFire(s) => schedule::apply_schedule_fire(b, cur, s, actions),
     }
 }
 

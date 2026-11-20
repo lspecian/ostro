@@ -22,6 +22,8 @@ use crate::acks::PendingAcks;
 use crate::apply::{ApplyOutcome, Cursor};
 use crate::clock::{Clock, SystemClock};
 use crate::handle::PartitionHandle;
+use crate::leader::cron::{CronConfig, ScheduleSource};
+use crate::leader::snapshot::SnapshotConfig;
 use crate::leader::{self, LeaderConfig, LeaderCtx, LeaderTasks};
 use crate::leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 use crate::machine::{MachineConfig, MachineHandle, PartitionHealth};
@@ -64,6 +66,15 @@ pub struct NodeConfig {
     /// Optional wrapper around the router used by the leader services (default: none, the
     /// services use the [`InProcessRouter`] directly).
     pub router_wrapper: Option<RouterWrapper>,
+    /// Local snapshot service settings (Phase 8; consumed by 08-09).
+    pub snapshots: SnapshotConfig,
+    /// Cron driver settings (Phase 8; consumed by 08-14).
+    pub cron: CronConfig,
+    /// The schedule set for the cron driver (Phase 8, 08-14); `None` = no cron driver.
+    pub schedule_source: Option<Arc<dyn ScheduleSource>>,
+    /// Bottomless backup is on (B4): 08-09 then initialises the upload floor to
+    /// `Some(log_start)` in `Node::open` before retention starts.
+    pub backup_enabled: bool,
 }
 
 impl NodeConfig {
@@ -82,6 +93,10 @@ impl NodeConfig {
             leadership: Arc::new(LocalLeadership),
             clock: Arc::new(SystemClock),
             router_wrapper: None,
+            snapshots: SnapshotConfig::default(),
+            cron: CronConfig::default(),
+            schedule_source: None,
+            backup_enabled: false,
         }
     }
 }

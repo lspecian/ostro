@@ -12,6 +12,10 @@ use ostro_types::command::{
     RetryRun, ScheduleTimer, SendMessage, Signal, SignalRun, StartChild, StartRun, Suspend,
     TerminalStatus, TerminateRun, TimerFired, WaitKind, decode_command, encode_command,
 };
+use ostro_types::command::{
+    MAX_REQUEST_ID_LEN, OverlapPolicy, ScheduleFire, ScheduleFireKind, cron_idempotency_key,
+    cron_manual_idempotency_key,
+};
 use ostro_types::{AttemptToken, Command, Epoch, IdError, PartitionId, PayloadRef, RunId};
 use proptest::prelude::*;
 
@@ -374,11 +378,72 @@ fn golden_appended_v5() -> Vec<(&'static str, Command)> {
     ]
 }
 
+/// A cron-started `StartRun` (Phase 8 vectors): `sample_start_v5` with the cron idempotency key.
+fn cron_start(key: &str) -> StartRun {
+    StartRun {
+        idempotency_key: key.as_bytes().to_vec(),
+        tags: vec!["ostro.schedule=nightly".into()],
+        ..sample_start_v5(5)
+    }
+}
+
+/// Vectors appended by plan 08-01 (Phase 8 contract: `Cmd::ScheduleFire`, tag 27, P8-D10).
+/// Appended after every Phase 5 line; the older lines are byte-identical.
+fn golden_appended_v8() -> Vec<(&'static str, Command)> {
+    vec![
+        (
+            "schedule_fire_fire",
+            Command::schedule_fire(ScheduleFire {
+                schedule: "nightly".into(),
+                fire_time_ms: 1_767_225_600_000,
+                kind: ScheduleFireKind::Fire as i32,
+                start: Some(cron_start(&cron_idempotency_key(
+                    "nightly",
+                    1_767_225_600_000,
+                ))),
+                overlap: OverlapPolicy::BufferOne as u32,
+                request_id: vec![],
+                skipped: 2,
+                schedule_created_at_ms: 1_767_000_000_000,
+            }),
+        ),
+        (
+            "schedule_fire_manual",
+            Command::schedule_fire(ScheduleFire {
+                schedule: "nightly".into(),
+                fire_time_ms: 1_767_230_000_000,
+                kind: ScheduleFireKind::Manual as i32,
+                start: Some(cron_start(&cron_manual_idempotency_key(
+                    "nightly", b"req-1",
+                ))),
+                overlap: OverlapPolicy::AllowAll as u32,
+                request_id: b"req-1".to_vec(),
+                skipped: 0,
+                schedule_created_at_ms: 1_767_000_000_000,
+            }),
+        ),
+        (
+            "schedule_fire_advance",
+            Command::schedule_fire(ScheduleFire {
+                schedule: "nightly".into(),
+                fire_time_ms: 1_767_312_000_000,
+                kind: ScheduleFireKind::Advance as i32,
+                start: None,
+                overlap: OverlapPolicy::TerminateOther as u32,
+                request_id: vec![],
+                skipped: 5,
+                schedule_created_at_ms: 1_767_000_000_000,
+            }),
+        ),
+    ]
+}
+
 /// Every golden vector in file order: the original seven, then the appended ones.
 fn all_golden() -> Vec<(&'static str, Command)> {
     let mut v = golden_commands();
     v.extend(golden_appended());
     v.extend(golden_appended_v5());
+    v.extend(golden_appended_v8());
     v
 }
 
@@ -1046,4 +1111,120 @@ fn phase5_run_id_helpers_and_routing() {
         assert_eq!(m.target_partition(), Ok(PartitionId(p)));
     }
     let _ = CancelWait::default();
+}
+
+// ---- Plan 08-01: Phase 8 contract ---------------------------------------------------------
+
+#[test]
+fn phase8_vectors_round_trip() {
+    let v = golden_appended_v8();
+    assert_eq!(v.len(), 3, "one Fire, one Manual, one Advance");
+    for (name, c) in &v {
+        let back = decode_command(&encode_command(c)).expect("decode");
+        assert_eq!(&back, c, "{name} round trip");
+        assert_eq!(c.kind_name(), "ScheduleFire");
+    }
+    let kinds: Vec<ScheduleFireKind> = v
+        .iter()
+        .map(|(_, c)| match &c.cmd {
+            Some(command::Cmd::ScheduleFire(s)) => s.kind(),
+            _ => panic!("not a ScheduleFire"),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ScheduleFireKind::Fire,
+            ScheduleFireKind::Manual,
+            ScheduleFireKind::Advance
+        ]
+    );
+}
+
+#[test]
+fn phase8_schedule_fire_tag_and_fields_from_first_principles() {
+    // Cmd tag 27 (RESERVATIONS P8 = 27..33): key = 27 << 3 | 2 = 218 = varint `da 01`.
+    assert_eq!(
+        hex(&encode_command(&Command::schedule_fire(
+            ScheduleFire::default()
+        ))),
+        "da0100"
+    );
+    // Field numbers 1..=8: one byte per key (field << 3 | wire type).
+    let s = ScheduleFire {
+        schedule: "s".into(),                  // 1, LEN: 0a 01 73
+        fire_time_ms: 1,                       // 2, varint: 10 01
+        kind: ScheduleFireKind::Manual as i32, // 3, varint: 18 01
+        start: Some(StartRun::default()),      // 4, LEN: 22 00
+        overlap: 4,                            // 5, varint: 28 04
+        request_id: b"r".to_vec(),             // 6, LEN: 32 01 72
+        skipped: 3,                            // 7, varint: 38 03
+        schedule_created_at_ms: 2,             // 8, varint: 40 02
+    };
+    assert_eq!(
+        hex(&encode_command(&Command::schedule_fire(s))),
+        "da01120a0173100118012200280432017238034002"
+    );
+}
+
+#[test]
+fn phase8_golden_lines_are_appended_last() {
+    // The Phase 5 lines keep their positions; the three Phase 8 lines follow them.
+    let names: Vec<&str> = GOLDEN
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split_once('\t').expect("name<TAB>hex").0)
+        .collect();
+    assert_eq!(names.len(), 24);
+    assert_eq!(names[20], "inbound_batch_v5");
+    assert_eq!(
+        &names[21..],
+        [
+            "schedule_fire_fire",
+            "schedule_fire_manual",
+            "schedule_fire_advance"
+        ]
+    );
+}
+
+#[test]
+fn phase8_overlap_mapping_matches_meta() {
+    // Same numbers as ostro_meta::records::OVERLAP_* (plan 05-07).
+    for (v, p) in [
+        (0, OverlapPolicy::Skip),
+        (1, OverlapPolicy::BufferOne),
+        (2, OverlapPolicy::AllowAll),
+        (3, OverlapPolicy::CancelOther),
+        (4, OverlapPolicy::TerminateOther),
+    ] {
+        assert_eq!(OverlapPolicy::from_u32(v), Some(p));
+        assert_eq!(p as u32, v);
+    }
+    assert_eq!(OverlapPolicy::from_u32(5), None);
+    let s = ScheduleFire {
+        overlap: 9,
+        ..ScheduleFire::default()
+    };
+    assert_eq!(s.overlap_policy(), None);
+}
+
+#[test]
+fn phase8_cron_idempotency_keys_and_limits() {
+    assert_eq!(
+        cron_idempotency_key("nightly", 1_000),
+        "__cron/nightly/1000"
+    );
+    assert_eq!(
+        cron_manual_idempotency_key("nightly", &[0x00, 0xab, 0x7f]),
+        "__cron/nightly/manual/00ab7f"
+    );
+    assert_eq!(cron_manual_idempotency_key("n", b""), "__cron/n/manual/");
+    let mut s = ScheduleFire {
+        request_id: vec![1; MAX_REQUEST_ID_LEN],
+        ..ScheduleFire::default()
+    };
+    assert!(s.check_limits().is_ok());
+    s.request_id.push(1);
+    assert!(s.check_limits().is_err());
 }

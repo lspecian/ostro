@@ -7,7 +7,8 @@
 //!   fields, new oneof variants, new enum values.
 //! - Field numbers and oneof tags are never reused or renumbered. A removed field's number is
 //!   retired forever.
-//! - Reserved for future use: `Cmd` tags `13..=63` (blocks per phase in `.planning/RESERVATIONS.md`).
+//! - Reserved for future use: `Cmd` tags `13..=26` and `28..=63` (blocks per phase in
+//!   `.planning/RESERVATIONS.md`; 27 is Phase 8's `ScheduleFire`).
 //!   Unknown fields are skipped on decode, so an
 //!   older binary can read a log that carries newer optional fields.
 //! - The bytes are pinned by `tests/golden/commands.txt`.
@@ -62,6 +63,14 @@
 //!
 //! The helpers in this module are pure and never panic on malformed input: they return errors so
 //! apply can produce deterministic `Rejected(Invalid)` outcomes.
+//!
+//! # Phase 8 additions (plan 08-01, post-freeze, additive)
+//!
+//! - [`Cmd::ScheduleFire`] at tag 27 (RESERVATIONS.md P8 block 27..=33; P8-D10): a cron fire,
+//!   a trigger-now (`Manual`) or a watermark-only `Advance` on the schedule's owner partition
+//!   ([`crate::routing::schedule_owner`]). Golden vectors appended (`schedule_fire_*`); every
+//!   older line is byte-identical. Apply rejects it with `Invalid(NotImplemented)` until 08-07.
+//! - Idempotency keys of cron starts: [`cron_idempotency_key`] / [`cron_manual_idempotency_key`].
 
 use bytes::Bytes;
 use prost::Message;
@@ -111,8 +120,8 @@ pub const fn is_reserved_op(op: u64) -> bool {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Command {
     /// The command variant. `None` only for malformed/empty input (apply rejects it as invalid).
-    /// Tags 13..=63 are reserved for future variants (`.planning/RESERVATIONS.md` §1).
-    #[prost(oneof = "Cmd", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12")]
+    /// Tags 13..=26 and 28..=63 are reserved for future variants (`.planning/RESERVATIONS.md` §1).
+    #[prost(oneof = "Cmd", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 27")]
     pub cmd: Option<Cmd>,
 }
 
@@ -160,6 +169,10 @@ pub enum Cmd {
     /// Complete an await token (Phase 5, D21).
     #[prost(message, tag = "12")]
     CompleteToken(CompleteToken),
+    /// A schedule fire on the schedule's owner partition (Phase 8, P8-D10).
+    // RESERVATIONS.md: P8 = 27..33
+    #[prost(message, tag = "27")]
+    ScheduleFire(ScheduleFire),
 }
 
 /// A new leader epoch.
@@ -806,6 +819,101 @@ pub struct CompleteToken {
     pub completed_at_ms: u64,
 }
 
+/// Kind of a [`ScheduleFire`] (Phase 8, P8-D10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, prost::Enumeration)]
+#[repr(i32)]
+pub enum ScheduleFireKind {
+    /// A cron fire at `fire_time_ms`: starts a run (subject to overlap) and moves the watermark.
+    Fire = 0,
+    /// Trigger-now: starts a run, never moves the watermark; deduplicated by `request_id`.
+    Manual = 1,
+    /// Moves the watermark without starting a run (catch-up `Skip`).
+    Advance = 2,
+}
+
+/// Overlap policy of a schedule, carried in [`ScheduleFire::overlap`]. The numeric mapping is
+/// the meta `Schedule.overlap` u8 of plan 05-07 (`ostro_meta::records::OVERLAP_*`):
+/// 0 Skip, 1 BufferOne, 2 AllowAll, 3 CancelOther, 4 TerminateOther.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum OverlapPolicy {
+    /// Skip the fire while the previous run is live.
+    Skip = 0,
+    /// Buffer at most one fire and start it when the previous run ends.
+    BufferOne = 1,
+    /// Start every fire.
+    AllowAll = 2,
+    /// Cancel the previous run gracefully, then start.
+    CancelOther = 3,
+    /// Terminate the previous run, then start.
+    TerminateOther = 4,
+}
+
+impl OverlapPolicy {
+    /// The policy for a wire value; `None` outside `0..=4`.
+    pub const fn from_u32(v: u32) -> Option<Self> {
+        Some(match v {
+            0 => Self::Skip,
+            1 => Self::BufferOne,
+            2 => Self::AllowAll,
+            3 => Self::CancelOther,
+            4 => Self::TerminateOther,
+            _ => return None,
+        })
+    }
+}
+
+/// A schedule fire (Phase 8, `Cmd` tag 27, P8-D10), applied on the schedule's owner partition
+/// ([`crate::routing::schedule_owner`]) against the durable watermark in keyspace 16
+/// `schedule_state`.
+// RESERVATIONS.md: P8 = 27..33
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ScheduleFire {
+    /// Schedule name.
+    #[prost(string, tag = "1")]
+    pub schedule: String,
+    /// Nominal UTC fire instant (ms); for `Manual`, the request time.
+    #[prost(uint64, tag = "2")]
+    pub fire_time_ms: u64,
+    /// Fire, Manual or Advance.
+    #[prost(enumeration = "ScheduleFireKind", tag = "3")]
+    pub kind: i32,
+    /// The run to start: required for `Fire`/`Manual`, absent for `Advance`.
+    #[prost(message, optional, tag = "4")]
+    pub start: Option<StartRun>,
+    /// The meta `Schedule.overlap` at fire time ([`OverlapPolicy`] mapping: 0 Skip,
+    /// 1 BufferOne, 2 AllowAll, 3 CancelOther, 4 TerminateOther).
+    #[prost(uint32, tag = "5")]
+    pub overlap: u32,
+    /// Trigger-now dedupe key (`Manual` only), at most [`MAX_REQUEST_ID_LEN`] bytes.
+    #[prost(bytes = "vec", tag = "6")]
+    pub request_id: Vec<u8>,
+    /// Fire times skipped by catch-up before this one (stats only).
+    #[prost(uint32, tag = "7")]
+    pub skipped: u32,
+    /// The meta `Schedule.created_at_ms`: identifies the schedule incarnation (W4).
+    #[prost(uint64, tag = "8")]
+    pub schedule_created_at_ms: u64,
+}
+
+/// Idempotency key of the run started by a cron fire: `__cron/<schedule>/<fire_time_ms>`
+/// (P8-D10; the `__cron/` namespace is reserved, RESERVATIONS §11 and D23).
+pub fn cron_idempotency_key(schedule: &str, fire_time_ms: u64) -> String {
+    format!("__cron/{schedule}/{fire_time_ms}")
+}
+
+/// Idempotency key of the run started by a trigger-now (`ScheduleFireKind::Manual`):
+/// `__cron/<schedule>/manual/<lowercase hex request_id>`.
+pub fn cron_manual_idempotency_key(schedule: &str, request_id: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut k = format!("__cron/{schedule}/manual/");
+    for b in request_id {
+        // Writing to a String never fails.
+        let _ = write!(k, "{b:02x}");
+    }
+    k
+}
+
 /// Encode a command to its frozen protobuf bytes.
 pub fn encode_command(c: &Command) -> Bytes {
     Bytes::from(c.encode_to_vec())
@@ -886,6 +994,11 @@ impl Command {
         Self::of(Cmd::CompleteToken(c))
     }
 
+    /// `ScheduleFire` (Phase 8).
+    pub fn schedule_fire(s: ScheduleFire) -> Self {
+        Self::of(Cmd::ScheduleFire(s))
+    }
+
     /// Variant name (for logs and metrics); `"None"` for an empty command.
     pub fn kind_name(&self) -> &'static str {
         match &self.cmd {
@@ -902,6 +1015,7 @@ impl Command {
             Some(Cmd::TerminateRun(_)) => "TerminateRun",
             Some(Cmd::RetryRun(_)) => "RetryRun",
             Some(Cmd::CompleteToken(_)) => "CompleteToken",
+            Some(Cmd::ScheduleFire(_)) => "ScheduleFire",
         }
     }
 }
@@ -1002,6 +1116,18 @@ impl CompleteToken {
     /// The target run id; `Err` unless exactly 18 bytes.
     pub fn run_id(&self) -> Result<RunId, IdError> {
         parse_run_id(&self.run_id)
+    }
+}
+
+impl ScheduleFire {
+    /// Checks `request_id` ≤ [`MAX_REQUEST_ID_LEN`].
+    pub fn check_limits(&self) -> Result<(), FieldTooLong> {
+        check_len("request_id", self.request_id.len(), MAX_REQUEST_ID_LEN)
+    }
+
+    /// The overlap policy; `None` for a value outside `0..=4`.
+    pub fn overlap_policy(&self) -> Option<OverlapPolicy> {
+        OverlapPolicy::from_u32(self.overlap)
     }
 }
 

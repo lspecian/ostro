@@ -1,14 +1,18 @@
 //! Leader services of one partition: outbox shuffler, timer service, log retention and,
-//! when configured, the dispatcher (plan 04-14).
+//! when configured, the dispatcher (plan 04-14). Phase 8 adds the local snapshot service
+//! (`snapshot`, 08-09) and the cron driver (`cron`, 08-14); 08-01 declares both modules with
+//! their config/trait contracts.
 //!
 //! They are spawned by [`Node`](crate::node::Node) only after the partition's
 //! [`ReadyBarrier`] is open (state caught up, term started) and after every partition is
 //! registered in the router. Each service has a fixed `spawn(ctx, cfg) -> JoinHandle<()>`
 //! signature and stops when `ctx.shutdown` turns true.
 
+pub mod cron;
 pub mod dispatcher;
 pub mod retention;
 pub mod shuffler;
+pub mod snapshot;
 pub mod timers;
 
 use std::sync::Arc;

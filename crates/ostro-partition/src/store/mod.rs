@@ -17,10 +17,12 @@
 //! [`config`]).
 
 pub mod batch;
+pub mod blobrefs;
 pub mod config;
 mod digest;
 pub mod keys;
 pub mod meta;
+pub mod snapshot;
 pub mod values;
 
 use std::collections::BTreeMap;
@@ -64,6 +66,11 @@ pub enum Table {
     /// Signal dedupe (D13; plan 05-02; RESERVATIONS §6 ordinal 15, name `signal_seen`):
     /// `run ‖ request_id` → `()`, deleted with the run.
     SignalSeen,
+    /// Cron schedule state (Phase 8, P8-D10; RESERVATIONS §6 ordinal 16, name
+    /// `schedule_state`), on the schedule's owner partition. Two key shapes:
+    /// `0x01 ‖ name` → `ScheduleStateRow` (watermark) and the reverse index
+    /// `0x02 ‖ run` → `ScheduleRunRow` (the run a fire started). Rows are written by 08-07.
+    ScheduleState,
 }
 
 /// Every table, in fixed (declaration) order.
@@ -84,10 +91,11 @@ pub const TABLES: [Table; TABLE_COUNT] = [
     Table::Running,
     Table::Waits,
     Table::SignalSeen,
+    Table::ScheduleState,
 ];
 
 /// Number of keyspaces.
-pub const TABLE_COUNT: usize = 16;
+pub const TABLE_COUNT: usize = 17;
 
 impl Table {
     /// fjall keyspace name.
@@ -109,6 +117,7 @@ impl Table {
             Table::Running => "running",
             Table::Waits => "waits",
             Table::SignalSeen => "signal_seen",
+            Table::ScheduleState => "schedule_state",
         }
     }
 

@@ -244,6 +244,45 @@ pub fn signal_seen_key(run: &RunId, request_id: &[u8]) -> Vec<u8> {
     k
 }
 
+/// `schedule_state` key-shape tag of a schedule's watermark row ([`schedule_state_key`]).
+pub const SCHEDULE_STATE: u8 = 0x01;
+/// `schedule_state` key-shape tag of the run → schedule reverse index ([`schedule_run_key`]).
+pub const SCHEDULE_RUN: u8 = 0x02;
+
+/// `schedule_state` watermark row (Phase 8, P8-D10): `0x01 ‖ name` (raw, rest of key).
+/// Value: `ScheduleStateRow`.
+pub fn schedule_state_key(name: &str) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + name.len());
+    k.push(SCHEDULE_STATE);
+    k.extend_from_slice(name.as_bytes());
+    k
+}
+
+/// `schedule_state` reverse index (Phase 8; read by 08-07's terminal hook): `0x02 ‖ run`.
+/// Value: `ScheduleRunRow`.
+pub fn schedule_run_key(run: &RunId) -> Vec<u8> {
+    let mut k = Vec::with_capacity(1 + RUN_LEN);
+    k.push(SCHEDULE_RUN);
+    k.extend_from_slice(run.as_bytes());
+    k
+}
+
+/// Inverse of [`schedule_state_key`]: the schedule name.
+pub fn decode_schedule_state_key(k: &[u8]) -> Option<&str> {
+    match k.split_first() {
+        Some((&SCHEDULE_STATE, name)) => std::str::from_utf8(name).ok(),
+        _ => None,
+    }
+}
+
+/// Inverse of [`schedule_run_key`]: the run id.
+pub fn decode_schedule_run_key(k: &[u8]) -> Option<RunId> {
+    match k.split_first() {
+        Some((&SCHEDULE_RUN, run)) => RunId::from_bytes(run).ok(),
+        _ => None,
+    }
+}
+
 /// `dedupe`: workflow ‖ idempotency key (raw, rest of key).
 pub fn dedupe_key(workflow: &str, idem_key: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(2 + workflow.len() + idem_key.len());

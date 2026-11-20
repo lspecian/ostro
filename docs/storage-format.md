@@ -1,4 +1,4 @@
-# Ostro on-disk format (Phase 2, with Phase 4 additions in §12, Phase 5 additions in §13 and the freeze rules in §14)
+# Ostro on-disk format (Phase 2, with Phase 4 additions in §12, Phase 5 additions in §13, the freeze rules in §14 and Phase 8 additions in §15)
 
 **Status: FROZEN v0.1 (2026-11-19, plan 05-20).** First fixed at the end of Phase 2 (plan 02-16). This document describes what the code writes today. Each section names the source file that defines the format, and the golden files and tests that pin it. The frozen sources of truth, the evolution rules and the mixed-version rules are in **§14**; the on-disk corpus that pins this format is `tests/format-corpus/v0.1` (`crates/ostro-partition/tests/format_corpus.rs`). Ordinals and reserved names come only from `.planning/RESERVATIONS.md`.
 
@@ -20,6 +20,9 @@ All multi-byte integers are **little-endian in the log** (WAL frame, envelope) a
 │       ├── <n>.jnl                 # fjall journal(s)
 │       ├── keyspaces/<k>/...       # one LSM tree per keyspace (fjall-internal layout)
 │       ├── version, lock           # fjall-internal
+│   └── .install-pNNNN/             # Phase 8: staging dir of a snapshot install, renamed over pNNNN (§15)
+├── snapshots/
+│   └── pNNNN/<applied 20d>.osnap   # Phase 8: local OSNP v1 snapshots (+ .blobrefs cache), §15
 ├── blobs/<hh>/<sha256 hex>         # content-addressed blobs, <hh> = first two hex chars (crates/ostro-blob)
 └── tmp/<sha256 hex>.<pid>.<n>      # in-flight blob writes; deleted by BlobStore::open
 ```
@@ -449,3 +452,18 @@ These rules govern how a binary treats data written by a newer one. The rule tex
 4. The apply semantics of existing commands never change.
 5. **Ext tag values are never validated at apply time.** TLV structure (ordering, lengths) may be checked; tag contents never are, so old and new voters cannot diverge.
 6. Meta and the cluster version (the downgrade fence) are checked **before `Node::open` touches partition data**.
+
+## 15. Phase 8 additions (post-freeze, additive; plan 08-01)
+
+Every ordinal below comes from `.planning/RESERVATIONS.md` (Phase 8 block, P8-D20). Nothing frozen in §14 changes: the additions follow §14.2.
+
+- **`Cmd::ScheduleFire` = tag 27** (`crates/ostro-types/src/command.rs`, P8-D10). Fields: `schedule` string 1; `fire_time_ms` u64 2 (nominal UTC instant; for `Manual`, the request time); `kind` enum `ScheduleFireKind` 3 (`Fire` 0, `Manual` 1, `Advance` 2: moves the watermark without a start, used for catch-up `Skip`); `start` optional `StartRun` 4 (required for `Fire`/`Manual`, absent for `Advance`); `overlap` u32 5 (the meta `Schedule.overlap` at fire time: 0 Skip, 1 BufferOne, 2 AllowAll, 3 CancelOther, 4 TerminateOther); `request_id` bytes 6 (`Manual` only, ≤ 64 bytes); `skipped` u32 7 (stats only); `schedule_created_at_ms` u64 8 (the schedule incarnation, W4). Golden vectors `schedule_fire_fire`, `schedule_fire_manual` and `schedule_fire_advance` are appended to `commands.txt` after the 21 frozen vectors, which are unchanged. Apply rejects the command with `Invalid(NotImplemented)` until 08-07.
+- **Cron idempotency keys.** A fire's run uses `__cron/<schedule>/<fire_time_ms>`, a trigger-now's `__cron/<schedule>/manual/<lowercase hex request_id>` (the `__cron/` namespace is reserved, D23). The owner partition is `routing::schedule_owner(name, P) = xxh3_64("__cron/" ‖ name) % P`.
+- **Keyspace 16 `schedule_state`** (appended to `TABLES`; an existing store gains it empty at open, and an empty keyspace adds only `name + row_count 0` to the digest). Two key shapes:
+  - `0x01 ‖ name` (raw UTF-8, rest of key) → `ScheduleStateRow { schedule_created_at_ms: u64, watermark_ms: u64, last_run: Option<RunId> (18 bytes), buffered: Option<BufferedFire { fire_time_ms: u64, start: Vec<u8> /* prost StartRun */ }>, fired: u64, skipped: u64, duplicates: u64 }`;
+  - `0x02 ‖ run` (18 bytes) → `ScheduleRunRow { schedule: String, schedule_created_at_ms: u64 }`, the reverse index read when the run ends.
+
+  Both values are `VALUE_FORMAT ‖ postcard` (format byte 1, unchanged; positional, fields only appended).
+- **`InvalidCode` 22 `BadScheduleFire`, 23 `ScheduleOwnerMismatch`.** `InvalidCode` is declaration-indexed, so indices 13–21 are held by `#[doc(hidden)]`, never-emitted placeholders `ReservedP5_13`, `ReservedP5_14`, `ReservedP6_15` … `ReservedP7_21` (RESERVATIONS §8 placeholder rule); the owning phase renames its placeholder in place. All of them fold into the hash as outcome code 26 (`Rejected(Invalid(_))`), like every `InvalidCode`.
+- **`node.toml` key `incarnation`** (additive, §14.4: readers ignore unknown keys). Written by 08-08/08-13 for bottomless prefix fencing (P8-D4) and replaced by 08-18 on restore, together with `restored_from`.
+- **`snapshots/pNNNN/`** holds the local OSNP v1 snapshots `<applied 20d>.osnap` (plus a `.blobrefs` cache), and **`state/.install-pNNNN`** is the staging directory of a snapshot install, renamed atomically over `state/pNNNN` after the digest check (P8-D1). The snapshot format itself is specified in `docs/snapshot-format.md` (created by 08-02). Both directories follow §14.3: other tooling ignores them.

@@ -15,10 +15,15 @@ use ostro_partition::store::keys::{
     payload_key, ready_key, run_key, run_prefix, signal_inbox_key, signal_inbox_prefix,
     signal_seen_key, timer_key, wait_key, wait_name_key, wait_name_prefix, wait_prefixes,
 };
+use ostro_partition::store::keys::{
+    SCHEDULE_RUN, SCHEDULE_STATE, decode_schedule_run_key, decode_schedule_state_key,
+    schedule_run_key, schedule_state_key,
+};
 use ostro_partition::store::values::{
     self, CursorMeta, InboxMsg, PauseMark, ReadySlot, ReadyValue, RunRecord, RunStatus, SignalSlot,
     WaitKind, WaitRow,
 };
+use ostro_partition::store::values::{BufferedFire, ScheduleRunRow, ScheduleStateRow};
 use ostro_partition::{PartitionStore, StoreConfig, StoreError, StoreMeta, TABLES, Table};
 use ostro_types::{Offset, PartitionCount, PartitionId, PayloadRef, RunId};
 use proptest::prelude::*;
@@ -83,12 +88,17 @@ fn defaults_and_tables() {
             "effects",
             "running",
             "waits",
-            "signal_seen"
+            "signal_seen",
+            "schedule_state"
         ]
     );
     // RESERVATIONS.md §6: ordinal = declaration index.
     assert_eq!(Table::Waits as u8, 14);
     assert_eq!(Table::SignalSeen as u8, 15);
+    // Phase 8 (08-01): ordinal 16 `schedule_state`.
+    assert_eq!(Table::ScheduleState as u8, 16);
+    assert_eq!(TABLES[16].name(), "schedule_state");
+    assert_eq!(TABLES.len(), 17);
     let mut sorted = TABLES;
     sorted.sort();
     assert_eq!(sorted, TABLES, "TABLES is declaration order");
@@ -710,4 +720,74 @@ fn decode_rejects_unknown_format_byte() {
         values::decode::<ReadyValue>(&[]),
         Err(StoreError::Codec(_))
     ));
+}
+
+// ---- Plan 08-01: Phase 8 keyspace `schedule_state` (ordinal 16) ----------------------------
+
+#[test]
+fn phase8_schedule_state_keys() {
+    assert_eq!(SCHEDULE_STATE, 0x01);
+    assert_eq!(SCHEDULE_RUN, 0x02);
+    let k = schedule_state_key("nightly");
+    assert_eq!(k, b"\x01nightly");
+    assert_eq!(decode_schedule_state_key(&k), Some("nightly"));
+    let r = run(3, 9);
+    let k = schedule_run_key(&r);
+    assert_eq!(k.len(), 19);
+    assert_eq!(k[0], 0x02);
+    assert_eq!(&k[1..], r.as_bytes());
+    assert_eq!(decode_schedule_run_key(&k), Some(r));
+    // The shapes never decode as each other, and every watermark row sorts before the index.
+    assert_eq!(decode_schedule_run_key(&schedule_state_key("x")), None);
+    assert_eq!(decode_schedule_state_key(&schedule_run_key(&r)), None);
+    assert!(schedule_state_key("\u{10FFFF}") < schedule_run_key(&r));
+}
+
+#[test]
+fn phase8_schedule_rows_round_trip() {
+    round_trip(&ScheduleStateRow::default());
+    round_trip(&ScheduleStateRow {
+        schedule_created_at_ms: 1_767_000_000_000,
+        watermark_ms: 1_767_225_600_000,
+        last_run: Some(run(3, 9)),
+        buffered: Some(BufferedFire {
+            fire_time_ms: 1_767_229_200_000,
+            start: vec![0x0a, 0x12, 0x00],
+        }),
+        fired: 7,
+        skipped: 2,
+        duplicates: 1,
+    });
+    round_trip(&ScheduleRunRow {
+        schedule: "nightly".into(),
+        schedule_created_at_ms: 1_767_000_000_000,
+    });
+    // last_run uses the RunId's 18-byte encoding (as RunRecord's run-id fields do).
+    let with = values::encode(&ScheduleStateRow {
+        last_run: Some(run(3, 9)),
+        ..ScheduleStateRow::default()
+    });
+    let without = values::encode(&ScheduleStateRow::default());
+    assert_eq!(with.len(), without.len() + 18);
+}
+
+#[test]
+fn phase8_new_keyspace_opens_empty_on_reopen() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let (store, _) = open(dir.path(), 0, 1)?;
+    assert!(
+        store
+            .reader()
+            .prefix(Table::ScheduleState, &[], 10)?
+            .is_empty()
+    );
+    let d1 = store.digest()?;
+    drop(store);
+    let (store, _) = open(dir.path(), 0, 1)?;
+    assert_eq!(
+        store.digest()?,
+        d1,
+        "empty schedule_state is stable across reopen"
+    );
+    Ok(())
 }

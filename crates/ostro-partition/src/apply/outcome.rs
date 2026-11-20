@@ -29,7 +29,12 @@
 //! bytes are folded anyway, and they determine the detail). `InvalidCode`
 //! variants are append-only as well (02-09 added `BadIntent`,
 //! `FieldTooLong`; 02-10 added `BadSource`, `TruncateBeyondEnd`; 04-12 added `BadLength`,
-//! `NotRunning`).
+//! `NotRunning`; 08-01 added Phase 8's `BadScheduleFire` (22) and `ScheduleOwnerMismatch` (23)).
+//!
+//! `InvalidCode` is declaration-indexed, so a phase landing above an absent lower slot declares
+//! `#[doc(hidden)]`, never-emitted placeholders named `Reserved<Phase>_<index>`
+//! (RESERVATIONS §8 placeholder rule). A phase claiming its own slot renames the placeholder in
+//! place.
 
 use ostro_types::{AttemptToken, Epoch, PartitionId, RunId};
 
@@ -110,6 +115,32 @@ pub enum InvalidCode {
     BadLength,
     /// A `Suspend` intent for a run whose status is not `Running`. Added by 04-12.
     NotRunning,
+    // RESERVATIONS.md §8: placeholders for other phases' slots 13..=21 (never emitted).
+    #[doc(hidden)]
+    ReservedP5_13,
+    #[doc(hidden)]
+    ReservedP5_14,
+    #[doc(hidden)]
+    ReservedP6_15,
+    #[doc(hidden)]
+    ReservedP6_16,
+    #[doc(hidden)]
+    ReservedP6_17,
+    #[doc(hidden)]
+    ReservedP7_18,
+    #[doc(hidden)]
+    ReservedP7_19,
+    #[doc(hidden)]
+    ReservedP7_20,
+    #[doc(hidden)]
+    ReservedP7_21,
+    /// A malformed `ScheduleFire`: `Fire`/`Manual` without `start`, `Advance` with one,
+    /// `request_id` on a non-`Manual` fire or too long, an unknown kind or overlap value.
+    /// Phase 8 (08-01), index 22.
+    BadScheduleFire,
+    /// A `ScheduleFire` applied on a partition that is not `schedule_owner(name, P)`.
+    /// Phase 8 (08-01), index 23.
+    ScheduleOwnerMismatch,
 }
 
 impl RejectReason {
@@ -267,9 +298,27 @@ mod tests {
             InvalidCode::TruncateBeyondEnd,
             InvalidCode::BadLength,
             InvalidCode::NotRunning,
+            InvalidCode::ReservedP5_13,
+            InvalidCode::ReservedP5_14,
+            InvalidCode::ReservedP6_15,
+            InvalidCode::ReservedP6_16,
+            InvalidCode::ReservedP6_17,
+            InvalidCode::ReservedP7_18,
+            InvalidCode::ReservedP7_19,
+            InvalidCode::ReservedP7_20,
+            InvalidCode::ReservedP7_21,
+            InvalidCode::BadScheduleFire,
+            InvalidCode::ScheduleOwnerMismatch,
         ];
         for (i, c) in order.into_iter().enumerate() {
             assert_eq!(c as usize, i, "{c:?}");
         }
+        // Phase 8 (RESERVATIONS §8): 22 BadScheduleFire, 23 ScheduleOwnerMismatch.
+        assert_eq!(InvalidCode::BadScheduleFire as usize, 22);
+        assert_eq!(InvalidCode::ScheduleOwnerMismatch as usize, 23);
+        assert_eq!(
+            ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::BadScheduleFire)).code(),
+            26
+        );
     }
 }

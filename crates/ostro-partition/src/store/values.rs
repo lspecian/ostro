@@ -212,6 +212,49 @@ pub enum SignalSlot {
     },
 }
 
+/// Watermark row of one schedule in `schedule_state` (Phase 8, P8-D10; key
+/// `schedule_state_key(name)`). Written by 08-07's `ScheduleFire` apply. Positional postcard:
+/// fields are only ever appended.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleStateRow {
+    /// The meta `Schedule.created_at_ms` of the schedule incarnation this row belongs to (W4):
+    /// a re-created schedule with the same name starts from a fresh row.
+    pub schedule_created_at_ms: u64,
+    /// Highest nominal fire time applied (`Fire` or `Advance`), ms. Fires at or below it are
+    /// duplicates.
+    pub watermark_ms: u64,
+    /// The run started by the latest fire (overlap policies look at it).
+    #[serde(with = "opt_run_id")]
+    pub last_run: Option<RunId>,
+    /// A fire held back by `BufferOne` overlap, started when `last_run` ends.
+    pub buffered: Option<BufferedFire>,
+    /// Fires that started a run.
+    pub fired: u64,
+    /// Fires skipped (overlap `Skip` and catch-up skips).
+    pub skipped: u64,
+    /// Duplicate fires (at or below the watermark, or a repeated manual `request_id`).
+    pub duplicates: u64,
+}
+
+/// A buffered schedule fire ([`ScheduleStateRow::buffered`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferedFire {
+    /// Nominal fire time (ms).
+    pub fire_time_ms: u64,
+    /// The prost-encoded `StartRun` to submit when the previous run ends.
+    pub start: Vec<u8>,
+}
+
+/// Reverse-index row `schedule_run_key(run)` in `schedule_state` (Phase 8): which schedule
+/// (incarnation) started the run, so its terminal transition can update the schedule row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleRunRow {
+    /// Schedule name.
+    pub schedule: String,
+    /// The schedule's `created_at_ms` (incarnation, W4).
+    pub schedule_created_at_ms: u64,
+}
+
 /// serde for `Option<RunId>` as `Option<[u8; 18]>`.
 mod opt_run_id {
     use ostro_types::RunId;
