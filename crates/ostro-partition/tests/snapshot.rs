@@ -2,24 +2,31 @@
 //! corruption detection, concurrent (batch-atomic) export.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
+use ostro_partition::apply::{Cursor, apply_command};
 use ostro_partition::store::batch::MetaUpdate;
 use ostro_partition::store::keys;
 use ostro_partition::store::snapshot::{
-    self, ExportOptions, Frame, HEADER_LEN, OsnpReader, SnapshotError, SnapshotInfo,
+    self, ExportOptions, Frame, HEADER_LEN, InstallWriter, OsnpReader, SnapshotError, SnapshotInfo,
     TRAILER_FRAME_LEN,
 };
 use ostro_partition::store::values::{
     self, BufferedFire, CursorMeta, RunRecord, ScheduleStateRow, SignalSlot,
 };
-use ostro_partition::{PartitionStore, StoreConfig, TABLES, Table};
-use ostro_types::command::{JournalEvent, OutboxMsg, Signal, StartRun, outbox_msg};
-use ostro_types::{Offset, PartitionCount, PartitionId, PayloadRef, RunId};
+use ostro_partition::{ApplyOutcome, PartitionStore, StoreConfig, StoreMeta, TABLES, Table};
+use ostro_types::command::{
+    AttemptGranted, JournalEvent, OutboxMsg, Signal, StartRun, encode_command, outbox_msg,
+};
+use ostro_types::{
+    AttemptToken, Command, Epoch, Offset, PartitionCount, PartitionId, PayloadRef, RunId,
+};
 use proptest::prelude::*;
 use prost::Message;
 
@@ -541,4 +548,467 @@ fn concurrent_export_is_batch_atomic() {
             assert_eq!(info.state_hash, chunk_meta(k - 1).state_hash);
         }
     }
+}
+
+// ---------------------------------------------------------------------------- install
+// (Task 2: staged install, crash recovery, rebuild equivalence)
+
+fn open_at(data: &Path) -> (PartitionStore, StoreMeta) {
+    PartitionStore::open(data, P, count(), &StoreConfig::default()).expect("open installed")
+}
+
+fn install(data: &Path, buf: &[u8], w: InstallWriter) -> Result<SnapshotInfo, SnapshotError> {
+    snapshot::install_snapshot_with(data, P, count(), &StoreConfig::default(), buf, w)
+}
+
+/// Only `pNNNN` (or nothing) under `state/`: no staging or `.old` leftovers.
+fn assert_clean_state_dir(data: &Path) {
+    let names: Vec<String> = match std::fs::read_dir(data.join("state")) {
+        Ok(rd) => rd
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => return,
+    };
+    assert!(
+        names.iter().all(|n| n == &format!("p{:04}", P.0)),
+        "leftovers in state/: {names:?}"
+    );
+}
+
+#[test]
+fn install_round_trips_with_both_writers() {
+    let dir = ostro_testkit::fs::tempdir();
+    let src = build(dir.path(), 400);
+    let src_meta = src.read_meta().expect("meta");
+    for (lz4, w) in [
+        (false, InstallWriter::WriteBatch),
+        (true, InstallWriter::Ingestion),
+        (false, snapshot::DEFAULT_INSTALL_WRITER),
+    ] {
+        let (buf, info) = export(&src, lz4);
+        let data = ostro_testkit::fs::tempdir();
+        let got = install(data.path(), &buf, w).expect("install");
+        assert_eq!(got.logical_digest, info.logical_digest);
+        assert_eq!(got.blob_refs, info.blob_refs);
+        assert_clean_state_dir(data.path());
+        let (store, meta) = open_at(data.path());
+        assert_eq!(store.digest().expect("digest"), info.logical_digest);
+        assert_eq!(meta.applied, src_meta.applied);
+        // checkpointed_offset is written as applied_offset
+        assert_eq!(meta.checkpointed, src_meta.applied);
+        assert_eq!(meta.state_hash, src_meta.state_hash);
+        // cursor row (epoch history, F7) and inbound_seen carried verbatim
+        assert_eq!(meta.cursor, src_meta.cursor);
+        assert_eq!(meta.inbound_seen, src_meta.inbound_seen);
+        assert_eq!(
+            store
+                .blob_refs_snapshot()
+                .expect("refs")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            info.blob_refs
+        );
+        // re-export of the installed store is byte-identical (same created_at_ms)
+        assert_eq!(export(&store, lz4).0, buf);
+    }
+}
+
+#[test]
+fn install_replaces_existing_state() {
+    let dir = ostro_testkit::fs::tempdir();
+    let src = build(dir.path(), 200);
+    let (buf, info) = export(&src, false);
+    let data = ostro_testkit::fs::tempdir();
+    drop(build(data.path(), 30)); // an older, different state, closed
+    install(data.path(), &buf, snapshot::DEFAULT_INSTALL_WRITER).expect("install");
+    assert_clean_state_dir(data.path());
+    let (store, meta) = open_at(data.path());
+    assert_eq!(store.digest().expect("digest"), info.logical_digest);
+    assert_eq!(meta.applied.0, 200);
+}
+
+#[test]
+fn corrupt_or_mismatched_snapshots_leave_the_live_state_untouched() {
+    let dir = ostro_testkit::fs::tempdir();
+    let src = build(dir.path(), 120);
+    let (buf, _) = export(&src, false);
+    let data = ostro_testkit::fs::tempdir();
+    let before = {
+        let s = build(data.path(), 10);
+        s.digest().expect("digest")
+    };
+    let live_digest = |data: &Path| open_at(data).0.digest().expect("digest");
+
+    // a flipped byte inside a Rows frame (CRC) and at the end of the stream (trailer)
+    for pos in [HEADER_LEN + 200, buf.len() / 2, buf.len() - 10] {
+        let mut bad = buf.clone();
+        bad[pos] ^= 0x40;
+        for w in [InstallWriter::WriteBatch, InstallWriter::Ingestion] {
+            let e = install(data.path(), &bad, w).expect_err("corrupt install");
+            assert!(
+                matches!(
+                    e,
+                    SnapshotError::FrameCrc { .. }
+                        | SnapshotError::DigestMismatch { .. }
+                        | SnapshotError::Malformed(_)
+                ),
+                "flip at {pos}: {e:?}"
+            );
+            assert_clean_state_dir(data.path());
+            assert_eq!(live_digest(data.path()), before);
+        }
+    }
+
+    // a valid-CRC trailer with a wrong logical digest
+    let tpos = buf.len() - TRAILER_FRAME_LEN;
+    let mut trailer = buf[tpos + 5..buf.len() - 4].to_vec();
+    trailer[0] ^= 1;
+    let mut forged = buf[..tpos].to_vec();
+    forged.extend_from_slice(&frame(5, &trailer));
+    assert!(matches!(
+        install(data.path(), &forged, snapshot::DEFAULT_INSTALL_WRITER),
+        Err(SnapshotError::DigestMismatch { .. })
+    ));
+    assert_clean_state_dir(data.path());
+    assert_eq!(live_digest(data.path()), before);
+
+    // truncated stream
+    assert!(matches!(
+        install(
+            data.path(),
+            &buf[..buf.len() - 1],
+            snapshot::DEFAULT_INSTALL_WRITER
+        ),
+        Err(SnapshotError::Truncated)
+    ));
+    assert_eq!(live_digest(data.path()), before);
+
+    // another partition count / another partition: refused before anything is written
+    let other = PartitionCount::new(16).expect("non-zero");
+    assert!(matches!(
+        snapshot::install_snapshot(
+            data.path(),
+            P,
+            other,
+            &StoreConfig::default(),
+            buf.as_slice()
+        ),
+        Err(SnapshotError::Mismatch(_))
+    ));
+    assert!(matches!(
+        snapshot::install_snapshot(
+            data.path(),
+            PartitionId(4),
+            count(),
+            &StoreConfig::default(),
+            buf.as_slice()
+        ),
+        Err(SnapshotError::Mismatch(_))
+    ));
+    assert!(!PartitionStore::exists(data.path(), PartitionId(4)));
+    assert_eq!(live_digest(data.path()), before);
+}
+
+#[test]
+fn recover_install_rolls_interrupted_swaps_back_or_forward() {
+    let data = ostro_testkit::fs::tempdir();
+    let d = data.path();
+    let live = ostro_partition::store::state_dir(d, P);
+    let old = snapshot::install_old_dir(d, P);
+    let staging = snapshot::install_staging_dir(d, P);
+    let digest = {
+        let s = build(d, 20);
+        s.digest().expect("digest")
+    };
+
+    // nothing to do
+    snapshot::recover_install(d, P).expect("recover");
+    assert_eq!(open_at(d).0.digest().expect("digest"), digest);
+
+    // crash after `pNNNN -> .old-pNNNN`, staging half-built: roll back
+    std::fs::rename(&live, &old).expect("rename");
+    std::fs::create_dir_all(staging.join("junk")).expect("staging");
+    snapshot::recover_install(d, P).expect("recover");
+    assert!(live.is_dir() && !old.exists() && !staging.exists());
+    assert_eq!(open_at(d).0.digest().expect("digest"), digest);
+
+    // crash after the swap, before `.old-pNNNN` was removed: roll forward
+    std::fs::create_dir_all(old.join("stale")).expect("old");
+    snapshot::recover_install(d, P).expect("recover");
+    assert!(live.is_dir() && !old.exists());
+    assert_eq!(open_at(d).0.digest().expect("digest"), digest);
+    assert_clean_state_dir(d);
+
+    // no data dir at all
+    let empty = ostro_testkit::fs::tempdir();
+    snapshot::recover_install(empty.path(), P).expect("recover on empty dir");
+}
+
+// ------------------------------------------------------------- rebuild equivalence
+//
+// Snapshot at k + replay of [k, end) == full replay. Commands come from the rebuild_digest
+// generator hooks (tests/common, read-only) applied through the pure apply core on one store.
+
+#[derive(Clone, Debug)]
+enum GOp {
+    Start,
+    Grant(usize),
+    Waits(common::gen_waits::WaitOp),
+    Lifecycle(common::gen_lifecycle::LifecycleOp),
+}
+
+fn gop() -> impl Strategy<Value = GOp> {
+    prop_oneof![
+        3 => Just(GOp::Start),
+        3 => any::<usize>().prop_map(GOp::Grant),
+        4 => common::gen_waits::strategy().prop_filter_map("no op", |o| o.map(GOp::Waits)),
+        3 => common::gen_lifecycle::strategy().prop_filter_map("no op", |o| o.map(GOp::Lifecycle)),
+    ]
+}
+
+/// Generator partition: the hooks address partitions 0 and 1; only partition-0 commands are
+/// applied (the store is partition 0 of 2).
+const GP: PartitionId = PartitionId(0);
+
+fn gcount() -> PartitionCount {
+    PartitionCount::new(2).expect("non-zero")
+}
+
+struct Driver {
+    store: PartitionStore,
+    cur: Cursor,
+    runs: Vec<(RunId, Option<AttemptToken>)>,
+    grants: u32,
+    log: Vec<Vec<u8>>,
+}
+
+impl Driver {
+    fn new(data: &Path) -> Self {
+        let (store, meta) =
+            PartitionStore::open(data, GP, gcount(), &StoreConfig::default()).expect("open");
+        Driver {
+            cur: Cursor::from_meta(&meta),
+            store,
+            runs: Vec::new(),
+            grants: 0,
+            log: Vec::new(),
+        }
+    }
+
+    fn apply(&mut self, c: &Command) -> ApplyOutcome {
+        let bytes = encode_command(c);
+        let o = apply_one(&self.store, &mut self.cur, &bytes);
+        self.log.push(bytes.to_vec());
+        o
+    }
+
+    fn view(&self) -> Vec<common::GenRun> {
+        let r = self.store.reader();
+        self.runs
+            .iter()
+            .map(|(id, token)| common::GenRun {
+                partition: GP.0,
+                id: *id,
+                token: *token,
+                next_seq: r
+                    .get(Table::Runs, &keys::run_key(id))
+                    .expect("read")
+                    .map_or(0, |v| {
+                        values::decode::<RunRecord>(&v).expect("run").next_seq
+                    }),
+            })
+            .collect()
+    }
+
+    fn step(&mut self, n: usize, op: &GOp) {
+        let cmds: Vec<(u16, Command)> = match op {
+            GOp::Start => {
+                let id = common::run_on(GP.0);
+                self.runs.push((id, None));
+                vec![(GP.0, common::start_cmd(&id))]
+            }
+            GOp::Grant(i) => {
+                if self.runs.is_empty() {
+                    return;
+                }
+                let k = i % self.runs.len();
+                self.grants += 1;
+                let tok = AttemptToken {
+                    epoch: Epoch(1),
+                    n: self.grants,
+                };
+                let c = Command::attempt_granted(AttemptGranted {
+                    run_id: self.runs[k].0.as_bytes().to_vec(),
+                    token: Some(tok.into()),
+                    after_failure: false,
+                });
+                if self.apply(&c) == ApplyOutcome::Accepted {
+                    self.runs[k].1 = Some(tok);
+                }
+                return;
+            }
+            GOp::Waits(w) => common::gen_waits::commands(w, &self.view(), n),
+            GOp::Lifecycle(l) => common::gen_lifecycle::commands(l, &self.view(), n),
+        };
+        for (p, c) in cmds {
+            if p == GP.0 {
+                self.apply(&c);
+            }
+        }
+    }
+}
+
+fn apply_one(store: &PartitionStore, cur: &mut Cursor, bytes: &[u8]) -> ApplyOutcome {
+    let mut b = store.batch();
+    let mut actions = Vec::new();
+    let off = cur.next;
+    let o = apply_command(&mut b, cur, off, Epoch(1), bytes, &mut actions).expect("apply");
+    let mu = cur.meta_update();
+    b.commit(&mu).expect("commit");
+    o
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: ostro_testkit::proptest_cases(32),
+        failure_persistence: None,
+        .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn snapshot_plus_tail_equals_full_replay(
+        ops in proptest::collection::vec(gop(), 1..60),
+        frac in 0.0f64..=1.0,
+        lz4 in any::<bool>(),
+    ) {
+        let live_dir = ostro_testkit::fs::tempdir();
+        let mut d = Driver::new(live_dir.path());
+        assert_eq!(d.apply(&Command::leader_announced(1, 1, 0)), ApplyOutcome::Accepted);
+        for (n, op) in ops.iter().enumerate() {
+            d.step(n, op);
+        }
+        let total = d.log.len();
+        let k = ((total as f64) * frac) as usize;
+
+        // A store replayed to k exports the snapshot.
+        let kdir = ostro_testkit::fs::tempdir();
+        let (kstore, kmeta) =
+            PartitionStore::open(kdir.path(), GP, gcount(), &StoreConfig::default()).expect("open");
+        let mut kcur = Cursor::from_meta(&kmeta);
+        for bytes in &d.log[..k] {
+            apply_one(&kstore, &mut kcur, bytes);
+        }
+        let mut buf = Vec::new();
+        let info = kstore
+            .export_snapshot_with(&mut buf, 0, ExportOptions { lz4 })
+            .expect("export");
+        prop_assert_eq!(info.applied_offset, k as u64);
+        drop(kstore);
+
+        // Install, replay the tail [k, end).
+        let idir = ostro_testkit::fs::tempdir();
+        snapshot::install_snapshot(idir.path(), GP, gcount(), &StoreConfig::default(), buf.as_slice())
+            .expect("install");
+        let (istore, imeta) =
+            PartitionStore::open(idir.path(), GP, gcount(), &StoreConfig::default()).expect("open");
+        prop_assert_eq!(imeta.applied.0, k as u64);
+        let mut icur = Cursor::from_meta(&imeta);
+        for bytes in &d.log[k..] {
+            apply_one(&istore, &mut icur, bytes);
+        }
+        prop_assert_eq!(istore.digest().expect("digest"), d.store.digest().expect("digest"));
+        prop_assert_eq!(icur.hash, d.cur.hash);
+        prop_assert_eq!(icur.next, d.cur.next);
+    }
+}
+
+// --------------------------------------------------------------- crash-safe install
+// (`--features failpoints`, `--test-threads=1`: the `fail` registry is process-global)
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn install_crash_at_every_step_leaves_old_or_new_state() {
+    let dir = ostro_testkit::fs::tempdir();
+    let src = build(dir.path(), 150);
+    let (buf, info) = export(&src, false);
+    for (fp, new_wins) in [
+        ("snapshot::install_after_write", false),
+        ("snapshot::install_before_swap", false),
+        ("snapshot::install_after_old_rename", false),
+        ("snapshot::install_before_old_remove", true),
+    ] {
+        for had_state in [true, false] {
+            let data = ostro_testkit::fs::tempdir();
+            let d = data.path();
+            let old_digest = had_state.then(|| build(d, 15).digest().expect("digest"));
+            let scenario = fail::FailScenario::setup();
+            fail::cfg(fp, "return").expect("cfg");
+            let e = install(d, &buf, snapshot::DEFAULT_INSTALL_WRITER).expect_err("injected");
+            assert!(
+                matches!(e, SnapshotError::Injected(n) if n == fp),
+                "{fp}: {e:?}"
+            );
+            fail::remove(fp);
+            scenario.teardown();
+
+            // "Crash", then reopen as Node::open will: recovery first.
+            snapshot::recover_install(d, P).expect("recover");
+            assert_clean_state_dir(d);
+            let want = if new_wins {
+                Some(info.logical_digest)
+            } else {
+                old_digest
+            };
+            match want {
+                Some(w) => {
+                    let (store, meta) = open_at(d);
+                    assert_eq!(
+                        store.digest().expect("digest"),
+                        w,
+                        "{fp} had_state={had_state}"
+                    );
+                    if new_wins {
+                        assert_eq!(meta.applied.0, info.applied_offset);
+                    }
+                }
+                None => assert!(
+                    !PartitionStore::exists(d, P),
+                    "{fp}: half-installed state without a prior state"
+                ),
+            }
+
+            // A retried install then succeeds.
+            install(d, &buf, snapshot::DEFAULT_INSTALL_WRITER).expect("retry");
+            assert_clean_state_dir(d);
+            assert_eq!(open_at(d).0.digest().expect("digest"), info.logical_digest);
+        }
+    }
+}
+
+/// Snapshot size of a store with 100k runs (the `chunk_ops` mix: run record, event, payload,
+/// timer per chunk, every 5th payload a blob ref), with and without lz4. Measurement only:
+/// `cargo test -p ostro-partition --release --test snapshot -- --ignored --nocapture size`.
+#[test]
+#[ignore = "measurement: 100k-run snapshot size"]
+fn snapshot_size_for_100k_runs() {
+    let dir = ostro_testkit::fs::tempdir();
+    let store = open(dir.path());
+    let mut i = 0u64;
+    let mut runs = 0u64;
+    while runs < 100_000 {
+        apply(&store, i);
+        // chunk_ops deletes run i-2 when i % 3 == 2: count live runs
+        runs = i + 1 - (i + 1) / 3;
+        i += 1;
+    }
+    let (plain, info) = export(&store, false);
+    let (lz, _) = export(&store, true);
+    eprintln!(
+        "100k runs: {} rows, {} blob refs; OSNP plain {} bytes, lz4 {} bytes (ratio {:.3})",
+        info.total_rows,
+        info.blob_refs.len(),
+        plain.len(),
+        lz.len(),
+        lz.len() as f64 / plain.len() as f64
+    );
 }

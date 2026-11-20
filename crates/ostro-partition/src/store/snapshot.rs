@@ -22,15 +22,19 @@
 //! the identity. Every later STATE/VALUE_FORMAT change MUST add its row migrator there (and a
 //! format-corpus generation, docs/storage-format.md §14.2).
 
+use std::fs;
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 
-use fjall::Readable;
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable};
+use ostro_types::{PartitionCount, PartitionId};
 
 use super::blobrefs;
+use super::config::StoreConfig;
 use super::digest::DigestBuilder;
 use super::meta::{self, K_APPLIED, K_CHECKPOINTED, K_CURSOR, K_STATE_HASH};
 use super::values::{self, CursorMeta};
-use super::{PartitionStore, StoreError, TABLES, Table};
+use super::{PartitionStore, StoreError, TABLE_COUNT, TABLES, Table};
 
 /// File magic.
 pub const MAGIC: [u8; 4] = *b"OSNP";
@@ -232,10 +236,11 @@ pub struct SnapshotInfo {
 /// Export options.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ExportOptions {
-    /// lz4-compress `Rows` frames (header flag bit 0). Off by default: state values are
-    /// mostly small postcard/prost records with little redundancy (see the 08-02 SUMMARY for
-    /// the measured ratio), and snapshots are read on the restore/install path where
-    /// decompression costs CPU for little gain.
+    /// lz4-compress `Rows` frames (header flag bit 0). Off by default: local snapshots live
+    /// next to the state they summarise and are read on the install path, where the plain
+    /// format can be checked and forwarded without decompression; compression is a choice of
+    /// the upload path (08-13). Measured (08-02 SUMMARY): a synthetic 100k-run store is
+    /// 10.2 MB plain, 3.8 MB lz4 (0.38; repetitive test values, real payloads compress less).
     pub lz4: bool,
 }
 
@@ -974,4 +979,401 @@ pub(crate) fn read_stream<R: Read>(
 /// refs, trailer digest and counts) without writing anything.
 pub fn verify_snapshot<R: Read>(r: R) -> Result<SnapshotInfo, SnapshotError> {
     read_stream(r, |_, _, _| Ok(())).map(|(_, info, _)| info)
+}
+
+// ------------------------------------------------------------------------------ install
+//
+// Staged install (research Pattern 3). Directory states under `<data>/state/`, in order:
+//
+//   1. `.install-pNNNN` is built and verified (reopen + digest + applied_offset); `pNNNN`
+//      (if any) is untouched. A crash here leaves a stale staging dir: removed on the next
+//      install / recovery, the old state is intact.
+//   2. `pNNNN` -> `.old-pNNNN` (only if a state existed). A crash here leaves
+//      `.old-pNNNN` without `pNNNN`: recovery renames it back (old state intact).
+//   3. `.install-pNNNN` -> `pNNNN`, fsync `state/`. From here the new state is complete. A
+//      crash before the old dir is removed leaves `pNNNN` + `.old-pNNNN`: recovery removes
+//      `.old-pNNNN`.
+//
+// So no reopen ever sees a half-installed `pNNNN`: it is either the old directory (renamed
+// whole) or the fully verified staging directory (renamed whole). [`recover_install`] applies
+// the rules above and runs at the start of every install; `Node::open` (08-09) calls it before
+// opening a partition's store.
+
+/// How [`install_snapshot`] writes table rows into the staging store (08-02 spike).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallWriter {
+    /// `Keyspace::start_ingestion()` per table (writes tables directly, bypassing memtables and
+    /// the journal); meta last through a `WriteBatch`.
+    Ingestion,
+    /// `WriteBatch` chunks of about [`INSTALL_BATCH_BYTES`]; meta last.
+    WriteBatch,
+}
+
+/// The writer [`install_snapshot`] uses. Chosen by the 08-02 spike (see the SUMMARY): WriteBatch
+/// chunks plus `persist(SyncAll)`. Correctness never depends on it: the reopen + digest check
+/// and the directory rename decide.
+pub const DEFAULT_INSTALL_WRITER: InstallWriter = InstallWriter::WriteBatch;
+
+/// Target size of one install `WriteBatch`.
+pub const INSTALL_BATCH_BYTES: usize = 4 << 20;
+
+/// `<data>/state/.install-p0007`: staging directory of an install into partition 7.
+pub fn install_staging_dir(data_dir: &Path, p: PartitionId) -> PathBuf {
+    data_dir.join("state").join(format!(".install-p{:04}", p.0))
+}
+
+/// `<data>/state/.old-p0007`: the previous state of partition 7 while it is being replaced.
+pub fn install_old_dir(data_dir: &Path, p: PartitionId) -> PathBuf {
+    data_dir.join("state").join(format!(".old-p{:04}", p.0))
+}
+
+fn fsync_dir(dir: &Path) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+fn remove_dir_if_exists(dir: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+/// Finishes or rolls back an interrupted install of partition `p` (see the state list above):
+/// - a stale `.install-pNNNN` is removed;
+/// - `.old-pNNNN` without `pNNNN` is renamed back to `pNNNN` (the swap never happened);
+/// - `.old-pNNNN` next to `pNNNN` is removed (the swap completed).
+///
+/// Must run before the partition's store is opened. Idempotent.
+pub fn recover_install(data_dir: &Path, p: PartitionId) -> Result<(), SnapshotError> {
+    let state = data_dir.join("state");
+    if !state.is_dir() {
+        return Ok(());
+    }
+    let live = super::state_dir(data_dir, p);
+    let old = install_old_dir(data_dir, p);
+    let staging = install_staging_dir(data_dir, p);
+    let mut changed = false;
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+        changed = true;
+    }
+    if old.exists() {
+        if live.exists() {
+            fs::remove_dir_all(&old)?;
+        } else {
+            fs::rename(&old, &live)?;
+        }
+        changed = true;
+    }
+    if changed {
+        fsync_dir(&state)?;
+    }
+    Ok(())
+}
+
+macro_rules! install_fail_point {
+    ($name:literal) => {
+        #[cfg(feature = "failpoints")]
+        fail::fail_point!($name, |_| Err(SnapshotError::Injected($name)));
+    };
+}
+
+/// Opens a fjall database at `path` with the production configuration of
+/// `PartitionStore::open`, without writing the initial meta rows.
+fn open_raw(path: &Path, cfg: &StoreConfig) -> Result<PartitionStore, SnapshotError> {
+    let db = Database::builder(path)
+        .worker_threads(cfg.worker_threads)
+        .max_journaling_size(cfg.max_journaling_size)
+        .cache_size(cfg.cache_size)
+        .open()?;
+    let memtable = cfg.max_memtable_size;
+    let mut handles: Vec<Keyspace> = Vec::with_capacity(TABLES.len());
+    for t in TABLES {
+        handles.push(db.keyspace(t.name(), || {
+            KeyspaceCreateOptions::default().max_memtable_size(memtable)
+        })?);
+    }
+    let ks: [Keyspace; TABLE_COUNT] = handles
+        .try_into()
+        .unwrap_or_else(|_| unreachable!("one keyspace per table"));
+    Ok(PartitionStore { db, ks })
+}
+
+/// Installs an OSNP v1 snapshot as the state of partition `p` under `data_dir`
+/// (`<data>/state/pNNNN`), replacing any existing state. See [`install_snapshot_with`].
+pub fn install_snapshot<R: Read>(
+    data_dir: &Path,
+    p: PartitionId,
+    count: PartitionCount,
+    cfg: &StoreConfig,
+    r: R,
+) -> Result<SnapshotInfo, SnapshotError> {
+    install_snapshot_with(data_dir, p, count, cfg, r, DEFAULT_INSTALL_WRITER)
+}
+
+/// Staged install (research Pattern 3):
+/// 1. [`recover_install`], then build `state/.install-pNNNN` from the stream (every table in
+///    order, meta last with `checkpointed_offset = applied_offset`), `persist(SyncAll)`. The
+///    stream is fully verified on the way (header and frame CRCs, structure, key order, blob
+///    refs, trailer digest and counts); any error removes the staging directory and leaves the
+///    live state untouched.
+/// 2. Close, reopen, check `digest() == trailer.logical_digest` (after migration: the digest of
+///    the migrated rows) and meta `applied_offset == header.applied_offset`, partition and
+///    partition count.
+/// 3. Rename `pNNNN` aside to `.old-pNNNN`, rename the staging directory to `pNNNN`, fsync
+///    `state/`, remove `.old-pNNNN`.
+///
+/// The caller must have closed the partition's store (no `PartitionStore` open on `pNNNN`).
+/// A snapshot of another partition or partition count is [`SnapshotError::Mismatch`], before
+/// anything is written.
+#[doc(hidden)]
+pub fn install_snapshot_with<R: Read>(
+    data_dir: &Path,
+    p: PartitionId,
+    count: PartitionCount,
+    cfg: &StoreConfig,
+    mut r: R,
+    writer: InstallWriter,
+) -> Result<SnapshotInfo, SnapshotError> {
+    let mut hb = [0u8; HEADER_LEN];
+    r.read_exact(&mut hb)?;
+    let header = SnapshotHeader::decode(&hb)?;
+    if header.partition != p.0 || header.partition_count != count.get() {
+        return Err(SnapshotError::Mismatch(format!(
+            "snapshot of partition {}/{}, target partition {}/{}",
+            header.partition,
+            header.partition_count,
+            p.0,
+            count.get()
+        )));
+    }
+    let state = data_dir.join("state");
+    fs::create_dir_all(&state)?;
+    recover_install(data_dir, p)?;
+    let staging = install_staging_dir(data_dir, p);
+    let built = build_staging(&staging, cfg, io::Cursor::new(hb).chain(r), writer);
+    let info = match built {
+        Ok(info) => info,
+        Err(e) => {
+            // Best effort: the next install / recovery removes it anyway.
+            let _ = remove_dir_if_exists(&staging);
+            return Err(e);
+        }
+    };
+    install_fail_point!("snapshot::install_before_swap");
+    let live = super::state_dir(data_dir, p);
+    let old = install_old_dir(data_dir, p);
+    let had_live = live.exists();
+    if had_live {
+        fs::rename(&live, &old)?;
+    }
+    install_fail_point!("snapshot::install_after_old_rename");
+    fs::rename(&staging, &live)?;
+    fsync_dir(&state)?;
+    install_fail_point!("snapshot::install_before_old_remove");
+    if had_live {
+        fs::remove_dir_all(&old)?;
+        fsync_dir(&state)?;
+    }
+    Ok(info)
+}
+
+/// Step 1 + 2 of the install: write and verify the staging store at `staging`.
+fn build_staging<R: Read>(
+    staging: &Path,
+    cfg: &StoreConfig,
+    r: R,
+    writer: InstallWriter,
+) -> Result<SnapshotInfo, SnapshotError> {
+    let (header, info, want_digest) = {
+        let store = open_raw(staging, cfg)?;
+        let res = write_rows(&store, r, writer)?;
+        install_fail_point!("snapshot::install_after_write");
+        store.persist().map_err(SnapshotError::Store)?;
+        res
+    };
+    // Reopen (the store above is dropped, i.e. closed) and check what is on disk.
+    let store = open_raw(staging, cfg)?;
+    let mks = store.ks(Table::Meta);
+    match meta::read_format_version(mks)? {
+        Some(STATE_FORMAT) => {}
+        found => {
+            return Err(malformed(format!(
+                "installed format_ver {found:?}, want {STATE_FORMAT}"
+            )));
+        }
+    }
+    let m = store.read_meta()?;
+    if m.applied.0 != header.applied_offset || m.checkpointed.0 != header.applied_offset {
+        return Err(SnapshotError::Mismatch(format!(
+            "installed applied/checkpointed {}/{} != header applied_offset {}",
+            m.applied.0, m.checkpointed.0, header.applied_offset
+        )));
+    }
+    if m.partition.0 != header.partition || m.count.get() != header.partition_count {
+        return Err(SnapshotError::Mismatch(
+            "installed partition / partition_count differ from the header".into(),
+        ));
+    }
+    if m.state_hash != info.state_hash {
+        return Err(malformed("installed state_hash differs from the trailer"));
+    }
+    let actual = store.digest()?;
+    if actual != want_digest {
+        return Err(SnapshotError::DigestMismatch {
+            expected: want_digest,
+            actual,
+        });
+    }
+    drop(store);
+    Ok(info)
+}
+
+/// Streams the snapshot's rows into `store` (empty) with `writer`; meta last, with
+/// `checkpointed_offset = applied_offset`.
+fn write_rows<R: Read>(
+    store: &PartitionStore,
+    r: R,
+    writer: InstallWriter,
+) -> Result<(SnapshotHeader, SnapshotInfo, [u8; 32]), SnapshotError> {
+    let mut meta_rows: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut batch = store.db.batch();
+    let mut batch_bytes = 0usize;
+    // fjall's `Ingestion` type is not nameable outside fjall: tie the type to its constructor.
+    let mut ingest = none_of(|| store.ks(Table::Runs).start_ingestion());
+    let mut ingest_table: Option<Table> = None;
+    let res = read_stream(r, |t, k, v| {
+        if t == Table::Meta {
+            meta_rows.push((k, v));
+            return Ok(());
+        }
+        match writer {
+            InstallWriter::WriteBatch => {
+                batch_bytes += k.len() + v.len() + 16;
+                batch.insert(store.ks(t), k, v);
+                if batch_bytes >= INSTALL_BATCH_BYTES {
+                    std::mem::replace(&mut batch, store.db.batch()).commit()?;
+                    batch_bytes = 0;
+                }
+            }
+            InstallWriter::Ingestion => {
+                if ingest_table != Some(t) {
+                    if let Some(i) = ingest.take() {
+                        i.finish()?;
+                    }
+                    ingest = Some(store.ks(t).start_ingestion()?);
+                    ingest_table = Some(t);
+                }
+                if let Some(i) = ingest.as_mut() {
+                    i.write(k, v)?;
+                }
+            }
+        }
+        Ok(())
+    });
+    // On error the staging directory is discarded by the caller.
+    let (header, info, digest) = res?;
+    if let Some(i) = ingest.take() {
+        i.finish()?;
+    }
+    let mks = store.ks(Table::Meta);
+    for (k, v) in meta_rows {
+        batch.insert(mks, k, v);
+    }
+    batch.insert(mks, K_CHECKPOINTED, header.applied_offset.to_be_bytes());
+    batch.commit()?;
+    Ok((header, info, digest))
+}
+
+/// `None` typed as the `Ok` value of `f` (never called).
+fn none_of<T, E>(_f: impl FnOnce() -> Result<T, E>) -> Option<T> {
+    None
+}
+
+/// Install-writer spike (plan 08-02, research Open Question 3). `#[ignore]`d: run with
+/// `cargo test -p ostro-partition --release --lib -- --ignored --nocapture install_spike`.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+mod install_spike {
+    use std::time::Instant;
+
+    use super::*;
+
+    fn source(dir: &Path, rows: u64) -> (Vec<u8>, SnapshotInfo) {
+        let count = PartitionCount::new(1).expect("non-zero");
+        let (store, _) = PartitionStore::open(dir, PartitionId(0), count, &StoreConfig::default())
+            .expect("open");
+        // tables whose values the blob-ref visitor does not decode (opaque test values)
+        let tables = [Table::Runs, Table::Ready, Table::Timers, Table::Dedupe];
+        let mut b = store.db.batch();
+        for i in 0..rows {
+            let t = tables[(i % 4) as usize];
+            let v = format!("value-{i}-{}", "x".repeat((i % 97) as usize));
+            b.insert(store.ks(t), i.to_be_bytes(), v.as_bytes());
+            if i % 10_000 == 9_999 {
+                std::mem::replace(&mut b, store.db.batch())
+                    .commit()
+                    .expect("commit");
+            }
+        }
+        b.commit().expect("commit");
+        let mut buf = Vec::new();
+        let info = store.export_snapshot(&mut buf, 0).expect("export");
+        (buf, info)
+    }
+
+    #[test]
+    #[ignore = "spike: timing on a 200k-row store"]
+    fn install_spike_ingestion_vs_writebatch() {
+        let src = tempfile::tempdir().expect("tmp");
+        let (buf, info) = source(src.path(), 200_000);
+        let count = PartitionCount::new(1).expect("non-zero");
+        for w in [
+            InstallWriter::WriteBatch,
+            InstallWriter::Ingestion,
+            InstallWriter::WriteBatch,
+            InstallWriter::Ingestion,
+        ] {
+            let d = tempfile::tempdir().expect("tmp");
+            let t0 = Instant::now(); // clock-exempt: spike timing
+            let got = install_snapshot_with(
+                d.path(),
+                PartitionId(0),
+                count,
+                &StoreConfig::default(),
+                buf.as_slice(),
+                w,
+            )
+            .expect("install");
+            eprintln!(
+                "install {w:?}: {} rows, {} bytes in {:?}",
+                got.total_rows,
+                buf.len(),
+                t0.elapsed()
+            );
+            assert_eq!(got.logical_digest, info.logical_digest);
+        }
+
+        // Do ingested tables survive a reopen without an explicit persist? (meta rows go
+        // through a batch, so only the journal could lose them; tables are what is checked.)
+        let small = tempfile::tempdir().expect("tmp");
+        let (sbuf, sinfo) = source(small.path(), 20_000);
+        let mut ok = 0;
+        for _ in 0..20 {
+            let d = tempfile::tempdir().expect("tmp");
+            let path = d.path().join("db");
+            let want = {
+                let store = open_raw(&path, &StoreConfig::default()).expect("open");
+                let (_, _, want) =
+                    write_rows(&store, sbuf.as_slice(), InstallWriter::Ingestion).expect("write");
+                want // dropped without persist(SyncAll)
+            };
+            let store = open_raw(&path, &StoreConfig::default()).expect("reopen");
+            if store.digest().expect("digest") == want && want == sinfo.logical_digest {
+                ok += 1;
+            }
+        }
+        eprintln!("ingestion reopen without persist: {ok}/20 digests equal");
+    }
 }
