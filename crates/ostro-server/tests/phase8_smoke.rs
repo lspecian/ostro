@@ -1,6 +1,6 @@
 //! Phase 8 API wiring smoke (08-10): on the real server every Phase 8 route reaches its
 //! controller: a stub (503 `unavailable` naming the owning plan, never 404) until the
-//! plan lands, the real controller after (webhooks since 08-15). The gRPC services are
+//! plan lands, the real controller after (webhooks since 08-15, schedules since 08-14). The gRPC services are
 //! mounted (not UNIMPLEMENTED), the hook route enforces
 //! `[triggers] webhook_body_limit`, a start-run `traceparent` header is validated, and
 //! the `tests/common/phase8.rs` signers agree with ostro-triggers' verifiers.
@@ -36,18 +36,7 @@ async fn phase8_routes_reach_controller_stubs() {
     s.wait_ready(Duration::from_secs(10)).await;
     assert!(s.collector.is_some());
 
-    let schedule = json!({"name": "n", "workflow": "w", "cron": "* * * * *"});
-    for (method, path, body, owner) in [
-        ("GET", "/v1/schedules", Value::Null, "08-14"),
-        ("POST", "/v1/schedules", schedule.clone(), "08-14"),
-        ("GET", "/v1/schedules/n", Value::Null, "08-14"),
-        ("PUT", "/v1/schedules/n", schedule.clone(), "08-14"),
-        ("DELETE", "/v1/schedules/n", Value::Null, "08-14"),
-        ("POST", "/v1/schedules/n/pause", Value::Null, "08-14"),
-        ("POST", "/v1/schedules/n/resume", Value::Null, "08-14"),
-        ("POST", "/v1/schedules/n/trigger", Value::Null, "08-14"),
-        ("GET", "/v1/admin/backup", Value::Null, "08-18"),
-    ] {
+    for (method, path, body, owner) in [("GET", "/v1/admin/backup", Value::Null, "08-18")] {
         let mut req = s.http.request(method.parse().unwrap(), s.url(path));
         if !body.is_null() {
             req = req.json(&body);
@@ -64,6 +53,17 @@ async fn phase8_routes_reach_controller_stubs() {
             "{method} {path}"
         );
     }
+
+    // 08-14 implemented the schedule controller: real answers instead of the stub.
+    let (st, v) = s.get_json("/v1/schedules").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({"schedules": []}));
+    let (st, _) = s.get_json("/v1/schedules/n").await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, v) = s
+        .create_schedule(&json!({"name": "n", "workflow": "w", "cron": "* * * * *"}))
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "unknown workflow: {v}");
 
     // 08-15 implemented the webhook controller: real answers instead of the stub.
     let (st, v) = s.get_json("/v1/webhooks").await;
@@ -89,12 +89,11 @@ async fn phase8_routes_reach_controller_stubs() {
 
     // gRPC services are mounted and reach the stubs.
     let ch = s.channel().await;
-    let e = pb::schedules_client::SchedulesClient::new(ch.clone())
+    let listed = pb::schedules_client::SchedulesClient::new(ch.clone())
         .list(pb::ListSchedulesRequest {})
         .await
-        .expect_err("stub");
-    assert_eq!(e.code(), tonic::Code::Unavailable, "{e:?}");
-    assert!(e.message().contains("08-14"));
+        .expect("schedules implemented (08-14)");
+    assert!(listed.into_inner().schedules.is_empty());
     let listed = pb::webhooks_client::WebhooksClient::new(ch.clone())
         .list(pb::ListWebhooksRequest {})
         .await

@@ -369,10 +369,14 @@ async fn start_inner(
     node_cfg.leadership = Arc::new(MetaLeadership::new(meta.view().clone()));
     node_cfg.clock = Arc::clone(&clock);
     // Phase 8 contracts (08-01): snapshots and cron from `[snapshots]` / `[triggers]`;
-    // the upload floor exists only with bottomless on (B4, 08-09). `schedule_source` is
-    // set by 08-14.
+    // the upload floor exists only with bottomless on (B4, 08-09). The cron drivers read
+    // the meta-backed schedule set (08-14).
     node_cfg.snapshots = cfg.snapshots.to_snapshot_config();
     node_cfg.cron = cfg.triggers.to_cron_config();
+    node_cfg.schedule_source = Some(crate::control::schedules::MetaScheduleSource::start(
+        meta.view().clone(),
+        cfg.runs.clone(),
+    ));
     node_cfg.backup_enabled = cfg.backup.enabled();
     node_cfg.leader.dispatcher = Some(DispatcherConfig {
         executor,
