@@ -21,11 +21,22 @@
 //! Every attempt-ending error is classified by [`classify`] into an
 //! [`AttemptFailure`] reason code; a failure ends only this attempt (the store is
 //! dropped, the memory budget released).
+//!
+//! # Metrics (OBS-02, plan 08-16)
+//!
+//! The driver wraps the sink in a [`MeteredSink`] that counts the live step events of every
+//! **committed** append (`ostro_steps_total{workflow,outcome}`,
+//! `ostro_step_duration_seconds{workflow}`), so a fenced or conflicting flush counts
+//! nothing and a replayed step is never counted again. It also records the replay of the
+//! activation (`ostro_replay_events_total`, `ostro_replay_duration_seconds`) and the fuel
+//! the attempt consumed (`ostro_fuel_consumed_total{workflow}`). The `workflow` label is
+//! the module's workflow name (bounded by the deployed workflows); no run id is a label.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime};
 
-use ostro_types::journal::Failure;
+use ostro_types::journal::{Event, EventBody, Failure, Payload, decode_result};
 use tracing::Instrument;
 use wasmtime::{Store, Trap};
 
@@ -40,7 +51,9 @@ use crate::host::state::{HostState, HotWait, RunReturn, run_return_from_wit};
 use crate::limits::{Breach, HasLimits};
 use crate::replay::ReplayError;
 use crate::runtime::{Prepared, Runtime};
-use crate::sink::{Activate, ActivationOutcome, ActivationSink, AppendError};
+use crate::sink::{
+    Activate, ActivationOutcome, ActivationSink, AppendError, GuestLogRecord, RunRef,
+};
 use crate::telemetry::{ActivationSpan, RunTrace, current_traceparent};
 
 /// Result of classifying an error returned by `call_run` (a trap).
@@ -146,6 +159,126 @@ fn replay_failure(e: ReplayError) -> AttemptFailure {
     }
 }
 
+/// Stable `outcome` label of a committed step event; `None` for other events.
+fn step_outcome(body: &EventBody) -> Option<&'static str> {
+    match body {
+        EventBody::StepCompleted(sc) => Some(
+            match decode_result::<Result<Payload, Failure>>(&sc.outcome) {
+                Ok(Ok(_)) => "ok",
+                Ok(Err(Failure::Cancelled)) => "cancelled",
+                Ok(Err(Failure::Timeout)) => "timeout",
+                _ => "error",
+            },
+        ),
+        EventBody::StepAttemptFailed(_) => Some("retry"),
+        _ => None,
+    }
+}
+
+/// Seconds between two journal timestamps (0 when `to` is not after `from`).
+fn secs_between(from_nanos: u64, to_nanos: u64) -> f64 {
+    to_nanos.saturating_sub(from_nanos) as f64 / 1e9
+}
+
+/// The activation's view of the sink, recording step and replay metrics on every
+/// **committed** append (plan 08-16). Every [`ActivationSink`] method is forwarded to the
+/// wrapped sink (a new trait method must be forwarded here too).
+///
+/// Step duration is the journal time between the step event and the event before it (a
+/// live step's begin is not journaled; the previous command is the closest committed
+/// bound, so the value is an upper bound that includes guest code run between the two).
+struct MeteredSink {
+    inner: Arc<dyn ActivationSink>,
+    /// The run's workflow name, set once the replay state is built.
+    workflow: OnceLock<String>,
+    /// Committed journal length at activation start (the events replayed).
+    replayed: u64,
+    /// Engine-clock time of the activation start (replay duration base).
+    started_nanos: u64,
+    /// Timestamp of the last journal event seen (replayed or appended).
+    prev_ts: AtomicU64,
+    /// The replay duration was recorded (at the first live append).
+    replay_done: AtomicBool,
+}
+
+impl MeteredSink {
+    fn workflow(&self) -> &str {
+        self.workflow.get().map_or("", String::as_str)
+    }
+
+    /// Record the replay duration once, ending at `end_nanos`.
+    fn replay_ended(&self, end_nanos: u64) {
+        if self.replayed > 1 && !self.replay_done.swap(true, Ordering::Relaxed) {
+            crate::replay::metrics::duration(secs_between(self.started_nanos, end_nanos));
+        }
+    }
+
+    /// Record the step events of a committed append: `(outcome, duration seconds)`.
+    fn committed(&self, steps: Vec<(&'static str, f64)>) {
+        if steps.is_empty() {
+            return;
+        }
+        let wf = self.workflow().to_owned();
+        for (outcome, secs) in steps {
+            metrics::counter!("ostro_steps_total", "workflow" => wf.clone(), "outcome" => outcome)
+                .increment(1);
+            metrics::histogram!("ostro_step_duration_seconds", "workflow" => wf.clone())
+                .record(secs);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ActivationSink for MeteredSink {
+    async fn append(
+        &self,
+        run: &RunRef,
+        attempt: u32,
+        from_seq: u64,
+        events: Vec<Event>,
+    ) -> Result<u64, AppendError> {
+        // The step bookkeeping is computed up front; the batch moves to the inner sink.
+        let first_ts = events.first().map(|e| e.ts_nanos);
+        let mut prev = self.prev_ts.load(Ordering::Relaxed);
+        let mut steps = Vec::new();
+        for ev in &events {
+            if let Some(outcome) = step_outcome(&ev.body) {
+                steps.push((outcome, secs_between(prev, ev.ts_nanos)));
+            }
+            prev = prev.max(ev.ts_nanos);
+        }
+        let r = self.inner.append(run, attempt, from_seq, events).await;
+        if r.is_ok()
+            && let Some(first) = first_ts
+        {
+            self.replay_ended(first);
+            self.committed(steps);
+            self.prev_ts.fetch_max(prev, Ordering::Relaxed);
+        }
+        r
+    }
+
+    async fn fetch_blob(&self, sha: &[u8; 32]) -> Result<Vec<u8>, AppendError> {
+        self.inner.fetch_blob(sha).await
+    }
+
+    async fn done(&self, run: &RunRef, attempt: u32, outcome: ActivationOutcome) {
+        self.inner.done(run, attempt, outcome).await;
+    }
+
+    fn effect_driver(&self) -> Option<Arc<dyn crate::effects_driver::EffectDriver>> {
+        self.inner.effect_driver()
+    }
+
+    fn guest_log(&self, rec: GuestLogRecord) {
+        self.inner.guest_log(rec);
+    }
+
+    fn handles_guest_logs(&self) -> bool {
+        self.inner.handles_guest_logs()
+    }
+}
+
 /// Run one activation and report its outcome via `sink.done` exactly once.
 pub(crate) async fn run_activation(
     rt: &Runtime,
@@ -168,7 +301,16 @@ pub(crate) async fn run_activation(
     let run_trace = RunTrace::new(&run.run_id, current_traceparent().as_deref());
     // clock-exempt: span timestamps only (telemetry never feeds the journal).
     let mut aspan = ActivationSpan::start(run_trace, attempt, counter, SystemTime::now());
-    let outcome = execute(rt, p, act, sink.clone(), &mut aspan)
+    let meter = Arc::new(MeteredSink {
+        inner: sink.clone(),
+        workflow: OnceLock::new(),
+        replayed: act.journal.len() as u64,
+        // clock-exempt: replay duration metric only (never journaled, never decides).
+        started_nanos: rt.clock().now_unix_nanos(),
+        prev_ts: AtomicU64::new(act.journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0)),
+        replay_done: AtomicBool::new(false),
+    });
+    let outcome = execute(rt, p, act, meter, &mut aspan)
         .instrument(span)
         .await;
     aspan.end(&outcome, outcome_code(&outcome), SystemTime::now()); // clock-exempt: span timestamp
@@ -189,9 +331,10 @@ async fn execute(
     rt: &Runtime,
     p: &Prepared,
     act: Activate,
-    sink: Arc<dyn ActivationSink>,
+    meter: Arc<MeteredSink>,
     aspan: &mut ActivationSpan,
 ) -> ActivationOutcome {
+    let sink: Arc<dyn ActivationSink> = meter.clone();
     let engine = rt.engine();
     let cfg = engine.config();
     let Activate {
@@ -232,6 +375,8 @@ async fn execute(
         )
     };
     aspan.set_details(&workflow, replayed_events);
+    let _ = meter.workflow.set(workflow.clone());
+    crate::replay::metrics::events(replayed_events);
     state.trace = Some(aspan.trace().clone());
     let mut store = Store::new(engine.engine(), state);
     if let Err(e) = configure_store(&mut store, cfg.activation_fuel) {
@@ -316,6 +461,12 @@ async fn execute(
             }
         }
     };
+    // Nothing live was committed: replay ended with the guest call.
+    meter.replay_ended(rt.clock().now_unix_nanos()); // clock-exempt: replay duration metric
+    if let Some(left) = fuel_left {
+        metrics::counter!("ostro_fuel_consumed_total", "workflow" => workflow.clone())
+            .increment(cfg.activation_fuel.saturating_sub(left));
+    }
     if let ActivationOutcome::AttemptFailed(f) = &outcome {
         tracing::warn!(reason = f.reason_code(), detail = %f.dlq_reason(), "activation attempt failed");
     }

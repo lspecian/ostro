@@ -123,6 +123,18 @@
 //!
 //! `panic` at either site panics the task; the dispatcher handles it like any task panic
 //! (`on_join_error`: the lease is dropped and the run retried).
+//!
+//! # Metrics (OBS-02, plan 08-16)
+//!
+//! - `ostro_queue_ready{queue}` (gauge): due entries waiting for a slot. Every partition's
+//!   dispatcher moves the shared per-queue series by its own deltas (as with the lease
+//!   gauge), so the value is the node total; a stopped dispatcher removes its share.
+//! - `ostro_queue_lag_seconds{queue}` (histogram): `ready_at` → granted, recorded when a
+//!   grant succeeds (regrants of running runs, whose ready time is unknown, are skipped).
+//! - `ostro_runs_started_total{workflow}` (counter): first grant of a run (its first
+//!   activation).
+//! - `ostro_queue_worker_demand{queue}` is only **described** here; Phase 7's
+//!   `workers/demand.rs` owns its value (07-DECISIONS).
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
@@ -802,6 +814,8 @@ struct Dispatcher {
     rejected: BTreeMap<RunId, AttemptToken>,
     m_dispatched: metrics::Counter,
     m_expired: metrics::Counter,
+    /// This dispatcher's share of `ostro_queue_ready{queue}`: queue -> (gauge, reported).
+    ready_gauges: BTreeMap<String, (metrics::Gauge, usize)>,
 }
 
 /// Loop control after handling an event.
@@ -813,6 +827,7 @@ enum Flow {
 impl Dispatcher {
     fn new(ctx: LeaderCtx, cfg: DispatcherConfig) -> Self {
         let label = ctx.partition.0.to_string();
+        describe_queue_metrics();
         Self {
             st: State::new(cfg.lease_ttl),
             stats: cfg.stats.clone().unwrap_or_default(),
@@ -823,6 +838,7 @@ impl Dispatcher {
             reported_leases: 0,
             m_dispatched: metrics::counter!("ostro_dispatcher_dispatched_total", "partition" => label.clone()),
             m_expired: metrics::counter!("ostro_dispatcher_lease_expired_total", "partition" => label),
+            ready_gauges: BTreeMap::new(),
             ctx,
             cfg,
         }
@@ -931,6 +947,50 @@ impl Dispatcher {
                 .fetch_sub(self.reported_leases - now, Ordering::Relaxed);
         }
         self.reported_leases = now;
+    }
+
+    /// Move `ostro_queue_ready{queue}` by this dispatcher's change since the last report
+    /// (one O(1) length read per queue; no lock).
+    fn report_queues(&mut self) {
+        for (q, (g, reported)) in &mut self.ready_gauges {
+            let now = self.st.queues.get(q).map_or(0, BTreeSet::len);
+            move_gauge(g, reported, now);
+        }
+        for (q, set) in &self.st.queues {
+            if !self.ready_gauges.contains_key(q) {
+                let g = ready_gauge(q);
+                let mut reported = 0;
+                move_gauge(&g, &mut reported, set.len());
+                self.ready_gauges.insert(q.clone(), (g, reported));
+            }
+        }
+    }
+
+    /// Make `queue`'s ready series visible (at this dispatcher's share 0) even when its
+    /// entries are always granted before a report sees them queued.
+    fn track_queue(&mut self, queue: &str) {
+        if !self.ready_gauges.contains_key(queue) {
+            self.ready_gauges
+                .insert(queue.to_owned(), (ready_gauge(queue), 0));
+        }
+    }
+
+    /// Queue lag and run-start metrics of a successful grant.
+    fn record_grant(&mut self, run: &RunId) {
+        let Some(l) = self.st.leases.get(run) else {
+            return;
+        };
+        let (ready_at_ms, queue) = (l.entry.ready_at_ms, l.entry.queue.clone());
+        let workflow = l.entry.first_activation.then(|| l.entry.workflow.clone());
+        self.track_queue(&queue);
+        if ready_at_ms > 0 {
+            let lag_ms = self.now_ms().saturating_sub(ready_at_ms);
+            metrics::histogram!("ostro_queue_lag_seconds", "queue" => queue)
+                .record(lag_ms as f64 / 1000.0);
+        }
+        if let Some(workflow) = workflow {
+            metrics::counter!("ostro_runs_started_total", "workflow" => workflow).increment(1);
+        }
     }
 
     /// Apply one committed action batch to the state.
@@ -1079,6 +1139,7 @@ impl Dispatcher {
                     l.phase = Phase::Executing(token);
                     l.grant_pending = pending;
                 }
+                self.record_grant(&run);
                 self.stats.dispatched.fetch_add(1, Ordering::Relaxed);
                 self.m_dispatched.increment(1);
                 debug!(partition = self.p(), %run, epoch = token.epoch.0, n = token.n, "dispatching");
@@ -1359,6 +1420,7 @@ impl Dispatcher {
             self.st.promote_due(now);
             self.dispatch_available();
             self.report_leases();
+            self.report_queues();
 
             let deadline = self.next_deadline();
             let want_slot = self.st.has_ready();
@@ -1419,6 +1481,10 @@ impl Dispatcher {
     async fn stop(mut self) {
         self.st.revoke_all();
         self.report_leases();
+        // Leadership ends: remove this dispatcher's share of the ready gauges.
+        for (g, reported) in self.ready_gauges.values_mut() {
+            move_gauge(g, reported, 0);
+        }
         let grace = self.cfg.lease_ttl.min(SHUTDOWN_GRACE);
         let drained = tokio::time::timeout(grace, async {
             while self.joins.join_next().await.is_some() {}
@@ -1434,6 +1500,45 @@ impl Dispatcher {
         }
         info!(partition = self.p(), "dispatcher stopped");
     }
+}
+
+/// The `ostro_queue_ready{queue}` handle (registered, so the series renders at 0).
+fn ready_gauge(queue: &str) -> metrics::Gauge {
+    let g = metrics::gauge!("ostro_queue_ready", "queue" => queue.to_owned());
+    g.increment(0.0);
+    g
+}
+
+/// Move a shared gauge from this owner's `reported` share to `now`.
+fn move_gauge(g: &metrics::Gauge, reported: &mut usize, now: usize) {
+    if now > *reported {
+        g.increment((now - *reported) as f64);
+    } else if now < *reported {
+        g.decrement((*reported - now) as f64);
+    }
+    *reported = now;
+}
+
+/// Help text of the queue series (idempotent). `ostro_queue_worker_demand` is described
+/// only: Phase 7 (`workers/demand.rs`) owns its value.
+fn describe_queue_metrics() {
+    metrics::describe_gauge!(
+        "ostro_queue_ready",
+        "Ready (due) runs waiting for an executor slot, per queue."
+    );
+    metrics::describe_histogram!(
+        "ostro_queue_lag_seconds",
+        metrics::Unit::Seconds,
+        "Time from a run's ready_at to its attempt grant, per queue."
+    );
+    metrics::describe_counter!(
+        "ostro_runs_started_total",
+        "Runs granted their first activation, per workflow."
+    );
+    metrics::describe_gauge!(
+        "ostro_queue_worker_demand",
+        "Worker demand per queue (set by Phase 7 workers/demand.rs; KEDA input)."
+    );
 }
 
 /// The pipelined grant (see the module docs): wait for an earlier unacknowledged grant of

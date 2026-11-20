@@ -421,7 +421,22 @@ impl Runtime {
         sink: Arc<dyn ActivationSink>,
     ) -> ActivationOutcome {
         let _live = LiveGuard::enter(&self.live);
-        crate::activation::run_activation(self, p, act, sink).await
+        self.publish_gauges();
+        let outcome = crate::activation::run_activation(self, p, act, sink).await;
+        self.publish_gauges();
+        outcome
+    }
+
+    /// Publish the node-wide instance gauges (OBS-02, plan 08-16):
+    /// `ostro_instance_memory_bytes` (linear memory charged by live instances, parked ones
+    /// included), `ostro_wasm_memory_budget_bytes` (the soft node budget) and
+    /// `ostro_parked_instances`. Called at activation start and end; the memory reads are
+    /// atomics, the parked count takes the registry's own (per-park) lock once.
+    pub fn publish_gauges(&self) {
+        let budget = self.parked.budget();
+        metrics::gauge!("ostro_instance_memory_bytes").set(budget.used() as f64);
+        metrics::gauge!("ostro_wasm_memory_budget_bytes").set(budget.limit() as f64);
+        metrics::gauge!("ostro_parked_instances").set(self.parked.parked_count() as f64);
     }
 
     /// Number of activations running right now on this runtime, hot-parked ones

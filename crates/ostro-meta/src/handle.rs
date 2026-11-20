@@ -34,6 +34,21 @@ pub enum MetaError {
     Rejected(String),
 }
 
+/// A point-in-time view of the metadata Raft group, for the `ostro_raft_*` gauges
+/// (OBS-02, plan 08-16). Read from the driver's published status (a watch value), never
+/// from the driver thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaRaftStatus {
+    /// Current Raft term.
+    pub term: u64,
+    /// Highest log index known committed.
+    pub commit_index: u64,
+    /// Highest log index applied to the metadata state machine.
+    pub applied_index: u64,
+    /// This node leads the metadata group.
+    pub is_leader: bool,
+}
+
 /// A running single-voter metadata group.
 pub struct MetaHandle {
     /// `Some` until [`MetaHandle::stop`]; dropping the handle also stops the
@@ -218,6 +233,17 @@ impl MetaHandle {
         self.raft.status().is_leader
     }
 
+    /// Term, commit / applied index and leadership of the metadata group (read-only).
+    pub fn raft_status(&self) -> MetaRaftStatus {
+        let s = self.raft.status();
+        MetaRaftStatus {
+            term: s.term,
+            commit_index: s.commit,
+            applied_index: s.applied,
+            is_leader: s.is_leader,
+        }
+    }
+
     /// The underlying Raft handle (status, subscribe).
     pub fn raft(&self) -> &RaftHandle {
         &self.raft
@@ -228,5 +254,22 @@ impl MetaHandle {
         if let Some(driver) = self.driver.take() {
             let _ = tokio::task::spawn_blocking(move || driver.stop()).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn raft_status_reports_the_lone_leader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = MetaHandle::start(dir.path(), 1).await.expect("meta starts");
+        let s = h.raft_status();
+        assert!(s.is_leader, "{s:?}");
+        assert!(s.term >= 1, "{s:?}");
+        assert!(s.commit_index >= 1, "{s:?}");
+        assert!(s.applied_index <= s.commit_index, "{s:?}");
+        h.stop().await;
     }
 }
