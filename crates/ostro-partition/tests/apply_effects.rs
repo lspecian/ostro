@@ -251,10 +251,16 @@ fn append(h: &H, r: &RunId, events: u64, derived: Vec<Derived>) -> Command {
 /// Run `n` started, granted and with `events` journaled (seqs `0..events`).
 fn running(h: &mut H, n: u8, events: u64, start_run: StartRun) -> RunId {
     let r = rid(n);
-    assert_eq!(h.apply(&Command::start_run(start_run)), ApplyOutcome::Accepted);
+    assert_eq!(
+        h.apply(&Command::start_run(start_run)),
+        ApplyOutcome::Accepted
+    );
     assert_eq!(h.apply(&grant(h, &r, 1)), ApplyOutcome::Accepted);
     if events > 0 {
-        assert_eq!(h.apply(&append(h, &r, events, vec![])), ApplyOutcome::Accepted);
+        assert_eq!(
+            h.apply(&append(h, &r, events, vec![])),
+            ApplyOutcome::Accepted
+        );
     }
     r
 }
@@ -262,7 +268,12 @@ fn running(h: &mut H, n: u8, events: u64, start_run: StartRun) -> RunId {
 /// One opaque `EffectScheduled` event plus `RegisterEffect` for its seq. Returns the op.
 fn schedule(h: &mut H, r: &RunId, kind: u32) -> u64 {
     let op = h.run(r).next_seq;
-    let c = append(h, r, 1, vec![Derived::register_effect(op, kind, 1_000 + op)]);
+    let c = append(
+        h,
+        r,
+        1,
+        vec![Derived::register_effect(op, kind, 1_000 + op)],
+    );
     assert_eq!(h.apply(&c), ApplyOutcome::Accepted);
     op
 }
@@ -416,10 +427,19 @@ fn cancel_effect_is_a_blind_delete_and_completion_after_it_is_duplicate() {
     assert!(h.effect(&r, op).is_some());
 
     let a = h.apply_full(&append(&h, &r, 0, vec![Derived::cancel_effect(op)]));
-    assert_eq!((a.out, a.reads), (ApplyOutcome::Accepted, 1), "no extra read");
+    assert_eq!(
+        (a.out, a.reads),
+        (ApplyOutcome::Accepted, 1),
+        "no extra read"
+    );
     assert_eq!(h.effect(&r, op), None);
     // Cancelling a missing row is fine.
-    let c = append(&h, &r, 0, vec![Derived::cancel_effect(op), Derived::cancel_effect(77)]);
+    let c = append(
+        &h,
+        &r,
+        0,
+        vec![Derived::cancel_effect(op), Derived::cancel_effect(77)],
+    );
     assert_eq!(h.apply(&c), ApplyOutcome::Accepted);
 
     let next = h.run(&r).next_seq;
@@ -492,8 +512,11 @@ fn complete_effect_wakes_a_suspended_run() {
     ));
     let slot = rec.ready.expect("ready slot");
     assert!(
-        h.get(Table::Ready, &ready_key("q", slot.priority, slot.ready_at_ms, &r))
-            .is_some()
+        h.get(
+            Table::Ready,
+            &ready_key("q", slot.priority, slot.ready_at_ms, &r)
+        )
+        .is_some()
     );
     h.assert_rebuild_equal();
 }
@@ -537,7 +560,12 @@ fn complete_effect_rejections() {
     assert_eq!(h.run(&r).next_seq, next);
 
     // Terminal run.
-    let c = append(&h, &r, 1, vec![complete_run(TerminalStatus::Completed, false)]);
+    let c = append(
+        &h,
+        &r,
+        1,
+        vec![complete_run(TerminalStatus::Completed, false)],
+    );
     assert_eq!(h.apply(&c), ApplyOutcome::Accepted);
     let a = h.apply_full(&complete_effect(&r, op, Some(outcome(op, 1))));
     assert_eq!((a.out, a.reads), (rej(RejectReason::RunTerminal), 1));
@@ -695,12 +723,7 @@ fn leader_announced_wakes_suspended_runs_with_effects() {
 
     // A stale announcement does nothing.
     let a = h.apply_at(1, &Command::leader_announced(1, 1, 0));
-    assert_eq!(
-        a.out,
-        rej(RejectReason::StaleEpoch {
-            current: Epoch(1)
-        })
-    );
+    assert_eq!(a.out, rej(RejectReason::StaleEpoch { current: Epoch(1) }));
     assert_eq!((a.reads, a.writes), (0, 0));
     assert_eq!(h.run(&sus).status, RunStatus::Scheduled);
 
@@ -717,8 +740,11 @@ fn leader_announced_wakes_suspended_runs_with_effects() {
     ));
     let slot = rec.ready.expect("ready slot");
     assert!(
-        h.get(Table::Ready, &ready_key("q", slot.priority, slot.ready_at_ms, &sus))
-            .is_some()
+        h.get(
+            Table::Ready,
+            &ready_key("q", slot.priority, slot.ready_at_ms, &sus)
+        )
+        .is_some()
     );
     assert_eq!(h.run(&run), running_before);
     assert_eq!(h.run(&idle).status, RunStatus::Scheduled);

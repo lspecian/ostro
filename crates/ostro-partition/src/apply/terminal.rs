@@ -20,8 +20,8 @@
 
 use ostro_types::RunId;
 
-use super::{effects, lifecycle};
 use super::outcome::Action;
+use super::{effects, lifecycle};
 use crate::store::keys::{WAIT_ROW, decode_wait_key, timer_key, wait_prefixes};
 use crate::store::values::{self, RunRecord, WaitRow};
 use crate::store::{ApplyBatch, StoreError, Table};

@@ -838,7 +838,11 @@ fn fixed_scenario_effects() {
         if i % 4 != 1 {
             ops.push(Op::Effects(Some(EffectOp::Complete {
                 run: i,
-                op: if i % 6 == 5 { Err(1) } else { Ok((i % 2) as u64) },
+                op: if i % 6 == 5 {
+                    Err(1)
+                } else {
+                    Ok((i % 2) as u64)
+                },
                 blob: i % 8 == 2,
                 twice: i % 3 == 1,
             })));

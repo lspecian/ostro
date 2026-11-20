@@ -132,9 +132,7 @@ fn complete_effect(r: &GenRun, op: u64, blob: bool) -> Command {
             codec_ver: 1,
             bytes: op.to_be_bytes().to_vec(),
         };
-        PayloadRef::inline(Bytes::from(complete_effect_payload(
-            op, &result, 1_000_000,
-        )))
+        PayloadRef::inline(Bytes::from(complete_effect_payload(op, &result, 1_000_000)))
     };
     Command::complete_effect(CompleteEffect {
         run_id: r.id.as_bytes().to_vec(),
