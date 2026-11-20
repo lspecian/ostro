@@ -36,7 +36,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Durable Partition Log & State Machine** - CRC-verified WAL journal behind an RF=1 `ReplicatedLog`, deterministic fjall apply, outbox/shuffler, timers, fencing epochs (completed 2026-11-19)
 - [x] **Phase 3: Deterministic Wasm Engine & WIT 0.1** - Wasmtime component host with virtualised WASI, replay divergence detection, sandbox limits, AOT cache/pooling, full WIT 0.1 surface (completed 2026-11-18)
 - [x] **Phase 4: Single-Node Server & Rust MVP** - Metadata Raft, dispatcher, unified HTTP/gRPC API, `ostro dev`/`server`, and Rust SDK running workflows with steps end to end (completed 2026-11-19)
-- [ ] **Phase 5: Workflow Semantics & Core Hardening** - Timers, signals, concurrency, cancel, patching, timeouts; crash-injection harness, replay corpus, retention, WIT 0.1 freeze
+- [x] **Phase 5: Workflow Semantics & Core Hardening** - Timers, signals, concurrency, cancel, patching, timeouts; crash-injection harness, replay corpus, retention, WIT 0.1 freeze
 - [ ] **Phase 6: Effects Bridge, Connectors & Secrets** - HTTP/SQL/object-store effects with idempotency semantics, origin-bound secrets, SSRF-hardened egress
 - [ ] **Phase 7: Workers, Placement & Flow Control** - mTLS stateless workers, embedded/workers/auto placement, KEDA demand, keyed concurrency/throttle/rate limits, pause, fencing chaos
 - [ ] **Phase 8: Triggers, Bottomless & Observability** - Webhooks and cron, object-storage backup/restore with a single snapshot format, OTel traces, Prometheus metrics, guest logs

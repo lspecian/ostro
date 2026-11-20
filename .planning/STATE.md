@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
+status: executing
 stopped_at: Completed 01-08-PLAN.md
 last_updated: "2026-11-18T20:20:00.000Z"
 last_activity: 2026-11-18 — Completed 01-08-PLAN.md (quiet-machine confirmation; fjall crash test 5/5 + RMW 106.9k cmds/s; three Phase 1 decisions logged in PROJECT.md; FOUND-06 complete)
 progress:
   total_phases: 14
-  completed_phases: 1
+  completed_phases: 5
   total_plans: 8
   completed_plans: 8
   percent: 100
@@ -25,18 +25,18 @@ See: .planning/PROJECT.md (updated 2026-11-18)
 
 ## Current Position
 
-Phase: 5 of 14 (Phases 1-4 complete; Phases 5-9 planned)
+Phase: 6 of 14 (Phases 1-5 complete; Phases 6-14 planned)
 Plan: Phase 5 plan 1 of 20 complete (05-01 gate + contract done; wave 2 05-02..05-07 next, in parallel)
 Phase 2 plan: 16 of 16 complete (02-01 Wave 0 + 02-02 WAL patches done; wave 2 done: 02-03 ostro-types core + 02-04 blob store; wave 3 done: 02-05 fjall state store + 02-06 command set + 02-07 log recovery; wave 4 done: 02-08 RF=1 ReplicatedLog + 02-09 apply core; wave 5 done: 02-10 cross-partition/timer apply + 02-11 apply machine/acks/PartitionHandle; wave 6: 02-12 Node done; wave 7 done: 02-13 shuffler + 02-14 timers/retention; wave 8 done: 02-15 rebuild-digest proptest + ostro-crashtest crash loops; wave 9 done: 02-16 fjall reopen/throughput/stall measurements + tail-only WAL recovery fsync + docs/storage-format.md) — Phase 2 COMPLETE (02-VERIFICATION passed 5/5, 2026-11-19)
 Phase 3 plan: 12 of 12 complete (all waves done; wave 6: 03-11 hot wait + LRU budget eviction + Runtime::prepare_cached done) — Phase 3 COMPLETE (03-VERIFICATION passed 5/5)
 Phase 4 plan: 20 of 20 complete (wave 1: 04-01 ostro-meta records/versioned CAS/MetaSm/MetaHandle with immediate campaign done; 04-02 workspace pins + ostro-server layered ServerConfig + one-port smoke test done; 04-03 ostro.api.v1 protos done; 04-05 Rust SDK runtime crate done; 04-04 StepAttemptFailed kind 29 + retry decision + replay attempt chains done; wave 2: 04-07 host step retry (retry-now / StepBackoff eviction) + Runtime::prepared done; 04-06 #[workflow]/#[step] macros + trybuild + SDK guests (sdk-basic/-v2/-retry/-native) validated on the engine done; 04-08 ControlPlane trait + ApiError mapping + REST/utoipa OpenAPI + UI shell + FakeControlPlane done; wave 3: 04-10 step timeout-ms via epoch-deadline callback + per-step fuel breach attribution done; 04-11 gRPC Modules/Workflows/Runs adapters on the one-port router + REST/gRPC parity suite done; 04-09 PHASE-4 GATE passed (baseline 8ffdc01, ci-local --no-musl green) + StartRun 14..18 + Derived::Suspend done; 04-12 apply gaps: RunRecord fields, Running keyspace, Suspend CAS, InputAppended, query helpers done; 04-13 TimerFired journaled as input at next_seq + wake (Scheduled->Ready, Running->InputAppended), Suspend CAS closes lost wake-up done; 04-14 dispatcher leader service (Executor trait, rebuild, action wake-ups, soft leases) done; 04-15 storage<->engine seam: derive (journal->Derived), PartitionSink ActivationSink (fencing map, blob offload, unsupported effect/child/token completions), RunStarted synthesis, journal_io done; wave 5: 04-16 EngineExecutor (activation loop, ordered input bridge, engine-view Suspend/EnqueueReady CAS, heartbeat + self-fence, retries -> Failed) + DISP-07 lease/zombie suite done; wave 6: 04-17 server bootstrap (meta -> runtime -> node + dispatcher -> API), MetaLeadership, ephemeral tmpfs dir, real ControlPlane modules/workflows done; wave 7: 04-18 runs ControlPlane (start with idempotency/conflict policy, get with typed result + published status, history, cross-partition list) done; 04-19 `ostro dev`/`server`/`openapi` binary + spawned-binary startup/config tests done; wave 8: 04-20 end-to-end success-criteria tests (spawned `ostro dev` e2e_dev 3 + full-server sdk_e2e 9) + SDK workspace/guests CI steps + full ci-local incl. musl green done) — all Phase 4 plans complete, phase verification pending
-Status: Phase 4 COMPLETE (04-VERIFICATION passed 5/5, 2026-11-19); executing Phase 5 (05-01 complete)
+Status: Phase 5 COMPLETE (05-VERIFICATION human_needed, no gaps, 2026-11-20; WIT 0.1 frozen at fc47569); executing Phases 6-8
 Phase 2 last activity: 2026-11-19 — Completed 02-16-PLAN.md (WAL recovery fsyncs only the last non-empty segment: Inspect reopen at 300 restarts 741 -> 154 ms, kill9 500 iterations max reopen 348 ms vs 2.9 s; fjall reopen at the journal cap 604-672 ms/partition, Node::open 828-923 ms; no apply batch >= 100 ms; store-level RMW 80.8k cmds/s at 16 MiB cache (153k at 128 MiB) = open concern; StoreConfig defaults kept; docs/storage-format.md frozen format + docs/03 fjall; full gate green incl. proptest 1000, kill9 500, ci-local; STOR-05 complete)
 Phase 3 last activity: 2026-11-18 — Completed 03-11-PLAN.md (hot wait parks/resumes in-activation, ParkedRegistry LRU BudgetPressure eviction, 50 runs under 10x budget; Runtime::prepare_cached L2 InstancePre LRU over L1 AOT cache, warm instantiate p50 272 us debug; logical time monotonic over inputs + step-local RNG fixes with deliberate golden re-bless; full ci-local incl. musl green; ENG-09 complete)
 Phase 4 last activity: 2026-11-19 — Completed 04-20-PLAN.md (e2e through the spawned binary: sha256 upload/no-op re-upload, REST + gRPC starts on one port with typed JSON, GET parity, idempotency 200/409/ALREADY_EXISTS, history + filtered lists, SIGKILL mid-run + restart replays completed steps once with metadata intact, v2 activation for new runs only; full server: retries with exact 50/100/200 ms backoffs and 3-attempt cap across a restart, replay after eviction, sdk-native journal re-executed on a fresh Runtime byte-identical, lease stall -> re-dispatch + zombie Fenced, stale meta CAS rejected; ci-local + ci.yml run the SDK workspace fmt/clippy/test/wasm build and the guests build; full `bash scripts/ci-local.sh` incl. musl green at b0b4e58; SDK-01, API-01 complete; WF-07/META-01 left for the verifier)Last activity: 2026-11-18 — Phase 1 verified (4/4 local criteria; FOUND-05 remote CI human_needed) and marked complete
 Phase 5 last activity: 2026-11-19 — Completed 05-01-PLAN.md (gate passed at baseline d79ae42; code ordinals == RESERVATIONS.md; ostro-types contract Cmd 8..12, StartRun 19..23, Intent 7..8, TerminalStatus 3..5, outbox StartRun 6, journal kinds 70/71/96/97, goldens append-only; status parity across partition/domain/REST/proto; final ci-local --no-musl green at 204247f)
 
-Progress: [█░░░░░░░░░] 7% (1/14 phases)
+Progress: [████░░░░░░] 36% (5/14 phases)
 
 ## Performance Metrics
 
@@ -281,3 +281,5 @@ Resolved in Phase 1:
 Last session: 2026-11-19T06:11:00.000Z
 Stopped at: Completed 05-01-PLAN.md
 Resume file: None
+
+Phase 5 completed: 2026-11-20 — 27/27 plans; gate: 20-shard campaign 10,000 kills 0 violations (D25 retry cancellation point, D26 checker fix with user approval), perf profile A advisory on WSL2, ci-local green; 05-VERIFICATION human_needed (native NVMe perf, aarch64/macOS CI legs, docker quickstart, decision review).

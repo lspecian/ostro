@@ -60,7 +60,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **WIT-04**: Callback/await tokens: a workflow obtains an opaque token (embedding partition and run) that an external caller completes without knowing the run id
 - [x] **WIT-05**: `set-status` publishes a JSON status readable via the API (instead of query handlers)
 - [x] **WIT-06**: Non-retryable error kind and per-run timeouts are expressible in the contract
-- [ ] **WIT-07**: WIT 0.1 is frozen at the end of the single-node core phase; later changes are additive only
+- [x] **WIT-07**: WIT 0.1 is frozen at the end of the single-node core phase; later changes are additive only
 
 ### Workflow Semantics
 
@@ -200,7 +200,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Quality & Verification
 
-- [ ] **QA-01**: Crash-injection harness (failpoints + `kill -9` + EIO/ENOSPC) proves 0 lost accepted runs and 0 duplicate journal entries over ≥ 10,000 injected faults per phase gate
+- [x] **QA-01**: Crash-injection harness (failpoints + `kill -9` + EIO/ENOSPC) proves 0 lost accepted runs and 0 duplicate journal entries over ≥ 10,000 injected faults per phase gate
 - [ ] **QA-02**: Replay corpus replayed in CI across Ostro versions and across x86_64/aarch64
 - [ ] **QA-03**: Fencing chaos test: external mock observes exactly one call per idempotency key despite zombie executors and failovers
 - [ ] **QA-04**: Benchmarks verify acknowledged work and bytes on disk (not just rates); single node ≥ 10,000 steps/s, 3-node RF=3 ≥ 5,000 steps/s with p99 commit < 20 ms on LAN [NFR-2]
@@ -282,7 +282,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WIT-04 | Phase 3 | Complete |
 | WIT-05 | Phase 3 | Complete |
 | WIT-06 | Phase 3 | Complete |
-| WIT-07 | Phase 5 | Pending (05-05 tooling + pins done; 05-20 freeze flip) |
+| WIT-07 | Phase 5 | Complete (frozen at fc47569, tag wit/ostro-runtime-v0.1.0) |
 | WF-01 | Phase 4 | Complete |
 | WF-02 | Phase 4 | Complete |
 | WF-03 | Phase 5 | Complete (server e2e: race-fuzz x 5 seeds, concurrent signals + restart, fresh-Runtime replay identical: 05-15 semantics_e2e gather_race) |
@@ -374,8 +374,8 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | DIST-01 | Phase 14 | Pending |
 | DIST-02 | Phase 14 | Pending |
 | DIST-03 | Phase 14 | Pending |
-| QA-01 | Phase 5 | Pending |
-| QA-02 | Phase 5 | Partial (05-12: 24-entry corpus replayed by the default suite, green on x86_64 gnu locally; aarch64/macOS replay runs on the CI legs, remote run human_needed; final entries at 05-20) |
+| QA-01 | Phase 5 | Complete (05-20 gate: 10,000 kills, 0 violations; optional real-ENOSPC tmpfs leg human_needed) |
+| QA-02 | Phase 5 | Partial (30-entry corpus green on x86_64 gnu + musl locally; aarch64/macOS CI legs human_needed until first push) |
 | QA-03 | Phase 7 | Pending |
 | QA-04 | Phase 14 | Pending |
 | QA-05 | Phase 14 | Pending |
