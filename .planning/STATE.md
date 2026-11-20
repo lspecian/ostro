@@ -274,6 +274,31 @@ Recent decisions affecting current work:
   - P-21: templated HTTP requests send `Accept-Encoding: identity` and refuse non-identity `Content-Encoding` (`http_transport`).
   - Phase 6 ordinal allocations (RESERVATIONS P6 block only): Cmd 13 CompleteEffect (spare 14–19); Intent 9 RegisterEffect, 10 CancelEffect (spare 11–12); InvalidCode 15 BadEffectCompletion (spare 16–17); rows in existing keyspace #12 `effects`; no new journal kind, RejectReason, outbox kind, StartRun field, TerminalStatus or meta variant.
   - `ostro-objstore` owner: not yet created at 06-01 (main 6984651); whichever of 06-02 / 08-01 runs first creates it and records it in its SUMMARY.
+- [Phase 08 decisions (adopted defaults; user may override)]: adopted by the planner 2026-11-19 (08-DECISIONS.md); recorded by 08-01.
+  - P8-D1: snapshots are logical OSNP v1 exported from one fjall `Database::snapshot()` (CRC32C frames, header carries `state_format`, trailer = store digest layout), installed via staged `state/.install-pNNNN` + digest check + atomic rename; physical fjall copies rejected.
+  - P8-D2: trim floor = min(force_checkpoint, local_floor (oldest retained local snapshot, keep 2), upload_floor if bottomless, retention_floor), each a watch channel published after snapshot fsync; no usable snapshot below log_start -> partition fails "snapshot required: run `ostro restore`".
+  - P8-D3: one node-level uploader, every `seal_interval` (default 1 s) takes an HwVector consistent cut and uploads blobs, uploader-sealed hash-chained OSEG v1 chunks, a meta snapshot, then `manifest/current` (If-Match); remote keeps K=3 snapshots; idle partitions upload nothing; snapshot hold-back + `Manifest::validate`.
+  - P8-D4: prefix fencing = `LOCK` object (If-None-Match: *) + manifest If-Match; new additive `node.toml` key `incarnation`; restored node needs `--takeover`; fallback LOCK re-read for providers without conditional PUT; single-node construct.
+  - P8-D5: shared `ostro-objstore` crate (D19) on rusty-s3 =0.12.0 + reqwest rustls/stream and LocalFs; no object_store, no chrono, no deny exception; 08-03 freezes the object-safe trait; first phase to run creates the crate.
+  - P8-D6: `ostro restore --from <s3://|file://|tar> [--at] [--takeover] --data-dir <empty>` with meta bootstrap from the meta snapshot and a two-step verified replay via files (spike in 08-18; fallback synthetic Put stream).
+  - P8-D7: backup file = the remote layout on LocalFs packed as tar (`tar` 0.4.46); online `GET /v1/admin/backup`, offline `ostro backup --to f.tar`; one restore path.
+  - P8-D8: blob GC = local mark/sweep (1 h, grace 1 h) under a BlobStore GC write lock, put of an existing blob touches mtime; remote delayed-deletion ledger; module blobs never deleted.
+  - P8-D9: cron = croner 4.0.3 (jiff feature, never chrono) behind a jiff-0.2 adapter inside `ostro-triggers` only; public API jiff 1.0 / i64 ms; both majors built from the same TZif bytes; jiff 1.0 gains `tzdb-bundle-always`.
+  - P8-D10: cron owner partition = `routing::schedule_owner(name, P)`; owner leader service drives fires through a `ScheduleSource` trait; `Cmd::ScheduleFire` (27) with a durable watermark in keyspace 16 `schedule_state`; idempotency key `__cron/<schedule>/<fire_time_ms>` as second guard; overlap evaluated in apply, catch-up in the driver (cap 100); trigger-now = Manual kind.
+  - P8-D11: Kafka/Chronik topic-consumer triggers are out of scope.
+  - P8-D12: webhooks at `POST /hooks/{name}`, raw-body signature verification first (Stripe, GitHub, Slack, Standard Webhooks, generic HMAC), constant-time compare, 1 MiB body limit, header/json/none idempotency extractors, actions start/signal/complete_token, 2xx after apply.
+  - P8-D13: OTel stack opentelemetry/sdk/otlp/appender-tracing 0.33.1 + tracing-opentelemetry 0.34.0, otlp grpc-tonic only (never zstd), resolving to the locked tonic 0.14.9/prost 0.14.6; ostro-engine depends on the API crate only.
+  - P8-D14: deterministic span ids via a custom `IdGenerator` reading a thread-local override in `ostro_engine::telemetry`; trace id = stored traceparent else blake3("ostro/trace" ‖ run_id); live-only emission.
+  - P8-D15: Prometheus via `metrics-exporter-prometheus` 0.18.3 (default-features off), `install_recorder()` once, 5 s upkeep, axum `GET /metrics`; bounded labels, never run_id.
+  - P8-D16: guest logs: per-run token bucket (50/s, burst 500) + in-memory per-run lifetime cap (10k lines / 10 MiB) + node bucket (5k/s); non-durable per-run ring buffer at `GET /v1/runs/{id}/logs`; JSON node logs; OTLP LogRecords; nothing while replaying; never journaled.
+  - P8-D17: forbidden-crate check moved to `scripts/forbidden-crates.sh` with the anchored regex and a `--self-test`; ci-local and ci.yml call the same script; `ci/deny-fixtures/ban-prometheus` proves deny bans `prometheus`.
+  - P8-D18: Docker-only tests (MinIO) run in CI via the shared `docker run` step with `OSTRO_TEST_S3_*`; locally #[ignore]/env-gated and recorded human_needed; s3s-fs dev-only if deny accepts it (spike 08-03).
+  - P8-D19: OTLP canary test `crates/ostro-server/tests/otlp_canary.rs` (no export contains the canary secret in any encoding); hooks into Phase 6's canary harness if present.
+  - P8-D20: Phase 8 ordinals only from RESERVATIONS: Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22 BadScheduleFire / 23 ScheduleOwnerMismatch; gaps 13-21 filled with `Reserved<Phase>_<index>` placeholders; name-only rows added by 08-01.
+  - P8-D21: 22 plans in 7 waves; 08-01 pre-declares every module stub and every Phase 8 dependency so later waves do not touch shared mod.rs/lib.rs files or Cargo.lock (exceptions: 08-03 s3s-fs dev-dep, guests lock).
+  - P8-D22: config sections `[telemetry]`, `[snapshots]`, `[backup]`, `[blob_gc]`, `[triggers]`, `[guest_logs]` parsed by 08-04, durations in h/m/s; defaults per 08-DECISIONS (snapshots 1h/60s/256 MiB/keep 2, backup seal 1s keep 3, blob_gc 1h/1h, triggers 1 MiB/300s/100).
+  - P8-D23: RPO measured as cut lag (<= seal_interval, the SC3 criterion) plus upload latency and per-crash loss window, reported separately.
+  - P8-D24: Phase 8 owns outbound-HTTP traceparent propagation and effect spans: 08-21 implements Phase 6 06-14's `EffectHooks` on `ServerEffectDriver` in `crates/ostro-server/src/effect_trace.rs` (live request copy only, after the intent is journaled).
 
 ### Pending Todos
 
@@ -290,10 +315,17 @@ Recent decisions affecting current work:
 - [USER REVIEW] D-FX2: SQL TLS uses native roots + per-connection ca_file (no CDLA-Permissive-2.0 exception for webpki-roots).
 - [HUMAN] GCS through S3 interoperability (HMAC keys) is unverified; run the object e2e against storage.googleapis.com before docs promise it.
 - [HUMAN] MySQL 8.4 and MinIO legs (fx_sql_crash MySQL, sql_mysql, object_s3, fx_object_e2e S3) run in CI service containers after the first push, or locally once mysqld/Docker exist (D-FX5).
+- [USER REVIEW] P8-D9: croner behind a jiff-0.2 adapter puts a second jiff major (0.2 + 1.0) in the graph until croner ships jiff 1 support. See 08-DECISIONS.md.
+- [USER REVIEW] P8-D3: bottomless seal interval default of 1 s (about $7/day in S3 PUTs at P=16 with every partition busy; cost table in docs/bottomless.md).
+- [USER REVIEW] P8-D11: Kafka/Chronik topic-consumer triggers are out of scope for Phase 8 (no requirement names them).
+- [USER REVIEW] P8-D16: the per-run guest-log lifetime cap is held in memory only and resets on restart.
+- [USER REVIEW] P8-D21: Phase 8 has 22 plans instead of the research's 18 (API surface consolidated; CLI, bottomless primitives and SC5 e2e split out).
+- [HUMAN] Phase 8: MinIO/R2 conditional-PUT and S3 protocol tests on a Docker machine or in CI after the first push; real S3/R2 restore on a fresh machine; Jaeger/Grafana visual check of traces and metrics.
 
 ### Blockers/Concerns
 
 Open:
+- **Cross-phase coordination (Phases 6/7/8 in parallel)** (recorded by 08-01). Shared files: `Cargo.toml`, `Cargo.lock`, `deny.toml`, `scripts/ci-local.sh`, `.github/workflows/ci.yml`, `crates/ostro-types/src/command.rs` (+ golden `tests/golden/commands.txt`), the `ostro-partition` keyspace list (`store/mod.rs` TABLES), `crates/ostro-objstore` (D19: first runner creates it), `crates/ostro-testkit/src/lib.rs`, `crates/ostro-api/src/{rest,grpc,openapi}.rs`, `crates/ostro-api/tests/parity.rs`, the OpenAPI insta snapshot, `crates/ostro-server/src/server.rs`, `crates/ostro-server/Cargo.toml`, `crates/ostro-proto/build.rs`, `crates/ostro-cli/src/commands/mod.rs`, `crates/ostro/src/main.rs`, `crates/ostro-partition/src/leader/dispatcher.rs` (Phase 7 07-04 vs Phase 8 08-16: STOP if the file is dirty from another phase) and `crates/ostro-server/src/effects.rs` (Phase 6 06-14; 08-21 implements its `decorate_live_request`/`on_effect_complete` hooks). Rule: a plan touching one of them starts from a clean file on the latest HEAD, appends only, and re-runs the golden and reservation checks. ostro-objstore: absent at main 8abba5e when 08-01 ran, so Phase 8 08-01 creates the skeleton (Task 3); Phase 6 only adds to it (D19).
 - macOS notarization entitlement for Cranelift (`allow-jit`): a **Phase 14** release-signing concern; unsigned test binaries JIT fine. The macOS CI leg itself awaits the user's first push (human_needed, see FOUND-05).
 - FOUND-05 remote CI legs (aarch64 musl, macOS, the Actions run itself) are human_needed: no git remote exists yet.
 - Wasmtime 50.0.2 default stack and pool sizes. (Phase 3; S2 input: Python needs 38 core instances per instance, `max_memory_size` floor 13.2 MB Python / 9.5 MB TS / 1.1 MB Rust)

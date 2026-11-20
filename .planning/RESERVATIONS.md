@@ -196,7 +196,8 @@ Rules:
 | 15 | BadEffectCompletion | reserved P6 |
 | 16–17 | spare | reserved P6 |
 | 18–21 | — | reserved P7 |
-| 22–23 | 1–2 schedule validation codes, names chosen by 08-01 | reserved P8 |
+| 22 | BadScheduleFire (malformed `ScheduleFire`: kind/start/request_id mismatch; name chosen by 08-01) | reserved P8 (08-01) |
+| 23 | ScheduleOwnerMismatch (`ScheduleFire` applied on a partition that is not `schedule_owner(name, P)`; name chosen by 08-01) | reserved P8 (08-01) |
 | 24 | spare | reserved P8 |
 | 25–28 | — (P9 spare, incl. fallback) | reserved P9 |
 | 29 | BadRerunPrefix | reserved P11 |
@@ -217,8 +218,8 @@ Rules:
 | 19 | `ReservedP7_19` | P7 |
 | 20 | `ReservedP7_20` | P7 |
 | 21 | `ReservedP7_21` | P7 |
-| 22 | `ReservedP8_22` (renamed in place by 08-01's schedule validation code) | P8 |
-| 23 | `ReservedP8_23` (ditto, if 08-01 needs a second code) | P8 |
+| 22 | `ReservedP8_22`, renamed in place to `BadScheduleFire` by 08-01 | P8 |
+| 23 | `ReservedP8_23`, renamed in place to `ScheduleOwnerMismatch` by 08-01 | P8 |
 | 24 | `ReservedP8_24` | P8 |
 
 Indices 25+ follow the same pattern with their owner block (e.g. `ReservedP9_25`, `ReservedP11_31`).
@@ -322,6 +323,17 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Sealed-secret prefix | `__ostro/` (exists: `__ostro/token-key`; P6 adds `__ostro/presign/<connection>`) | P4 / P6 |
 | Grant id prefix | `secret:` | P6 |
 | Dedupe key namespace | `__cron/<schedule>` | P8 |
+| Dedupe / idempotency namespace | `__hook/<name>/<key>` (webhook deliveries, 08-15) | P8 |
+| Config sections | `[telemetry]`, `[snapshots]`, `[backup]`, `[blob_gc]`, `[triggers]`, `[guest_logs]` (P8-D22; parsed by 08-04) | P8 |
+| Failpoint prefixes | `snapshot::`, `trim::`, `upload::`, `restore::`, `blobgc::`, `cron::` | P8 |
+| REST paths | `GET /metrics`; `/v1/schedules` (+ `/v1/schedules/{name}/pause`, `/resume`, `/trigger`); `GET /v1/runs/{id}/logs`; `GET /v1/admin/backup` | P8 (08-10) |
+| gRPC services | `ostro.api.v1.Schedules`, `ostro.api.v1.Webhooks` | P8 (08-10) |
+| gRPC RPC | `GetRunLogs`: appended to the existing `ostro.api.v1.Runs` service by 08-10 (no new service name reserved; 08-10 records it here if it cannot append) | P8 (08-10) |
+| node.toml keys | `incarnation` (08-08; additive, F6), `restored_from` (08-18) | P8 |
+| Object-store prefixes (bottomless layout, under the configured prefix) | `LOCK`, `manifest/` (`manifest/current`, `manifest/gen/<gen 20d>`), `meta/`, `blobs/`, `p/<pppp>/snap/`, `p/<pppp>/seg/` | P8 |
+| Data-dir entries | `snapshots/pNNNN/` (local OSNP snapshots), `state/.install-pNNNN` (snapshot install staging) | P8 (08-02/08-09) |
+| Run tag | `ostro.schedule` (runs started by a schedule, 08-14) | P8 |
+| Env prefix | `OSTRO_BACKUP_*` (backup/restore CLI, 08-18) | P8 |
 | Crates | `ostro-witcheck` | P5 (05-05) |
 | Crates | `ostro-objstore` (shared P6/P8, first runner creates it; D19), `ostro-bridge` | P6 / P8 |
 | Crates | `ostro-backup`, `ostro-triggers` | P8 |
