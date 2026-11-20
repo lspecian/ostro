@@ -26,30 +26,71 @@ fn len_u32(n: usize) -> [u8; 4] {
         .to_le_bytes()
 }
 
+/// Incremental builder of the logical digest (layout in the module docs).
+///
+/// Shared by [`PartitionStore::digest`] and the OSNP snapshot writer/reader
+/// (`store/snapshot.rs`), so a snapshot's trailer `logical_digest` is byte-identical to the
+/// digest of the store it was exported from (and of the store it installs into). Callers
+/// feed every table of [`TABLES`] in order, including empty ones, and skip the meta row
+/// `checkpointed_offset` themselves.
+pub(crate) struct DigestBuilder {
+    h: blake3::Hasher,
+    rows: u64,
+}
+
+impl DigestBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            h: blake3::Hasher::new(),
+            rows: 0,
+        }
+    }
+
+    /// `u16 LE name_len ‖ name`; resets the table's row count.
+    pub(crate) fn table_begin(&mut self, name: &str) {
+        let name = name.as_bytes();
+        let name_len = u16::try_from(name.len()).expect("short table name");
+        self.h.update(&name_len.to_le_bytes());
+        self.h.update(name);
+        self.rows = 0;
+    }
+
+    /// `u32 LE key_len ‖ key ‖ u32 LE value_len ‖ value`.
+    pub(crate) fn row(&mut self, k: &[u8], v: &[u8]) {
+        self.h.update(&len_u32(k.len()));
+        self.h.update(k);
+        self.h.update(&len_u32(v.len()));
+        self.h.update(v);
+        self.rows += 1;
+    }
+
+    /// `u64 LE row_count` of the current table; returns that count.
+    pub(crate) fn table_end(&mut self) -> u64 {
+        self.h.update(&self.rows.to_le_bytes());
+        self.rows
+    }
+
+    pub(crate) fn finish(self) -> [u8; 32] {
+        *self.h.finalize().as_bytes()
+    }
+}
+
 impl PartitionStore {
     /// blake3 over the logical content of every table (see module docs).
     pub fn digest(&self) -> Result<[u8; 32], StoreError> {
         let snap = self.db.snapshot();
-        let mut h = blake3::Hasher::new();
+        let mut d = DigestBuilder::new();
         for t in TABLES {
-            let name = t.name().as_bytes();
-            let name_len = u16::try_from(name.len()).expect("short table name");
-            h.update(&name_len.to_le_bytes());
-            h.update(name);
-            let mut rows: u64 = 0;
+            d.table_begin(t.name());
             for g in snap.iter(self.ks(t)) {
                 let (k, v) = g.into_inner()?;
                 if t == Table::Meta && &*k == K_CHECKPOINTED {
                     continue;
                 }
-                h.update(&len_u32(k.len()));
-                h.update(&k);
-                h.update(&len_u32(v.len()));
-                h.update(&v);
-                rows += 1;
+                d.row(&k, &v);
             }
-            h.update(&rows.to_le_bytes());
+            d.table_end();
         }
-        Ok(*h.finalize().as_bytes())
+        Ok(d.finish())
     }
 }
