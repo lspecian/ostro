@@ -46,13 +46,19 @@
 //! with an unavailable partition, `append` returns `Unavailable` although the scheduling
 //! events are committed; the executor calls [`PartitionSink::repair_unsupported`] on the
 //! journal it loads for the next activation so no effect is left without a completion.
+//!
+//! # Guest logs (08-17)
+//!
+//! Live guest log lines ([`ActivationSink::guest_log`], already replay-filtered and
+//! bounded per activation by the engine) are forwarded to the node's [`GuestLogSink`]
+//! when one is attached ([`PartitionSink::with_guest_logs`]); they never touch the log.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::Bytes;
-use ostro_engine::sink::{ActivationOutcome, ActivationSink, AppendError, RunRef};
+use ostro_engine::sink::{ActivationOutcome, ActivationSink, AppendError, GuestLogRecord, RunRef};
 use ostro_log::{ReplicatedLog, Rf1Log};
 use ostro_partition::apply::InvalidCode;
 use ostro_partition::{ApplyOutcome, PartitionHandle, RejectReason};
@@ -68,6 +74,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::derive::{self, InheritPolicy, ModuleResolver, NoModules, PolicyResolver};
 use crate::journal_io;
+use crate::services::guest_logs::GuestLogSink;
 
 /// Error kind of every Phase 4 unsupported completion.
 pub const UNSUPPORTED_KIND: &str = "unsupported";
@@ -96,6 +103,7 @@ pub struct PartitionSink<L: ReplicatedLog = Rf1Log> {
     outcome: Mutex<Option<ActivationOutcome>>,
     modules: Arc<dyn ModuleResolver>,
     policy: Arc<dyn PolicyResolver>,
+    guest_logs: Option<Arc<GuestLogSink>>,
 }
 
 impl<L: ReplicatedLog> std::fmt::Debug for PartitionSink<L> {
@@ -173,7 +181,15 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             outcome: Mutex::new(None),
             modules: Arc::new(NoModules),
             policy: Arc::new(InheritPolicy),
+            guest_logs: None,
         }
+    }
+
+    /// Forward live guest log lines to the node's guest log sink (08-17). Without it the
+    /// engine writes them to the node log itself.
+    pub fn with_guest_logs(mut self, sink: Arc<GuestLogSink>) -> Self {
+        self.guest_logs = Some(sink);
+        self
     }
 
     /// Resolve continue-as-new successors through `modules` / `policy` (the server wires
@@ -538,5 +554,15 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
 
     async fn done(&self, _run: &RunRef, _attempt: u32, outcome: ActivationOutcome) {
         *self.lock_outcome() = Some(outcome);
+    }
+
+    fn handles_guest_logs(&self) -> bool {
+        self.guest_logs.is_some()
+    }
+
+    fn guest_log(&self, rec: GuestLogRecord) {
+        if let Some(g) = &self.guest_logs {
+            g.emit(rec);
+        }
     }
 }

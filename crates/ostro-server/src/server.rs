@@ -311,7 +311,11 @@ async fn start_inner(
     };
     // The guest log sink exists before the node (the executor is part of NodeConfig); the
     // services seam hands out the same instance.
-    let guest_logs = Arc::new(GuestLogSink::new(&cfg.guest_logs));
+    let guest_logs = Arc::new(
+        GuestLogSink::new(&cfg.guest_logs)
+            .with_clock(Arc::clone(&clock))
+            .with_logger_provider(telemetry.as_ref().and_then(TelemetryGuard::logger_provider)),
+    );
     let executor: Arc<dyn Executor> = Arc::new(
         EngineExecutor::new(Arc::clone(&runtime), exec_cfg)
             .with_hooks(hooks)

@@ -181,7 +181,7 @@ pub struct HostState {
     pub(crate) module_hash_hex: String,
     pub(crate) token_key: [u8; 32],
     pub(crate) can_events: u64,
-    sink: Option<Arc<dyn ActivationSink>>,
+    pub(crate) sink: Option<Arc<dyn ActivationSink>>,
     /// Status published by the guest, as journaled (on replay: the recorded json).
     pub latest_status: Option<String>,
     /// Guest log lines of this activation (empty while replaying).

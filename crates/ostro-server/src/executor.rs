@@ -120,7 +120,9 @@ use std::time::Duration;
 
 use ostro_engine::error::{AttemptFailure, EvictReason};
 use ostro_engine::runtime::{Prepared, Runtime};
-use ostro_engine::sink::{Activate, ActivationOutcome, ActivationSink, AppendError, RunRef};
+use ostro_engine::sink::{
+    Activate, ActivationOutcome, ActivationSink, AppendError, GuestLogRecord, RunRef,
+};
 use ostro_partition::{ExecOutcome, Executor, Job, LeaseRenewer, PartitionHandle, query};
 use ostro_types::command::{CompleteRun, Derived, EnqueueReady, TerminalStatus, derived::Intent};
 use ostro_types::journal::{Event, EventBody};
@@ -588,6 +590,14 @@ impl ActivationSink for EngineSink {
     async fn done(&self, run: &RunRef, attempt: u32, outcome: ActivationOutcome) {
         self.inner.done(run, attempt, outcome).await;
     }
+
+    fn handles_guest_logs(&self) -> bool {
+        self.inner.handles_guest_logs()
+    }
+
+    fn guest_log(&self, rec: GuestLogRecord) {
+        self.inner.guest_log(rec);
+    }
 }
 
 // ------------------------------------------------------------------- failpoints
@@ -687,7 +697,8 @@ impl EngineExecutor {
         let (sink_tx, sink_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(
             PartitionSink::new(handle.clone(), run, token, Some(sink_tx), Some(on_renew))
-                .with_resolvers(Arc::clone(&self.modules), Arc::clone(&self.policy)),
+                .with_resolvers(Arc::clone(&self.modules), Arc::clone(&self.policy))
+                .with_guest_logs(Arc::clone(&self.guest_logs)),
         );
         let rref = RunRef {
             partition: run.partition().0,
