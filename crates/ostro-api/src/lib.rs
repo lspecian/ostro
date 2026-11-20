@@ -10,11 +10,13 @@ pub mod error;
 pub mod fake;
 pub mod grpc;
 mod openapi;
+pub mod phase8;
 pub mod rest;
 
 pub use domain::ControlPlane;
 pub use error::{ApiError, ErrorCode};
 pub use openapi::openapi;
+pub use phase8::ApiExtensions;
 
 use ostro_proto::api::v1::{
     modules_server::ModulesServer, runs_server::RunsServer, tokens_server::TokensServer,
@@ -84,7 +86,18 @@ pub fn ui_shell_html() -> String {
 /// bytes themselves are checked exactly by [`grpc::GrpcModules`]);
 /// Workflows, Runs and Tokens use `cfg.max_request_bytes`. Over-limit messages answer
 /// `RESOURCE_EXHAUSTED`.
+///
+/// Equivalent to [`router_with`] with no Phase 8 extensions (their REST routes answer
+/// 404, their gRPC services are not mounted).
 pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
+    router_with(cp, cfg, ApiExtensions::default())
+}
+
+/// [`router`] plus the Phase 8 surface ([`phase8`], 08-10): schedules, webhooks,
+/// `POST /hooks/{name}` (route-level body limit `ext.hook_body_limit`), run logs and the
+/// admin backup, merged via `phase8::router(ext)`; gRPC `ostro.api.v1.{Schedules,
+/// Webhooks,RunLogs}` for the slots that are present.
+pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions) -> axum::Router {
     let (rest, _doc) = rest::api_routes(cfg.max_module_bytes).split_for_parts();
     let grpc = tonic::service::Routes::new(HealthServer::new(HealthSvc))
         .add_service(
@@ -104,11 +117,14 @@ pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
         .add_service(
             TokensServer::new(grpc::GrpcTokens(cp.clone()))
                 .max_decoding_message_size(cfg.max_request_bytes),
-        )
+        );
+    let grpc = phase8::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
         .into_axum_router()
         .layer(axum::middleware::map_response(grpc::map_size_limit_status));
     rest.with_state(cp)
-        // Route-level limits (the module upload) are inner layers and win over this one.
+        .merge(phase8::router(ext))
+        // Route-level limits (the module upload, the hook body) are inner layers and win
+        // over this one.
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .merge(grpc)
@@ -122,6 +138,13 @@ mod tests {
     fn router_builds() {
         let cp: Arc<dyn ControlPlane> = Arc::new(fake::FakeControlPlane::new());
         let _r: axum::Router = router(cp, ApiConfig::default());
+    }
+
+    #[test]
+    fn router_with_phase8_extensions_builds() {
+        let cp = Arc::new(fake::FakeControlPlane::new());
+        let ext = phase8::fake::FakePhase8::new(cp.clone()).extensions();
+        let _r: axum::Router = router_with(cp, ApiConfig::default(), ext);
     }
 
     #[test]

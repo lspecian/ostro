@@ -11,7 +11,8 @@ pub mod health {
 /// `ostro.api.v1` control-plane protocol (gRPC half of API-01).
 ///
 /// Services `Modules`, `Workflows`, `Runs` and `Tokens` (await-token
-/// completion, Phase 5) mirror the REST operations one-to-one. JSON payloads travel as UTF-8 JSON in `bytes` fields named
+/// completion, Phase 5) mirror the REST operations one-to-one, as do the Phase 8
+/// services `Schedules`, `RunLogs` (`schedules.proto`) and `Webhooks` (`webhooks.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
 /// `*_json`; timestamps are Unix milliseconds in `*_at_ms` fields.
 pub mod api {
     /// Version 1 of the control-plane API.
@@ -28,6 +29,13 @@ mod tests {
         modules_client::ModulesClient, modules_server::ModulesServer, runs_client::RunsClient,
         runs_server::RunsServer, tokens_client::TokensClient, tokens_server::TokensServer,
         workflows_client::WorkflowsClient, workflows_server::WorkflowsServer,
+    };
+    use super::api::v1::{
+        CatchupPolicy, GetRunLogsRequest, LogLevel, OverlapPolicy, Schedule, Webhook,
+        WebhookAction, WebhookSignalAction, WebhookVerifierKind, run_logs_client::RunLogsClient,
+        run_logs_server::RunLogsServer, schedules_client::SchedulesClient,
+        schedules_server::SchedulesServer, webhook_action, webhook_signal_action,
+        webhooks_client::WebhooksClient, webhooks_server::WebhooksServer,
     };
     use super::health::v1::CheckRequest;
     use prost::Message;
@@ -175,5 +183,70 @@ mod tests {
         assert_eq!(RetryMode::Unspecified as i32, 0);
         assert_eq!(RetryMode::Resumed as i32, 1);
         assert_eq!(RetryMode::Restarted as i32, 2);
+    }
+
+    #[test]
+    fn phase8_messages_roundtrip_and_numbering() {
+        // Overlap / catch-up numbering equals the meta constants (05-07).
+        assert_eq!(OverlapPolicy::Skip as i32, 0);
+        assert_eq!(OverlapPolicy::BufferOne as i32, 1);
+        assert_eq!(OverlapPolicy::AllowAll as i32, 2);
+        assert_eq!(OverlapPolicy::CancelOther as i32, 3);
+        assert_eq!(OverlapPolicy::TerminateOther as i32, 4);
+        assert_eq!(CatchupPolicy::Skip as i32, 0);
+        assert_eq!(CatchupPolicy::One as i32, 1);
+        assert_eq!(CatchupPolicy::All as i32, 2);
+        assert_eq!(LogLevel::Unspecified as i32, 0);
+        assert_eq!(WebhookVerifierKind::None as i32, 0);
+
+        let s = Schedule {
+            name: "nightly".into(),
+            workflow: "report".into(),
+            version: Some(0),
+            cron: "0 0 * * *".into(),
+            overlap: OverlapPolicy::BufferOne as i32,
+            catchup_window_ms: Some(0),
+            version_tag: Some(3),
+            ..Default::default()
+        };
+        let back = Schedule::decode(s.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(back, s);
+        assert_eq!(back.version, Some(0));
+        assert_eq!(back.catchup_window_ms, Some(0));
+
+        let w = Webhook {
+            name: "gh".into(),
+            action: Some(WebhookAction {
+                kind: Some(webhook_action::Kind::Signal(WebhookSignalAction {
+                    workflow: "w".into(),
+                    name: "push".into(),
+                    run_by: Some(webhook_signal_action::RunBy::RunIdPointer("/run".into())),
+                })),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            Webhook::decode(w.encode_to_vec().as_slice()).expect("decode"),
+            w
+        );
+        let l = GetRunLogsRequest {
+            run_id: "r".into(),
+            limit: 0,
+            level: Some(LogLevel::Warn as i32),
+        };
+        assert_eq!(
+            GetRunLogsRequest::decode(l.encode_to_vec().as_slice()).expect("decode"),
+            l
+        );
+
+        fn name<T: ?Sized>() -> &'static str {
+            std::any::type_name::<T>()
+        }
+        assert!(name::<SchedulesClient<tonic::transport::Channel>>().contains("SchedulesClient"));
+        assert!(name::<SchedulesServer<()>>().contains("SchedulesServer"));
+        assert!(name::<WebhooksClient<tonic::transport::Channel>>().contains("WebhooksClient"));
+        assert!(name::<WebhooksServer<()>>().contains("WebhooksServer"));
+        assert!(name::<RunLogsClient<tonic::transport::Channel>>().contains("RunLogsClient"));
+        assert!(name::<RunLogsServer<()>>().contains("RunLogsServer"));
     }
 }

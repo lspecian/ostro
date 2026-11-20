@@ -56,6 +56,73 @@ expression: pretty
         }
       }
     },
+    "/hooks/{name}": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Deliver a webhook. The raw body is verified (signature) before anything parses it;\nthere is no other authentication. Body limit: `[triggers] webhook_body_limit`.",
+        "operationId": "deliver_hook",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Webhook name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw payload, verified byte-for-byte",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HookPayload"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/HookPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Delivered (the body depends on the action; a Slack url_verification challenge is echoed as text/plain)"
+          },
+          "202": {
+            "description": "Accepted"
+          },
+          "401": {
+            "description": "Missing or invalid signature"
+          },
+          "404": {
+            "description": "Unknown webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds triggers.webhook_body_limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/openapi.json": {
       "get": {
         "tags": [
@@ -97,6 +164,47 @@ expression: pretty
               "text/plain": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/backup": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Download an online backup (tar of the bottomless layout, P8-D7).",
+        "operationId": "backup",
+        "responses": {
+          "200": {
+            "description": "Tar stream",
+            "content": {
+              "application/x-tar": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupTar"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Admin API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Backup not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -637,6 +745,86 @@ expression: pretty
         }
       }
     },
+    "/v1/runs/{run_id}/logs": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "A run's recent guest log lines (non-durable, P8-D16).",
+        "operationId": "run_logs",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Most recent lines to return (default 100, max 1000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Minimum level.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Guest log level.",
+              "enum": [
+                "trace",
+                "debug",
+                "info",
+                "warn",
+                "error"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent lines, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunLogsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{run_id}/result": {
       "get": {
         "tags": [
@@ -954,6 +1142,430 @@ expression: pretty
         }
       }
     },
+    "/v1/schedules": {
+      "get": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "List schedules.",
+        "operationId": "list_schedules",
+        "responses": {
+          "200": {
+            "description": "Every schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleListResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Schedules API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Create a schedule.",
+        "operationId": "create_schedule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Schedule created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid schedule (name, cron, time zone)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A schedule with this name exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/{name}": {
+      "get": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Get a schedule.",
+        "operationId": "get_schedule",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Schedule name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Replace a schedule (CAS on `version_tag` / `If-Match`).",
+        "operationId": "update_schedule",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Schedule name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Expected version_tag",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScheduleDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version_tag (details.reason = version_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Delete a schedule (optional CAS on `version_tag` / `If-Match`).",
+        "operationId": "delete_schedule",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Schedule name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Expected version_tag",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "version_tag",
+            "in": "query",
+            "description": "Expected record version (alternatively an `If-Match` header).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version_tag (details.reason = version_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/{name}/pause": {
+      "post": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Pause a schedule (idempotent).",
+        "operationId": "pause_schedule",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Schedule name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The paused schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/{name}/resume": {
+      "post": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Resume a schedule (idempotent).",
+        "operationId": "resume_schedule",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Schedule name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The resumed schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/schedules/{name}/trigger": {
+      "post": {
+        "tags": [
+          "schedules"
+        ],
+        "summary": "Fire a schedule now (does not move its watermark).",
+        "operationId": "trigger_schedule",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Schedule name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; an empty body means no request_id",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriggerScheduleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The started (or deduplicated) run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerScheduleResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request_id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown schedule or workflow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tokens/complete": {
       "post": {
         "tags": [
@@ -1014,6 +1626,283 @@ expression: pretty
           },
           "413": {
             "description": "Body exceeds api.max_request_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/webhooks": {
+      "get": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "List webhooks.",
+        "operationId": "list_webhooks",
+        "responses": {
+          "200": {
+            "description": "Every webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookListResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Webhooks API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Create a webhook.",
+        "operationId": "create_webhook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Webhook created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A webhook with this name exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/webhooks/{name}": {
+      "get": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Get a webhook.",
+        "operationId": "get_webhook",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Webhook name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Replace a webhook (CAS on `version_tag` / `If-Match`).",
+        "operationId": "update_webhook",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Webhook name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Expected version_tag",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version_tag (details.reason = version_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Delete a webhook (optional CAS on `version_tag` / `If-Match`).",
+        "operationId": "delete_webhook",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Webhook name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Expected version_tag",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "version_tag",
+            "in": "query",
+            "description": "Expected record version (alternatively an `If-Match` header).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version_tag (details.reason = version_mismatch)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1241,6 +2130,18 @@ expression: pretty
         "operationId": "start_run",
         "parameters": [
           {
+            "name": "traceparent",
+            "in": "header",
+            "description": "W3C traceparent (00-<trace-id>-<parent-id>-<flags>); used when the body's traceparent is empty. Invalid: 400, details.reason = invalid_traceparent",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "name",
             "in": "path",
             "description": "Workflow name",
@@ -1362,6 +2263,11 @@ expression: pretty
         },
         "additionalProperties": false
       },
+      "BackupTar": {
+        "type": "string",
+        "format": "binary",
+        "description": "Tar archive (documentation-only schema of the backup download)."
+      },
       "CancelResponseDto": {
         "type": "object",
         "description": "Cancel result.",
@@ -1379,6 +2285,15 @@ expression: pretty
             "description": "Echo of the request flag."
           }
         }
+      },
+      "CatchupPolicyDto": {
+        "type": "string",
+        "description": "Which missed fires are started after downtime. Numbering\n([`CatchupPolicyDto::as_u8`]) equals the meta `CATCHUP_*` constants (05-07).",
+        "enum": [
+          "skip",
+          "one",
+          "all"
+        ]
       },
       "CompleteTokenBody": {
         "type": "object",
@@ -1431,6 +2346,24 @@ expression: pretty
           "return_existing",
           "reject"
         ]
+      },
+      "DeletedDto": {
+        "type": "object",
+        "description": "Delete result.",
+        "required": [
+          "name",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "description": "Always true on success."
+          },
+          "name": {
+            "type": "string",
+            "description": "Deleted record name."
+          }
+        }
       },
       "ErrorBody": {
         "type": "object",
@@ -1533,6 +2466,11 @@ expression: pretty
           }
         }
       },
+      "HookPayload": {
+        "type": "string",
+        "format": "binary",
+        "description": "Raw webhook payload (documentation-only schema of the hook body)."
+      },
       "ListWorkflowsResponse": {
         "type": "object",
         "description": "Workflow listing.",
@@ -1548,6 +2486,17 @@ expression: pretty
             "description": "Workflows by name."
           }
         }
+      },
+      "LogLevelDto": {
+        "type": "string",
+        "description": "Guest log level.",
+        "enum": [
+          "trace",
+          "debug",
+          "info",
+          "warn",
+          "error"
+        ]
       },
       "ModuleDto": {
         "type": "object",
@@ -1597,6 +2546,17 @@ expression: pretty
           }
         }
       },
+      "OverlapPolicyDto": {
+        "type": "string",
+        "description": "What a fire does when the previous run of the schedule is still open. Numbering\n([`OverlapPolicyDto::as_u8`]) equals the meta `OVERLAP_*` constants (05-07).",
+        "enum": [
+          "skip",
+          "buffer_one",
+          "allow_all",
+          "cancel_other",
+          "terminate_other"
+        ]
+      },
       "RetryBody": {
         "type": "object",
         "description": "Retry body (the whole body is optional).",
@@ -1638,6 +2598,37 @@ expression: pretty
             "description": "The resumed run, or the new run (`restarted`; the original id for dry_run)."
           }
         }
+      },
+      "RunByDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "JSON pointer to the run id in the body.",
+            "required": [
+              "run_id_pointer"
+            ],
+            "properties": {
+              "run_id_pointer": {
+                "type": "string",
+                "description": "JSON pointer to the run id in the body."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "JSON pointer to the start idempotency key in the body.",
+            "required": [
+              "idempotency_pointer"
+            ],
+            "properties": {
+              "idempotency_pointer": {
+                "type": "string",
+                "description": "JSON pointer to the start idempotency key in the body."
+              }
+            }
+          }
+        ],
+        "description": "How a signal webhook finds its run."
       },
       "RunDto": {
         "type": "object",
@@ -1813,6 +2804,70 @@ expression: pretty
           }
         }
       },
+      "RunLogLine": {
+        "type": "object",
+        "description": "One guest log line.",
+        "required": [
+          "ts_ms",
+          "level",
+          "message",
+          "fields",
+          "attempt"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Attempt that emitted the line.",
+            "minimum": 0
+          },
+          "fields": {
+            "description": "Structured fields (a JSON object)."
+          },
+          "level": {
+            "$ref": "#/components/schemas/LogLevelDto",
+            "description": "Level."
+          },
+          "message": {
+            "type": "string",
+            "description": "Message."
+          },
+          "ts_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Emission time, ms since the Unix epoch.",
+            "minimum": 0
+          }
+        }
+      },
+      "RunLogsResponse": {
+        "type": "object",
+        "description": "A run's recent guest log lines (non-durable ring buffer, P8-D16).",
+        "required": [
+          "run_id",
+          "lines",
+          "dropped"
+        ],
+        "properties": {
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines dropped for this run by rate limits, caps or ring eviction (best effort).",
+            "minimum": 0
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunLogLine"
+            },
+            "description": "Lines, oldest first."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          }
+        }
+      },
       "RunPolicyBody": {
         "type": "object",
         "description": "Run policy body: friendly durations (`168h`, `30s`; write days as hours).\nOmitted fields are cleared (PUT replaces the whole policy).",
@@ -1969,6 +3024,123 @@ expression: pretty
           "workflow": {
             "type": "string",
             "description": "Workflow."
+          }
+        }
+      },
+      "ScheduleDto": {
+        "type": "object",
+        "description": "A cron schedule (meta `Schedule`). On PUT the name comes from the path (a body name\nmust match it); `version_tag` is the CAS input on PUT and the stored record version\non output; `next_fire_at_ms` / `last_fire_at_ms` are output only.",
+        "properties": {
+          "catchup": {
+            "$ref": "#/components/schemas/CatchupPolicyDto",
+            "description": "Catch-up policy."
+          },
+          "catchup_window_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How far back missed fires are considered, ms (unset or 0 = server default).",
+            "minimum": 0
+          },
+          "cron": {
+            "type": "string",
+            "description": "Cron expression."
+          },
+          "end_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "No fire after this time (ms since the Unix epoch).",
+            "minimum": 0
+          },
+          "input": {
+            "description": "Run input (any JSON value; defaults to null)."
+          },
+          "last_fire_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Last fire time (output only).",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Schedule name (`[A-Za-z0-9_.-]{1,128}`)."
+          },
+          "next_fire_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Next fire time, computed by the server (output only).",
+            "minimum": 0
+          },
+          "overlap": {
+            "$ref": "#/components/schemas/OverlapPolicyDto",
+            "description": "Overlap policy."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Paused schedules do not fire."
+          },
+          "start_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "No fire before this time (ms since the Unix epoch).",
+            "minimum": 0
+          },
+          "timezone": {
+            "type": "string",
+            "description": "IANA time zone; empty = UTC."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Workflow version (unset = the active version at fire time).",
+            "minimum": 0
+          },
+          "version_tag": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Meta record version (CAS input on PUT).",
+            "minimum": 0
+          },
+          "workflow": {
+            "type": "string",
+            "description": "Workflow to start."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ScheduleListResponse": {
+        "type": "object",
+        "description": "Schedule listing.",
+        "required": [
+          "schedules"
+        ],
+        "properties": {
+          "schedules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleDto"
+            },
+            "description": "Every schedule, by name."
           }
         }
       },
@@ -2181,6 +3353,33 @@ expression: pretty
           }
         }
       },
+      "TriggerScheduleBody": {
+        "type": "object",
+        "description": "Manual trigger body (optional).",
+        "properties": {
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Idempotency of the manual fire (1..=64 bytes): a repeat returns the same run."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TriggerScheduleResponseDto": {
+        "type": "object",
+        "description": "Manual trigger result.",
+        "required": [
+          "run_id"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "description": "The started (or deduplicated) run."
+          }
+        }
+      },
       "UploadModuleResponse": {
         "type": "object",
         "description": "Upload result.",
@@ -2199,10 +3398,230 @@ expression: pretty
           }
         }
       },
+      "VerifierDto": {
+        "type": "object",
+        "description": "Signature verifier. The secret is never returned: `secret_ref` names a sealed\nsecret.",
+        "properties": {
+          "algorithm": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Generic HMAC: `sha256` (default) or `legacy_sha1`."
+          },
+          "encoding": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Generic HMAC: `hex` or `base64`."
+          },
+          "header": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Generic HMAC: signature header."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/VerifierKindDto",
+            "description": "Kind."
+          },
+          "prefix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Generic HMAC: signature prefix (e.g. `sha256=`)."
+          },
+          "secret_ref": {
+            "type": "string",
+            "description": "Sealed secret name (required unless kind = none)."
+          },
+          "template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Generic HMAC: signed template (`{body}` or `{ts}.{body}`)."
+          },
+          "timestamp_header": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Generic HMAC: timestamp header."
+          },
+          "tolerance_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Replay window, seconds (unset = the verifier default).",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "VerifierKindDto": {
+        "type": "string",
+        "description": "Signature verifier kind.",
+        "enum": [
+          "none",
+          "stripe",
+          "github",
+          "slack",
+          "standard",
+          "hmac"
+        ]
+      },
       "WasmBytes": {
         "type": "string",
         "format": "binary",
         "description": "Raw Wasm component bytes (documentation-only schema of the upload body)."
+      },
+      "WebhookActionDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Start a run (idempotency key = the delivery key, conflict policy return-existing).",
+            "required": [
+              "workflow",
+              "kind"
+            ],
+            "properties": {
+              "input": {
+                "type": "string",
+                "description": "`\"body\"` (the whole body) or a JSON pointer into it."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "start"
+                ]
+              },
+              "version": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "Version (unset = active).",
+                "minimum": 0
+              },
+              "workflow": {
+                "type": "string",
+                "description": "Workflow."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Signal a run (request id = the delivery key).",
+            "required": [
+              "workflow",
+              "run_by",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "signal"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "Signal name."
+              },
+              "run_by": {
+                "$ref": "#/components/schemas/RunByDto",
+                "description": "How the run is found."
+              },
+              "workflow": {
+                "type": "string",
+                "description": "Workflow of the target run."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Complete an await token.",
+            "required": [
+              "token_pointer",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "complete_token"
+                ]
+              },
+              "token_pointer": {
+                "type": "string",
+                "description": "JSON pointer to the token in the body."
+              }
+            }
+          }
+        ],
+        "description": "What a verified delivery does."
+      },
+      "WebhookDto": {
+        "type": "object",
+        "description": "An inbound webhook (meta `Webhook`).",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/WebhookActionDto",
+            "description": "Action."
+          },
+          "idempotency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`header:<name>`, `json:<pointer>` or `none` (unset = the verifier's default)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Webhook name (`[A-Za-z0-9_.-]{1,128}`), the `{name}` of `POST /hooks/{name}`."
+          },
+          "verifier": {
+            "$ref": "#/components/schemas/VerifierDto",
+            "description": "Verifier."
+          },
+          "version_tag": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Meta record version (CAS input on PUT).",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebhookListResponse": {
+        "type": "object",
+        "description": "Webhook listing.",
+        "required": [
+          "webhooks"
+        ],
+        "properties": {
+          "webhooks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookDto"
+            },
+            "description": "Every webhook, by name."
+          }
+        }
       },
       "WorkflowDto": {
         "type": "object",
@@ -2319,6 +3738,18 @@ expression: pretty
     {
       "name": "queues",
       "description": "Queue run policies"
+    },
+    {
+      "name": "schedules",
+      "description": "Cron schedules (Phase 8)"
+    },
+    {
+      "name": "webhooks",
+      "description": "Inbound webhooks: definitions and POST /hooks/{name} (Phase 8)"
+    },
+    {
+      "name": "admin",
+      "description": "Online backup (Phase 8)"
     },
     {
       "name": "health",

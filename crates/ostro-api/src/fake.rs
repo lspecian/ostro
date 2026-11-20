@@ -24,6 +24,9 @@ use sha2::{Digest, Sha256};
 use crate::domain::*;
 use crate::error::ApiError;
 
+/// In-memory Phase 8 traits (schedules, webhooks, hooks, run logs, backup), 08-10.
+pub use crate::phase8::fake::{FAKE_BACKUP, FakePhase8};
+
 /// Base of the fake clock (2023-11-14T22:13:20Z).
 pub const FAKE_EPOCH_MS: u64 = 1_700_000_000_000;
 /// Fake clock advance per mutating call.

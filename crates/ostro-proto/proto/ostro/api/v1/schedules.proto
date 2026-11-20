@@ -1,0 +1,150 @@
+// Cron schedules (REST: /v1/schedules, /v1/schedules/{name}, and
+// POST /v1/schedules/{name}/pause|resume|trigger) and per-run guest logs
+// (REST: GET /v1/runs/{run_id}/logs). Phase 8 (08-10).
+//
+// The schedule records are meta `Schedule` records (05-07). `version_tag` is the meta
+// record version used for compare-and-set on Update / Delete (a stale tag is
+// ALREADY_EXISTS, REST 409). `next_fire_at_ms` / `last_fire_at_ms` are computed by the
+// server and ignored on input.
+syntax = "proto3";
+
+package ostro.api.v1;
+
+service Schedules {
+  rpc List(ListSchedulesRequest) returns (ListSchedulesResponse);
+  rpc Get(GetScheduleRequest) returns (Schedule);
+  rpc Create(CreateScheduleRequest) returns (Schedule);
+  rpc Update(UpdateScheduleRequest) returns (Schedule);
+  rpc Delete(DeleteScheduleRequest) returns (DeleteScheduleResponse);
+  rpc Pause(PauseScheduleRequest) returns (Schedule);
+  rpc Resume(ResumeScheduleRequest) returns (Schedule);
+  // Fire the schedule now (ScheduleFire{kind: Manual}); never moves the watermark.
+  rpc Trigger(TriggerScheduleRequest) returns (TriggerScheduleResponse);
+}
+
+// Per-run guest log lines (non-durable ring buffer, P8-D16). A sibling service and
+// not an RPC appended to `Runs`, so the Phase 8 surface stays in its own proto files
+// (RESERVATIONS §11, recorded by 08-10).
+service RunLogs {
+  rpc GetRunLogs(GetRunLogsRequest) returns (GetRunLogsResponse);
+}
+
+// Overlap policy; numbering equals the meta OVERLAP_* constants (05-07).
+enum OverlapPolicy {
+  OVERLAP_POLICY_SKIP = 0;
+  OVERLAP_POLICY_BUFFER_ONE = 1;
+  OVERLAP_POLICY_ALLOW_ALL = 2;
+  OVERLAP_POLICY_CANCEL_OTHER = 3;
+  OVERLAP_POLICY_TERMINATE_OTHER = 4;
+}
+
+// Catch-up policy; numbering equals the meta CATCHUP_* constants (05-07).
+enum CatchupPolicy {
+  CATCHUP_POLICY_SKIP = 0;
+  CATCHUP_POLICY_ONE = 1;
+  CATCHUP_POLICY_ALL = 2;
+}
+
+message Schedule {
+  string name = 1;
+  string workflow = 2;
+  // Unset = the workflow's active version at fire time.
+  optional uint32 version = 3;
+  string cron = 4;
+  // IANA zone name; empty = UTC.
+  string timezone = 5;
+  // UTF-8 JSON run input; empty = JSON null.
+  bytes input_json = 6;
+  bool paused = 7;
+  OverlapPolicy overlap = 8;
+  CatchupPolicy catchup = 9;
+  // Unset or 0 = the server default.
+  optional uint64 catchup_window_ms = 10;
+  optional uint64 start_at_ms = 11;
+  optional uint64 end_at_ms = 12;
+  // Meta record version (output; CAS input on Update).
+  optional uint64 version_tag = 13;
+  optional uint64 next_fire_at_ms = 14;
+  optional uint64 last_fire_at_ms = 15;
+}
+
+message ListSchedulesRequest {}
+
+message ListSchedulesResponse {
+  repeated Schedule schedules = 1;
+}
+
+message GetScheduleRequest {
+  string name = 1;
+}
+
+message CreateScheduleRequest {
+  Schedule schedule = 1;
+}
+
+message UpdateScheduleRequest {
+  // `schedule.version_tag`, when set, must equal the stored record version.
+  Schedule schedule = 1;
+}
+
+message DeleteScheduleRequest {
+  string name = 1;
+  optional uint64 version_tag = 2;
+}
+
+message DeleteScheduleResponse {
+  string name = 1;
+  bool deleted = 2;
+}
+
+message PauseScheduleRequest {
+  string name = 1;
+}
+
+message ResumeScheduleRequest {
+  string name = 1;
+}
+
+message TriggerScheduleRequest {
+  string name = 1;
+  // Idempotency for the manual fire (repeats return the same run).
+  optional string request_id = 2;
+}
+
+message TriggerScheduleResponse {
+  string run_id = 1;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_TRACE = 1;
+  LOG_LEVEL_DEBUG = 2;
+  LOG_LEVEL_INFO = 3;
+  LOG_LEVEL_WARN = 4;
+  LOG_LEVEL_ERROR = 5;
+}
+
+message GetRunLogsRequest {
+  string run_id = 1;
+  // Most recent lines to return (0 = default 100, max 1000).
+  uint32 limit = 2;
+  // Minimum level; unset = every level.
+  optional LogLevel level = 3;
+}
+
+message RunLogLine {
+  uint64 ts_ms = 1;
+  LogLevel level = 2;
+  string message = 3;
+  // UTF-8 JSON object of structured fields; empty = {}.
+  bytes fields_json = 4;
+  uint32 attempt = 5;
+}
+
+message GetRunLogsResponse {
+  string run_id = 1;
+  // Oldest first.
+  repeated RunLogLine lines = 2;
+  // Lines dropped for this run by rate limits, caps or ring eviction (best effort).
+  uint64 dropped = 3;
+}

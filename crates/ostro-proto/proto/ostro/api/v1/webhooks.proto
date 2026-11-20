@@ -1,0 +1,112 @@
+// Inbound webhook definitions (REST: /v1/webhooks, /v1/webhooks/{name}). Phase 8
+// (08-10).
+//
+// Delivery itself (REST `POST /hooks/{name}`) is REST-only: the signature covers the
+// raw HTTP body and headers, which have no gRPC counterpart.
+//
+// Secrets are never returned: `secret_ref` names a sealed meta secret.
+syntax = "proto3";
+
+package ostro.api.v1;
+
+service Webhooks {
+  rpc List(ListWebhooksRequest) returns (ListWebhooksResponse);
+  rpc Get(GetWebhookRequest) returns (Webhook);
+  rpc Create(CreateWebhookRequest) returns (Webhook);
+  rpc Update(UpdateWebhookRequest) returns (Webhook);
+  rpc Delete(DeleteWebhookRequest) returns (DeleteWebhookResponse);
+}
+
+message Webhook {
+  string name = 1;
+  WebhookAction action = 2;
+  WebhookVerifier verifier = 3;
+  // "header:<name>", "json:<pointer>" or "none"; unset = the verifier's default.
+  optional string idempotency = 4;
+  // Meta record version (output; CAS input on Update).
+  optional uint64 version_tag = 5;
+}
+
+message WebhookAction {
+  oneof kind {
+    WebhookStartAction start = 1;
+    WebhookSignalAction signal = 2;
+    WebhookCompleteTokenAction complete_token = 3;
+  }
+}
+
+message WebhookStartAction {
+  string workflow = 1;
+  optional uint32 version = 2;
+  // "body" (the whole body) or a JSON pointer into it.
+  string input = 3;
+}
+
+message WebhookSignalAction {
+  string workflow = 1;
+  // Signal name.
+  string name = 2;
+  oneof run_by {
+    // JSON pointer to the run id in the body.
+    string run_id_pointer = 3;
+    // JSON pointer to the start idempotency key in the body.
+    string idempotency_pointer = 4;
+  }
+}
+
+message WebhookCompleteTokenAction {
+  // JSON pointer to the await token in the body.
+  string token_pointer = 1;
+}
+
+enum WebhookVerifierKind {
+  WEBHOOK_VERIFIER_KIND_NONE = 0;
+  WEBHOOK_VERIFIER_KIND_STRIPE = 1;
+  WEBHOOK_VERIFIER_KIND_GITHUB = 2;
+  WEBHOOK_VERIFIER_KIND_SLACK = 3;
+  WEBHOOK_VERIFIER_KIND_STANDARD = 4;
+  WEBHOOK_VERIFIER_KIND_HMAC = 5;
+}
+
+message WebhookVerifier {
+  WebhookVerifierKind kind = 1;
+  // Sealed secret name.
+  string secret_ref = 2;
+  // Replay window in seconds; unset = the verifier default.
+  optional uint32 tolerance_s = 3;
+  // Generic HMAC options.
+  optional string header = 4;
+  optional string prefix = 5;
+  optional string algorithm = 6;
+  optional string encoding = 7;
+  optional string timestamp_header = 8;
+  optional string template = 9;
+}
+
+message ListWebhooksRequest {}
+
+message ListWebhooksResponse {
+  repeated Webhook webhooks = 1;
+}
+
+message GetWebhookRequest {
+  string name = 1;
+}
+
+message CreateWebhookRequest {
+  Webhook webhook = 1;
+}
+
+message UpdateWebhookRequest {
+  Webhook webhook = 1;
+}
+
+message DeleteWebhookRequest {
+  string name = 1;
+  optional uint64 version_tag = 2;
+}
+
+message DeleteWebhookResponse {
+  string name = 1;
+  bool deleted = 2;
+}

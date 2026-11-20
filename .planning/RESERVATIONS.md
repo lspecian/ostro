@@ -328,7 +328,7 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Failpoint prefixes | `snapshot::`, `trim::`, `upload::`, `restore::`, `blobgc::`, `cron::` | P8 |
 | REST paths | `GET /metrics`; `/v1/schedules` (+ `/v1/schedules/{name}/pause`, `/resume`, `/trigger`); `GET /v1/runs/{id}/logs`; `GET /v1/admin/backup` | P8 (08-10) |
 | gRPC services | `ostro.api.v1.Schedules`, `ostro.api.v1.Webhooks` | P8 (08-10) |
-| gRPC RPC | `GetRunLogs`: appended to the existing `ostro.api.v1.Runs` service by 08-10 (no new service name reserved; 08-10 records it here if it cannot append) | P8 (08-10) |
+| gRPC service + RPC | `ostro.api.v1.RunLogs` / `GetRunLogs` (in `schedules.proto`). 08-10 did not append to `Runs`: runs.proto stays untouched so the Phase 8 surface lives in its own proto files and 06-08 shares no proto edit. Hook ingress and the admin backup are REST-only | P8 (08-10) |
 | node.toml keys | `incarnation` (08-08; additive, F6), `restored_from` (08-18) | P8 |
 | Object-store prefixes (bottomless layout, under the configured prefix) | `LOCK`, `manifest/` (`manifest/current`, `manifest/gen/<gen 20d>`), `meta/`, `blobs/`, `p/<pppp>/snap/`, `p/<pppp>/seg/` | P8 |
 | Data-dir entries | `snapshots/pNNNN/` (local OSNP snapshots), `state/.install-pNNNN` (snapshot install staging) | P8 (08-02/08-09) |

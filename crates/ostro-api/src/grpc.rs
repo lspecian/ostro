@@ -358,6 +358,17 @@ impl From<domain::RunPolicy> for pb::RunPolicy {
     }
 }
 
+/// The `traceparent` gRPC metadata value (`None` when absent; non-ASCII is invalid).
+fn traceparent_metadata(md: &tonic::metadata::MetadataMap) -> Result<Option<String>, ApiError> {
+    md.get(crate::phase8::TRACEPARENT_HEADER)
+        .map(|v| {
+            v.to_str()
+                .map(|s| s.trim().to_owned())
+                .map_err(|_| crate::phase8::invalid_traceparent("metadata is not ASCII"))
+        })
+        .transpose()
+}
+
 // ---------------------------------------------------------------------------------
 // Services
 // ---------------------------------------------------------------------------------
@@ -525,7 +536,12 @@ impl runs_server::Runs for GrpcRuns {
         &self,
         request: Request<pb::StartRunRequest>,
     ) -> Result<Response<pb::StartRunResponse>, Status> {
-        let req = domain::StartRunRequest::try_from(request.into_inner()).map_err(to_status)?;
+        let header = traceparent_metadata(request.metadata()).map_err(to_status)?;
+        let mut req = domain::StartRunRequest::try_from(request.into_inner()).map_err(to_status)?;
+        // Body wins; else the `traceparent` metadata (08-10). Validated either way.
+        req.traceparent =
+            crate::phase8::resolve_traceparent(req.traceparent.take(), header.as_deref())
+                .map_err(to_status)?;
         let res = self.0.start_run(req).await.map_err(to_status)?;
         Ok(Response::new(pb::StartRunResponse {
             run_id: res.run_id,

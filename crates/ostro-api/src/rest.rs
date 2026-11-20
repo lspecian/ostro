@@ -746,7 +746,7 @@ impl From<domain::RunSummary> for RunSummaryDto {
     }
 }
 
-fn body_rejection(status: StatusCode, text: String) -> ApiError {
+pub(crate) fn body_rejection(status: StatusCode, text: String) -> ApiError {
     if status == StatusCode::PAYLOAD_TOO_LARGE {
         ApiError::payload_too_large(text)
     } else {
@@ -754,14 +754,14 @@ fn body_rejection(status: StatusCode, text: String) -> ApiError {
     }
 }
 
-fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+pub(crate) fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     body.map(|Json(v)| v)
         .map_err(|r| body_rejection(r.status(), r.body_text()))
 }
 
 /// JSON body that may be omitted entirely (empty body = `T::default()`). Used by the
 /// lifecycle POSTs whose every field is optional, so `curl -X POST .../cancel` works.
-fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
+pub(crate) fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<T, ApiError> {
     let bytes = body.map_err(|r| body_rejection(r.status(), r.body_text()))?;
@@ -772,13 +772,13 @@ fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
         .map_err(|e| ApiError::invalid_argument(format!("invalid JSON body: {e}")))
 }
 
-fn query<T>(q: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
+pub(crate) fn query<T>(q: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
     q.map(|Query(v)| v)
         .map_err(|r| ApiError::invalid_argument(r.body_text()))
 }
 
 /// `If-Match: "7"` / `W/"7"` / `7` -> 7.
-fn if_match_version(headers: &HeaderMap) -> Result<Option<u64>, ApiError> {
+pub(crate) fn if_match_version(headers: &HeaderMap) -> Result<Option<u64>, ApiError> {
     let Some(v) = headers.get(header::IF_MATCH) else {
         return Ok(None);
     };
@@ -931,7 +931,10 @@ async fn activate_workflow(
     post,
     path = "/v1/workflows/{name}/runs",
     tag = "runs",
-    params(("name" = String, Path, description = "Workflow name")),
+    params(
+        ("traceparent" = Option<String>, Header, description = "W3C traceparent (00-<trace-id>-<parent-id>-<flags>); used when the body's traceparent is empty. Invalid: 400, details.reason = invalid_traceparent"),
+        ("name" = String, Path, description = "Workflow name"),
+    ),
     request_body = StartRunBody,
     responses(
         (status = 201, description = "Run created", body = StartRunResponse),
@@ -946,11 +949,17 @@ async fn activate_workflow(
 async fn start_run(
     State(cp): State<Arc<dyn ControlPlane>>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     body: Result<Json<StartRunBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let b = json_body(body)?;
     let input_json = serde_json::to_vec(&b.input)
         .map_err(|e| ApiError::invalid_argument(format!("input: {e}")))?;
+    // Body wins; else the `traceparent` header (08-10). Validated either way.
+    let traceparent = crate::phase8::resolve_traceparent(
+        b.traceparent,
+        crate::phase8::traceparent_header(&headers)?,
+    )?;
     let res = cp
         .start_run(domain::StartRunRequest {
             workflow: name,
@@ -960,7 +969,7 @@ async fn start_run(
             delay_ms: b.delay_ms,
             priority: b.priority,
             tags: b.tags,
-            traceparent: b.traceparent,
+            traceparent,
             tenant: b.tenant,
             idempotency_key: b.idempotency_key,
             conflict_policy: b.conflict_policy.unwrap_or_default().into(),
@@ -1472,6 +1481,9 @@ async fn ui_shell() -> Html<String> {
         (name = "runs", description = "Starting and inspecting runs"),
         (name = "tokens", description = "Await-token completion"),
         (name = "queues", description = "Queue run policies"),
+        (name = "schedules", description = "Cron schedules (Phase 8)"),
+        (name = "webhooks", description = "Inbound webhooks: definitions and POST /hooks/{name} (Phase 8)"),
+        (name = "admin", description = "Online backup (Phase 8)"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )

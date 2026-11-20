@@ -1793,3 +1793,751 @@ async fn grpc_upload_above_tonic_default_reaches_control_plane() {
         .expect("upload");
     assert_eq!(ok["module"]["size_bytes"], 6 * MIB);
 }
+
+// ---------------------------------------------------------------------------------
+// Phase 8 (08-10): Schedules, Webhooks and RunLogs parity against `FakePhase8`.
+// Hook ingress and the backup are REST-only (no gRPC counterpart).
+// ---------------------------------------------------------------------------------
+
+mod phase8 {
+    use super::*;
+    use ostro_api::fake::FakePhase8;
+    use ostro_api::phase8::{LogLevelDto, RunLogLine, RunLogsResponse, ScheduleDto, WebhookDto};
+    use ostro_proto::api::v1::{
+        run_logs_client::RunLogsClient, schedules_client::SchedulesClient,
+        webhooks_client::WebhooksClient,
+    };
+
+    struct P8Server {
+        addr: SocketAddr,
+        cp: Arc<FakeControlPlane>,
+        p8: Arc<FakePhase8>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for P8Server {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn serve_p8() -> P8Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let cp = Arc::new(FakeControlPlane::new());
+        let p8 = FakePhase8::new(cp.clone());
+        let dyn_cp: Arc<dyn ControlPlane> = cp.clone();
+        let app = ostro_api::router_with(dyn_cp, cfg(), p8.extensions());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        P8Server { addr, cp, p8, task }
+    }
+
+    /// Canonical JSON of a schedule / webhook / log page (both transports go through
+    /// the DTO).
+    fn canon_schedule(v: ScheduleDto) -> Value {
+        serde_json::to_value(v).expect("json")
+    }
+
+    fn canon_webhook(v: WebhookDto) -> Value {
+        serde_json::to_value(v).expect("json")
+    }
+
+    trait P8Client {
+        async fn create_schedule(&mut self, s: Value) -> Out;
+        async fn get_schedule(&mut self, name: &str) -> Out;
+        async fn list_schedules(&mut self) -> Out;
+        async fn update_schedule(&mut self, s: Value) -> Out;
+        async fn delete_schedule(&mut self, name: &str, tag: Option<u64>) -> Out;
+        async fn pause(&mut self, name: &str) -> Out;
+        async fn resume(&mut self, name: &str) -> Out;
+        async fn trigger(&mut self, name: &str, request_id: Option<&str>) -> Out;
+        async fn create_webhook(&mut self, w: Value) -> Out;
+        async fn get_webhook(&mut self, name: &str) -> Out;
+        async fn list_webhooks(&mut self) -> Out;
+        async fn update_webhook(&mut self, w: Value) -> Out;
+        async fn delete_webhook(&mut self, name: &str, tag: Option<u64>) -> Out;
+        async fn run_logs(&mut self, run_id: &str, limit: u32, level: Option<&str>) -> Out;
+    }
+
+    impl P8Client for RestClient {
+        async fn create_schedule(&mut self, s: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/schedules", self.base))
+                        .json(&s),
+                )
+                .await?;
+            Ok(canon_schedule(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn get_schedule(&mut self, name: &str) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/schedules/{name}", self.base)))
+                .await?;
+            Ok(canon_schedule(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn list_schedules(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/schedules", self.base)))
+                .await?;
+            Ok(Value::Array(
+                v["schedules"]
+                    .as_array()
+                    .expect("schedules")
+                    .iter()
+                    .map(|s| canon_schedule(serde_json::from_value(s.clone()).expect("dto")))
+                    .collect(),
+            ))
+        }
+
+        async fn update_schedule(&mut self, s: Value) -> Out {
+            let name = s["name"].as_str().expect("name").to_owned();
+            let v = self
+                .send(
+                    self.http
+                        .put(format!("{}/v1/schedules/{name}", self.base))
+                        .json(&s),
+                )
+                .await?;
+            Ok(canon_schedule(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn delete_schedule(&mut self, name: &str, tag: Option<u64>) -> Out {
+            let q = tag.map(|t| format!("?version_tag={t}")).unwrap_or_default();
+            self.send(
+                self.http
+                    .delete(format!("{}/v1/schedules/{name}{q}", self.base)),
+            )
+            .await
+        }
+
+        async fn pause(&mut self, name: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/schedules/{name}/pause", self.base)),
+                )
+                .await?;
+            Ok(canon_schedule(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn resume(&mut self, name: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/schedules/{name}/resume", self.base)),
+                )
+                .await?;
+            Ok(canon_schedule(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn trigger(&mut self, name: &str, request_id: Option<&str>) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/schedules/{name}/trigger", self.base))
+                    .json(&json!({ "request_id": request_id })),
+            )
+            .await
+        }
+
+        async fn create_webhook(&mut self, w: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/webhooks", self.base))
+                        .json(&w),
+                )
+                .await?;
+            Ok(canon_webhook(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn get_webhook(&mut self, name: &str) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/webhooks/{name}", self.base)))
+                .await?;
+            Ok(canon_webhook(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn list_webhooks(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/webhooks", self.base)))
+                .await?;
+            Ok(Value::Array(
+                v["webhooks"]
+                    .as_array()
+                    .expect("webhooks")
+                    .iter()
+                    .map(|w| canon_webhook(serde_json::from_value(w.clone()).expect("dto")))
+                    .collect(),
+            ))
+        }
+
+        async fn update_webhook(&mut self, w: Value) -> Out {
+            let name = w["name"].as_str().expect("name").to_owned();
+            let v = self
+                .send(
+                    self.http
+                        .put(format!("{}/v1/webhooks/{name}", self.base))
+                        .json(&w),
+                )
+                .await?;
+            Ok(canon_webhook(serde_json::from_value(v).expect("dto")))
+        }
+
+        async fn delete_webhook(&mut self, name: &str, tag: Option<u64>) -> Out {
+            let q = tag.map(|t| format!("?version_tag={t}")).unwrap_or_default();
+            self.send(
+                self.http
+                    .delete(format!("{}/v1/webhooks/{name}{q}", self.base)),
+            )
+            .await
+        }
+
+        async fn run_logs(&mut self, run_id: &str, limit: u32, level: Option<&str>) -> Out {
+            let mut url = format!("{}/v1/runs/{run_id}/logs?limit={limit}", self.base);
+            if let Some(l) = level {
+                url.push_str(&format!("&level={l}"));
+            }
+            let v = self.send(self.http.get(url)).await?;
+            let page: RunLogsResponse = serde_json::from_value(v).expect("dto");
+            Ok(serde_json::to_value(page).expect("json"))
+        }
+    }
+
+    struct GrpcP8 {
+        schedules: SchedulesClient<Channel>,
+        webhooks: WebhooksClient<Channel>,
+        logs: RunLogsClient<Channel>,
+    }
+
+    impl GrpcP8 {
+        async fn connect(addr: SocketAddr) -> Self {
+            let ch = Channel::from_shared(format!("http://{addr}"))
+                .expect("uri")
+                .connect()
+                .await
+                .expect("h2c connect");
+            GrpcP8 {
+                schedules: SchedulesClient::new(ch.clone()),
+                webhooks: WebhooksClient::new(ch.clone()),
+                logs: RunLogsClient::new(ch),
+            }
+        }
+    }
+
+    fn pb_schedule(v: Value) -> pb::Schedule {
+        let dto: ScheduleDto = serde_json::from_value(v).expect("dto");
+        dto.into()
+    }
+
+    fn pb_webhook(v: Value) -> pb::Webhook {
+        let dto: WebhookDto = serde_json::from_value(v).expect("dto");
+        dto.into()
+    }
+
+    fn from_pb_schedule(s: pb::Schedule) -> Value {
+        canon_schedule(ScheduleDto::try_from(s).expect("valid schedule"))
+    }
+
+    fn from_pb_webhook(w: pb::Webhook) -> Value {
+        canon_webhook(WebhookDto::try_from(w).expect("valid webhook"))
+    }
+
+    fn level_proto(l: &str) -> i32 {
+        match l {
+            "trace" => pb::LogLevel::Trace as i32,
+            "debug" => pb::LogLevel::Debug as i32,
+            "info" => pb::LogLevel::Info as i32,
+            "warn" => pb::LogLevel::Warn as i32,
+            "error" => pb::LogLevel::Error as i32,
+            other => panic!("level {other}"),
+        }
+    }
+
+    fn level_name(v: i32) -> &'static str {
+        match pb::LogLevel::try_from(v).expect("level") {
+            pb::LogLevel::Trace => "trace",
+            pb::LogLevel::Debug => "debug",
+            pb::LogLevel::Info => "info",
+            pb::LogLevel::Warn => "warn",
+            pb::LogLevel::Error => "error",
+            pb::LogLevel::Unspecified => panic!("unspecified level on the wire"),
+        }
+    }
+
+    impl P8Client for GrpcP8 {
+        async fn create_schedule(&mut self, s: Value) -> Out {
+            let r = self
+                .schedules
+                .create(pb::CreateScheduleRequest {
+                    schedule: Some(pb_schedule(s)),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_schedule(r.into_inner()))
+        }
+
+        async fn get_schedule(&mut self, name: &str) -> Out {
+            let r = self
+                .schedules
+                .get(pb::GetScheduleRequest { name: name.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_schedule(r.into_inner()))
+        }
+
+        async fn list_schedules(&mut self) -> Out {
+            let r = self
+                .schedules
+                .list(pb::ListSchedulesRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(Value::Array(
+                r.into_inner()
+                    .schedules
+                    .into_iter()
+                    .map(from_pb_schedule)
+                    .collect(),
+            ))
+        }
+
+        async fn update_schedule(&mut self, s: Value) -> Out {
+            let r = self
+                .schedules
+                .update(pb::UpdateScheduleRequest {
+                    schedule: Some(pb_schedule(s)),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_schedule(r.into_inner()))
+        }
+
+        async fn delete_schedule(&mut self, name: &str, tag: Option<u64>) -> Out {
+            let r = self
+                .schedules
+                .delete(pb::DeleteScheduleRequest {
+                    name: name.into(),
+                    version_tag: tag,
+                })
+                .await
+                .map_err(grpc_err)?
+                .into_inner();
+            Ok(json!({ "name": r.name, "deleted": r.deleted }))
+        }
+
+        async fn pause(&mut self, name: &str) -> Out {
+            let r = self
+                .schedules
+                .pause(pb::PauseScheduleRequest { name: name.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_schedule(r.into_inner()))
+        }
+
+        async fn resume(&mut self, name: &str) -> Out {
+            let r = self
+                .schedules
+                .resume(pb::ResumeScheduleRequest { name: name.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_schedule(r.into_inner()))
+        }
+
+        async fn trigger(&mut self, name: &str, request_id: Option<&str>) -> Out {
+            let r = self
+                .schedules
+                .trigger(pb::TriggerScheduleRequest {
+                    name: name.into(),
+                    request_id: request_id.map(str::to_owned),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(json!({ "run_id": r.into_inner().run_id }))
+        }
+
+        async fn create_webhook(&mut self, w: Value) -> Out {
+            let r = self
+                .webhooks
+                .create(pb::CreateWebhookRequest {
+                    webhook: Some(pb_webhook(w)),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_webhook(r.into_inner()))
+        }
+
+        async fn get_webhook(&mut self, name: &str) -> Out {
+            let r = self
+                .webhooks
+                .get(pb::GetWebhookRequest { name: name.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_webhook(r.into_inner()))
+        }
+
+        async fn list_webhooks(&mut self) -> Out {
+            let r = self
+                .webhooks
+                .list(pb::ListWebhooksRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(Value::Array(
+                r.into_inner()
+                    .webhooks
+                    .into_iter()
+                    .map(from_pb_webhook)
+                    .collect(),
+            ))
+        }
+
+        async fn update_webhook(&mut self, w: Value) -> Out {
+            let r = self
+                .webhooks
+                .update(pb::UpdateWebhookRequest {
+                    webhook: Some(pb_webhook(w)),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(from_pb_webhook(r.into_inner()))
+        }
+
+        async fn delete_webhook(&mut self, name: &str, tag: Option<u64>) -> Out {
+            let r = self
+                .webhooks
+                .delete(pb::DeleteWebhookRequest {
+                    name: name.into(),
+                    version_tag: tag,
+                })
+                .await
+                .map_err(grpc_err)?
+                .into_inner();
+            Ok(json!({ "name": r.name, "deleted": r.deleted }))
+        }
+
+        async fn run_logs(&mut self, run_id: &str, limit: u32, level: Option<&str>) -> Out {
+            let r = self
+                .logs
+                .get_run_logs(pb::GetRunLogsRequest {
+                    run_id: run_id.into(),
+                    limit,
+                    level: level.map(level_proto),
+                })
+                .await
+                .map_err(grpc_err)?
+                .into_inner();
+            Ok(json!({
+                "run_id": r.run_id,
+                "lines": r.lines.iter().map(|l| json!({
+                    "ts_ms": l.ts_ms,
+                    "level": level_name(l.level),
+                    "message": l.message,
+                    "fields": embed(&l.fields_json),
+                    "attempt": l.attempt,
+                })).collect::<Vec<_>>(),
+                "dropped": r.dropped,
+            }))
+        }
+    }
+
+    async fn scenario<C: P8Client>(c: &mut C, srv: &P8Server) -> Vec<(String, Out)> {
+        let mut t: Vec<(String, Out)> = Vec::new();
+        macro_rules! step {
+            ($label:expr, $e:expr) => {{
+                let out = $e;
+                t.push(($label.to_owned(), out));
+            }};
+        }
+        let wasm = fake_module(&[("greet", 1)]);
+        srv.cp
+            .upload_module(ostro_api::domain::UploadModule {
+                sha256: sha256_hex(&wasm),
+                wasm,
+                language: None,
+                tenant: None,
+                name: None,
+            })
+            .await
+            .expect("upload");
+
+        // Schedules.
+        let sched = json!({
+            "name": "nightly", "workflow": "greet", "cron": "0 0 * * *",
+            "timezone": "Europe/Lisbon", "input": {"n": 1}, "overlap": "buffer_one",
+            "catchup": "all", "catchup_window_ms": 3_600_000u64,
+            "start_at_ms": 1_000u64, "end_at_ms": 2_000_000_000_000u64,
+        });
+        step!("create schedule", c.create_schedule(sched.clone()).await);
+        step!(
+            "create duplicate schedule",
+            c.create_schedule(sched.clone()).await
+        );
+        step!(
+            "create bad name",
+            c.create_schedule(json!({"name": "a b", "workflow": "greet", "cron": "x"}))
+                .await
+        );
+        step!(
+            "create no cron",
+            c.create_schedule(json!({"name": "x", "workflow": "greet"}))
+                .await
+        );
+        step!(
+            "create no workflow",
+            c.create_schedule(json!({"name": "x", "cron": "* * * * *"}))
+                .await
+        );
+        step!(
+            "create second",
+            c.create_schedule(
+                json!({"name": "hourly", "workflow": "greet", "cron": "0 * * * *", "paused": true})
+            )
+            .await
+        );
+        step!("get schedule", c.get_schedule("nightly").await);
+        step!("get unknown schedule", c.get_schedule("nope").await);
+        step!("get bad schedule name", c.get_schedule("a b").await);
+        step!("list schedules", c.list_schedules().await);
+        let mut upd = sched.clone();
+        upd["overlap"] = json!("terminate_other");
+        upd["version_tag"] = json!(1);
+        step!("update schedule", c.update_schedule(upd.clone()).await);
+        step!("update stale tag", c.update_schedule(upd.clone()).await);
+        let mut missing = upd.clone();
+        missing["name"] = json!("ghost");
+        missing["version_tag"] = Value::Null;
+        step!("update unknown", c.update_schedule(missing).await);
+        step!("pause", c.pause("nightly").await);
+        step!("pause again", c.pause("nightly").await);
+        step!("resume", c.resume("nightly").await);
+        step!("pause unknown", c.pause("nope").await);
+        step!("trigger", c.trigger("nightly", Some("r1")).await);
+        step!(
+            "trigger same request",
+            c.trigger("nightly", Some("r1")).await
+        );
+        step!("trigger no request id", c.trigger("nightly", None).await);
+        step!(
+            "trigger long request id",
+            c.trigger("nightly", Some(&"x".repeat(65))).await
+        );
+        step!("trigger unknown", c.trigger("nope", None).await);
+        step!("delete stale", c.delete_schedule("hourly", Some(9)).await);
+        step!("delete", c.delete_schedule("hourly", Some(1)).await);
+        step!("delete again", c.delete_schedule("hourly", None).await);
+        step!("list after delete", c.list_schedules().await);
+
+        // Webhooks.
+        let gh = json!({
+            "name": "gh",
+            "action": {"kind": "signal", "workflow": "greet", "name": "push",
+                       "run_by": {"idempotency_pointer": "/order/id"}},
+            "verifier": {"kind": "github", "secret_ref": "gh-secret"},
+            "idempotency": "header:X-GitHub-Delivery",
+        });
+        step!("create webhook", c.create_webhook(gh.clone()).await);
+        step!(
+            "create duplicate webhook",
+            c.create_webhook(gh.clone()).await
+        );
+        step!(
+            "create hmac webhook",
+            c.create_webhook(json!({
+                "name": "hmac",
+                "action": {"kind": "start", "workflow": "greet", "version": 1, "input": "/data"},
+                "verifier": {"kind": "hmac", "secret_ref": "s", "tolerance_s": 60, "header": "X-Sig",
+                             "prefix": "sha256=", "algorithm": "sha256", "encoding": "hex",
+                             "timestamp_header": "X-Ts", "template": "{ts}.{body}"},
+            }))
+            .await
+        );
+        step!(
+            "create token webhook",
+            c.create_webhook(json!({
+                "name": "tok",
+                "action": {"kind": "complete_token", "token_pointer": "/token"},
+            }))
+            .await
+        );
+        step!(
+            "create webhook without secret",
+            c.create_webhook(json!({
+                "name": "bad", "action": {"kind": "complete_token", "token_pointer": "/t"},
+                "verifier": {"kind": "slack"},
+            }))
+            .await
+        );
+        step!(
+            "create webhook bad idempotency",
+            c.create_webhook(json!({
+                "name": "bad", "action": {"kind": "complete_token", "token_pointer": "/t"},
+                "idempotency": "cookie:x",
+            }))
+            .await
+        );
+        step!("get webhook", c.get_webhook("gh").await);
+        step!("get unknown webhook", c.get_webhook("nope").await);
+        step!("list webhooks", c.list_webhooks().await);
+        let mut gh2 = gh.clone();
+        gh2["idempotency"] = json!("none");
+        gh2["version_tag"] = json!(5);
+        step!("update webhook stale", c.update_webhook(gh2.clone()).await);
+        gh2["version_tag"] = json!(1);
+        step!("update webhook", c.update_webhook(gh2).await);
+        step!(
+            "delete webhook stale",
+            c.delete_webhook("tok", Some(3)).await
+        );
+        step!("delete webhook", c.delete_webhook("tok", None).await);
+        step!(
+            "delete unknown webhook",
+            c.delete_webhook("tok", None).await
+        );
+
+        // Run logs.
+        let run_id = srv
+            .cp
+            .start_run(ostro_api::domain::StartRunRequest {
+                workflow: "greet".into(),
+                input_json: b"null".to_vec(),
+                ..Default::default()
+            })
+            .await
+            .expect("start")
+            .run_id;
+        for (i, level) in [
+            LogLevelDto::Trace,
+            LogLevelDto::Info,
+            LogLevelDto::Warn,
+            LogLevelDto::Error,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            srv.p8.push_log(
+                &run_id,
+                RunLogLine {
+                    ts_ms: 1_000 + i as u64,
+                    level,
+                    message: format!("line {i}"),
+                    fields: json!({"i": i}),
+                    attempt: 1,
+                },
+            );
+        }
+        step!("logs all", c.run_logs(&run_id, 0, None).await);
+        step!("logs limit 2", c.run_logs(&run_id, 2, None).await);
+        step!("logs warn+", c.run_logs(&run_id, 0, Some("warn")).await);
+        step!("logs unknown run", c.run_logs("run-999999", 0, None).await);
+        t
+    }
+
+    #[tokio::test]
+    async fn phase8_rest_and_grpc_transcripts_are_equal() {
+        let rest_srv = serve_p8().await;
+        let mut rest = RestClient::new(rest_srv.addr);
+        let rest_t = scenario(&mut rest, &rest_srv).await;
+
+        let grpc_srv = serve_p8().await;
+        let mut grpc = GrpcP8::connect(grpc_srv.addr).await;
+        let grpc_t = scenario(&mut grpc, &grpc_srv).await;
+
+        assert_eq!(rest_t.len(), grpc_t.len());
+        for ((label, r), (_, g)) in rest_t.iter().zip(&grpc_t) {
+            assert_eq!(r, g, "step {label:?} differs\nREST: {r:#?}\ngRPC: {g:#?}");
+        }
+
+        let get = |label: &str| {
+            rest_t
+                .iter()
+                .find(|(l, _)| l == label)
+                .unwrap_or_else(|| panic!("no step {label}"))
+                .1
+                .clone()
+        };
+        let err = |label: &str| get(label).unwrap_err();
+        let created = get("create schedule").unwrap();
+        assert_eq!(created["version_tag"], 1);
+        assert_eq!(created["timezone"], "Europe/Lisbon");
+        assert_eq!(created["overlap"], "buffer_one");
+        assert_eq!(created["catchup"], "all");
+        assert_eq!(created["input"], json!({"n": 1}));
+        assert_eq!(err("create duplicate schedule").0, ErrorCode::Conflict);
+        for l in [
+            "create bad name",
+            "create no cron",
+            "create no workflow",
+            "get bad schedule name",
+            "trigger long request id",
+        ] {
+            assert_eq!(err(l).0, ErrorCode::InvalidArgument, "{l}");
+        }
+        for l in [
+            "get unknown schedule",
+            "update unknown",
+            "pause unknown",
+            "trigger unknown",
+            "delete again",
+            "get unknown webhook",
+            "delete unknown webhook",
+            "logs unknown run",
+        ] {
+            assert_eq!(err(l).0, ErrorCode::NotFound, "{l}");
+        }
+        for l in [
+            "update stale tag",
+            "delete stale",
+            "update webhook stale",
+            "delete webhook stale",
+        ] {
+            let (code, details) = err(l);
+            assert_eq!(code, ErrorCode::Conflict, "{l}");
+            assert_eq!(
+                details.expect("details")["reason"],
+                "version_mismatch",
+                "{l}"
+            );
+        }
+        assert_eq!(get("update schedule").unwrap()["version_tag"], 2);
+        assert_eq!(get("pause").unwrap()["paused"], true);
+        assert_eq!(
+            get("pause again").unwrap()["version_tag"],
+            3,
+            "idempotent pause"
+        );
+        assert_eq!(
+            get("trigger").unwrap()["run_id"],
+            get("trigger same request").unwrap()["run_id"]
+        );
+        assert_eq!(
+            get("list after delete").unwrap().as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            err("create webhook without secret").0,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            err("create webhook bad idempotency").0,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(get("update webhook").unwrap()["idempotency"], "none");
+        assert_eq!(
+            get("logs all").unwrap()["lines"].as_array().map(Vec::len),
+            Some(4)
+        );
+        assert_eq!(
+            get("logs limit 2").unwrap()["lines"][0]["message"],
+            "line 2"
+        );
+        assert_eq!(
+            get("logs warn+").unwrap()["lines"].as_array().map(Vec::len),
+            Some(2)
+        );
+    }
+}

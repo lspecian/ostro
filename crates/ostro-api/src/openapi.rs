@@ -8,9 +8,16 @@ use std::sync::OnceLock;
 pub fn openapi() -> utoipa::openapi::OpenApi {
     static DOC: OnceLock<utoipa::openapi::OpenApi> = OnceLock::new();
     DOC.get_or_init(|| {
-        crate::rest::api_routes(crate::ApiConfig::default().max_module_bytes)
+        let mut doc = crate::rest::api_routes(crate::ApiConfig::default().max_module_bytes)
             .split_for_parts()
-            .1
+            .1;
+        // Phase 8 (08-10): paths and schemas only (its base document has no tags).
+        doc.merge(
+            crate::phase8::api_routes(crate::phase8::DEFAULT_HOOK_BODY_LIMIT)
+                .split_for_parts()
+                .1,
+        );
+        doc
     })
     .clone()
 }
