@@ -108,7 +108,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **FX-02**: Every HTTP effect carries a stable idempotency key (run, op, name), overridable by the user
 - [ ] **FX-03**: In-flight effects are re-driven by replay with the same key; if the provider's idempotency window has elapsed, the effect fails with `effect_outcome_unknown` instead of resending
 - [ ] **FX-04**: SQL connector (Postgres, MySQL) with named connections; `exactly-once` mode wraps statements in a transaction with an `ostro_effects` idempotency token [FR-4.2]
-- [ ] **FX-05**: Object store connector (S3/GCS/Azure/local via `object_store`): get/put/presign [FR-4.3]
+- [ ] **FX-05**: Object store connector through the shared `ostro-objstore` crate: S3-compatible backends (AWS S3, MinIO, R2, Ceph; GCS via S3-interoperability HMAC keys) and the local filesystem, with get/put/delete/head/presign. Azure Blob is deferred until a native backend exists [FR-4.3]
 - [ ] **FX-06**: Secrets are referenced as `{{secret:name}}`, resolved only in the host bridge, zeroized after use, never journaled or logged, and never visible to guests
 - [ ] **FX-07**: Secret grants are bound to (module, secret, destination origins); templated requests do not auto-follow redirects; responses are scrubbed of secret values
 - [ ] **FX-08**: Per-module egress allow-lists; SSRF guard blocks private/link-local/metadata ranges incl. IPv4-mapped IPv6, NAT64, decimal/octal literals, cloud metadata IPv6, redirects and env proxies (resolve once, pin address, no proxy) [FR-4.4]

@@ -204,6 +204,25 @@ Rules:
 | 31 | spare | reserved P11 |
 | 32+ | — | unallocated |
 
+**Placeholder rule (P-15, 06-01).** `InvalidCode` is ordinal by declaration index. A phase that lands a code above an index that does not exist yet must also declare every lower missing index as a `#[doc(hidden)]` placeholder variant that apply never emits, using the **canonical name `Reserved<Phase>_<index>`** below. Phases 6, 7 and 8 therefore produce identical declarations whatever order they land in. A phase claiming its own slot renames its placeholder in place (same index). Placeholders are never emitted, so they never reach the state hash.
+
+| Index | Canonical placeholder name | Owner block |
+|-------|----------------------------|-------------|
+| 13 | `ReservedP5_13` | P5 spare |
+| 14 | `ReservedP5_14` | P5 spare |
+| 15 | `ReservedP6_15` (renamed in place to `BadEffectCompletion` by 06-02) | P6 |
+| 16 | `ReservedP6_16` | P6 |
+| 17 | `ReservedP6_17` | P6 |
+| 18 | `ReservedP7_18` | P7 |
+| 19 | `ReservedP7_19` | P7 |
+| 20 | `ReservedP7_20` | P7 |
+| 21 | `ReservedP7_21` | P7 |
+| 22 | `ReservedP8_22` (renamed in place by 08-01's schedule validation code) | P8 |
+| 23 | `ReservedP8_23` (ditto, if 08-01 needs a second code) | P8 |
+| 24 | `ReservedP8_24` | P8 |
+
+Indices 25+ follow the same pattern with their owner block (e.g. `ReservedP9_25`, `ReservedP11_31`).
+
 ## 9. Outbox `outbox_msg::Kind` tags (prost)
 
 | Tag | Item | Status |
@@ -306,6 +325,13 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Crates | `ostro-witcheck` | P5 (05-05) |
 | Crates | `ostro-objstore` (shared P6/P8, first runner creates it; D19), `ostro-bridge` | P6 / P8 |
 | Crates | `ostro-backup`, `ostro-triggers` | P8 |
+| gRPC services | `ostro.api.v1.Secrets` (secrets, grants), `ostro.api.v1.Connectors` (connections, egress policies) | P6 (P-14) |
+| Proto file | `ostro/api/v1/bridge.proto` | P6 (P-14) |
+| CLI verbs | `ostro secret`, `ostro grant`, `ostro connection`, `ostro egress` | P6 (P-14) |
+| Metric prefix | `ostro_effect_` | P6 (P-14) |
+| Env vars | `OSTRO_SEALING_KEY`, `OSTRO_SECRET_*`, `OSTRO_TEST_PG_*`, `OSTRO_TEST_MYSQL_*`, `OSTRO_TEST_S3_*` | P6 (P-14) |
+| Testkit features | `ostro-testkit` features `mock-http`, `db`, `canary` | P6 (P-12/P-14) |
+| Test spec | Shared MinIO/S3 test spec (image, health wait, credentials, bucket `ostro-test`, job env): canonical table in `.planning/phases/06-effects-bridge-connectors-secrets/06-DECISIONS.md` § Test environment variables → "Shared MinIO / S3 test spec". Phase 8 (08-03) references the same table; whichever phase lands first adds the CI step | P6 / P8 (W13) |
 | Git tag | `wit/ostro-runtime-v0.1.0` (local) | P5 (05-20) |
 | Crate | `ostro-conformance` (SDK conformance; Phase 12's replication suite must use a different name) | P9 |
 | Failpoint prefix | `child::` | P9 |
