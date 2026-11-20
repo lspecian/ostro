@@ -228,7 +228,7 @@ Plans:
 - [ ] 06-09-PLAN.md — Rust SDK effect builders + ctx.idempotency_key + guests fx-http/fx-sql/fx-object/fx-canary/fx-ssrf (FX-02, FX-04, FX-05)
 - [x] 06-10-PLAN.md — HTTP connector: idempotency key, unknown-outcome window, retries/timeouts/size cap, templating + no-redirect + identity encoding + scrub/redact, manual redirects, mock provider (FX-01, FX-02, FX-03, FX-07)
 - [x] 06-11-PLAN.md — SQL connector: sqlx PG/MySQL pools (schema option), statement allow-list, token-first protocol with post-COMMIT reconcile (never Retryable), retention horizon, GC (FX-04)
-- [ ] 06-12-PLAN.md — Object store: shared ostro-objstore LocalFs + S3 (rusty-s3) + presign, bridge object adapter + local HMAC presign (FX-05)
+- [x] 06-12-PLAN.md — Object store: shared ostro-objstore LocalFs + S3 (rusty-s3) + presign, bridge object adapter + local HMAC presign (FX-05)
 - [ ] 06-13-PLAN.md — Vault (vaultrs) + Kubernetes (kube) secret providers with zeroizing TTL cache (FX-10)
 - [ ] 06-14-PLAN.md — Server seam: config sections, BridgeServices + PresignKeyStore, EffectDriver adapter, CompleteEffect submission, SendGate, derive mappings, no unsupported repair for effects (B1), test helpers (FX-01..FX-06, FX-08)
 - [ ] 06-15-PLAN.md — Seam e2e (in-process): intent before I/O, journal delivery, crash re-drive instead of unsupported repair, 1 MiB blob outcome, evicted-run wake, children regression (FX-01, FX-03, FX-06)
