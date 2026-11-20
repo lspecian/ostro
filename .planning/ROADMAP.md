@@ -226,7 +226,7 @@ Plans:
 - [x] 06-07-PLAN.md — Bridge driver core: Bridge/EffectRegistry, gate → rate limit → execute → completion sink, panic → internal_error, per-target rate limits (FX-09, FX-01, FX-03)
 - [ ] 06-08-PLAN.md — Admin API surface: bridge.proto (Secrets, Connectors), REST/gRPC/fake/parity/OpenAPI, unauthenticated local presign route (FX-05..FX-08, FX-10)
 - [ ] 06-09-PLAN.md — Rust SDK effect builders + ctx.idempotency_key + guests fx-http/fx-sql/fx-object/fx-canary/fx-ssrf (FX-02, FX-04, FX-05)
-- [ ] 06-10-PLAN.md — HTTP connector: idempotency key, unknown-outcome window, retries/timeouts/size cap, templating + no-redirect + identity encoding + scrub/redact, manual redirects, mock provider (FX-01, FX-02, FX-03, FX-07)
+- [x] 06-10-PLAN.md — HTTP connector: idempotency key, unknown-outcome window, retries/timeouts/size cap, templating + no-redirect + identity encoding + scrub/redact, manual redirects, mock provider (FX-01, FX-02, FX-03, FX-07)
 - [ ] 06-11-PLAN.md — SQL connector: sqlx PG/MySQL pools (schema option), statement allow-list, token-first protocol with post-COMMIT reconcile (never Retryable), retention horizon, GC (FX-04)
 - [ ] 06-12-PLAN.md — Object store: shared ostro-objstore LocalFs + S3 (rusty-s3) + presign, bridge object adapter + local HMAC presign (FX-05)
 - [ ] 06-13-PLAN.md — Vault (vaultrs) + Kubernetes (kube) secret providers with zeroizing TTL cache (FX-10)
