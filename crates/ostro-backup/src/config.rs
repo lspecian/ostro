@@ -10,7 +10,7 @@ use std::time::Duration;
 /// S3 URL addressing style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UrlStyle {
-    /// `https://endpoint/bucket/key` (MinIO, R2 and most S3-compatible stores).
+    /// `https://endpoint/bucket/key` (SeaweedFS, R2 and most S3-compatible stores).
     #[default]
     Path,
     /// `https://bucket.endpoint/key` (AWS virtual-hosted style).
@@ -38,7 +38,7 @@ pub struct BackupConfig {
     pub seal_interval: Duration,
     /// S3 region.
     pub region: Option<String>,
-    /// S3 endpoint override (MinIO, R2, ...).
+    /// S3 endpoint override (SeaweedFS, R2, ...).
     pub endpoint: Option<String>,
     /// Path- or virtual-hosted-style addressing.
     pub url_style: UrlStyle,
@@ -48,7 +48,7 @@ pub struct BackupConfig {
     pub secret_access_key: Option<String>,
     /// Session token (redacted in `Debug`).
     pub session_token: Option<String>,
-    /// Allow a plain `http://` endpoint (tests, local MinIO).
+    /// Allow a plain `http://` endpoint (tests, a local S3-compatible store).
     pub allow_http: bool,
     /// TLS root source.
     pub tls_roots: TlsRoots,

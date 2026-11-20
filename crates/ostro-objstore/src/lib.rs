@@ -142,7 +142,7 @@ pub trait ObjectStore: Send + Sync + 'static {
 /// S3 URL addressing style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UrlStyle {
-    /// `https://endpoint/bucket/key` (MinIO, R2 and most S3-compatible stores).
+    /// `https://endpoint/bucket/key` (SeaweedFS, R2 and most S3-compatible stores).
     #[default]
     Path,
     /// `https://bucket.endpoint/key` (AWS virtual-hosted style).
@@ -193,13 +193,13 @@ impl std::fmt::Debug for Credentials {
 pub struct StoreOptions {
     /// Region (default `us-east-1`).
     pub region: Option<String>,
-    /// Endpoint override (MinIO, R2, GCS interop). Default: `https://s3.<region>.amazonaws.com`.
+    /// Endpoint override (SeaweedFS, R2, GCS interop). Default: `https://s3.<region>.amazonaws.com`.
     pub endpoint: Option<String>,
     /// Path- or virtual-hosted-style addressing.
     pub url_style: UrlStyle,
     /// Credentials; `None` sends unsigned requests (public buckets).
     pub credentials: Option<Credentials>,
-    /// Allow a plain `http://` endpoint (tests, local MinIO). Required for `http://`.
+    /// Allow a plain `http://` endpoint (tests, a local S3-compatible store). Required for `http://`.
     pub allow_http: bool,
     /// TLS root source.
     pub tls_roots: TlsRoots,

@@ -1,7 +1,7 @@
 //! S3 backend: the shared conformance suite against
 //! - an in-process **s3s-fs** server (always; SigV4 is verified, so signing is exercised), and
-//! - **MinIO**, env-gated on the Phase 6 convention `OSTRO_TEST_S3_URL` / `_ACCESS_KEY` /
-//!   `_SECRET_KEY` / `_BUCKET` (CI's MinIO step exports them). Unset: a loud
+//! - an external **S3-compatible store** (SeaweedFS in CI), env-gated on the Phase 6 convention `OSTRO_TEST_S3_URL` / `_ACCESS_KEY` /
+//!   `_SECRET_KEY` / `_BUCKET` (CI's SeaweedFS step exports them). Unset: a loud
 //!   `SKIP (human_needed)` line and a pass (WSL has no Docker).
 //!
 //! Plus retry/backoff behaviour against a scripted raw-HTTP server.
@@ -195,12 +195,12 @@ async fn mismatched_if_match(s: &S3Store) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// MinIO leg (CI; human_needed locally)
+// External S3-compatible leg (CI SeaweedFS; human_needed locally)
 // ---------------------------------------------------------------------------------------------
 
-fn minio() -> Option<(StoreOptions, String)> {
+fn external_s3() -> Option<(StoreOptions, String)> {
     let Ok(url) = std::env::var("OSTRO_TEST_S3_URL") else {
-        println!("SKIP (human_needed): OSTRO_TEST_S3_URL unset (CI MinIO step / Docker host)");
+        println!("SKIP (human_needed): OSTRO_TEST_S3_URL unset (CI SeaweedFS step / Docker host)");
         return None;
     };
     let var = |n: &str| {
@@ -231,8 +231,8 @@ fn run_ns() -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn conformance_minio() {
-    let Some((opts, bucket)) = minio() else {
+async fn conformance_external_s3() {
+    let Some((opts, bucket)) = external_s3() else {
         return;
     };
     let big = std::env::var("OSTRO_TEST_S3_BIG").is_ok_and(|v| v == "1");
@@ -253,12 +253,42 @@ async fn conformance_minio() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn minio_rejects_mismatched_if_match() {
-    let Some((opts, bucket)) = minio() else {
+async fn external_s3_rejects_mismatched_if_match() {
+    let Some((opts, bucket)) = external_s3() else {
         return;
     };
     let s = S3Store::new(&bucket, &run_ns(), &opts).unwrap();
     mismatched_if_match(&s).await;
+}
+
+/// Smoke check: the store enforces `If-None-Match: *` (two creates of one key, the second
+/// gets 412). A store that silently ignores the header would let the second PUT overwrite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn external_s3_if_none_match_second_put_412() {
+    let Some((opts, bucket)) = external_s3() else {
+        return;
+    };
+    let s = S3Store::new(&bucket, &run_ns(), &opts).unwrap();
+    let key = "inm-smoke/LOCK";
+    let first = s
+        .put_if_absent(key, Bytes::from_static(b"first"))
+        .await
+        .unwrap();
+    assert!(
+        !first.is_precondition_failed(),
+        "first If-None-Match: * PUT must create"
+    );
+    let second = s
+        .put_if_absent(key, Bytes::from_static(b"second"))
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        Conditional::PreconditionFailed,
+        "second If-None-Match: * PUT must get 412"
+    );
+    assert_eq!(&s.get(key).await.unwrap().unwrap().0[..], b"first");
+    s.delete(key).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------

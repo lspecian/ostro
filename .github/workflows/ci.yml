@@ -131,33 +131,43 @@ jobs:
 
       # --- native legs: macOS arm64, linux gnu (fast feedback) ---
       - if: matrix.name == 'linux-x86_64-gnu'
-        name: Start MinIO (shared Phase 6/8 S3 test spec)
-        # 06-DECISIONS "Shared MinIO / S3 test spec" (canonical for Phases 6 and 8; added by
-        # 08-03). A docker-run step because service containers cannot pass `server /data`.
+        name: Start SeaweedFS (shared Phase 6/8 S3 test spec)
+        # 06-DECISIONS "Shared S3 test spec" (canonical for Phases 6 and 8; added by 08-03;
+        # backend = SeaweedFS, Apache-2.0, per user direction 2026-11-20). `weed mini` is a
+        # single-container S3 server on :8333; a docker-run step because service containers
+        # cannot pass the `mini` command. Image pin: 4.54 is GitHub's latest release; if the
+        # pull fails, fall back to the newest release tag confirmed on Docker Hub.
         # Exports the OSTRO_TEST_S3_* env to the later steps of this leg only.
         run: |
-          docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=ostro -e MINIO_ROOT_PASSWORD=ostrominio quay.io/minio/minio server /data
+          docker run -d --name seaweedfs -p 8333:8333 \
+            -e AWS_ACCESS_KEY_ID=ostro -e AWS_SECRET_ACCESS_KEY=ostroseaweed -e S3_BUCKET=ostro-test \
+            chrislusf/seaweedfs:4.54 mini -dir=/data
+          s3() { curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user ostro:ostroseaweed "$@"; }
+          # readiness: the bucket answers a signed HEAD with 200 (S3_BUCKET creates it)
+          ready=0
           for _ in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:9000/minio/health/ready; then break; fi
+            if s3 -f -o /dev/null -I http://127.0.0.1:8333/ostro-test; then ready=1; break; fi
             sleep 1
           done
-          curl -sf http://127.0.0.1:9000/minio/health/ready
-          # = `mc alias set m http://127.0.0.1:9000 ostro ostrominio && mc mb -p m/ostro-test`
-          # (MC_HOST_m is mc's env form of the alias, so the one-off container needs no shell)
-          docker run --rm --network host -e MC_HOST_m=http://ostro:ostrominio@127.0.0.1:9000 minio/mc mb -p m/ostro-test
+          if [ "$ready" != 1 ]; then
+            # S3 is up but S3_BUCKET did not create the bucket: create it via the S3 API
+            s3 -o /dev/null -X PUT http://127.0.0.1:8333/ostro-test || true
+          fi
+          s3 -f -o /dev/null -I http://127.0.0.1:8333/ostro-test || { docker logs seaweedfs; exit 1; }
           {
-            echo "OSTRO_TEST_S3_URL=http://127.0.0.1:9000"
+            echo "OSTRO_TEST_S3_URL=http://127.0.0.1:8333"
             echo "OSTRO_TEST_S3_ACCESS_KEY=ostro"
-            echo "OSTRO_TEST_S3_SECRET_KEY=ostrominio"
+            echo "OSTRO_TEST_S3_SECRET_KEY=ostroseaweed"
             echo "OSTRO_TEST_S3_BUCKET=ostro-test"
           } >> "$GITHUB_ENV"
       - if: ${{ !matrix.zig }}
         name: cargo test
         run: cargo test --workspace --locked
       - if: matrix.name == 'linux-x86_64-gnu'
-        name: ostro-objstore S3 conformance (MinIO)
-        # 08-03: conformance + conditional PUT (If-None-Match / If-Match) + multipart against
-        # MinIO; fails loudly here if the OSTRO_TEST_S3_* env from the MinIO step is missing.
+        name: ostro-objstore S3 conformance (SeaweedFS)
+        # 08-03: conformance + conditional PUT (If-None-Match / If-Match, incl. the 412-on-
+        # second-create smoke) + multipart against SeaweedFS; fails loudly here if the
+        # OSTRO_TEST_S3_* env from the SeaweedFS step is missing.
         run: |
           test -n "${OSTRO_TEST_S3_URL:-}"
           cargo test -p ostro-objstore --test s3 --locked -- --nocapture

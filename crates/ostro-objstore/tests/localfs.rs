@@ -113,7 +113,7 @@ async fn open_url_dispatch() {
     let s3 = open_url(
         "s3://bucket/some/prefix",
         &StoreOptions {
-            endpoint: Some("https://minio.example".into()),
+            endpoint: Some("https://s3.example".into()),
             ..StoreOptions::default()
         },
     );

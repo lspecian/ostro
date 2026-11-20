@@ -89,7 +89,7 @@ impl Resp {
     }
 }
 
-/// S3-compatible object store (AWS, MinIO, R2, GCS interop, ...).
+/// S3-compatible object store (AWS, SeaweedFS, R2, GCS interop, ...).
 pub struct S3Store {
     bucket: Bucket,
     credentials: Option<rusty_s3::Credentials>,

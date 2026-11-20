@@ -1,6 +1,6 @@
 //! Backend-agnostic conformance suite (08-03). Every check takes `Arc<dyn ObjectStore>` (so
 //! object safety is exercised on every call) and a namespace `ns` that prefixes every key, so
-//! a shared bucket (CI MinIO) can be reused across runs.
+//! a shared bucket (CI SeaweedFS) can be reused across runs.
 
 #![allow(dead_code)] // each test binary uses a subset
 
