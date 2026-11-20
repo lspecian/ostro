@@ -3,6 +3,7 @@
 #![allow(dead_code, clippy::disallowed_methods, clippy::disallowed_types)]
 
 pub mod flaky_router;
+pub mod gen_effects;
 pub mod gen_lifecycle;
 pub mod gen_waits;
 pub mod manual_hw;
@@ -25,7 +26,7 @@ use ostro_types::{
 use tokio::time::timeout;
 
 /// Driver view of one run, handed to the `rebuild_digest` generator hooks
-/// ([`gen_waits`], [`gen_lifecycle`]). `next_seq` is re-read from live state just before the
+/// ([`gen_waits`], [`gen_lifecycle`], [`gen_effects`]). `next_seq` is re-read from live state just before the
 /// hook runs (inputs journaled by apply move it).
 #[derive(Clone, Debug)]
 pub struct GenRun {

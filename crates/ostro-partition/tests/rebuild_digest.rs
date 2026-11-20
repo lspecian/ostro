@@ -14,11 +14,15 @@ use std::path::Path;
 use std::time::Duration;
 
 use bytes::Bytes;
+use common::gen_effects::EffectOp;
 use common::gen_lifecycle::LifecycleOp;
 use common::gen_waits::WaitOp;
 use common::{GenRun, OPEN_T, T, copy_dir, run_on, start_run};
 use ostro_log::ReplicatedLog;
-use ostro_partition::{ApplyOutcome, MachineConfig, Node, NodeConfig, PartitionSlot, StartMode};
+use ostro_partition::store::keys::decode_effect_key;
+use ostro_partition::{
+    ApplyOutcome, MachineConfig, Node, NodeConfig, PartitionSlot, StartMode, Table, query,
+};
 use ostro_types::command::{
     AttemptTokenMsg, CompleteRun, Derived, EventsAppended, JournalEvent, MAX_RUN_TAGS,
     MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, ScheduleTimer, SendMessage,
@@ -105,6 +109,9 @@ enum Op {
     Waits(Option<WaitOp>),
     /// Plan 05-02 hook: lifecycle commands from `common::gen_lifecycle` (05-09).
     Lifecycle(Option<LifecycleOp>),
+    /// Plan 06-03: effect commands from `common::gen_effects` (RegisterEffect/CancelEffect,
+    /// CompleteEffect, terminal cleanup, stale LeaderAnnounced).
+    Effects(Option<EffectOp>),
 }
 
 fn cfg_strategy() -> impl Strategy<Value = Cfg> {
@@ -157,6 +164,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         // Plan 05-02 generator hooks (05-08 / 05-09 fill them; `None` = no command).
         2 => common::gen_waits::strategy().prop_map(Op::Waits),
         2 => common::gen_lifecycle::strategy().prop_map(Op::Lifecycle),
+        // Plan 06-03 generator hook.
+        2 => common::gen_effects::strategy().prop_map(Op::Effects),
     ]
 }
 
@@ -515,6 +524,12 @@ async fn drive(dir: &Path, sc: &Scenario) {
                     submit_all(&node, common::gen_lifecycle::commands(l, &view, n)).await;
                 }
             }
+            Op::Effects(e) => {
+                if let Some(e) = e {
+                    let view = gen_view(&node, &runs);
+                    submit_all(&node, common::gen_effects::commands(e, &view, n)).await;
+                }
+            }
         }
     }
     settle(&node).await;
@@ -624,9 +639,35 @@ async fn check(sc: Scenario) -> Result<(), String> {
             ));
         }
     }
+    effects_invariant(&live)?;
     live.shutdown().await.expect("shutdown");
     nb.shutdown().await.expect("shutdown");
     nc.shutdown().await.expect("shutdown");
+    Ok(())
+}
+
+/// P-8 (06-03): every `effects` row belongs to an existing run that is live or a resumable
+/// terminal; no row survives a non-resumable terminal transition.
+fn effects_invariant(node: &Node) -> Result<(), String> {
+    for p in 0..P {
+        let h = node.handle(PartitionId(p)).expect("ready");
+        let reader = h.store().reader();
+        let rows = reader
+            .prefix(Table::Effects, &[], usize::MAX)
+            .expect("effects scan");
+        for (k, _) in rows {
+            let (run, op) = decode_effect_key(&k).ok_or("malformed effects key")?;
+            let Some(rec) = query::run_record(&reader, &run).expect("run record") else {
+                return Err(format!("p{p}: effects row {run:?}/{op} without a run"));
+            };
+            if rec.status.is_terminal() && !rec.resumable {
+                return Err(format!(
+                    "p{p}: effects row {run:?}/{op} survived non-resumable {:?}",
+                    rec.status
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -748,6 +789,74 @@ fn fixed_scenario_phase4() {
             complete: i % 4 == 1,
         });
         if i == 20 {
+            ops.push(Op::Restart(tiny.clone()));
+        }
+    }
+    let sc = Scenario {
+        initial: tiny,
+        ops,
+        rebuild_chunks: (1, 1024),
+    };
+    rt().block_on(check(sc)).expect("live == rebuilt");
+}
+
+/// Plan 06-03: a fixed scenario over the effect paths: effects scheduled on granted runs
+/// (some suspended), completions (valid, duplicate, ahead, blob), cancels, resumable and
+/// non-resumable terminals, stale announcements and a restart (an accepted LeaderAnnounced:
+/// the P-9 wake of suspended runs with open effects); rebuilt with chunk 1 and 1024.
+#[test]
+fn fixed_scenario_effects() {
+    let tiny = Cfg {
+        max_chunk_cmds: 1,
+        checkpoint_batches: 1,
+        checkpoint_every: Duration::from_millis(1),
+    };
+    let mut ops = Vec::new();
+    for i in 0..30usize {
+        let p = (i % 2) as u16;
+        ops.push(Op::Start {
+            p,
+            key: None,
+            oversize: false,
+            delayed: false,
+        });
+        ops.push(Op::Grant { p, i });
+        ops.push(Op::Effects(Some(EffectOp::Schedule {
+            run: i,
+            kind: (i % 4) as u32,
+            repeat: i % 5 == 0,
+            cancel_back: (i % 7 == 3).then_some(0),
+            suspend: i % 3 == 0,
+        })));
+        ops.push(Op::Effects(Some(EffectOp::Schedule {
+            run: i,
+            kind: 1,
+            repeat: false,
+            cancel_back: None,
+            suspend: false,
+        })));
+        if i % 4 != 1 {
+            ops.push(Op::Effects(Some(EffectOp::Complete {
+                run: i,
+                op: if i % 6 == 5 { Err(1) } else { Ok((i % 2) as u64) },
+                blob: i % 8 == 2,
+                twice: i % 3 == 1,
+            })));
+        }
+        if i % 5 == 2 {
+            ops.push(Op::Effects(Some(EffectOp::Cancel { run: i, back: 0 })));
+        }
+        if i % 4 == 3 {
+            ops.push(Op::Effects(Some(EffectOp::Terminal {
+                run: i,
+                resumable: i % 8 == 3,
+                failed: true,
+            })));
+        }
+        if i % 9 == 4 {
+            ops.push(Op::Effects(Some(EffectOp::Announce { run: i })));
+        }
+        if i == 15 {
             ops.push(Op::Restart(tiny.clone()));
         }
     }
