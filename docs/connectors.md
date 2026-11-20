@@ -651,4 +651,5 @@ Metrics: `ostro_effect_duration_seconds{kind}`, `ostro_effect_completed_total{ki
 - `allow_private` is node-level only; per-rule `allow_private` is deferred (P-6).
 - GCS interoperability is unverified; Azure Blob is deferred.
 - Presign expiry is per connection until a WIT 0.1.N `object-presign` function exists (D-FX8).
-- The SC3 canary scan of the OTLP export runs at the Phase 8 gate (D-FX6).
+- The SC3 canary scan of the OTLP export (D-FX6) ran in 08-21 (`ostro-server` test
+  `otlp_canary`, clean).

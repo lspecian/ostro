@@ -114,8 +114,10 @@ data directory and the object root, plus 9 encodings echoed back by the provider
 - The SQL and object connectors return database and object bytes as they are; their secrets are
   operator credentials that never appear in results. SQL error messages are scrubbed of the
   connection password and URL credentials.
-- The OTLP export path is scanned at the Phase 8 gate (D-FX6); Phase 6 scans everything that
-  OTLP would export through a TRACE-level capture layer.
+- The OTLP export path is scanned too (D-FX6): Phase 6 scans everything OTLP would export
+  through a TRACE-level capture layer, and since 08-21 `crates/ostro-server/tests/otlp_canary.rs`
+  runs the fx-canary scenario with a real OTLP exporter and scans the collected spans and log
+  records in every harness encoding (raw, hex, base64, percent-encoded, JSON-escaped).
 
 ---
 
