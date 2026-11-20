@@ -8,6 +8,8 @@
 pub mod deploy;
 pub mod lifecycle;
 pub mod runs;
+pub mod schedules;
+pub mod webhooks;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -70,6 +72,16 @@ pub enum ClientCommand {
     },
     /// Upload a Wasm component (no build) and optionally activate its workflows.
     Deploy(deploy::DeployArgs),
+    /// Manage cron schedules (ls, get, create, update, delete, pause, resume, trigger).
+    Schedules {
+        #[command(subcommand)]
+        command: schedules::SchedulesCommand,
+    },
+    /// Manage inbound webhooks (ls, get, create, update, delete).
+    Webhooks {
+        #[command(subcommand)]
+        command: webhooks::WebhooksCommand,
+    },
 }
 
 /// Run a verb to completion on a current-thread runtime.
@@ -102,6 +114,8 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
             command: lifecycle::TokenCommand::Complete(a),
         } => &a.conn,
         ClientCommand::Deploy(a) => &a.conn,
+        ClientCommand::Schedules { command } => command.conn(),
+        ClientCommand::Webhooks { command } => command.conn(),
     };
     let out = conn.out();
     let client = match conn.client() {
@@ -122,6 +136,8 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
             command: lifecycle::TokenCommand::Complete(a),
         } => lifecycle::token_complete(&client, out, a).await,
         ClientCommand::Deploy(a) => deploy::deploy(&client, out, a).await,
+        ClientCommand::Schedules { command } => schedules::run(&client, out, command).await,
+        ClientCommand::Webhooks { command } => webhooks::run(&client, out, command).await,
     };
     match res {
         Ok(o) => o,

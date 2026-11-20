@@ -24,6 +24,8 @@ tar.workspace = true
 tempfile.workspace = true
 # FakeControlPlane-backed CLI tests (08-12)
 ostro-api = { path = "../ostro-api", features = ["fake"] }
+# serve the fake router on 127.0.0.1:0 in tests/phase8_verbs.rs (08-12)
+axum.workspace = true
 
 [lints]
 workspace = true

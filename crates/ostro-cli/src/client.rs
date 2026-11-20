@@ -347,6 +347,24 @@ impl Client {
     pub async fn complete_token(&self, body: &Value) -> Result<Response, CallError> {
         self.post(&["v1", "tokens", "complete"], body).await
     }
+
+    // --- generic (Phase 8 verbs, 08-12) -----------------------------------------------
+
+    /// One JSON request: `method base/segments?query` with an optional JSON body. The
+    /// Phase 8 verbs (`ostro schedules`, `ostro webhooks`) build their routes on this.
+    pub async fn call(
+        &self,
+        method: Method,
+        segments: &[&str],
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<Response, CallError> {
+        let mut rb = self.request(method, self.url(segments, query));
+        if let Some(b) = body {
+            rb = rb.json(b);
+        }
+        self.send(rb).await
+    }
 }
 
 #[cfg(test)]

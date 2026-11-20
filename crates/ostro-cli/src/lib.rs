@@ -18,6 +18,7 @@ use tar as _;
 
 #[cfg(test)]
 mod dev_dep_anchors {
-    // FakeControlPlane-backed CLI tests (08-12).
+    // FakeControlPlane-backed CLI tests (08-12, tests/phase8_verbs.rs).
+    use axum as _;
     use ostro_api as _;
 }

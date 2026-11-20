@@ -3141,6 +3141,7 @@ dependencies = [
 name = "ostro-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "jiff 1.0.1",
  "ostro-api",
