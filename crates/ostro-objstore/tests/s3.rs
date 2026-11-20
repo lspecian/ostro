@@ -424,3 +424,83 @@ async fn retries_connection_errors() {
         other => panic!("expected a transport error, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6 (06-12): put_with content type (s3s-fs always, external store env-gated)
+// ---------------------------------------------------------------------------------------------
+
+/// put_with stores the content type: a presigned GET (no override) answers with it.
+async fn put_with_content_type(s: &S3Store, key: &str) {
+    use ostro_objstore::{PresignMethod, PresignOpts, PutOpts};
+    s.put_with(
+        key,
+        Bytes::from_static(b"<p>hi</p>"),
+        &PutOpts {
+            content_type: Some("text/html".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let (body, meta) = s.get(key).await.unwrap().unwrap();
+    assert_eq!(&body[..], b"<p>hi</p>");
+    assert_eq!(meta.size, 9);
+    let url = s
+        .presign(
+            PresignMethod::Get,
+            key,
+            Duration::from_secs(60),
+            &PresignOpts::default(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let r = reqwest::get(url).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let ct = r
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(ct.starts_with("text/html"), "content-type {ct:?}");
+    // put_with without a content type is a plain put.
+    s.put_with(key, Bytes::from_static(b"x"), &PutOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(&s.get(key).await.unwrap().unwrap().0[..], b"x");
+    s.delete(key).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3s_fs_put_with_content_type() {
+    let srv = start_s3s_fs().await;
+    let s = S3Store::new(BUCKET, "ct", &s3s_opts(&srv.endpoint)).unwrap();
+    put_with_content_type(&s, "page.html").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s3s_fs_with_client_uses_injected_client() {
+    let srv = start_s3s_fs().await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let s = S3Store::with_client(BUCKET, "", &s3s_opts(&srv.endpoint), client).unwrap();
+    s.put("wc", Bytes::from_static(b"1")).await.unwrap();
+    assert_eq!(&s.get("wc").await.unwrap().unwrap().0[..], b"1");
+    // allow_http still gates a plain-http endpoint.
+    let strict = StoreOptions {
+        allow_http: false,
+        ..s3s_opts(&srv.endpoint)
+    };
+    assert!(matches!(
+        S3Store::with_client(BUCKET, "", &strict, reqwest::Client::new()),
+        Err(Error::Config(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn external_s3_put_with_content_type() {
+    let Some((opts, bucket)) = external_s3() else {
+        return;
+    };
+    let s = S3Store::new(&bucket, &run_ns(), &opts).unwrap();
+    put_with_content_type(&s, "page.html").await;
+}

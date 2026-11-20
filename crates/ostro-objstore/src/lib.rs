@@ -9,6 +9,13 @@
 //! Created empty by plan 08-01 (Phase 8 ran first); 08-03 defined and **froze** the trait
 //! below, matching 06-02. Phase 6 (06-12) adds only `put_with`/`presign`, each with a default
 //! impl, so neither phase breaks the other's implementors. No `object_store`, no chrono.
+//!
+//! Ownership: base created by 08-01/08-03 (Phase 8 ran first; 06-02 would otherwise have
+//! created it); Phase 8 owns multipart/conditional semantics and the retry policy. Phase 6
+//! (06-12) added, additively: [`PutOpts`], [`PresignMethod`], [`PresignOpts`],
+//! [`ObjectStore::put_with`], [`ObjectStore::presign`], [`clamp_presign_expiry`], the S3
+//! overrides of both, `S3Store::with_client`, and the LocalFs content-type sidecar
+//! ([`LocalFs::content_type`]).
 
 use std::sync::Arc;
 
@@ -75,6 +82,52 @@ impl<T> Conditional<T> {
     }
 }
 
+/// Options of [`ObjectStore::put_with`] (Phase 6, 06-12).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PutOpts {
+    /// `Content-Type` stored with the object (S3: a signed request header; LocalFs: a
+    /// `<key>.ostro-meta.json` sidecar). `None` = backend default.
+    pub content_type: Option<String>,
+}
+
+/// HTTP method a presigned URL is valid for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresignMethod {
+    /// Download (`GET`).
+    Get,
+    /// Upload (`PUT`).
+    Put,
+}
+
+impl PresignMethod {
+    /// `"GET"` or `"PUT"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Put => "PUT",
+        }
+    }
+}
+
+/// Options of [`ObjectStore::presign`] (Phase 6, 06-12).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PresignOpts {
+    /// For `Put`: a signed `content-type` header; the uploader must send exactly this value.
+    pub content_type: Option<String>,
+    /// For `Get`: the `response-content-type` override the server answers with.
+    pub response_content_type: Option<String>,
+}
+
+/// Shortest presign validity S3 accepts (1 s).
+pub const MIN_PRESIGN_EXPIRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// Longest presign validity S3 accepts (7 days).
+pub const MAX_PRESIGN_EXPIRY: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Clamp a presign validity to S3's accepted range (1 s ..= 7 d).
+pub fn clamp_presign_expiry(d: std::time::Duration) -> std::time::Duration {
+    d.clamp(MIN_PRESIGN_EXPIRY, MAX_PRESIGN_EXPIRY)
+}
+
 /// The object-store contract (frozen by 08-03; Phase 6 adds only defaulted methods).
 ///
 /// Keys are `/`-separated UTF-8 strings without leading `/`, empty segments, `.`/`..`
@@ -132,6 +185,27 @@ pub trait ObjectStore: Send + Sync + 'static {
             buf.extend_from_slice(&chunk?);
         }
         self.put(key, buf.freeze()).await
+    }
+
+    /// Unconditional write with options (Phase 6, 06-12). The default ignores `opts` and
+    /// calls [`ObjectStore::put`]; S3 sends the content type, LocalFs stores it in a sidecar.
+    async fn put_with(&self, key: &str, body: Bytes, opts: &PutOpts) -> Result<PutOutcome> {
+        let _ = opts;
+        self.put(key, body).await
+    }
+
+    /// A URL that lets a plain HTTP client `GET`/`PUT` `key` for `expires` (clamped to
+    /// 1 s ..= 7 d) without credentials (Phase 6, 06-12). `Ok(None)` when the backend cannot
+    /// presign (the default, and LocalFs: the bridge serves an Ostro HMAC URL instead).
+    async fn presign(
+        &self,
+        method: PresignMethod,
+        key: &str,
+        expires: std::time::Duration,
+        opts: &PresignOpts,
+    ) -> Result<Option<::url::Url>> {
+        let _ = (method, key, expires, opts);
+        Ok(None)
     }
 
     /// Whether `put_if_absent`/`put_if_match` are enforced by the backend. `false` means

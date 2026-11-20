@@ -155,3 +155,152 @@ fn relative_root_rejected() {
         Err(Error::Config(_))
     ));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Phase 6 (06-12) additions: put_with + content-type sidecar, presign, object safety
+// ---------------------------------------------------------------------------------------------
+
+use ostro_objstore::{PresignMethod, PresignOpts, PutOpts};
+
+fn _assert_object_safe(_: std::sync::Arc<dyn ObjectStore>) {}
+
+#[test]
+fn localfs_is_object_safe() {
+    let dir = tempfile::tempdir().unwrap();
+    _assert_object_safe(Arc::new(LocalFs::new(dir.path()).unwrap()));
+}
+
+#[tokio::test]
+async fn put_with_round_trip_and_sidecar_hidden() {
+    let dir = tempfile::tempdir().unwrap();
+    let fs = LocalFs::new(dir.path()).unwrap();
+    let opts = PutOpts {
+        content_type: Some("text/plain; charset=\"utf-8\"".into()),
+    };
+    let out = fs
+        .put_with("docs/a.txt", Bytes::from_static(b"hello"), &opts)
+        .await
+        .unwrap();
+    let (body, meta) = fs.get("docs/a.txt").await.unwrap().unwrap();
+    assert_eq!(&body[..], b"hello");
+    assert_eq!(meta.e_tag, out.e_tag);
+    assert_eq!(
+        fs.content_type("docs/a.txt").await.unwrap().as_deref(),
+        Some("text/plain; charset=\"utf-8\"")
+    );
+    let root = dir.path().canonicalize().unwrap();
+    assert!(root.join("docs/a.txt.ostro-meta.json").exists());
+    // The sidecar is not an object: never listed, and its name is reserved.
+    let keys: Vec<String> = fs
+        .list("", None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.key)
+        .collect();
+    assert_eq!(keys, ["docs/a.txt"]);
+    assert!(matches!(
+        fs.put("docs/a.txt.ostro-meta.json", Bytes::new()).await,
+        Err(Error::InvalidKey { .. })
+    ));
+    assert!(matches!(
+        fs.put("x.ostro-meta.json/y", Bytes::new()).await,
+        Err(Error::InvalidKey { .. })
+    ));
+    // A plain put drops the stale content type; put_with without one too.
+    fs.put("docs/a.txt", Bytes::from_static(b"v2"))
+        .await
+        .unwrap();
+    assert_eq!(fs.content_type("docs/a.txt").await.unwrap(), None);
+    assert!(!root.join("docs/a.txt.ostro-meta.json").exists());
+    fs.put_with("docs/a.txt", Bytes::from_static(b"v3"), &opts)
+        .await
+        .unwrap();
+    fs.put_with("docs/a.txt", Bytes::from_static(b"v4"), &PutOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(fs.content_type("docs/a.txt").await.unwrap(), None);
+    // delete removes object and sidecar, and prunes the directory.
+    fs.put_with("docs/a.txt", Bytes::from_static(b"v5"), &opts)
+        .await
+        .unwrap();
+    fs.delete("docs/a.txt").await.unwrap();
+    assert!(!root.join("docs").exists());
+    assert_eq!(fs.content_type("docs/a.txt").await.unwrap(), None);
+    // Through the trait object, put_with dispatches to the LocalFs override.
+    let s: Arc<dyn ObjectStore> = Arc::new(fs.clone());
+    s.put_with("k", Bytes::from_static(b"x"), &opts)
+        .await
+        .unwrap();
+    assert!(fs.content_type("k").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn traversal_and_absolute_keys_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(&dir);
+    for bad in ["../escape", "a/../../b", "/etc/passwd", "a//b", ""] {
+        assert!(
+            matches!(
+                s.put_with(bad, Bytes::new(), &PutOpts::default()).await,
+                Err(Error::InvalidKey { .. })
+            ),
+            "{bad:?} accepted"
+        );
+        assert!(s.get(bad).await.is_err(), "{bad:?} readable");
+    }
+    assert!(!dir.path().parent().unwrap().join("escape").exists());
+}
+
+#[tokio::test]
+async fn list_order_start_after_and_head_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(&dir);
+    for k in ["b", "a/2", "a/1", "c/x/y", "a/10"] {
+        s.put(k, Bytes::from(k.as_bytes().to_vec())).await.unwrap();
+    }
+    let keys =
+        |v: Vec<ostro_objstore::ObjectMeta>| v.into_iter().map(|m| m.key).collect::<Vec<_>>();
+    assert_eq!(
+        keys(s.list("", None).await.unwrap()),
+        ["a/1", "a/10", "a/2", "b", "c/x/y"]
+    );
+    assert_eq!(
+        keys(s.list("", Some("a/10")).await.unwrap()),
+        ["a/2", "b", "c/x/y"]
+    );
+    assert_eq!(
+        keys(s.list("a/", Some("a/1")).await.unwrap()),
+        ["a/10", "a/2"]
+    );
+    let m = s.head("c/x/y").await.unwrap().unwrap();
+    assert_eq!(m.size, 5);
+    assert!(m.last_modified > jiff::Timestamp::UNIX_EPOCH);
+    assert_eq!(m.e_tag.as_deref().map(str::len), Some(64));
+    assert_eq!(s.head("nope").await.unwrap(), None);
+    assert!(s.get("nope").await.unwrap().is_none());
+    s.delete("nope").await.unwrap();
+    s.delete_many(&["a/1".into(), "missing".into()])
+        .await
+        .unwrap();
+    assert_eq!(s.head("a/1").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn localfs_presign_is_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = store(&dir);
+    for m in [PresignMethod::Get, PresignMethod::Put] {
+        assert_eq!(
+            s.presign(
+                m,
+                "k",
+                std::time::Duration::from_secs(60),
+                &PresignOpts::default()
+            )
+            .await
+            .unwrap(),
+            None
+        );
+    }
+}

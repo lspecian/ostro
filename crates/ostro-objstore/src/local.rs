@@ -14,6 +14,10 @@
 //!   (it would hash every listed object), so `list` returns `e_tag: None`.
 //! - Because keys are paths, a key cannot also be a "directory" of another key (`a` and
 //!   `a/b` cannot coexist); such a write fails with [`Error::Io`].
+//! - Phase 6 (06-12): `put_with` stores the content type in a sidecar `<key>.ostro-meta.json`
+//!   (written tmp + fsync + rename like the object, under the same lock). Key segments
+//!   ending in `.ostro-meta.json` are reserved, sidecars never appear in `list`, and
+//!   every write/delete of the key drops a stale sidecar. LocalFs never presigns.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -29,9 +33,65 @@ use futures_util::StreamExt as _;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
-use crate::{Conditional, Error, ObjectMeta, ObjectStore, PutOutcome, Result, check_key};
+use crate::{Conditional, Error, ObjectMeta, ObjectStore, PutOpts, PutOutcome, Result, check_key};
 
 const TMP_DIR: &str = ".ostro-tmp";
+/// Suffix of the Phase 6 content-type sidecar (`<key>.ostro-meta.json`).
+const META_SUFFIX: &str = ".ostro-meta.json";
+
+/// The sidecar path of the object at `dest`.
+fn sidecar_of(dest: &Path) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(META_SUFFIX);
+    dest.with_file_name(name)
+}
+
+/// Remove a stale sidecar (absent is fine). Caller holds the lock.
+fn drop_sidecar(dest: &Path) -> Result<()> {
+    let side = sidecar_of(dest);
+    match fs::remove_file(&side) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::io(side.display(), e)),
+    }
+}
+
+/// `{"v":1,"content_type":"<escaped>"}`.
+fn encode_sidecar(content_type: &str) -> Result<Vec<u8>> {
+    let mut out = String::from("{\"v\":1,\"content_type\":\"");
+    for c in content_type.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => {
+                return Err(Error::Config(
+                    "content type contains a control character".into(),
+                ));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push_str("\"}");
+    Ok(out.into_bytes())
+}
+
+/// Inverse of [`encode_sidecar`]; `None` for anything this store did not write.
+fn decode_sidecar(raw: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(raw).ok()?;
+    let body = s
+        .strip_prefix("{\"v\":1,\"content_type\":\"")?
+        .strip_suffix("\"}")?;
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next()?),
+            '"' => return None,
+            c => out.push(c),
+        }
+    }
+    Some(out)
+}
 
 /// Filesystem-backed object store.
 #[derive(Clone)]
@@ -127,12 +187,30 @@ impl LocalFs {
         &self.root
     }
 
+    /// The content type stored by [`ObjectStore::put_with`] (Phase 6, 06-12); `None` when the
+    /// object was written without one (or is absent).
+    pub async fn content_type(&self, key: &str) -> Result<Option<String>> {
+        let side = sidecar_of(&self.path_of(key)?);
+        blocking(move || match fs::read(&side) {
+            Ok(raw) => Ok(decode_sidecar(&raw)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::io(side.display(), e)),
+        })
+        .await
+    }
+
     fn path_of(&self, key: &str) -> Result<PathBuf> {
         check_key(key)?;
         if key == TMP_DIR || key.starts_with(".ostro-tmp/") {
             return Err(Error::InvalidKey {
                 key: key.to_owned(),
                 reason: "'.ostro-tmp' is reserved by LocalFs",
+            });
+        }
+        if key.split('/').any(|seg| seg.ends_with(META_SUFFIX)) {
+            return Err(Error::InvalidKey {
+                key: key.to_owned(),
+                reason: "the '.ostro-meta.json' suffix is reserved by LocalFs",
             });
         }
         Ok(self.root.join(key))
@@ -239,6 +317,7 @@ impl LocalFs {
             return Ok(Conditional::PreconditionFailed);
         }
         self.install(&tmp, &dest)?;
+        drop_sidecar(&dest)?;
         Ok(Conditional::Ok(PutOutcome { e_tag: Some(e_tag) }))
     }
 
@@ -256,6 +335,9 @@ impl LocalFs {
             };
             if rel.is_empty() && name == TMP_DIR {
                 continue;
+            }
+            if name.ends_with(META_SUFFIX) {
+                continue; // Phase 6 content-type sidecar, not an object
             }
             let key = if rel.is_empty() {
                 name
@@ -298,6 +380,7 @@ impl LocalFs {
     fn delete_blocking(&self, key: &str) -> Result<()> {
         let path = self.path_of(key)?;
         let _g = self.guard();
+        drop_sidecar(&path)?;
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -333,6 +416,45 @@ impl ObjectStore for LocalFs {
             let tmp = this.write_tmp(&body)?;
             let _g = this.guard();
             this.install(&tmp, &dest)?;
+            drop_sidecar(&dest)?;
+            Ok(PutOutcome { e_tag: Some(e_tag) })
+        })
+        .await
+    }
+
+    async fn put_with(&self, key: &str, body: Bytes, opts: &PutOpts) -> Result<PutOutcome> {
+        let this = self.clone();
+        let key = key.to_owned();
+        let side = opts
+            .content_type
+            .as_deref()
+            .map(encode_sidecar)
+            .transpose()?;
+        blocking(move || {
+            let dest = this.path_of(&key)?;
+            let e_tag = sha256_hex(&body);
+            let tmp = this.write_tmp(&body)?;
+            let side_tmp = match &side {
+                Some(raw) => match this.write_tmp(raw) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        let _ = fs::remove_file(&tmp);
+                        return Err(e);
+                    }
+                },
+                None => None,
+            };
+            let _g = this.guard();
+            if let Err(e) = this.install(&tmp, &dest) {
+                if let Some(t) = &side_tmp {
+                    let _ = fs::remove_file(t);
+                }
+                return Err(e);
+            }
+            match side_tmp {
+                Some(t) => this.install(&t, &sidecar_of(&dest))?,
+                None => drop_sidecar(&dest)?,
+            }
             Ok(PutOutcome { e_tag: Some(e_tag) })
         })
         .await
@@ -501,6 +623,7 @@ impl ObjectStore for LocalFs {
         blocking(move || {
             let _g = this.guard();
             this.install(&tmp, &dest)?;
+            drop_sidecar(&dest)?;
             Ok(PutOutcome { e_tag: Some(e_tag) })
         })
         .await

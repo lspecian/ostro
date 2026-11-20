@@ -10,6 +10,10 @@
 //! - `put_multipart` buffers up to `multipart_threshold` (64 MiB); a shorter body is one PUT,
 //!   a longer one is CreateMultipartUpload / UploadPart (`multipart_part_size`) / Complete,
 //!   with AbortMultipartUpload on any error.
+//! - Phase 6 (06-12): `put_with` signs and sends `content-type`; `presign` returns a
+//!   `rusty_s3` `S3Action::sign` URL (validity clamped to 1 s ..= 7 d) with an optional signed
+//!   `content-type` (PUT) or `response-content-type` query (GET); [`S3Store::with_client`]
+//!   accepts an operator-supplied reqwest client.
 
 use std::time::Duration;
 
@@ -26,8 +30,9 @@ use rusty_s3::actions::{
 use rusty_s3::{Bucket, S3Action as _};
 
 use crate::{
-    Conditional, Error, MIN_MULTIPART_PART_SIZE, ObjectMeta, ObjectStore, PutOutcome, Result,
-    StoreOptions, TlsRoots, UrlStyle, check_key,
+    Conditional, Error, MIN_MULTIPART_PART_SIZE, ObjectMeta, ObjectStore, PresignMethod,
+    PresignOpts, PutOpts, PutOutcome, Result, StoreOptions, TlsRoots, UrlStyle, check_key,
+    clamp_presign_expiry,
 };
 
 /// Lifetime of each presigned request URL.
@@ -145,6 +150,19 @@ pub(crate) fn normalise_prefix(prefix: &str) -> Result<String> {
 impl S3Store {
     /// A store over `bucket`, with every key prefixed by `prefix` (normalised to end in `/`).
     pub fn new(bucket: &str, prefix: &str, opts: &StoreOptions) -> Result<Self> {
+        let client = Self::build_client(opts)?;
+        Self::with_client(bucket, prefix, opts, client)
+    }
+
+    /// Like [`S3Store::new`], but sends every request through `client` (Phase 6: the bridge's
+    /// trusted operator client). `opts.tls_roots` is ignored (the client's own roots apply);
+    /// `opts.allow_http` still gates a plain-`http` endpoint.
+    pub fn with_client(
+        bucket: &str,
+        prefix: &str,
+        opts: &StoreOptions,
+        client: reqwest::Client,
+    ) -> Result<Self> {
         let region = opts
             .region
             .clone()
@@ -187,6 +205,20 @@ impl S3Store {
             }
         });
 
+        Ok(Self {
+            bucket,
+            credentials,
+            client,
+            prefix: normalise_prefix(prefix)?,
+            conditional: opts.conditional_put,
+            multipart_threshold: opts.multipart_threshold.max(1),
+            multipart_part_size: opts.multipart_part_size.max(MIN_MULTIPART_PART_SIZE),
+            max_retries: opts.max_retries,
+            retry_base: opts.retry_base,
+        })
+    }
+
+    fn build_client(opts: &StoreOptions) -> Result<reqwest::Client> {
         let mut cb = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(60))
@@ -208,21 +240,8 @@ impl S3Store {
                 cb = cb.tls_certs_only(certs);
             }
         }
-        let client = cb
-            .build()
-            .map_err(|e| Error::Config(format!("HTTP client: {e}")))?;
-
-        Ok(Self {
-            bucket,
-            credentials,
-            client,
-            prefix: normalise_prefix(prefix)?,
-            conditional: opts.conditional_put,
-            multipart_threshold: opts.multipart_threshold.max(1),
-            multipart_part_size: opts.multipart_part_size.max(MIN_MULTIPART_PART_SIZE),
-            max_retries: opts.max_retries,
-            retry_base: opts.retry_base,
-        })
+        cb.build()
+            .map_err(|e| Error::Config(format!("HTTP client: {e}")))
     }
 
     /// The key prefix every key is stored under (empty or ending in `/`).
@@ -394,6 +413,59 @@ impl ObjectStore for S3Store {
                 detail: "412 on an unconditional PUT".into(),
             }),
         }
+    }
+
+    async fn put_with(&self, key: &str, body: Bytes, opts: &PutOpts) -> Result<PutOutcome> {
+        let Some(ct) = opts.content_type.as_deref() else {
+            return self.put(key, body).await;
+        };
+        let full = self.full_key(key)?;
+        let mut action = self.bucket.put_object(self.creds(), &full);
+        // Before signing: content-type becomes a signed header the request must carry.
+        action.headers_mut().insert("content-type", ct);
+        let resp = self
+            .send(|| {
+                self.client
+                    .put(action.sign(SIGN_EXPIRY))
+                    .header("content-type", ct)
+                    .body(body.clone())
+            })
+            .await?;
+        if resp.status.is_success() {
+            Ok(PutOutcome {
+                e_tag: resp.header("etag"),
+            })
+        } else {
+            Err(resp.into_status_error("put", key))
+        }
+    }
+
+    async fn presign(
+        &self,
+        method: PresignMethod,
+        key: &str,
+        expires: Duration,
+        opts: &PresignOpts,
+    ) -> Result<Option<::url::Url>> {
+        let full = self.full_key(key)?;
+        let expires = clamp_presign_expiry(expires);
+        let url = match method {
+            PresignMethod::Get => {
+                let mut action = self.bucket.get_object(self.creds(), &full);
+                if let Some(rct) = opts.response_content_type.as_deref() {
+                    action.query_mut().insert("response-content-type", rct);
+                }
+                action.sign(expires)
+            }
+            PresignMethod::Put => {
+                let mut action = self.bucket.put_object(self.creds(), &full);
+                if let Some(ct) = opts.content_type.as_deref() {
+                    action.headers_mut().insert("content-type", ct);
+                }
+                action.sign(expires)
+            }
+        };
+        Ok(Some(url))
     }
 
     async fn put_if_absent(&self, key: &str, body: Bytes) -> Result<Conditional<PutOutcome>> {
@@ -677,6 +749,70 @@ mod tests {
         assert!(
             url.as_str().contains("X-Amz-SignedHeaders=host%3Bif-match"),
             "{url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn presign_signs_content_type_and_clamps_expiry() {
+        let o = StoreOptions {
+            endpoint: Some("http://127.0.0.1:9000".into()),
+            allow_http: true,
+            credentials: Some(crate::Credentials {
+                access_key_id: "k".into(),
+                secret_access_key: "s".into(),
+                session_token: None,
+            }),
+            ..StoreOptions::default()
+        };
+        let s = S3Store::new("b", "pre", &o).unwrap();
+        let put = s
+            .presign(
+                PresignMethod::Put,
+                "x",
+                Duration::from_secs(30 * 24 * 3600),
+                &PresignOpts {
+                    content_type: Some("text/plain".into()),
+                    response_content_type: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let q = put.as_str();
+        assert!(q.contains("/b/pre/x?"), "{q}");
+        assert!(q.contains("X-Amz-SignedHeaders=content-type%3Bhost"), "{q}");
+        assert!(q.contains("X-Amz-Expires=604800"), "{q}");
+        let get = s
+            .presign(
+                PresignMethod::Get,
+                "x",
+                Duration::ZERO,
+                &PresignOpts {
+                    content_type: None,
+                    response_content_type: Some("application/json".into()),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let q = get.as_str();
+        assert!(
+            q.contains("X-Amz-Expires=1&") || q.ends_with("X-Amz-Expires=1"),
+            "{q}"
+        );
+        assert!(
+            q.contains("response-content-type=application%2Fjson"),
+            "{q}"
+        );
+        assert!(
+            s.presign(
+                PresignMethod::Get,
+                "../x",
+                Duration::from_secs(5),
+                &PresignOpts::default()
+            )
+            .await
+            .is_err()
         );
     }
 
