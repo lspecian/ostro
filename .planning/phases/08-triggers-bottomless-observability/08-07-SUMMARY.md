@@ -131,3 +131,7 @@ format_corpus is not re-blessed and docs/storage-format.md is unchanged.
 
 - FOUND: crates/ostro-partition/src/apply/schedule.rs, tests/apply_schedule.rs, tests/common/gen_schedule.rs
 - FOUND: commits ba5e72d, bba9269, a7c420b on main
+
+## Post-plan fixes
+
+- **826c592 `fix(08-07)`: a retried manual `request_id` is answered by its dedupe row before the overlap policy.** 08-20's CLI e2e found that `ostro schedules trigger --request-id X`, retried while the manual run it started was still live, was skipped under `Skip` (server: 409 `schedule_overlap`) and would have been buffered under `BufferOne`. Now a `Manual` fire under a live `Skip`/`BufferOne` reads its `__cron/` dedupe row first: if the row exists, the answer is `Duplicate { existing }` with `duplicates += 1`. That costs one more read on that path only. The policies that start a run already reach `start_run`'s dedupe check before any cancel or terminate. Regression test: `manual_retry_while_its_run_is_live_returns_the_run_before_overlap`. format_corpus and rebuild_digest (schedule workloads) pass unchanged.

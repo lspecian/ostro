@@ -171,3 +171,11 @@ Note: 08-VALIDATION's gate command lacks `OSTRO_CAMPAIGN_PHASE8=1`; without it t
 - **Armed server with a failed partition never prints its ready line** within 60 s (install_before_swap=return scenario); clean restarts are unaffected.
 
 ## Self-Check: PASSED
+
+## Post-plan fixes
+
+Two of the findings above are fixed:
+- 826c592 `fix(08-07)`: a trigger-now retry under overlap Skip/BufferOne returns the existing run. `cron_cli_policies` now also retries while the manual run is live.
+- 2123663 `fix(08-15)`: a signal hook redelivered after the run finished gets a 200 duplicate when its signal applied, and 409 `run_terminal` otherwise.
+
+The "armed server with a failed partition" finding is still open.

@@ -165,3 +165,7 @@ All runs used worktree wt-08-15 and `CARGO_TARGET_DIR=target/wt-08-15`, re-run a
 
 - FOUND: crates/ostro-server/src/control/webhooks.rs (`impl HookIngress`, `webhook::verify` via `verify`, `ReturnExisting`), crates/ostro-server/tests/webhooks.rs, docs/webhooks.md
 - FOUND: fd55a6c and cc38c60 on main
+
+## Post-plan fixes
+
+- **2123663 `fix(08-15)`: a signal hook redelivered after the run finished gets a 200 duplicate.** 08-20 found that such a redelivery answered 409 `run_terminal` even when the delivery's signal had applied. On 409 `run_terminal`, `act_signal` now looks up the run's SignalSeen row (keyspace 15) for the delivery's request id. If the row is present, the answer is `200 {"run_id", "accepted": true, "duplicate": true}`. If it is absent, the signal never applied and the 409 `run_terminal` stands. This is documented in docs/webhooks.md and covered by `signal_action_targets_runs_and_dedupes_redelivery`.
