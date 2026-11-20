@@ -38,7 +38,7 @@ pub fn node_cfg(dir: &Path, p: u16) -> NodeConfig {
     cfg.leader.shuffler.idle_poll = Duration::from_millis(20);
     cfg.leader.retention.interval = Duration::from_secs(3600);
     cfg.wal.enable_rotation = true;
-    cfg.wal.rotation_size_bytes = 4 * 1024;
+    cfg.wal.rotation_size_bytes = 2 * 1024;
     cfg
 }
 

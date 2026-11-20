@@ -427,6 +427,9 @@ impl Uploader {
             if let UploadError::Fenced(why) = e {
                 self.set_fenced(why);
             }
+            // The in-memory state may be ahead of the last durable manifest: the next round
+            // re-reads it from the store (re-puts of identical objects are idempotent).
+            *self.session.lock().await = None;
         }
         r
     }
