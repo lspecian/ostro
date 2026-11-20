@@ -306,7 +306,7 @@ Plans:
 - [ ] 08-16-PLAN.md — Metrics coverage: queues, lag, steps, replay, fuel, memory, DLQ, HW lag, ISR, Raft + docs/metrics.md (OBS-02)
 - [x] 08-17-PLAN.md — Guest logs: rate limits, per-run caps, ring buffer + /v1/runs/{id}/logs, JSON + OTLP LogRecords (OBS-03)
 - [ ] 08-18-PLAN.md — Restore (manifest validation, two-step in-files verified replay, meta bootstrap spike, WAL import) + tar backup online/offline + CLI (BACK-02/03)
-- [ ] 08-19-PLAN.md — Blob GC: mtime touch, GC lock, mark/sweep with grace, delayed remote deletion ledger (BACK-01)
+- [x] 08-19-PLAN.md — Blob GC: mtime touch, GC lock, mark/sweep with grace, delayed remote deletion ledger (BACK-01)
 - [ ] 08-20-PLAN.md — End-to-end proofs SC1–SC4: Stripe round trip, cron kill loop, restore RPO loop, SeaweedFS leg, Phase 8 campaign faults (TRIG, BACK)
 - [ ] 08-21-PLAN.md — SC5 observability e2e + outbound traceparent via ostro-bridge (B2) + OTLP canary (D-FX6) (OBS-01/02/03)
 - [ ] 08-22-PLAN.md — PHASE GATE: full ci-local, >= 10,000-fault campaign, RESERVATIONS flip, docs, VALIDATION (all)
