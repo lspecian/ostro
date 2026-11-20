@@ -131,9 +131,11 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::config::GuestLogsSection;
 use crate::derive::{self, InheritPolicy, ModuleResolver, NoModules, PolicyResolver};
 use crate::journal_io;
 use crate::run_started::{first_events, input_payload};
+use crate::services::guest_logs::GuestLogSink;
 use crate::sink::{PartitionSink, RenewFn};
 
 /// Evaluate a failpoint: `failpoint!("name")` is a `Result<(), AppendError>`. Without the
@@ -306,6 +308,8 @@ pub struct EngineExecutor {
     policy: Arc<dyn PolicyResolver>,
     /// `resumed_count` each run was last re-armed for (B2; in memory only).
     rearmed: Arc<Mutex<HashMap<RunId, u32>>>,
+    /// Node-level guest log sink (services seam, 08-04; filled by 08-17).
+    guest_logs: Arc<GuestLogSink>,
 }
 
 impl std::fmt::Debug for EngineExecutor {
@@ -325,7 +329,20 @@ impl EngineExecutor {
             modules: Arc::new(NoModules),
             policy: Arc::new(InheritPolicy),
             rearmed: Arc::new(Mutex::new(HashMap::new())),
+            guest_logs: Arc::new(GuestLogSink::new(&GuestLogsSection::default())),
         }
+    }
+
+    /// The node's guest log sink (the server passes the services seam's sink; 08-17 feeds
+    /// it every live guest line).
+    pub fn with_guest_log_sink(mut self, sink: Arc<GuestLogSink>) -> Self {
+        self.guest_logs = sink;
+        self
+    }
+
+    /// The guest log sink in use.
+    pub fn guest_log_sink(&self) -> &Arc<GuestLogSink> {
+        &self.guest_logs
     }
 
     /// Continue-as-new resolvers for every job's sink (the server wires the meta-backed

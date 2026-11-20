@@ -18,6 +18,9 @@
 //! port ([`Server::start`] -> [`ServerHandle`]); [`leadership::MetaLeadership`] supplies
 //! partition epoch floors from meta; [`control::ServerControlPlane`] is the real
 //! `ostro_api::ControlPlane` (modules/workflows here, runs in 04-18).
+//!
+//! Phase 8 (08-04): the [`services`] seam (one place every node-level background service
+//! starts and stops, P8-D21) and the Phase 8 config sections in [`config`].
 
 pub mod config;
 pub mod control;
@@ -29,9 +32,12 @@ pub mod logging;
 pub mod retention;
 pub mod run_started;
 pub mod server;
+pub mod services;
 pub mod sink;
 
-pub use server::{LOCK_FILE, Server, ServerError, ServerHandle, StartupTimings, start};
+pub use server::{
+    LOCK_FILE, Server, ServerError, ServerHandle, ServerOptions, StartupTimings, start,
+};
 
 #[cfg(test)]
 mod dev_dep_anchors {

@@ -15,6 +15,7 @@ pub fn init_tracing(cfg: &LogSection) -> bool {
     let res = match cfg.format {
         LogFormat::Pretty => builder.pretty().try_init(),
         LogFormat::Compact => builder.compact().try_init(),
+        LogFormat::Json => builder.json().try_init(),
     };
     res.is_ok()
 }

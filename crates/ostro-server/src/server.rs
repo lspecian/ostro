@@ -31,11 +31,20 @@
 //!    one task per started partition subscribed to its apply machine's action broadcast
 //!    (05-13).
 //!
+//! Between 4 and 5 the **services seam** starts ([`crate::services::Services::start`],
+//! P8-D21): `Node::open` has returned (every partition's readiness barrier is open and
+//! its leader services run) and the leaders are recorded in meta.
+//!
+//! One injectable clock (Phase 10 F5): [`ServerOptions::clock`] (the system clock by
+//! default) is the single `Arc<dyn Clock>` handed to `InitCluster`'s timestamp,
+//! `NodeConfig.clock` and the services' [`crate::services::ServiceCtx::clock`].
+//!
 //! # Shutdown ([`ServerHandle::shutdown`])
 //!
 //! `/readyz` turns 503 -> the listener stops accepting and in-flight requests finish ->
-//! `Node::shutdown` (the dispatcher revokes leases, activations stop) -> meta stops ->
-//! the data-dir lock is released -> the ephemeral directory is removed.
+//! the services stop (cancel + join) -> `Node::shutdown` (the dispatcher revokes leases,
+//! activations stop) -> meta stops -> the data-dir lock is released -> the ephemeral
+//! directory is removed.
 
 use std::fs::File;
 use std::net::SocketAddr;
@@ -48,7 +57,8 @@ use ostro_engine::error::EngineError;
 use ostro_engine::runtime::{Runtime, RuntimeOptions};
 use ostro_meta::{MetaCommand, MetaError, MetaHandle, MetaResult};
 use ostro_partition::{
-    DispatcherConfig, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionSlot,
+    Clock, DispatcherConfig, DispatcherStats, Executor, Node, NodeConfig, NodeError,
+    PartitionSlot, SystemClock,
 };
 use ostro_types::PartitionCount;
 use tempfile::TempDir;
@@ -62,6 +72,8 @@ use crate::derive::MetaModules;
 use crate::executor::{EngineExecutor, ExecutorConfig, ExecutorHooks};
 use crate::leadership::MetaLeadership;
 use crate::retention::MetaPolicies;
+use crate::services::guest_logs::GuestLogSink;
+use crate::services::{ServiceCtx, Services};
 
 /// How long shutdown waits for in-flight HTTP/gRPC requests before closing them.
 const SERVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -140,7 +152,47 @@ impl Server {
 
 /// Boot meta, runtime, node and API; see the module docs for the order.
 pub async fn start(cfg: ServerConfig) -> Result<ServerHandle, ServerError> {
-    start_with_hooks(cfg, Arc::new(ExecutorHooks::default())).await
+    start_with_options(cfg, ServerOptions::default()).await
+}
+
+/// Process-level knobs that are not configuration: the clock and executor test hooks.
+#[derive(Clone)]
+pub struct ServerOptions {
+    /// The one injectable clock (system clock by default; a `ManualClock` in tests, the
+    /// Phase 10 DevClock). The same instance reaches `InitCluster`, the node and the
+    /// services.
+    pub clock: Arc<dyn Clock>,
+    /// Executor test hooks (full-server lease/zombie tests). The binary never sets hooks.
+    pub hooks: Arc<ExecutorHooks>,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self {
+            clock: Arc::new(SystemClock),
+            hooks: Arc::new(ExecutorHooks::default()),
+        }
+    }
+}
+
+impl std::fmt::Debug for ServerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerOptions").finish_non_exhaustive()
+    }
+}
+
+impl ServerOptions {
+    /// Use `clock` instead of the system clock.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Use executor test hooks.
+    pub fn with_hooks(mut self, hooks: Arc<ExecutorHooks>) -> Self {
+        self.hooks = hooks;
+        self
+    }
 }
 
 /// [`start`] with executor test hooks (full-server lease/zombie tests). The binary never
@@ -150,6 +202,16 @@ pub async fn start_with_hooks(
     cfg: ServerConfig,
     hooks: Arc<ExecutorHooks>,
 ) -> Result<ServerHandle, ServerError> {
+    start_with_options(cfg, ServerOptions::default().with_hooks(hooks)).await
+}
+
+/// [`start`] with explicit [`ServerOptions`] (clock, hooks).
+pub async fn start_with_options(
+    cfg: ServerConfig,
+    opts: ServerOptions,
+) -> Result<ServerHandle, ServerError> {
+    let ServerOptions { clock, hooks } = opts;
+    // clock-exempt: startup step durations are reported (StartupTimings), never used for logic.
     let t0 = Instant::now();
     let count = PartitionCount::new(cfg.node.partitions)
         .ok_or_else(|| ServerError::Config("node.partitions must be at least 1".into()))?;
@@ -179,7 +241,7 @@ pub async fn start_with_hooks(
 
     // 2. cluster identity + token key.
     let t = Instant::now();
-    let (cluster_id, token_key) = match init_cluster(&meta, node_id, count, now_ms()).await {
+    let (cluster_id, token_key) = match init_cluster(&meta, node_id, count, clock.now_ms()).await {
         Ok(v) => v,
         Err(e) => {
             meta.stop().await;
@@ -216,9 +278,13 @@ pub async fn start_with_hooks(
         max_attempt_failures: cfg.executor.max_attempt_failures,
         retry_backoff: cfg.executor.retry_backoff.get(),
     };
+    // The guest log sink exists before the node (the executor is part of NodeConfig); the
+    // services seam hands out the same instance.
+    let guest_logs = Arc::new(GuestLogSink::new(&cfg.guest_logs));
     let executor: Arc<dyn Executor> = Arc::new(
         EngineExecutor::new(Arc::clone(&runtime), exec_cfg)
             .with_hooks(hooks)
+            .with_guest_log_sink(Arc::clone(&guest_logs))
             .with_resolvers(
                 Arc::new(MetaModules(meta.view().clone())),
                 Arc::new(MetaPolicies {
@@ -231,6 +297,13 @@ pub async fn start_with_hooks(
     let mut node_cfg = NodeConfig::new(data_dir.clone(), count);
     node_cfg.node_id = node_id;
     node_cfg.leadership = Arc::new(MetaLeadership::new(meta.view().clone()));
+    node_cfg.clock = Arc::clone(&clock);
+    // Phase 8 contracts (08-01): snapshots and cron from `[snapshots]` / `[triggers]`;
+    // the upload floor exists only with bottomless on (B4, 08-09). `schedule_source` is
+    // set by 08-14.
+    node_cfg.snapshots = cfg.snapshots.to_snapshot_config();
+    node_cfg.cron = cfg.triggers.to_cron_config();
+    node_cfg.backup_enabled = cfg.backup.enabled();
     node_cfg.leader.dispatcher = Some(DispatcherConfig {
         executor,
         lease_ttl,
@@ -240,7 +313,7 @@ pub async fn start_with_hooks(
         stats: Some(Arc::clone(&stats)),
     });
     let node = match Node::open(node_cfg).await {
-        Ok(n) => n,
+        Ok(n) => Arc::new(n),
         Err(e) => {
             meta.stop().await;
             return Err(e.into());
@@ -256,8 +329,7 @@ pub async fn start_with_hooks(
     }
     timings.record_leaders = t.elapsed();
 
-    // 5. API.
-    let partitions = node
+    let partitions: Vec<_> = node
         .slots()
         .iter()
         .map(|s| match s {
@@ -265,9 +337,37 @@ pub async fn start_with_hooks(
             PartitionSlot::Failed { .. } => None,
         })
         .collect();
+    let blobs = partitions
+        .iter()
+        .flatten()
+        .next()
+        .map(|h| Arc::clone(h.blobs()));
     let cfg = Arc::new(cfg);
+    let meta = Arc::new(meta);
+
+    // 4b. Services seam (P8-D21): every barrier is open and the leaders are recorded.
+    let services = match blobs {
+        Some(blobs) => Services::start(
+            ServiceCtx {
+                node: Arc::clone(&node),
+                meta: Arc::clone(&meta),
+                blobs,
+                config: Arc::clone(&cfg),
+                data_dir: data_dir.clone(),
+                shutdown: tokio_util::sync::CancellationToken::new(),
+                clock: Arc::clone(&clock),
+            },
+            Arc::clone(&guest_logs),
+        ),
+        None => {
+            warn!("no partition started; node services stay idle");
+            Services::idle(Arc::clone(&guest_logs), Arc::clone(&clock))
+        }
+    };
+
+    // 5. API.
     let control = Arc::new(ServerControlPlane::new(
-        Arc::new(meta),
+        meta,
         partitions,
         count,
         Arc::clone(&runtime),
@@ -316,6 +416,8 @@ pub async fn start_with_hooks(
         timings,
         control,
         node: Some(node),
+        services: Some(services),
+        clock,
         stats,
         stop_tx,
         serve: Some(serve),
@@ -397,12 +499,6 @@ fn probe(dir: &Path) -> bool {
     let ok = std::fs::write(&p, b"ok").is_ok();
     let _ = std::fs::remove_file(&p);
     ok
-}
-
-/// ms since the Unix epoch (proposers supply every metadata timestamp).
-fn now_ms() -> u64 {
-    use ostro_partition::Clock;
-    ostro_partition::SystemClock.now_ms()
 }
 
 /// `InitCluster` (first boot creates identity + token key; later boots read them).
@@ -515,9 +611,19 @@ async fn join_all<F: std::future::Future + Unpin>(
     slots.into_iter().filter_map(|(_, o)| o).collect()
 }
 
-async fn shutdown_node(node: Node) {
-    if let Err(e) = node.shutdown().await {
+async fn shutdown_node(node: Arc<Node>) {
+    if let Err(e) = shutdown_shared_node(node).await {
         warn!(error = %e, "node shutdown");
+    }
+}
+
+/// `Node::shutdown` on the last reference (the services have released theirs).
+async fn shutdown_shared_node(node: Arc<Node>) -> Result<(), ServerError> {
+    match Arc::try_unwrap(node) {
+        Ok(node) => node.shutdown().await.map_err(ServerError::from),
+        Err(_) => Err(ServerError::Invariant(
+            "node still referenced at shutdown (a service did not release it)".into(),
+        )),
     }
 }
 
@@ -529,7 +635,11 @@ pub struct ServerHandle {
     token_key: [u8; 32],
     timings: StartupTimings,
     control: Arc<ServerControlPlane>,
-    node: Option<Node>,
+    node: Option<Arc<Node>>,
+    /// The services seam (P8-D21); stopped before the node.
+    services: Option<Services>,
+    /// The one injectable clock (Phase 10 F5).
+    clock: Arc<dyn Clock>,
     stats: Arc<DispatcherStats>,
     stop_tx: watch::Sender<bool>,
     serve: Option<JoinHandle<std::io::Result<()>>>,
@@ -606,6 +716,16 @@ impl ServerHandle {
         self.node.as_ref().expect("node present until shutdown")
     }
 
+    /// The node services (P8-D21 seam).
+    pub fn services(&self) -> &Services {
+        self.services.as_ref().expect("services present until shutdown")
+    }
+
+    /// The clock shared by meta timestamps, the node and the services.
+    pub fn clock(&self) -> &Arc<dyn Clock> {
+        &self.clock
+    }
+
     /// Dispatcher counters (shared by every partition).
     pub fn dispatcher_stats(&self) -> &Arc<DispatcherStats> {
         &self.stats
@@ -625,6 +745,7 @@ impl ServerHandle {
         let ServerHandle {
             control,
             node,
+            services,
             stop_tx,
             serve,
             data_lock,
@@ -644,8 +765,12 @@ impl ServerHandle {
                 }
             }
         }
+        // Services first: they hold node / meta clones until joined.
+        if let Some(services) = services {
+            services.shutdown().await;
+        }
         let node_res = match node {
-            Some(node) => node.shutdown().await,
+            Some(node) => shutdown_shared_node(node).await,
             None => Ok(()),
         };
         // The action broadcasts closed with the node (the forwarding tasks woke every
@@ -679,7 +804,7 @@ impl ServerHandle {
             elapsed_ms = t.elapsed().as_millis() as u64,
             "ostro server stopped"
         );
-        node_res.map_err(ServerError::from)
+        node_res
     }
 }
 
@@ -691,5 +816,43 @@ async fn stop_meta(meta: Arc<MetaHandle>) {
             // Dropping the last reference stops the driver (a blocking join).
             let _ = tokio::task::spawn_blocking(move || drop(m)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ostro_partition::clock::ManualClock;
+
+    /// Phase 10 F5: one injected clock reaches InitCluster's timestamp and the services.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn injected_clock_reaches_cluster_init_and_services() {
+        const FAKE_MS: u64 = 1_234_567_000;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = ServerConfig::server_defaults();
+        cfg.api.listen = "127.0.0.1:0".parse().expect("addr");
+        cfg.node.data_dir = dir.path().to_path_buf();
+        cfg.node.partitions = 2;
+        let clock = ManualClock::new(FAKE_MS);
+        let h = start_with_options(
+            cfg,
+            ServerOptions::default().with_clock(Arc::new(clock.clone())),
+        )
+        .await
+        .expect("server start");
+        let created = h
+            .meta()
+            .view()
+            .read(|s| s.cluster().map(|c| c.value.created_at_ms));
+        assert_eq!(created, Some(FAKE_MS), "InitCluster used the injected clock");
+        assert_eq!(h.clock().now_ms(), FAKE_MS);
+        assert_eq!(h.services().clock().now_ms(), FAKE_MS);
+        clock.advance(5_000);
+        assert_eq!(
+            h.services().clock().now_ms(),
+            FAKE_MS + 5_000,
+            "the services share the very same clock instance"
+        );
+        h.shutdown().await.expect("shutdown");
     }
 }
