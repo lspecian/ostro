@@ -16,6 +16,13 @@
 //! `h2`, `hyper`, `tower`, `reqwest`) would feed their own export back into the exporter,
 //! and `ostro::guest` lines are exported as OTLP LogRecords directly by the guest log sink
 //! (08-17), so bridging them would export every guest line twice (W4).
+//!
+//! The span layer likewise never sees spans or events of the crates in
+//! [`SPAN_EXCLUDED_TARGETS`] (the OTel SDK and the OTLP gRPC transport: `tonic`, `h2`,
+//! `tower`; matched at a crate boundary, so `tower_http` stays visible). At `trace` level the exporter's own gRPC spans would otherwise be exported
+//! by the exporter they describe, a feedback loop that floods the batch queue (08-21:
+//! 120k spans in 40 s). The outbound HTTP path of the bridge (`hyper`, `reqwest`) stays
+//! visible to the span layer.
 
 use std::any::TypeId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -53,6 +60,27 @@ pub fn bridge_excludes(target: &str) -> bool {
     BRIDGE_EXCLUDED_TARGETS
         .iter()
         .any(|p| target.starts_with(p))
+}
+
+/// Crates the OTLP span layer never sees (exporter feedback loop, 08-21). Matched at a crate
+/// boundary (`tower` excludes `tower::buffer`, not `tower_http`, whose `request` span is the
+/// REST request span).
+pub const SPAN_EXCLUDED_TARGETS: &[&str] = &[
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "opentelemetry_otlp",
+    "tonic",
+    "h2",
+    "tower",
+];
+
+/// Whether the OTLP span layer skips spans and events of `target`.
+pub fn span_layer_excludes(target: &str) -> bool {
+    SPAN_EXCLUDED_TARGETS.iter().any(|krate| {
+        target
+            .strip_prefix(krate)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    })
 }
 
 type SpanLayer = OpenTelemetryLayer<Registry, SdkTracer>;
@@ -122,6 +150,11 @@ pub struct OtelSlotLayer;
 
 impl Layer<Registry> for OtelSlotLayer {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, Registry>) {
+        if span_layer_excludes(attrs.metadata().target()) {
+            // No OtelData is attached, so the span layer ignores every later callback for
+            // this span id (record, enter, exit, close) and exports nothing for it.
+            return;
+        }
         if let Some(SpanLayerRef(l)) = current().and_then(spans) {
             l.on_new_span(attrs, id, ctx);
         }
@@ -141,7 +174,9 @@ impl Layer<Registry> for OtelSlotLayer {
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, Registry>) {
         let Some(layers) = current() else { return };
-        if let Some(l) = &layers.spans {
+        if let Some(l) = &layers.spans
+            && !span_layer_excludes(event.metadata().target())
+        {
             l.on_event(event, ctx.clone());
         }
         if let Some(b) = &layers.logs
@@ -233,6 +268,32 @@ mod tests {
         let cfg = LogSection::default();
         let _first = init_tracing(&cfg);
         assert!(!init_tracing(&cfg), "second init must be a no-op");
+    }
+
+    #[test]
+    fn span_layer_exclusions() {
+        for t in [
+            "opentelemetry_sdk::trace",
+            "opentelemetry_otlp::exporter",
+            "tonic::transport::channel",
+            "h2::proto::connection",
+            "tower::buffer::worker",
+            "tonic",
+        ] {
+            assert!(span_layer_excludes(t), "{t} must not reach the span layer");
+        }
+        for t in [
+            "ostro_server::server",
+            "ostro_engine::activation",
+            "hyper_util::client",
+            "reqwest::connect",
+            "ostro::guest",
+            "tower_http::trace::on_request",
+            "tonic_health",
+            "h2c",
+        ] {
+            assert!(!span_layer_excludes(t), "{t} must reach the span layer");
+        }
     }
 
     #[test]
