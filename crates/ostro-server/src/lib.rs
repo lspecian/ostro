@@ -54,3 +54,10 @@ mod phase8_dep_anchors {
     use ostro_triggers as _;
     use tracing_opentelemetry as _;
 }
+
+// Phase 6 dependencies declared once by plan 06-02 for 06-14 (BridgeServices wiring) and
+// 06-16 (admin impl); anchored like the Phase 8 ones above.
+mod phase6_dep_anchors {
+    use base64 as _;
+    use ostro_bridge as _;
+}

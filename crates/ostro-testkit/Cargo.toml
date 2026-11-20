@@ -8,12 +8,31 @@ publish.workspace = true
 
 # Test-only helpers. Must NOT depend on ostro-log or ostro-partition (dev-dependency
 # cycles); partition-specific doubles live in crates/ostro-partition/tests/common/.
+# Nor on ostro-bridge (Phase 6, P-12): the canary encoders are an independent implementation
+# that cross-checks the bridge's scrubber.
 [dependencies]
 tempfile.workspace = true
 # Phase 8: in-process OTLP collector (gRPC trace + logs services) for the OTel tests (08-04)
 opentelemetry-proto.workspace = true
 tonic.workspace = true
 tokio.workspace = true
+# Phase 6 (06-02, P-12), behind features: mock-http (06-10), db (06-11), canary (06-19).
+# tokio is already a plain dependency (Phase 8), so the features need not enable it.
+axum = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+[features]
+# axum mock provider + recording proxy listener (06-10)
+mock-http = ["dep:axum", "dep:serde_json"]
+# env-gated PostgreSQL / MySQL helpers (06-11)
+db = ["dep:sqlx", "dep:uuid"]
+# canary generator, encoders, scanner, capturing tracing layer, sink registry (06-19)
+canary = ["dep:tracing", "dep:tracing-subscriber", "dep:base64"]
 
 [lints]
 workspace = true

@@ -31,7 +31,7 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 #   cargo test -p <crate> --features failpoints [--test <target>] --locked -- --test-threads=1
 # `<crate>:<target>` restricts a crate whose full suite would take over 5 min single-threaded
 # to its failpoint test target (plan 05-18); the whole crate is still linted with the feature.
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup)
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)

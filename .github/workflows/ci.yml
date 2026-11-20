@@ -167,6 +167,7 @@ jobs:
           cargo test -p ostro-engine --features failpoints --test aot_failpoints --locked -- --test-threads=1
           cargo test -p ostro-server --features failpoints --test failpoints_phase5 --locked -- --test-threads=1
           cargo test -p ostro-backup --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro-bridge --features failpoints --locked -- --test-threads=1
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Server campaign smoke (20 kills)
         # QA-01 whole-server kill campaign (plan 05-19) from a freshly wiped state dir; keep

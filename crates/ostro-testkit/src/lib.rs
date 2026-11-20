@@ -7,6 +7,14 @@
 pub mod corrupt;
 pub mod fs;
 
+// Phase 6 (06-02, P-12) helpers, one feature each.
+#[cfg(feature = "canary")]
+pub mod canary;
+#[cfg(feature = "db")]
+pub mod db;
+#[cfg(feature = "mock-http")]
+pub mod mock_provider;
+
 /// Number of proptest cases: `PROPTEST_CASES` when set and parseable, else `default`.
 pub fn proptest_cases(default: u32) -> u32 {
     std::env::var("PROPTEST_CASES")
@@ -39,4 +47,21 @@ mod phase8_dep_anchors {
     use opentelemetry_proto as _;
     use tokio as _;
     use tonic as _;
+}
+
+// Phase 6 (plan 06-02, P-12): feature dependencies for 06-11 (db) and 06-19 (canary), anchored
+// so cargo's unused-dependency lint stays quiet until those modules land.
+mod phase6_dep_anchors {
+    #[cfg(feature = "canary")]
+    use base64 as _;
+    #[cfg(feature = "mock-http")]
+    use serde_json as _;
+    #[cfg(feature = "db")]
+    use sqlx as _;
+    #[cfg(feature = "canary")]
+    use tracing as _;
+    #[cfg(feature = "canary")]
+    use tracing_subscriber as _;
+    #[cfg(feature = "db")]
+    use uuid as _;
 }

@@ -48,6 +48,9 @@ ostro-backup = { path = "../ostro-backup" }
 ostro-objstore = { path = "../ostro-objstore" }
 ostro-triggers = { path = "../ostro-triggers" }
 hmac.workspace = true
+# Phase 6 effects bridge (06-02): BridgeServices wiring (06-14), admin impl (06-16)
+ostro-bridge = { path = "../ostro-bridge" }
+base64.workspace = true
 
 [features]
 # Fault injection (plan 05-18): the executor's own failpoints (executor::before_append,
@@ -63,11 +66,12 @@ failpoints = [
     "ostro-meta/failpoints",
     "ostro-engine/failpoints",
     "ostro-backup/failpoints",
+    "ostro-bridge/failpoints",
 ]
 
 [dev-dependencies]
 ostro-engine = { path = "../ostro-engine", features = ["testkit"] }
-ostro-testkit.workspace = true
+ostro-testkit = { workspace = true, features = ["mock-http", "db", "canary"] }
 # full-server tests (04-17): REST + gRPC clients on the one port
 reqwest.workspace = true
 tonic.workspace = true

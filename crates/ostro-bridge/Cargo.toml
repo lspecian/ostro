@@ -6,7 +6,55 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Phase 6 effects bridge (06-02). Depends on ostro-types / ostro-meta / ostro-objstore only:
+# never on ostro-engine or ostro-partition (ostro-server wires the bridge to both).
 [dependencies]
+ostro-types.workspace = true
+ostro-meta = { path = "../ostro-meta" }
+ostro-objstore = { path = "../ostro-objstore" }
+tokio.workspace = true
+tokio-util.workspace = true
+reqwest = { workspace = true, features = ["rustls", "stream"] }
+hickory-resolver.workspace = true
+url.workspace = true
+ipnet.workspace = true
+sqlx.workspace = true
+aws-lc-rs.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+governor.workspace = true
+aho-corasick.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
+metrics.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+fail = { workspace = true, optional = true }
+vaultrs = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+
+[features]
+default = ["vault", "k8s"]
+vault = ["dep:vaultrs"]
+k8s = ["dep:kube", "dep:k8s-openapi"]
+# Compiles in the `bridge::*` failpoints (P-13, `bridge_fail!`).
+failpoints = ["dep:fail", "fail/failpoints"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+axum.workspace = true
+ostro-testkit = { workspace = true, features = ["mock-http", "db", "canary"] }
+proptest.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

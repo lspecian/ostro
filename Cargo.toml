@@ -64,7 +64,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 # OS RNG for run rng_seed / token key (same major as uuid's)
 getrandom = "0.4.3"
-# test HTTP client only; no TLS (no native-tls/openssl)
+# test HTTP client at workspace level (no TLS: no native-tls/openssl). ostro-bridge and
+# ostro-objstore enable `rustls` and `stream` at member level (Phase 6 06-02, Phase 8 08-01).
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "http2"] }
 # WIT freeze tooling (05-05, ostro-witcheck). Exact: these are the versions wasmtime 50.0.2
 # pulls (one copy in Cargo.lock). Bump only together with wasmtime (D17).
@@ -94,6 +95,24 @@ jiff02 = { package = "jiff", version = "0.2.46", default-features = false, featu
 # backup tar files (P8-D7); snapshot frame compression (same major as lsm-tree's lz4_flex)
 tar = "0.4.46"
 lz4_flex = { version = "0.13", default-features = false, features = ["std"] }
+# Phase 6 effects bridge (plan 06-02; versions verified 2026-11-19, 06-RESEARCH "Workspace
+# pins"). rusty-s3, url and futures-core/-util are already pinned by Phase 8 above.
+# sqlx: no macros/migrate/any/sqlite; native roots only (webpki-roots is CDLA, D-FX2); no mysql-rsa
+sqlx = { version = "=0.9.1", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs-native-roots", "postgres", "mysql", "json", "time", "bigdecimal", "uuid"] }
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
+ipnet = "2.12.2"
+# same feature set rustls enables (aws-lc-sys + prebuilt-nasm): one aws-lc-sys build
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+zeroize = { version = "1.9.2", features = ["derive"] }
+secrecy = "0.10.3"
+# std only: keyed HashMap store + monotonic clock (no dashmap/quanta/jitter)
+governor = { version = "0.10.4", default-features = false, features = ["std"] }
+aho-corasick = "1"
+vaultrs = { version = "0.8.0", default-features = false, features = ["rustls"] }
+kube = { version = "5.1.0", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs"] }
+k8s-openapi = { version = "0.29.0", features = ["v1_33"] }
+# same version as already in Cargo.lock
+base64 = "0.22"
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

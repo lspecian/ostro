@@ -1,0 +1,1 @@
+//! Owned by 06-19: canary generator, encoders, tree/byte scanner, capturing tracing layer and the `register_sink` hook for Phase 8 (feature `canary`). An independent implementation: never depends on ostro-bridge.
