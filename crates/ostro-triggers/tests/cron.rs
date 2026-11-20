@@ -25,12 +25,8 @@ fn ms(s: &str) -> i64 {
 /// Unix ms of a local civil time in `zone` (must be unambiguous).
 fn local(zone: &str, civil: &str) -> i64 {
     let tz = jiff::tz::TimeZone::get(zone).unwrap();
-    civil
-        .parse::<jiff::civil::DateTime>()
+    tz.to_timestamp(civil.parse::<jiff::civil::DateTime>().unwrap())
         .unwrap()
-        .to_zoned(tz)
-        .unwrap()
-        .timestamp()
         .as_millisecond()
 }
 
@@ -173,7 +169,11 @@ fn seconds_field_and_modifiers() {
         ]
     );
     assert_eq!(
-        seq(&spec("0 0 9 * * MON#2", "UTC"), ms("2026-01-01T00:00:00Z"), 3),
+        seq(
+            &spec("0 0 9 * * MON#2", "UTC"),
+            ms("2026-01-01T00:00:00Z"),
+            3
+        ),
         vec![
             ms("2026-01-12T09:00:00Z"),
             ms("2026-02-09T09:00:00Z"),
@@ -242,7 +242,13 @@ fn validation_errors_are_typed() {
         CronSpec::parse("0 0 0 30 2 *", "UTC"),
         Err(CronError::Expr { .. })
     ));
-    for zone in ["Mars/Base", "../etc/passwd", "/etc/localtime", "America//New_York", "a b"] {
+    for zone in [
+        "Mars/Base",
+        "../etc/passwd",
+        "/etc/localtime",
+        "America//New_York",
+        "a b",
+    ] {
         assert!(
             matches!(
                 CronSpec::parse("* * * * *", zone),
@@ -279,7 +285,10 @@ fn policy_bytes_match_the_meta_constants() {
     }
     assert!(matches!(
         OverlapPolicy::try_from(5),
-        Err(CronError::Policy { kind: "overlap", value: 5 })
+        Err(CronError::Policy {
+            kind: "overlap",
+            value: 5
+        })
     ));
     let catchup = [CatchupPolicy::Skip, CatchupPolicy::One, CatchupPolicy::All];
     for (i, p) in catchup.iter().enumerate() {
@@ -288,7 +297,10 @@ fn policy_bytes_match_the_meta_constants() {
     }
     assert!(matches!(
         CatchupPolicy::try_from(3),
-        Err(CronError::Policy { kind: "catchup", value: 3 })
+        Err(CronError::Policy {
+            kind: "catchup",
+            value: 3
+        })
     ));
 }
 
@@ -304,10 +316,21 @@ fn bounds_clip_next_and_latest() {
         Some((t0 + 300_000) as u64),
     )
     .unwrap();
-    assert_eq!(next_after(&s, t0), Some(t0 + 180_000), "first fire >= start");
-    assert_eq!(next_after(&s, t0 + 240_000), Some(t0 + 300_000), "end is inclusive");
+    assert_eq!(
+        next_after(&s, t0),
+        Some(t0 + 180_000),
+        "first fire >= start"
+    );
+    assert_eq!(
+        next_after(&s, t0 + 240_000),
+        Some(t0 + 300_000),
+        "end is inclusive"
+    );
     assert_eq!(next_after(&s, t0 + 300_000), None);
-    assert_eq!(latest_at_or_before(&s, t0 + 10 * 60_000), Some(t0 + 300_000));
+    assert_eq!(
+        latest_at_or_before(&s, t0 + 10 * 60_000),
+        Some(t0 + 300_000)
+    );
     assert_eq!(latest_at_or_before(&s, t0 + 179_999), None);
     assert_eq!(latest_at_or_before(&s, t0), None);
 }
@@ -351,7 +374,15 @@ fn catchup_cap_keeps_the_newest_fires() {
     let s = spec("*/10 * * * * *", "UTC");
     let now = ms("2026-02-01T12:00:00Z");
     let watermark = now - 300_000;
-    let plan = plan_catchup(&s, watermark, watermark - 3_600_000, now, CatchupPolicy::All, 60_000, 3);
+    let plan = plan_catchup(
+        &s,
+        watermark,
+        watermark - 3_600_000,
+        now,
+        CatchupPolicy::All,
+        60_000,
+        3,
+    );
     assert_eq!(plan.fire, vec![now - 20_000, now - 10_000, now]);
     assert_eq!(plan.advance_to, None);
     // (watermark, now - 20 s) holds 27 fires.
@@ -427,7 +458,11 @@ fn catchup_long_downtime_is_bounded_and_newest() {
     assert_eq!(all.fire[0], now - 99_000);
     // 30 days of seconds: the estimate is close to the true count (2_592_000 - 100).
     let exact = 30 * 86_400 - 100;
-    assert!(all.skipped.abs_diff(exact) <= exact / 100, "{}", all.skipped);
+    assert!(
+        all.skipped.abs_diff(exact) <= exact / 100,
+        "{}",
+        all.skipped
+    );
     assert_eq!(skip.advance_to, Some(now));
     assert!(elapsed.as_millis() < 500, "{elapsed:?}");
 }
@@ -465,11 +500,20 @@ fn tz_loading_sources_and_names() {
     let system = std::path::Path::new(tz::SYSTEM_ZONEINFO).join(NY).is_file();
     assert_eq!(
         source,
-        Some(if system { tz::TzSource::System } else { tz::TzSource::Bundled })
+        Some(if system {
+            tz::TzSource::System
+        } else {
+            tz::TzSource::Bundled
+        })
     );
     assert_eq!(tz::load("").unwrap().1, None);
-    assert!(matches!(tz::tz_bytes("Mars/Base"), Err(tz::TzError::Unknown(_))));
-    for bad in ["", "..", "../x", "a/../b", "/abs", "a//b", ".hidden", "a b", "a\0b"] {
+    assert!(matches!(
+        tz::tz_bytes("Mars/Base"),
+        Err(tz::TzError::Unknown(_))
+    ));
+    for bad in [
+        "", "..", "../x", "a/../b", "/abs", "a//b", ".hidden", "a b", "a\0b",
+    ] {
         assert!(
             matches!(tz::validate_name(bad), Err(tz::TzError::BadName(_))),
             "{bad:?}"
@@ -532,12 +576,24 @@ proptest! {
         let s = spec("* * * * * *", zone);
         let now = ms("2026-11-01T06:30:00Z") + sub_ms; // inside the NY overlap
         let floor = now - back_ms;
-        let started = Instant::now(); // clock-exempt: test runtime bound only
-        let latest = latest_at_or_before(&s, now).unwrap();
-        let skip = plan_catchup(&s, floor, 0, now, CatchupPolicy::Skip, window_ms, cap);
-        let one = plan_catchup(&s, floor, 0, now, CatchupPolicy::One, window_ms, cap);
-        let all = plan_catchup(&s, floor, 0, now, CatchupPolicy::All, window_ms, cap);
-        let elapsed = started.elapsed(); // clock-exempt: test runtime bound only
+        // The per-case runtime bound (50 ms, debug build) is checked on the fastest of up to
+        // three identical runs, so a scheduler hiccup on a loaded machine cannot fail it while
+        // unbounded work still would.
+        let mut elapsed = std::time::Duration::MAX;
+        let mut result = None;
+        for _ in 0..3 {
+            let started = Instant::now(); // clock-exempt: test runtime bound only
+            let latest = latest_at_or_before(&s, now).unwrap();
+            let skip = plan_catchup(&s, floor, 0, now, CatchupPolicy::Skip, window_ms, cap);
+            let one = plan_catchup(&s, floor, 0, now, CatchupPolicy::One, window_ms, cap);
+            let all = plan_catchup(&s, floor, 0, now, CatchupPolicy::All, window_ms, cap);
+            elapsed = elapsed.min(started.elapsed()); // clock-exempt: test runtime bound only
+            result = Some((latest, skip, one, all));
+            if elapsed.as_millis() < 50 {
+                break;
+            }
+        }
+        let (latest, skip, one, all) = result.unwrap();
         prop_assert_eq!(latest, now - sub_ms);
         if latest > floor {
             prop_assert_eq!(skip.advance_to, Some(latest));
