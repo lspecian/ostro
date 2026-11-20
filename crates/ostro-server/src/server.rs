@@ -77,7 +77,6 @@ use ostro_engine::runtime::{Runtime, RuntimeOptions};
 use ostro_meta::{MetaCommand, MetaError, MetaHandle, MetaResult};
 use ostro_partition::{
     Clock, DispatcherConfig, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionSlot,
-    SystemClock,
 };
 use ostro_types::PartitionCount;
 use tempfile::TempDir;
@@ -192,7 +191,8 @@ pub struct ServerOptions {
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
-            clock: Arc::new(SystemClock),
+            // The one production clock (injection root); tests pass their own.
+            clock: Arc::new(ostro_partition::SystemClock), // clock-exempt: injection root
             hooks: Arc::new(ExecutorHooks::default()),
         }
     }
