@@ -425,7 +425,7 @@ mod tests {
         }
 
         async fn wait_completed(&self, run: &RunId) {
-            let t0 = Instant::now();
+            let t0 = Instant::now(); // clock-exempt: test wait deadline
             while self.status(run) != Some(RunStatus::Completed) {
                 assert!(t0.elapsed() < LIMIT, "{run}: {:?}", self.status(run));
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -433,7 +433,7 @@ mod tests {
         }
 
         async fn wait_expired(&self, run: &RunId) {
-            let t0 = Instant::now();
+            let t0 = Instant::now(); // clock-exempt: test wait deadline
             while self.status(run).is_some() {
                 assert!(t0.elapsed() < LIMIT, "{run} never expired");
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -587,7 +587,7 @@ mod tests {
             .await
             .expect("snapshot")
             .expect("run 3 changed the state");
-        let t0 = Instant::now();
+        let t0 = Instant::now(); // clock-exempt: test wait deadline
         while fx
             .h
             .node()
