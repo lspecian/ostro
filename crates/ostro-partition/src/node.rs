@@ -7,7 +7,13 @@
 //!   written on first open, preserved afterwards; older readers ignore unknown keys);
 //! - `state/pNNNN`: one fjall state store per partition (also records the count);
 //! - `wal/`: the shared group-commit WAL of every partition log;
-//! - `blobs/`: the content-addressed blob store shared by all partitions.
+//! - `blobs/`: the content-addressed blob store shared by all partitions;
+//! - `snapshots/pNNNN/`: local OSNP snapshots (08-09, [`snapshot`](crate::leader::snapshot)).
+//!
+//! Trimming (08-09, P8-D2): each Leader-mode partition runs a snapshot service whose local
+//! floor, together with the bottomless upload floor ([`Node::floor_handles`]), bounds WAL
+//! retention, so `log_start` never passes the oldest retained snapshot. A state that is
+//! missing, unreadable or below `log_start` is rebuilt as newest usable snapshot + log tail.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -19,7 +25,7 @@ use ostro_log::{
     LogError, LogNode, LogNodeConfig, RawBatch, ReadyBarrier, ReplicatedLog, Rf1Log, Role,
 };
 use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId};
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
 use crate::acks::PendingAcks;
@@ -27,13 +33,17 @@ use crate::apply::{ApplyOutcome, Cursor};
 use crate::clock::{Clock, SystemClock};
 use crate::handle::PartitionHandle;
 use crate::leader::cron::{CronConfig, ScheduleSource};
-use crate::leader::snapshot::SnapshotConfig;
+use crate::leader::retention::FloorWatches;
+use crate::leader::snapshot::{
+    self as snap, LocalSnapshot, SnapshotConfig, SnapshotService, SnapshotShared, SnapshotTaken,
+};
 use crate::leader::{self, LeaderConfig, LeaderCtx, LeaderTasks};
 use crate::leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 use crate::machine::{MachineConfig, MachineHandle, PartitionHealth};
 use crate::router::{InProcessRouter, PartitionRouter};
 use crate::startup::{StartupEvent, StartupLog};
 use crate::store::meta::{K_APPLIED, K_STATE_HASH};
+use crate::store::snapshot::{install_snapshot, recover_install};
 use crate::store::{PartitionStore, StoreConfig, StoreMeta, Table};
 
 /// `node.toml` format version.
@@ -133,6 +143,24 @@ pub enum NodeError {
     Io(#[from] std::io::Error),
 }
 
+/// The writable floor slots of one partition, for the bottomless uploader (08-13).
+#[derive(Clone, Debug)]
+pub struct FloorHandles {
+    /// The upload floor; `None` = unbounded. With `NodeConfig::backup_enabled` it starts at
+    /// `Some(log_start)` (set in `Node::open`, before any retention pass: B4), so nothing more
+    /// is trimmed until the uploader publishes a real floor. Only ever raise it.
+    pub upload: watch::Sender<Option<Offset>>,
+}
+
+/// Per-partition Phase 8 extras of a started partition.
+struct PartExtras {
+    snapshots: Option<Arc<SnapshotService>>,
+    upload: watch::Sender<Option<Offset>>,
+    floors: FloorWatches,
+    /// Leader mode only: the services' context (forced retention passes).
+    ctx: Option<LeaderCtx>,
+}
+
 /// An open node: P partitions over one shared WAL.
 pub struct Node {
     log: LogNode,
@@ -143,6 +171,11 @@ pub struct Node {
     leaders: Vec<LeaderTasks>,
     shutdown: watch::Sender<bool>,
     incarnation: [u8; 16],
+    data_dir: PathBuf,
+    leader_cfg: LeaderConfig,
+    parts: Vec<Option<PartExtras>>,
+    snap_shared: Arc<SnapshotShared>,
+    installed: Vec<Option<Offset>>,
 }
 
 impl std::fmt::Debug for Node {
@@ -170,13 +203,35 @@ impl Node {
         let incarnation = check_node_file(&cfg.data_dir, count)?;
         events.push(StartupEvent::NodeFileChecked);
 
+        // 0b. (08-09) finish or roll back an interrupted snapshot install, note which states
+        //     are missing, and scan the local snapshots (removing interrupted `.tmp-*` files).
+        let n = usize::from(count.get());
+        let mut pre_fail: Vec<Option<String>> = vec![None; n];
+        let mut missing = vec![false; n];
+        let mut local: Vec<Vec<LocalSnapshot>> = vec![Vec::new(); n];
+        for p in count.ids() {
+            let i = p.index();
+            if let Err(e) = recover_install(&cfg.data_dir, p) {
+                pre_fail[i] = Some(format!("snapshot install recovery: {e}"));
+            }
+            missing[i] = !PartitionStore::exists(&cfg.data_dir, p);
+            match snap::scan_dir(&snap::snapshot_dir(&cfg.data_dir, p)) {
+                Ok(v) => local[i] = v,
+                Err(e) => {
+                    warn!(partition = p.0, error = %e, "local snapshot scan failed; none used");
+                }
+            }
+        }
+
         // 1. state stores (the durable floors), in parallel.
-        let mut opens = Vec::with_capacity(usize::from(count.get()));
+        let mut opens = Vec::with_capacity(n);
         for p in count.ids() {
             let dir = cfg.data_dir.clone();
             let sc = cfg.store.clone();
-            opens.push(tokio::task::spawn_blocking(move || {
-                PartitionStore::open(&dir, p, count, &sc)
+            let failed = pre_fail[p.index()].take();
+            opens.push(tokio::task::spawn_blocking(move || match failed {
+                Some(reason) => Err(reason),
+                None => PartitionStore::open(&dir, p, count, &sc).map_err(|e| format!("{e}")),
             }));
         }
         let mut stages: Vec<Stage> = Vec::with_capacity(opens.len());
@@ -217,22 +272,41 @@ impl Node {
 
         let mut ready: Vec<Option<Recovered>> = Vec::with_capacity(stages.len());
         let mut failed: Vec<Option<String>> = vec![None; stages.len()];
+        let mut installed: Vec<Option<Offset>> = vec![None; stages.len()];
         for ((stage, lr), p) in stages.into_iter().zip(logs).zip(count.ids()) {
-            let r = stage.and_then(|(store, meta)| match lr {
-                Ok(rf1) => {
+            let r = match (stage, lr) {
+                (Err(reason), Err(_)) => Err(reason),
+                (Ok(_), Err(e)) => Err(format!("log recovery: {e}")),
+                (stage, Ok(rf1)) => {
                     let rep = rf1.recovery();
-                    events.push(StartupEvent::LogRecovered {
+                    let log_event = StartupEvent::LogRecovered {
                         p: p.0,
                         leo: rep.leo.0,
                         torn: rep.torn.is_some(),
-                    });
-                    // 3. validation.
-                    validate(&meta, &rf1)?;
-                    events.push(StartupEvent::Validated { p: p.0 });
-                    Ok((store, meta, rf1))
+                    };
+                    let readable = stage.is_ok();
+                    if readable {
+                        events.push(log_event.clone());
+                    }
+                    // 3a. (08-09) snapshot + tail when the state is missing, unreadable or
+                    //     below log_start.
+                    let settled =
+                        settle_state(&cfg, p, stage, &rf1, missing[p.index()], &local[p.index()])
+                            .await;
+                    settled.and_then(|(store, meta, s)| {
+                        if let Some(s) = s {
+                            installed[p.index()] = Some(s);
+                            if !readable {
+                                events.push(log_event);
+                            }
+                        }
+                        // 3b. validation.
+                        validate(&meta, &rf1)?;
+                        events.push(StartupEvent::Validated { p: p.0 });
+                        Ok((store, meta, rf1))
+                    })
                 }
-                Err(e) => Err(format!("log recovery: {e}")),
-            });
+            };
             match r {
                 Ok(v) => ready.push(Some(v)),
                 Err(reason) => {
@@ -305,6 +379,44 @@ impl Node {
         let (shutdown, _) = watch::channel(false);
         let mut leaders = Vec::new();
 
+        // (08-09) floors and snapshot services, before any retention pass can run. The upload
+        // floor starts at Some(log_start) with backup on (B4), None (unbounded) otherwise.
+        let snap_shared = SnapshotShared::new();
+        let mut parts: Vec<Option<PartExtras>> = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            let PartitionSlot::Ready(h) = slot else {
+                parts.push(None);
+                continue;
+            };
+            let p = h.partition();
+            let upload_init = cfg.backup_enabled.then(|| h.log().log_start());
+            let (upload, upload_rx) = watch::channel(upload_init);
+            let snapshots = (cfg.mode == StartMode::Leader).then(|| {
+                SnapshotService::new(
+                    p,
+                    count,
+                    &cfg.data_dir,
+                    Arc::clone(h.store()),
+                    cfg.snapshots.clone(),
+                    Arc::clone(&cfg.clock),
+                    Arc::clone(&snap_shared),
+                    std::mem::take(&mut local[p.index()]),
+                )
+            });
+            let local_rx = snapshots
+                .as_ref()
+                .map_or_else(|| watch::channel(Offset(0)).1, |s| s.local_floor());
+            parts.push(Some(PartExtras {
+                snapshots,
+                upload,
+                floors: FloorWatches {
+                    local: local_rx,
+                    upload: upload_rx,
+                },
+                ctx: None,
+            }));
+        }
+
         if cfg.mode == StartMode::Leader {
             let services_router: Arc<dyn PartitionRouter> = match &cfg.router_wrapper {
                 Some(wrap) => wrap(Arc::clone(&router)),
@@ -322,6 +434,9 @@ impl Node {
             for slot in &slots {
                 if let PartitionSlot::Ready(h) = slot {
                     let p = h.partition();
+                    let Some(extras) = parts[p.index()].as_mut() else {
+                        continue;
+                    };
                     let ctx = LeaderCtx {
                         partition: p,
                         count,
@@ -330,7 +445,10 @@ impl Node {
                         barrier: barriers[p.index()].clone(),
                         clock: Arc::clone(&cfg.clock),
                         shutdown: shutdown.subscribe(),
+                        floors: extras.floors.clone(),
+                        snapshots: extras.snapshots.clone(),
                     };
+                    extras.ctx = Some(ctx.clone());
                     leaders.push(leader::spawn_all(ctx, &cfg.leader));
                     events.push(StartupEvent::LeaderServicesStarted { p: p.0 });
                 }
@@ -346,7 +464,78 @@ impl Node {
             leaders,
             shutdown,
             incarnation,
+            data_dir: cfg.data_dir.clone(),
+            leader_cfg: cfg.leader.clone(),
+            parts,
+            snap_shared,
+            installed,
         })
+    }
+
+    /// Partition `p`'s writable floor slots (the bottomless upload floor, 08-13). `None` for a
+    /// partition that did not start.
+    pub fn floor_handles(&self, p: PartitionId) -> Option<FloorHandles> {
+        let x = self.parts.get(p.index())?.as_ref()?;
+        Some(FloorHandles {
+            upload: x.upload.clone(),
+        })
+    }
+
+    /// `<data>/snapshots/pNNNN`.
+    pub fn snapshot_dir(&self, p: PartitionId) -> PathBuf {
+        snap::snapshot_dir(&self.data_dir, p)
+    }
+
+    /// Every snapshot written from now on, node-wide (after its floor was published).
+    pub fn snapshot_events(&self) -> broadcast::Receiver<SnapshotTaken> {
+        self.snap_shared.subscribe()
+    }
+
+    /// The local trim floor of `p` (`applied_offset` of its oldest retained snapshot; `0` =
+    /// no trimming). `None` for a partition that did not start.
+    pub fn local_floor(&self, p: PartitionId) -> Option<Offset> {
+        let x = self.parts.get(p.index())?.as_ref()?;
+        Some(*x.floors.local.borrow())
+    }
+
+    /// The snapshot `Node::open` installed for `p` (snapshot + tail rebuild), if any.
+    pub fn snapshot_installed(&self, p: PartitionId) -> Option<Offset> {
+        self.installed.get(p.index()).copied().flatten()
+    }
+
+    /// Partition `p`'s local snapshots, ascending (Leader mode; empty otherwise).
+    pub async fn local_snapshots(&self, p: PartitionId) -> Vec<LocalSnapshot> {
+        match self
+            .parts
+            .get(p.index())
+            .and_then(|x| x.as_ref()?.snapshots.clone())
+        {
+            Some(s) => s.retained().await,
+            None => Vec::new(),
+        }
+    }
+
+    /// Take a snapshot of `p` now (Leader mode), regardless of the cadence. `Ok(None)` when
+    /// nothing was applied since the newest snapshot.
+    pub async fn snapshot_now(&self, p: PartitionId) -> Result<Option<SnapshotTaken>, String> {
+        let s = self
+            .parts
+            .get(p.index())
+            .and_then(|x| x.as_ref()?.snapshots.clone())
+            .ok_or_else(|| format!("partition {} has no snapshot service", p.0))?;
+        s.take().await.map_err(|e| e.to_string())
+    }
+
+    /// Run one retention pass of `p` now (Leader mode). Returns the log start after it.
+    pub async fn retention_pass(&self, p: PartitionId) -> Result<Offset, String> {
+        let ctx = self
+            .parts
+            .get(p.index())
+            .and_then(|x| x.as_ref()?.ctx.clone())
+            .ok_or_else(|| format!("partition {} runs no leader services", p.0))?;
+        leader::retention::run_pass(&ctx, &self.leader_cfg.retention)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// This data directory's incarnation (`node.toml` `incarnation`, 08-08): generated on
@@ -451,12 +640,14 @@ impl Node {
             router,
             leaders,
             shutdown,
+            parts,
             ..
         } = self;
         shutdown.send_replace(true);
         for t in leaders {
             t.shutdown().await;
         }
+        drop(parts);
         router.clear();
         for slot in slots {
             if let PartitionSlot::Ready(h) = slot {
@@ -485,12 +676,108 @@ fn validate(meta: &StoreMeta, log: &Rf1Log) -> Result<(), String> {
     }
     if meta.applied < log.log_start() {
         return Err(format!(
-            "snapshot required (Phase 8): applied {} below log start {}",
+            "snapshot required: run 'ostro restore' (applied {} below log start {}, no usable local snapshot)",
             meta.applied.0,
             log.log_start().0
         ));
     }
     Ok(())
+}
+
+/// Step 3a (08-09): decide whether partition `p` needs a snapshot install and do it.
+///
+/// - unreadable state, or `applied < log_start`: install the newest usable local snapshot;
+///   none usable → the original error / "snapshot required";
+/// - missing state (the directory did not exist before open) with local snapshots: install
+///   the newest usable one; none usable → keep the fresh store (full replay, `log_start = 0`
+///   or validation fails);
+/// - otherwise the state is used as is.
+///
+/// Usable = `log_start <= S <= LEO` and a successful staged, verified install; candidates are
+/// tried newest first and a failure (logged) falls back to the next older one. Returns the
+/// store, its meta and the installed snapshot's offset.
+async fn settle_state(
+    cfg: &NodeConfig,
+    p: PartitionId,
+    stage: Stage,
+    rf1: &Rf1Log,
+    missing: bool,
+    local: &[LocalSnapshot],
+) -> Result<(Arc<PartitionStore>, StoreMeta, Option<Offset>), String> {
+    let start = rf1.log_start();
+    let leo = rf1.log_end();
+    let fallback: Result<(), String> = match &stage {
+        Err(reason) => Err(reason.clone()),
+        Ok((_, meta)) if meta.applied < start => Err(format!(
+            "snapshot required: run 'ostro restore' (applied {} below log start {}, no usable local snapshot)",
+            meta.applied.0, start.0
+        )),
+        Ok(_) if missing && !local.is_empty() => Ok(()),
+        Ok(_) => {
+            let (store, meta) = stage?;
+            return Ok((store, meta, None));
+        }
+    };
+    let candidates: Vec<LocalSnapshot> = local
+        .iter()
+        .rev()
+        .filter(|s| s.applied_offset >= start && s.applied_offset <= leo)
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        return match fallback {
+            Ok(()) => {
+                let (store, meta) = stage?;
+                Ok((store, meta, None))
+            }
+            Err(e) => Err(e),
+        };
+    }
+    // The store must be closed during the install.
+    let had_state = stage.is_ok();
+    drop(stage);
+    let dir = cfg.data_dir.clone();
+    let sc = cfg.store.clone();
+    let count = cfg.partitions;
+    let res = tokio::task::spawn_blocking(move || {
+        let mut chosen = None;
+        for s in candidates {
+            let r = std::fs::File::open(&s.path)
+                .map_err(crate::store::snapshot::SnapshotError::from)
+                .and_then(|f| install_snapshot(&dir, p, count, &sc, std::io::BufReader::new(f)));
+            match r {
+                Ok(info) => {
+                    info!(partition = p.0, snapshot = %s.path.display(),
+                        applied = info.applied_offset, "local snapshot installed (snapshot + tail)");
+                    chosen = Some(Offset(info.applied_offset));
+                    break;
+                }
+                Err(e) => warn!(partition = p.0, snapshot = %s.path.display(), error = %e,
+                    "local snapshot unusable; trying an older one"),
+            }
+        }
+        let reopened = if chosen.is_some() || had_state {
+            Some(PartitionStore::open(&dir, p, count, &sc))
+        } else {
+            None
+        };
+        (chosen, reopened)
+    })
+    .await
+    .map_err(|e| format!("snapshot install task: {e}"))?;
+    match res {
+        (Some(s), Some(Ok((store, meta)))) => Ok((Arc::new(store), meta, Some(s))),
+        (Some(_), Some(Err(e))) => Err(format!("state store after snapshot install: {e}")),
+        (None, reopened) => match fallback {
+            Err(e) => Err(e),
+            Ok(()) => match reopened {
+                Some(Ok((store, meta))) => Ok((Arc::new(store), meta, None)),
+                Some(Err(e)) => Err(format!("state store: {e}")),
+                None => Err("state store: not reopened".into()),
+            },
+        },
+        (Some(_), None) => Err("state store: not reopened".into()),
+    }
 }
 
 /// Steps 4 and 5 of one partition.

@@ -4,8 +4,14 @@
 //! 1. `StateOpened`: open the state store and read `applied_offset` (the durable floor);
 //! 2. `LogRecovered`: verified log scan with that floor; a torn tail is cut **before** the
 //!    shared WAL exists, so before any append;
-//! 3. `Validated`: the state is neither ahead of the log nor below its start;
-//! 4. `CaughtUp`: replay `[applied, HW)` with actions discarded;
+//! 3. `Validated`: the state is neither ahead of the log nor below its start. Before the check
+//!    (plan 08-09), a partition whose state is missing, unreadable or below `log_start`
+//!    installs the newest usable local snapshot `S` with `log_start <= S <= LEO` (newest
+//!    first, falling back to older ones on any verification failure) and is then validated
+//!    against the installed state; with none usable it fails with
+//!    `snapshot required: run 'ostro restore'`. A missing state over an untrimmed log
+//!    (`log_start = 0`) with no usable snapshot is rebuilt by full replay as before;
+//! 4. `CaughtUp`: replay `[applied, HW)` (after an install: `[S, HW)`) with actions discarded;
 //! 5. `TermStarted`: `LeaderAnnounced{epoch}` appended and applied (the first record of the
 //!    term, `epoch = max(source floor, latest log epoch + 1)`);
 //! 6. `BarrierOpened`: the partition's [`ReadyBarrier`](ostro_log::ReadyBarrier) opens (trim

@@ -30,6 +30,8 @@ fail = { workspace = true, optional = true }
 # Phase 8 (08-01 declares; 08-02 OSNP snapshot frames: CRC32C + optional lz4 frames)
 lz4_flex.workspace = true
 crc32c.workspace = true
+# 08-09: sha256 of each local snapshot file (SnapshotTaken; the 08-13 remote key)
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

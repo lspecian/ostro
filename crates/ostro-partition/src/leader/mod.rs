@@ -1,7 +1,8 @@
 //! Leader services of one partition: outbox shuffler, timer service, log retention and,
 //! when configured, the dispatcher (plan 04-14). Phase 8 adds the local snapshot service
-//! (`snapshot`, 08-09) and the cron driver (`cron`, 08-14); 08-01 declares both modules with
-//! their config/trait contracts.
+//! (`snapshot`, 08-09: spawned when [`LeaderCtx::snapshots`] is set and enabled; its local
+//! floor and the bottomless upload floor reach retention through [`LeaderCtx::floors`]) and
+//! the cron driver (`cron`, 08-14).
 //!
 //! They are spawned by [`Node`](crate::node::Node) only after the partition's
 //! [`ReadyBarrier`] is open (state caught up, term started) and after every partition is
@@ -36,6 +37,10 @@ pub struct LeaderCtx {
     pub barrier: ReadyBarrier,
     pub clock: Arc<dyn Clock>,
     pub shutdown: watch::Receiver<bool>,
+    /// Dynamic trim floors (local snapshot floor, bottomless upload floor; P8-D2).
+    pub floors: retention::FloorWatches,
+    /// The partition's snapshot service (08-09); `None` = no snapshots, local floor fixed.
+    pub snapshots: Option<Arc<snapshot::SnapshotService>>,
 }
 
 impl std::fmt::Debug for LeaderCtx {
@@ -85,7 +90,8 @@ impl LeaderTasks {
     }
 }
 
-/// Spawn shuffler, timers, retention and (if configured) the dispatcher for
+/// Spawn shuffler, timers, the snapshot ticker (if enabled), retention and (if configured)
+/// the dispatcher for
 /// `ctx.partition`. They stop when either
 /// `ctx.shutdown` turns true or [`LeaderTasks::shutdown`] is called.
 pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
@@ -112,6 +118,11 @@ pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
     ];
     if let Some(d) = &cfg.dispatcher {
         tasks.push(dispatcher::spawn(child.clone(), d.clone()));
+    }
+    if let Some(s) = &child.snapshots
+        && s.config().enabled
+    {
+        tasks.push(snapshot::spawn(child.clone(), Arc::clone(s)));
     }
     tasks.push(retention::spawn(child, cfg.retention.clone()));
     tasks.push(fwd);
