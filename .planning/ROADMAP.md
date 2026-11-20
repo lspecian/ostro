@@ -293,7 +293,7 @@ Plans:
 - [x] 08-03-PLAN.md — ostro-objstore frozen object-safe trait + LocalFs + S3 (rusty-s3) + conformance; s3s-fs/deny spike; SeaweedFS CI leg (BACK-01)
 - [ ] 08-04-PLAN.md — Telemetry foundation: Phase 8 config contract, OTLP traces/logs, Prometheus /metrics, JSON logs, OstroIdGenerator, services seam, testkit OTLP collector (OBS-01/02/03)
 - [x] 08-05-PLAN.md — Cron engine (TDD): croner behind jiff-0.2 adapter, shared TZif, DST vectors, latest-before + catch-up planning keeping newest fires (TRIG-02/03)
-- [ ] 08-06-PLAN.md — Webhook verifiers (TDD): Stripe/GitHub/Slack/Standard/generic HMAC, idempotency extractors (TRIG-01)
+- [x] 08-06-PLAN.md — Webhook verifiers (TDD): Stripe/GitHub/Slack/Standard/generic HMAC, idempotency extractors (TRIG-01)
 - [ ] 08-07-PLAN.md — ScheduleFire apply: watermark exactly-once, overlap policies, buffered fire on terminal, rebuild digest (TRIG-02/03)
 - [ ] 08-08-PLAN.md — Bottomless primitives: HwVector consistent cut (update-before-publish), raw envelope reads, blob put observer, node.toml incarnation (BACK-01)
 - [ ] 08-09-PLAN.md — Snapshot service + WAL trimming enabled (dynamic floors, upload floor init), open-path snapshot install, SC4 proptest/failpoints (BACK-04)
