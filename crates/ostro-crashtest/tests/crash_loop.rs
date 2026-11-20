@@ -6,6 +6,11 @@
 //!     --test crash_loop -- --ignored --nocapture crash_loop_io_errors
 //! ```
 //!
+//! `crash_loop_snapshots` (plan 08-09) runs the target with tiny snapshot and retention
+//! intervals and 4 KiB WAL segments, so kills land during snapshot writes and trims: no
+//! acknowledged write is lost (ACKs below `log_start` are checked through the state) and the
+//! state rebuilt from the newest snapshot plus the log tail equals the live one.
+//!
 //! Every iteration runs `crash-target` against one data directory, kills it with SIGKILL
 //! at a seeded random point, then checks the directory offline.
 
@@ -335,4 +340,98 @@ async fn crash_loop_io_errors() {
     );
     assert!(failed > 0, "no injected I/O error ever failed a partition");
     assert!(acks > 0);
+}
+
+/// `.tmp-*` files (interrupted snapshot writes) and `.osnap` files under `dir/snapshots`.
+fn snapshot_files(dir: &Path) -> (usize, usize) {
+    let (mut tmp, mut snaps) = (0, 0);
+    for p in 0..P {
+        let d = dir.join("snapshots").join(format!("p{p:04}"));
+        if let Ok(it) = std::fs::read_dir(&d) {
+            for e in it.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.starts_with(".tmp-") {
+                    tmp += 1;
+                } else if n.ends_with(".osnap") {
+                    snaps += 1;
+                }
+            }
+        }
+    }
+    (tmp, snaps)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spawns crash-target processes; run with --ignored"]
+async fn crash_loop_snapshots() {
+    let iters = crash_iters(20);
+    let d = ostro_testkit::fs::tempdir();
+    let dir = d.path().join("data");
+    let mut rng = Rng::new(0x736e_6170);
+    let args: Vec<String> = [
+        "--snapshot-ms",
+        "30",
+        "--snapshot-bytes",
+        "8192",
+        "--retention-ms",
+        "20",
+        "--segment-bytes",
+        "4096",
+        "--pipeline",
+        "2",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let (mut acks, mut trimmed, mut tmp_seen, mut max_start) = (0usize, 0usize, 0usize, 0u64);
+    let mut snaps_seen = 0usize;
+    for i in 0..iters {
+        let run_for = Duration::from_millis(rng.range(50, 600));
+        let run = ostro_crashtest::run_and_kill_with(bin(), &dir, 4000 + i, P, &args, &[], run_for)
+            .unwrap_or_else(|e| panic!("iter {i}: {e}"));
+        assert!(run.failed.is_empty(), "iter {i}: {}", run.stdout);
+        let (tmp, snaps) = snapshot_files(&dir);
+        tmp_seen += tmp;
+        snaps_seen = snaps_seen.max(snaps);
+
+        let node = open_node(&dir, P, StartMode::Inspect)
+            .await
+            .unwrap_or_else(|e| panic!("iter {i}: {e}"));
+        let c = verify_acks(&node, &run.acks, &[])
+            .await
+            .unwrap_or_else(|e| panic!("iter {i}: {e}"));
+        let starts: Vec<u64> = (0..P)
+            .map(|p| {
+                node.handle(PartitionId(p))
+                    .unwrap_or_else(|| panic!("iter {i}: p{p} not ready"))
+                    .log()
+                    .log_start()
+                    .0
+            })
+            .collect();
+        node.shutdown().await.expect("shutdown");
+        rebuild_and_compare(&dir, P)
+            .await
+            .unwrap_or_else(|e| panic!("iter {i}: rebuild mismatch: {e}"));
+        acks += c.acks;
+        trimmed += c.trimmed;
+        max_start = max_start.max(starts.iter().copied().max().unwrap_or(0));
+        println!(
+            "iter {i}: acks {} (below log_start {}) runs {} log_start {:?} snapshots {snaps} \
+             interrupted {tmp} startup {} ms",
+            c.acks,
+            c.trimmed,
+            c.runs,
+            starts,
+            run.startup.as_millis()
+        );
+    }
+    println!(
+        "crash_loop_snapshots: {iters} iterations, {acks} acks verified ({trimmed} below \
+         log_start), max log_start {max_start}, max snapshots on disk {snaps_seen}, \
+         interrupted snapshot writes seen {tmp_seen}"
+    );
+    assert!(acks > 0, "no command was ever acknowledged");
+    assert!(snaps_seen > 0, "no snapshot was ever written");
+    assert!(max_start > 0, "the log was never trimmed");
 }

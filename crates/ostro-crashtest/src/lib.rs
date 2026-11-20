@@ -5,7 +5,9 @@
 //!   `Accepted`, only after the outcome arrived (i.e. after WAL fsync + apply commit).
 //! - this library: the helpers the crash loops use to check a data directory after a
 //!   `kill -9`: ACK parsing, a verified log scan (offset -> command hash), ACK/run
-//!   verification, and rebuild-and-compare (live state vs. state rebuilt from the log).
+//!   verification, and rebuild-and-compare (live state vs. state rebuilt from the newest local
+//!   snapshot plus the log tail; plan 08-09: with trimming on, "rebuild from the log" means
+//!   snapshot + tail, and with no snapshot it is still a full replay).
 //!
 //! `kill -9` never produces torn writes (the page cache survives a process kill), so torn
 //! tails and bit flips are injected offline between runs (02-RESEARCH Pitfall 2).
@@ -350,10 +352,17 @@ pub async fn scan_log<L: ReplicatedLog>(log: &L) -> Result<BTreeMap<u64, [u8; 32
 pub struct AckCheck {
     pub acks: usize,
     pub runs: usize,
+    /// ACKs below `log_start`, verified through the state only.
+    pub trimmed: usize,
 }
 
 /// Every ACK's offset holds a command with the acknowledged hash; every acknowledged run
 /// exists. Partitions listed in `skip` (e.g. a deliberately corrupted copy) are ignored.
+///
+/// An ACK below the partition's `log_start` (the prefix was trimmed after a snapshot, plan
+/// 08-09) can no longer be compared byte for byte; it must be covered by the state
+/// (`applied_offset > offset`) and its run, if any, must exist. Such ACKs are counted in
+/// [`AckCheck::trimmed`] as well as in `acks`.
 pub async fn verify_acks(node: &Node, acks: &[Ack], skip: &[u16]) -> Result<AckCheck, String> {
     let mut scans: BTreeMap<u16, BTreeMap<u64, [u8; 32]>> = BTreeMap::new();
     let mut c = AckCheck::default();
@@ -368,7 +377,10 @@ pub async fn verify_acks(node: &Node, acks: &[Ack], skip: &[u16]) -> Result<AckC
             e.insert(scan_log(h.log().as_ref()).await?);
         }
         let scan = &scans[&a.partition];
+        let start = h.log().log_start();
+        let applied = *h.machine().applied().borrow();
         match scan.get(&a.offset) {
+            None if a.offset < start.0 && a.offset < applied.0 => c.trimmed += 1,
             None => {
                 return Err(format!(
                     "lost acked command p{} offset {} (log [{}, {}))",
@@ -422,13 +434,22 @@ pub fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A copy of `src` (in a fresh tempdir, ext4 via `ostro_testkit`) with every state store
-/// deleted. The data lives in `<tempdir>/data`.
+/// A copy of `src` (in a fresh tempdir, ext4 via `ostro_testkit`) with every partition's
+/// state store (`state/pNNNN`) deleted; WAL, blobs and local snapshots are kept, so reopening
+/// it rebuilds each state from the newest usable snapshot plus the log tail (full replay when
+/// there is no snapshot). The data lives in `<tempdir>/data`.
 pub fn stateless_copy(src: &Path) -> Result<tempfile::TempDir, String> {
     let t = ostro_testkit::fs::tempdir();
     let dst = t.path().join("data");
     copy_dir(src, &dst).map_err(|e| format!("copy: {e}"))?;
-    std::fs::remove_dir_all(dst.join("state")).map_err(|e| format!("delete state: {e}"))?;
+    let state = dst.join("state");
+    for e in std::fs::read_dir(&state).map_err(|e| format!("read state dir: {e}"))? {
+        let e = e.map_err(|e| format!("read state dir: {e}"))?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('p') && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            std::fs::remove_dir_all(e.path()).map_err(|e| format!("delete {name}: {e}"))?;
+        }
+    }
     Ok(t)
 }
 
@@ -448,8 +469,9 @@ fn state_of(node: &Node, p: u16) -> Result<([u8; 32], [u8; 32], u64), String> {
     Ok((d, meta.state_hash, meta.applied.0))
 }
 
-/// Copy `data_dir`, delete every state dir in the copy, open both in Inspect mode and
-/// compare digest, rolling hash and applied offset per partition. `data_dir` must not be
+/// Copy `data_dir`, delete every `state/pNNNN` in the copy (keeping the local snapshots), open
+/// both in Inspect mode and compare digest, rolling hash and applied offset per partition: the
+/// copy is rebuilt as newest local snapshot + log tail (plan 08-09). `data_dir` must not be
 /// open by anyone else.
 pub async fn rebuild_and_compare(data_dir: &Path, p: u16) -> Result<(), String> {
     let copy = stateless_copy(data_dir)?;

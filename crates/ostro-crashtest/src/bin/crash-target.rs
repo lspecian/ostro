@@ -1,12 +1,16 @@
 //! `crash-target <data_dir> <seed> [--partitions N] [--pipeline N] [--blob-pct N]
-//! [--journal-mib N] [--memtable-mib N] [--workers N] [--cache-mib N]`: a Leader-mode node
+//! [--journal-mib N] [--memtable-mib N] [--workers N] [--cache-mib N] [--snapshot-ms N]
+//! [--snapshot-bytes N] [--retention-ms N] [--segment-bytes N]`: a Leader-mode node
 //! under seeded load, killed with SIGKILL by tests/crash_loop.rs (plan 02-15) and
 //! tests/reopen_time.rs (plan 02-16).
 //!
 //! Defaults: 4 partitions, one load task per partition, 2% of starts with a blob input,
 //! `StoreConfig::default()`. `--pipeline N` runs N independent load tasks per partition
 //! (N submits in flight, so group commit batches them); the store flags override the
-//! matching `StoreConfig` field (MiB for sizes).
+//! matching `StoreConfig` field (MiB for sizes). Plan 08-09: `--snapshot-ms` / `--snapshot-bytes`
+//! set the snapshot cadence (interval and bytes threshold, `min_interval` 0), `--retention-ms`
+//! the retention pass interval and `--segment-bytes` the WAL segment rotation size, so a kill
+//! lands during snapshot writes and trims.
 //!
 //! Prints `READY` once the node is open, then one line per command whose outcome was
 //! `Accepted`, only after that outcome arrived (WAL fsync + apply commit):
@@ -61,7 +65,8 @@ fn emit(line: &str) {
 fn usage() -> ! {
     eprintln!(
         "usage: crash-target <data_dir> <seed> [--partitions N] [--pipeline N] [--blob-pct N] \
-         [--journal-mib N] [--memtable-mib N] [--workers N] [--cache-mib N]"
+         [--journal-mib N] [--memtable-mib N] [--workers N] [--cache-mib N] [--snapshot-ms N] \
+         [--snapshot-bytes N] [--retention-ms N] [--segment-bytes N]"
     );
     std::process::exit(2);
 }
@@ -94,6 +99,10 @@ fn main() {
     let mut pipeline: u64 = 1;
     let mut blob_pct: u64 = 2;
     let mut store = StoreConfig::default();
+    let mut snapshot_ms: Option<u64> = None;
+    let mut snapshot_bytes: Option<u64> = None;
+    let mut retention_ms: Option<u64> = None;
+    let mut segment_bytes: Option<u64> = None;
     let mut rest = args[2..].iter();
     while let Some(a) = rest.next() {
         let v: u64 = rest
@@ -108,6 +117,10 @@ fn main() {
             "--memtable-mib" => store.max_memtable_size = v << 20,
             "--workers" => store.worker_threads = usize::try_from(v.max(1)).unwrap_or(1),
             "--cache-mib" => store.cache_size = v << 20,
+            "--snapshot-ms" => snapshot_ms = Some(v.max(1)),
+            "--snapshot-bytes" => snapshot_bytes = Some(v),
+            "--retention-ms" => retention_ms = Some(v.max(1)),
+            "--segment-bytes" => segment_bytes = Some(v.max(1024)),
             _ => usage(),
         }
     }
@@ -120,6 +133,21 @@ fn main() {
     rt.block_on(async move {
         let mut cfg = NodeConfig::new(dir, count);
         cfg.store = store;
+        if let Some(ms) = snapshot_ms {
+            cfg.snapshots.interval = std::time::Duration::from_millis(ms);
+            cfg.snapshots.min_interval = std::time::Duration::ZERO;
+        }
+        if let Some(b) = snapshot_bytes {
+            cfg.snapshots.bytes_threshold = b;
+            cfg.snapshots.min_interval = std::time::Duration::ZERO;
+        }
+        if let Some(ms) = retention_ms {
+            cfg.leader.retention.interval = std::time::Duration::from_millis(ms);
+        }
+        if let Some(b) = segment_bytes {
+            cfg.wal.enable_rotation = true;
+            cfg.wal.rotation_size_bytes = b;
+        }
         let node = match Node::open(cfg).await {
             Ok(n) => n,
             Err(e) => {
