@@ -871,3 +871,184 @@ fn fixed_scenario_effects() {
     };
     rt().block_on(check(sc)).expect("live == rebuilt");
 }
+
+// ---------------------------------------------------------------------- schedule workloads
+
+/// Plan 08-07: `ScheduleFire` workloads from `common::gen_schedule` (fires, manual fires,
+/// advances, completions, cancels, terminations, continue-as-new, re-created schedules and
+/// stale fires) applied to partition `OWNER` of `PC` with `apply_command`, one committed batch
+/// per command. The state equals a one-batch replay of the same log (digest and rolling
+/// hash), and the cron fires started at most one run per `(schedule, fire_time)` (exactly one
+/// for every `AllowAll` fire above the watermark with a fresh key).
+mod schedule_workloads {
+    use std::collections::BTreeMap;
+
+    use super::common::gen_schedule::{self, Finish, Model, OWNER, PC, ScheduleOp, Step, pcount};
+    use ostro_partition::store::values::{self, RunRecord};
+    use ostro_partition::{Cursor, PartitionStore, StoreConfig, Table, apply_command};
+    use ostro_types::{Epoch, PartitionId, RunId};
+    use proptest::prelude::*;
+
+    fn open() -> (tempfile::TempDir, PartitionStore, Cursor) {
+        let dir = ostro_testkit::fs::tempdir();
+        let (store, meta) = PartitionStore::open(
+            dir.path(),
+            PartitionId(OWNER),
+            pcount(PC),
+            &StoreConfig::default(),
+        )
+        .expect("open store");
+        let cur = Cursor::from_meta(&meta);
+        (dir, store, cur)
+    }
+
+    fn read_run(store: &PartitionStore, run: &RunId) -> Option<RunRecord> {
+        ostro_partition::query::run_record(&store.reader(), run).expect("run record")
+    }
+
+    pub(super) fn check(ops: &[ScheduleOp]) -> Result<(), String> {
+        check_with(ops).map(|_| ())
+    }
+
+    /// [`check`], returning the model (for the fixed workload's non-vacuity asserts).
+    fn check_with(ops: &[ScheduleOp]) -> Result<Model, String> {
+        let (_d, store, mut cur) = open();
+        let mut log: Vec<Vec<u8>> = Vec::new();
+        let mut model = Model::new();
+        let mut cmds = vec![ostro_types::Command::leader_announced(1, 1, 0)];
+        let mut i = 0;
+        loop {
+            for c in cmds.drain(..) {
+                let bytes = ostro_types::command::encode_command(&c).to_vec();
+                let mut b = store.batch();
+                let mut actions = Vec::new();
+                let off = cur.next;
+                apply_command(&mut b, &mut cur, off, Epoch(1), &bytes, &mut actions)
+                    .map_err(|e| format!("apply: {e}"))?;
+                let mu = cur.meta_update();
+                b.commit(&mu).map_err(|e| format!("commit: {e}"))?;
+                log.push(bytes);
+            }
+            let Some(op) = ops.get(i) else { break };
+            i += 1;
+            cmds = model.commands(op, 1, &|r| read_run(&store, r).map(|rec| rec.next_seq));
+        }
+
+        // One-batch replay.
+        let (_d2, replay, mut rc) = open();
+        let mut b = replay.batch();
+        let mut actions = Vec::new();
+        for bytes in &log {
+            let off = rc.next;
+            apply_command(&mut b, &mut rc, off, Epoch(1), bytes, &mut actions)
+                .map_err(|e| format!("replay: {e}"))?;
+        }
+        let mu = rc.meta_update();
+        b.commit(&mu).map_err(|e| format!("replay commit: {e}"))?;
+        let (live, rebuilt) = (
+            store.digest().expect("digest"),
+            replay.digest().expect("digest"),
+        );
+        if live != rebuilt {
+            return Err("live digest != replay digest".into());
+        }
+        if cur.hash != rc.hash {
+            return Err("live rolling hash != replay rolling hash".into());
+        }
+
+        // Exactly-once: runs per cron key.
+        let mut per_key: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, v) in store
+            .reader()
+            .prefix(Table::Runs, &[], usize::MAX)
+            .expect("runs")
+        {
+            let rec: RunRecord = values::decode(&v).expect("decode run");
+            let key = String::from_utf8_lossy(&rec.idempotency_key).into_owned();
+            if key.starts_with("__cron/") && !key.contains("/manual/") {
+                *per_key.entry(key).or_default() += 1;
+            }
+        }
+        if let Some((k, n)) = per_key.iter().find(|(_, n)| **n > 1) {
+            return Err(format!("{n} runs for {k}"));
+        }
+        for k in &model.must_start {
+            if per_key.get(k) != Some(&1) {
+                return Err(format!("AllowAll fire {k} did not start exactly one run"));
+            }
+        }
+        Ok(model)
+    }
+
+    /// Every op kind and overlap policy on both schedules, in a fixed order.
+    #[test]
+    fn fixed_schedule_workload() {
+        let mut ops = Vec::new();
+        for round in 0..6usize {
+            for s in 0..2 {
+                for overlap in 0..5u32 {
+                    ops.push(ScheduleOp::Fire {
+                        s,
+                        step: Step::Next(1),
+                        overlap,
+                    });
+                    ops.push(ScheduleOp::Fire {
+                        s,
+                        step: Step::Repeat,
+                        overlap,
+                    });
+                }
+                ops.push(ScheduleOp::Manual {
+                    s,
+                    req: (round % 2) as u8,
+                    overlap: 1,
+                });
+                ops.push(ScheduleOp::Advance {
+                    s,
+                    ahead: 1,
+                    skipped: 2,
+                });
+                ops.push(ScheduleOp::Fire {
+                    s,
+                    step: Step::Back,
+                    overlap: 2,
+                });
+                let how = [
+                    Finish::Complete,
+                    Finish::Fail,
+                    Finish::Terminate,
+                    Finish::Cancel,
+                    Finish::ContinueAsNew,
+                    Finish::Complete,
+                ][round];
+                ops.push(ScheduleOp::Finish { s, back: 0, how });
+                ops.push(ScheduleOp::Finish {
+                    s,
+                    back: 2,
+                    how: Finish::Complete,
+                });
+                if round == 3 {
+                    ops.push(ScheduleOp::Recreate { s });
+                    ops.push(ScheduleOp::StaleFire { s });
+                }
+            }
+        }
+        let model = check_with(&ops).expect("live == replay, exactly once");
+        assert!(model.must_start.len() >= 12, "{:?}", model.must_start);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: ostro_testkit::proptest_cases(128),
+            max_shrink_iters: 256,
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn schedule_workloads(ops in gen_schedule::strategy()) {
+            let r = check(&ops);
+            prop_assert!(r.is_ok(), "{}", r.unwrap_err());
+        }
+    }
+}
