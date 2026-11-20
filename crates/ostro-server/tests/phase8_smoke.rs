@@ -1,6 +1,7 @@
 //! Phase 8 API wiring smoke (08-10): on the real server every Phase 8 route reaches its
-//! controller stub (503 `unavailable` naming the owning plan, never 404), the gRPC
-//! services are mounted (UNAVAILABLE, not UNIMPLEMENTED), the hook route enforces
+//! controller: a stub (503 `unavailable` naming the owning plan, never 404) until the
+//! plan lands, the real controller after (webhooks since 08-15). The gRPC services are
+//! mounted (not UNIMPLEMENTED), the hook route enforces
 //! `[triggers] webhook_body_limit`, a start-run `traceparent` header is validated, and
 //! the `tests/common/phase8.rs` signers agree with ostro-triggers' verifiers.
 //!
@@ -36,7 +37,6 @@ async fn phase8_routes_reach_controller_stubs() {
     assert!(s.collector.is_some());
 
     let schedule = json!({"name": "n", "workflow": "w", "cron": "* * * * *"});
-    let webhook = json!({"name": "h", "action": {"kind": "start", "workflow": "w"}});
     for (method, path, body, owner) in [
         ("GET", "/v1/schedules", Value::Null, "08-14"),
         ("POST", "/v1/schedules", schedule.clone(), "08-14"),
@@ -46,12 +46,6 @@ async fn phase8_routes_reach_controller_stubs() {
         ("POST", "/v1/schedules/n/pause", Value::Null, "08-14"),
         ("POST", "/v1/schedules/n/resume", Value::Null, "08-14"),
         ("POST", "/v1/schedules/n/trigger", Value::Null, "08-14"),
-        ("GET", "/v1/webhooks", Value::Null, "08-15"),
-        ("POST", "/v1/webhooks", webhook.clone(), "08-15"),
-        ("GET", "/v1/webhooks/h", Value::Null, "08-15"),
-        ("PUT", "/v1/webhooks/h", webhook.clone(), "08-15"),
-        ("DELETE", "/v1/webhooks/h", Value::Null, "08-15"),
-        ("POST", "/hooks/h", json!({"any": "body"}), "08-15"),
         ("GET", "/v1/runs/run-1/logs", Value::Null, "08-17"),
         ("GET", "/v1/admin/backup", Value::Null, "08-18"),
     ] {
@@ -72,6 +66,13 @@ async fn phase8_routes_reach_controller_stubs() {
         );
     }
 
+    // 08-15 implemented the webhook controller: real answers instead of the stub.
+    let (st, v) = s.get_json("/v1/webhooks").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({"webhooks": []}));
+    let (st, _, _) = s.deliver_hook("h", &[], br#"{"any":"body"}"#).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
     // The hook route has its own limit ([triggers] webhook_body_limit = 4096 here).
     let r = s
         .http
@@ -90,12 +91,11 @@ async fn phase8_routes_reach_controller_stubs() {
         .expect_err("stub");
     assert_eq!(e.code(), tonic::Code::Unavailable, "{e:?}");
     assert!(e.message().contains("08-14"));
-    let e = pb::webhooks_client::WebhooksClient::new(ch.clone())
+    let listed = pb::webhooks_client::WebhooksClient::new(ch.clone())
         .list(pb::ListWebhooksRequest {})
         .await
-        .expect_err("stub");
-    assert_eq!(e.code(), tonic::Code::Unavailable, "{e:?}");
-    assert!(e.message().contains("08-15"));
+        .expect("webhooks implemented (08-15)");
+    assert!(listed.into_inner().webhooks.is_empty());
     let e = pb::run_logs_client::RunLogsClient::new(ch)
         .get_run_logs(pb::GetRunLogsRequest {
             run_id: "run-1".into(),

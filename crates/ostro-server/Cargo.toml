@@ -47,6 +47,8 @@ metrics-exporter-prometheus.workspace = true
 ostro-backup = { path = "../ostro-backup" }
 ostro-objstore = { path = "../ostro-objstore" }
 ostro-triggers = { path = "../ostro-triggers" }
+# webhook delivery counter (08-15)
+metrics.workspace = true
 hmac.workspace = true
 # Phase 6 effects bridge (06-02): BridgeServices wiring (06-14), admin impl (06-16)
 ostro-bridge = { path = "../ostro-bridge" }

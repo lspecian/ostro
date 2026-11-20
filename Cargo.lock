@@ -3355,6 +3355,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "jiff 1.0.1",
+ "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-appender-tracing",
