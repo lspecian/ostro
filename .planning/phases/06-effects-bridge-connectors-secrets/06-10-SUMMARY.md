@@ -161,3 +161,27 @@ Counters: `requests(key)` (any endpoint), `charges(key)`, `total_requests()`, `r
 
 - FOUND: crates/ostro-bridge/src/http/{mod,key,window,retry,target,send}.rs, crates/ostro-bridge/tests/http_connector.rs, crates/ostro-testkit/src/mock_provider.rs
 - FOUND: commits 2c2c4df, 8962059 and e3eb06a on main
+
+## Post-plan fixes
+
+### fix-0721: a re-drive retries a provider 409 in_progress (commit 0544fc2)
+
+- **Found by:** 07-21's QA-03 campaign. 7 of 10,000 runs ended with `result.status = 409`. The leader was SIGKILLed while its `POST /pay` was in flight. The restarted leader re-drove with the same key, and the provider answered `409 {"error":"in_progress"}`. `classify_status` returned `RetryStatus`, but `Schedule::should_retry` retries that only with a guest policy, and pay-flow sets none.
+- **Rule now:** when an effect is a re-drive (`LiveEffect.redrive`) and the configured key header is on the hop, a 409 that `is_in_progress_conflict` marks is retried **with or without a guest policy**. The new `retry::is_redrive_in_progress` is status 409 plus the existing marker heuristic: a `Retry-After` header, or `in_progress`/`in progress`/`in-progress`/`concurrent`/`currently being processed` in the first 4 KiB of the body. These retries:
+  - do not consume the attempt budget;
+  - back off with `retry::in_progress_delay` (200 ms, x2, max 5 s, `Retry-After` capped at 5 s);
+  - re-check the gate before every attempt.
+- **Bound:** retries stop at the provider's final answer. Before each wait, `window::may_await_in_progress(elapsed + delay)` checks `elapsed + safety_margin < idempotency_window`. This is the time part of `decide`, applied to every method (idempotent ones too) and independent of `resend`. When it fails, the effect ends `effect_outcome_unknown` with details `{"op","key","elapsed_ms"}`. It never retries forever.
+- **Unchanged:**
+  - A first (live) attempt without a policy still completes with the 409.
+  - A re-drive with no key header on the hop does not retry the 409. This covers a suppressed header, and a hop after a cross-origin redirect where the key header was stripped.
+  - With a guest policy, a re-drive's in-progress 409 now takes this path instead of the policy budget. Every other class follows the policy as before.
+- The `http effect attempt` debug line is unchanged (07-21's log parser reads it). New debug lines: `http re-drive in progress at the provider; retrying` and `... window closed`.
+- **Tests:**
+  - unit: `retry::tests::redrive_in_progress_detection_and_backoff` and `window::tests::in_progress_wait_is_bounded_by_the_window_for_every_method`;
+  - `tests/http_connector.rs`: `redrive_in_progress_409_is_retried_without_policy_until_final`, `first_attempt_409_in_progress_without_policy_is_the_outcome`, `redrive_409_without_key_header_is_not_retried` and `redrive_in_progress_past_the_window_is_unknown`.
+- **Verification:**
+  - `cargo test -p ostro-bridge --locked`: lib 164, driver 14, egress_client 5, http_connector 28, object_local 8, object_s3 3, providers_k8s 5, providers_vault 8, ratelimit 4, secrets 10, sql_mysql 8, sql_pg 10, ssrf_table 5. All ok.
+  - `--features failpoints --test http_connector -- --test-threads=1`: 29 passed.
+  - Clippy `-D warnings` (`--all-features` and `--no-default-features`, all targets) and `cargo fmt --check` are clean.
+- Decision D-W28 in 07-DECISIONS (user-reviewable with D-W11).

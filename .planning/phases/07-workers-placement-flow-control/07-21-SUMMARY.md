@@ -146,3 +146,49 @@ All 7 cases follow the same timeline. Times are from `shard-NN/requests.jsonl` a
 
 - FOUND: crates/ostro/tests/fencing_chaos.rs, scripts/fencing-chaos.sh (in `ae1e4be`)
 - FOUND: target/fencing-chaos/report.json, report.txt, shard-00..19.json, 7 evidence dirs
+
+## Post-plan fixes
+
+### fix-0721: the 409 in_progress GAP is closed; the campaign re-run passes
+
+- **Product fix:** `0544fc2` fix(06-10). A re-drive whose idempotency key header was sent retries a provider 409 in_progress without a guest policy, with bounded backoff. It retries until the provider's final answer, or ends `effect_outcome_unknown` once the idempotency window closes. See the 06-10 SUMMARY "Post-plan fixes" and D-W28. Fix option 1 of the GAP section; pay-flow is unchanged.
+- **Re-run:** the same 10,000 runs, 20 shards, seed `0x721c4a05eed`, PARALLEL 2 (Phase 8 campaign running on the machine), from an empty state dir:
+  - Command: `OSTRO_CHAOS_RUNS=10000 OSTRO_CHAOS_SHARDS=20 OSTRO_CHAOS_PARALLEL=2 OSTRO_CHAOS_SEED=0x721c4a05eed bash scripts/fencing-chaos.sh`, with `CARGO_TARGET_DIR=target/wt-fix-0721` and `OSTRO_CHAOS_STATE_DIR=<repo>/target/fencing-chaos-fix0721`.
+  - The original FAIL report and its 7 evidence dirs stay in `target/fencing-chaos/`.
+  - Each shard took about 70 s; the shards sum to 1,434 s.
+
+```text
+QA-03 fencing chaos report (D-W11)
+shards 20/20 seed 0x721c4a05eed  verdict PASS
+  runs                                   10000
+  completed                              10000
+  charges_eq_1                           10000
+  double_charges                         0
+  lost                                   0
+  fenced_sends                           0
+  start_effect_rejections                3
+  raw_duplicates                         170
+  raw_duplicates_without_leader_kill     0
+  unattributed_duplicates                0
+  provider_requests                      10170
+  provider_409                           10
+  faults by kind:
+    leader_kill                          37
+    server_failpoint                     45
+    worker_failpoint                     37
+    worker_kill9                         44
+    worker_sigstop                       64
+  duplicates by cause:
+    leader_kill                          170
+    retry_409                            0
+    unattributed                         0
+  run latency ms: median (of shard medians) 276, max 10256
+```
+
+- **The 409s were recovered.** The provider answered 409 in_progress 10 times, in shards 00, 03, 07, 08, 09, 11 (2), 12 (2) and 16. Every one of those runs still completed with status 200 and its charge: lost 0, charges_eq_1 10000. The run 1 numbers were provider_409 7 and lost 7.
+- **Everything else holds:**
+  - double_charges, fenced_sends, raw_duplicates_without_leader_kill and unattributed_duplicates are all 0.
+  - Every raw duplicate is attributed to a leader kill.
+  - The fault mix differs from run 1 by one leader_kill (timing-dependent: faults are drawn while runs are pending).
+  - start_effect_rejections went from 2 to 3. All are real lease rejections, with no send after them.
+- `chaos_smoke` (`cargo test -p ostro --features failpoints --test fencing_chaos --locked -- --test-threads=1 chaos_smoke`): `test result: ok. 1 passed` (38.7 s, 100 runs, every fault kind once).
