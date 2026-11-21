@@ -29,6 +29,18 @@
 //! [`FairQueues::len`], [`FairQueues::per_queue_counts`] and
 //! [`FairQueues::per_queue_oldest`], not in [`FairQueues::per_queue_unblocked`].
 //!
+//! A first-activation gate ([`FairQueues::gate_first`] for a queue,
+//! [`FairQueues::gate_first_key`] for one key, from a throttle `QueueBlocked` /
+//! `KeyBlocked` on a first activation, plan 07-23, D-W13) holds back only the **first
+//! activations** of that queue (key) until its `until_ms` passes
+//! ([`FairQueues::unpark_due`]) or [`FairQueues::ungate_all`] (the next flow-control
+//! `changed()` bump). Re-activations of the gated queue (key) stay servable in the same
+//! round, in their usual fair order: every band keeps a second order over its keys' heads
+//! of re-activations only, so a queue gate costs O(log n) to set or lift and the candidate
+//! search under it is the same O(log n) per band. Gated first activations count in
+//! [`FairQueues::len`] / [`FairQueues::per_queue_counts`] /
+//! [`FairQueues::per_queue_oldest`], not in [`FairQueues::per_queue_unblocked`].
+//!
 //! Pure: no I/O and no clock reads (time is the caller's clock milliseconds), BTreeMap /
 //! BTreeSet only. Insert, remove and take are O(log n); [`FairQueues::next_candidate`] is
 //! O(log n) per queue and band it looks at.
@@ -47,6 +59,8 @@ pub struct FairEntry {
     pub key: String,
     pub ready_at_ms: u64,
     pub run: RunId,
+    /// F7: the run's first activation (throttles apply only to these, D-W13).
+    pub first_activation: bool,
 }
 
 /// The entry [`FairQueues::next_candidate`] proposes; pass it to [`FairQueues::take`] once
@@ -60,10 +74,23 @@ type Slot = (u64, u64, RunId, String);
 struct KeyState {
     /// FIFO `(ready_at, run)`.
     items: BTreeSet<(u64, RunId)>,
+    /// The re-activations among `items` (`first_activation == false`).
+    reacts: BTreeSet<(u64, RunId)>,
     /// Service rank (rounds served).
     rank: u64,
-    /// The key's tuple in `Band::order` while it is active (non-empty, not parked).
+    /// The key's tuple in `Band::order` while it is active (not parked, and non-empty,
+    /// counting only re-activations while the key is gated).
     slot: Option<Slot>,
+    /// The key's tuple in `Band::react_order` (head of `reacts`) while not parked.
+    rslot: Option<Slot>,
+    /// First activations of this key are gated ([`FairQueues::gate_first_key`]).
+    gated: bool,
+}
+
+impl KeyState {
+    fn firsts(&self) -> usize {
+        self.items.len() - self.reacts.len()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -71,6 +98,9 @@ struct Band {
     keys: BTreeMap<String, KeyState>,
     /// Active keys by `(rank, head ready_at, head run)`.
     order: BTreeSet<Slot>,
+    /// Keys with re-activations by `(rank, head re-activation ready_at, run)`: the order
+    /// used while the queue's first activations are gated.
+    react_order: BTreeSet<Slot>,
     /// Rank of the key served last: a key that becomes active starts here.
     round: u64,
 }
@@ -84,13 +114,26 @@ impl Band {
         if let Some(old) = ks.slot.take() {
             self.order.remove(&old);
         }
+        if let Some(old) = ks.rslot.take() {
+            self.react_order.remove(&old);
+        }
         if parked {
             return;
         }
-        if let Some(&(at, run)) = ks.items.first() {
+        let head = if ks.gated {
+            ks.reacts.first()
+        } else {
+            ks.items.first()
+        };
+        if let Some(&(at, run)) = head {
             let slot = (ks.rank, at, run, key.to_owned());
             self.order.insert(slot.clone());
             ks.slot = Some(slot);
+        }
+        if let Some(&(at, run)) = ks.reacts.first() {
+            let slot = (ks.rank, at, run, key.to_owned());
+            self.react_order.insert(slot.clone());
+            ks.rslot = Some(slot);
         }
     }
 
@@ -99,15 +142,22 @@ impl Band {
         let round = self.round;
         if let Some(ks) = self.keys.get_mut(key)
             && ks.slot.is_none()
+            && ks.rslot.is_none()
         {
             ks.rank = ks.rank.max(round);
         }
         self.refile(key, false);
     }
 
-    /// First active key whose head is due at `now_ms`.
-    fn candidate(&self, now_ms: u64) -> Option<(&str, u64, RunId)> {
-        self.order
+    /// First active key whose head is due at `now_ms` (re-activations only while the
+    /// queue's first activations are gated).
+    fn candidate(&self, now_ms: u64, first_gated: bool) -> Option<(&str, u64, RunId)> {
+        let order = if first_gated {
+            &self.react_order
+        } else {
+            &self.order
+        };
+        order
             .iter()
             .find(|(_, at, _, _)| *at <= now_ms)
             .map(|(_, at, run, key)| (key.as_str(), *at, *run))
@@ -118,12 +168,14 @@ impl Band {
 struct Queue {
     bands: BTreeMap<Reverse<i32>, Band>,
     len: usize,
+    /// First activations among them.
+    firsts: usize,
     /// Every entry of the queue by `(ready_at, run)` (oldest ready time for the gauges).
     ats: BTreeSet<(u64, RunId)>,
 }
 
-/// Where a run is filed: `(queue, priority, key, ready_at)`.
-type Loc = (String, i32, String, u64);
+/// Where a run is filed: `(queue, priority, key, ready_at, first_activation)`.
+type Loc = (String, i32, String, u64, bool);
 
 /// Weighted DRR across queues, strict priority bands, round robin across keys.
 #[derive(Debug, Default)]
@@ -143,6 +195,12 @@ pub struct FairQueues {
     held: BTreeMap<RunId, FairEntry>,
     /// Held entries per queue by `(ready_at, run)`.
     held_q: BTreeMap<String, BTreeSet<(u64, RunId)>>,
+    /// Queues whose first activations are gated -> `until_ms`.
+    gated_queues: BTreeMap<String, u64>,
+    /// Keys whose first activations are gated -> `until_ms`.
+    gated_keys: BTreeMap<(String, String), u64>,
+    /// Gate deadlines `(until_ms, queue, key)`; `None` = the queue gate.
+    gate_until: BTreeSet<(u64, String, Option<String>)>,
 }
 
 impl FairQueues {
@@ -209,20 +267,35 @@ impl FairQueues {
             let n = if self.skipped.contains(q) {
                 0
             } else {
+                // (items, first activations) of `k` across the queue's bands.
+                let count = |k: &str| {
+                    s.bands
+                        .values()
+                        .filter_map(|b| b.keys.get(k))
+                        .fold((0, 0), |(n, f), ks| (n + ks.items.len(), f + ks.firsts()))
+                };
                 let lo = (q.clone(), String::new());
-                let parked: usize = self
+                let (mut parked, mut parked_firsts) = (0usize, 0usize);
+                for ((_, k), _) in self
                     .parked_keys
-                    .range(lo..)
+                    .range(lo.clone()..)
                     .take_while(|((pq, _), _)| pq == q)
-                    .map(|((_, k), _)| {
-                        s.bands
-                            .values()
-                            .filter_map(|b| b.keys.get(k))
-                            .map(|ks| ks.items.len())
-                            .sum::<usize>()
-                    })
-                    .sum();
-                s.len.saturating_sub(parked)
+                {
+                    let (n, f) = count(k);
+                    parked += n;
+                    parked_firsts += f;
+                }
+                let gated = if self.gated_queues.contains_key(q) {
+                    s.firsts.saturating_sub(parked_firsts)
+                } else {
+                    self.gated_keys
+                        .range(lo..)
+                        .take_while(|((gq, _), _)| gq == q)
+                        .filter(|((_, k), _)| !self.key_parked(q, k))
+                        .map(|((_, k), _)| count(k).1)
+                        .sum()
+                };
+                s.len.saturating_sub(parked + gated)
             };
             out.insert(q.clone(), n);
         }
@@ -255,10 +328,19 @@ impl FairQueues {
     pub fn insert(&mut self, e: FairEntry) {
         self.remove(&e.run);
         let parked = self.key_parked(&e.queue, &e.key);
+        let gated = self
+            .gated_keys
+            .contains_key(&(e.queue.clone(), e.key.clone()));
         let q = self.queues.entry(e.queue.clone()).or_default();
         let band = q.bands.entry(Reverse(e.priority)).or_default();
         let ks = band.keys.entry(e.key.clone()).or_default();
+        ks.gated = gated;
         ks.items.insert((e.ready_at_ms, e.run));
+        if e.first_activation {
+            q.firsts += 1;
+        } else {
+            ks.reacts.insert((e.ready_at_ms, e.run));
+        }
         q.len += 1;
         q.ats.insert((e.ready_at_ms, e.run));
         if parked {
@@ -266,8 +348,16 @@ impl FairQueues {
         } else {
             band.activate(&e.key);
         }
-        self.index
-            .insert(e.run, (e.queue, e.priority, e.key, e.ready_at_ms));
+        self.index.insert(
+            e.run,
+            (
+                e.queue,
+                e.priority,
+                e.key,
+                e.ready_at_ms,
+                e.first_activation,
+            ),
+        );
     }
 
     /// Remove `run` (queued or held); returns its entry.
@@ -281,12 +371,13 @@ impl FairQueues {
             }
             return Some(e);
         }
-        let (queue, priority, key, at) = self.index.remove(run)?;
+        let (queue, priority, key, at, first) = self.index.remove(run)?;
         let parked = self.key_parked(&queue, &key);
         if let Some(q) = self.queues.get_mut(&queue) {
             if let Some(band) = q.bands.get_mut(&Reverse(priority)) {
                 if let Some(ks) = band.keys.get_mut(&key) {
                     ks.items.remove(&(at, *run));
+                    ks.reacts.remove(&(at, *run));
                 }
                 band.refile(&key, parked);
                 if band.keys.get(&key).is_some_and(|ks| ks.items.is_empty()) {
@@ -297,15 +388,20 @@ impl FairQueues {
                 }
             }
             q.len = q.len.saturating_sub(1);
+            if first {
+                q.firsts = q.firsts.saturating_sub(1);
+            }
             q.ats.remove(&(at, *run));
             if q.len == 0 {
                 self.queues.remove(&queue);
-                // A parked key of an emptied queue has nothing left to hold back.
+                // A parked key or gate of an emptied queue has nothing left to hold back.
                 self.drop_parks_of(&queue);
+                self.ungate_queue(&queue);
             }
         }
         if !self.key_has_items(&queue, &key) {
             self.unpark_key_record(&queue, &key);
+            self.ungate_key(&queue, &key);
         }
         Some(FairEntry {
             queue,
@@ -313,6 +409,7 @@ impl FairQueues {
             key,
             ready_at_ms: at,
             run: *run,
+            first_activation: first,
         })
     }
 
@@ -332,6 +429,15 @@ impl FairQueues {
         for k in keys {
             self.unpark_key_record(queue, &k);
         }
+        let gated: Vec<String> = self
+            .gated_keys
+            .range((queue.to_owned(), String::new())..)
+            .take_while(|((gq, _), _)| gq == queue)
+            .map(|((_, k), _)| k.clone())
+            .collect();
+        for k in gated {
+            self.ungate_key(queue, &k);
+        }
     }
 
     /// Forget a key park (no refile).
@@ -345,14 +451,20 @@ impl FairQueues {
     /// Best entry of `queue` due at `now_ms`.
     fn queue_candidate(&self, queue: &str, now_ms: u64) -> Option<Candidate> {
         let q = self.queues.get(queue)?;
+        let gated = self.gated_queues.contains_key(queue);
         q.bands.iter().find_map(|(Reverse(p), band)| {
-            band.candidate(now_ms).map(|(key, at, run)| FairEntry {
-                queue: queue.to_owned(),
-                priority: *p,
-                key: key.to_owned(),
-                ready_at_ms: at,
-                run,
-            })
+            band.candidate(now_ms, gated)
+                .map(|(key, at, run)| FairEntry {
+                    queue: queue.to_owned(),
+                    priority: *p,
+                    key: key.to_owned(),
+                    ready_at_ms: at,
+                    run,
+                    first_activation: !band
+                        .keys
+                        .get(key)
+                        .is_some_and(|ks| ks.reacts.contains(&(at, run))),
+                })
         })
     }
 
@@ -391,7 +503,7 @@ impl FairQueues {
 
     /// Remove the candidate (it was granted) and charge its queue and key one pick.
     pub fn take(&mut self, c: &Candidate) -> Option<FairEntry> {
-        let (queue, priority, key, _) = self.index.get(&c.run)?.clone();
+        let (queue, priority, key, _, _) = self.index.get(&c.run)?.clone();
         // Charge the key before removing the entry: the band's round moves to its rank.
         if let Some(band) = self
             .queues
@@ -516,11 +628,102 @@ impl FairQueues {
             }
             self.unpark_key(&q, &k);
         }
+        while let Some((at, q, k)) = self.gate_until.first().cloned() {
+            if at > now_ms {
+                break;
+            }
+            match k {
+                None => self.ungate_queue(&q),
+                Some(k) => self.ungate_key(&q, &k),
+            }
+        }
     }
 
-    /// Earliest `until_ms` of a parked key.
+    /// Earliest `until_ms` of a parked key or a first-activation gate.
     pub fn next_unpark_at(&self) -> Option<u64> {
-        self.park_until.first().map(|(at, _, _)| *at)
+        let park = self.park_until.first().map(|(at, _, _)| *at);
+        let gate = self.gate_until.first().map(|(at, _, _)| *at);
+        match (park, gate) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Hold back the first activations of `queue` until `until_ms` (clock ms) or
+    /// [`Self::ungate_all`] (a throttle blocked a first activation, D-W13). Its
+    /// re-activations stay servable in the same round; nothing is charged. A later gate
+    /// replaces the deadline.
+    pub fn gate_first(&mut self, queue: &str, until_ms: u64) {
+        self.ungate_queue(queue);
+        if !self.queues.contains_key(queue) {
+            return;
+        }
+        self.gated_queues.insert(queue.to_owned(), until_ms);
+        self.gate_until.insert((until_ms, queue.to_owned(), None));
+    }
+
+    /// Hold back the first activations of `key` of `queue` until `until_ms` or
+    /// [`Self::ungate_all`] (a key throttle blocked a first activation, D-W13). The key's
+    /// re-activations and every other key stay servable.
+    pub fn gate_first_key(&mut self, queue: &str, key: &str, until_ms: u64) {
+        let k = (queue.to_owned(), key.to_owned());
+        if let Some(old) = self.gated_keys.remove(&k) {
+            self.gate_until
+                .remove(&(old, queue.to_owned(), Some(key.to_owned())));
+        }
+        if !self.key_has_items(queue, key) {
+            return;
+        }
+        self.gated_keys.insert(k, until_ms);
+        self.gate_until
+            .insert((until_ms, queue.to_owned(), Some(key.to_owned())));
+        self.set_key_gated(queue, key, true);
+    }
+
+    fn set_key_gated(&mut self, queue: &str, key: &str, gated: bool) {
+        let parked = self.key_parked(queue, key);
+        if let Some(q) = self.queues.get_mut(queue) {
+            for band in q.bands.values_mut() {
+                let Some(ks) = band.keys.get_mut(key) else {
+                    continue;
+                };
+                ks.gated = gated;
+                if parked {
+                    band.refile(key, true);
+                } else {
+                    band.activate(key);
+                }
+            }
+        }
+    }
+
+    fn ungate_queue(&mut self, queue: &str) {
+        if let Some(until) = self.gated_queues.remove(queue) {
+            self.gate_until.remove(&(until, queue.to_owned(), None));
+        }
+    }
+
+    fn ungate_key(&mut self, queue: &str, key: &str) {
+        if let Some(until) = self.gated_keys.remove(&(queue.to_owned(), key.to_owned())) {
+            self.gate_until
+                .remove(&(until, queue.to_owned(), Some(key.to_owned())));
+            self.set_key_gated(queue, key, false);
+        }
+    }
+
+    /// Lift every first-activation gate (a flow-control `changed()` bump).
+    pub fn ungate_all(&mut self) {
+        self.gated_queues.clear();
+        let keys: Vec<(String, String)> = self.gated_keys.keys().cloned().collect();
+        for (q, k) in keys {
+            self.ungate_key(&q, &k);
+        }
+        self.gate_until.clear();
+    }
+
+    /// Whether `queue`'s first activations are gated.
+    pub fn is_first_gated(&self, queue: &str) -> bool {
+        self.gated_queues.contains_key(queue)
     }
 
     /// Unpark every queue (a placement `changed()` bump).
@@ -536,10 +739,11 @@ impl FairQueues {
         }
     }
 
-    /// Unpark every queue and key and release every held entry.
+    /// Unpark every queue and key, lift every gate and release every held entry.
     pub fn unpark_all(&mut self) {
         self.unpark_queues();
         self.unpark_keys();
+        self.ungate_all();
         self.release_held();
     }
 
@@ -581,6 +785,15 @@ mod tests {
             key: k.into(),
             ready_at_ms: at,
             run: rid(i),
+            first_activation: true,
+        }
+    }
+
+    /// A re-activation (`first_activation == false`).
+    fn re(i: u64, q: &str, p: i32, k: &str, at: u64) -> FairEntry {
+        FairEntry {
+            first_activation: false,
+            ..e(i, q, p, k, at)
         }
     }
 
@@ -807,6 +1020,99 @@ mod tests {
         assert!(f.is_empty() && !f.has_held());
     }
 
+    /// A queue gate (throttled first activation, 07-23) holds back only the queue's first
+    /// activations: a re-activation behind them on the same key is served at once, other
+    /// queues keep their turns, and the gate lifts at `until_ms` or on `ungate_all`.
+    #[test]
+    fn queue_gate_holds_only_first_activations() {
+        let mut f = FairQueues::new();
+        f.insert(e(1, "q", 0, "", 1)); // throttled first activation, head of the FIFO
+        f.insert(re(2, "q", 0, "", 2)); // re-activation behind it, same key
+        f.insert(e(3, "q", 0, "", 3));
+        f.insert(re(4, "q", 0, "k", 4));
+        f.insert(e(5, "r", 0, "", 1));
+        let c = f.next_candidate(10).expect("c");
+        assert_eq!((c.run, c.first_activation), (rid(1), true));
+        f.gate_first("q", 50);
+        assert!(f.is_first_gated("q"));
+        assert_eq!(f.next_unpark_at(), Some(50));
+        assert_eq!(f.len(), 5);
+        assert_eq!(f.per_queue_counts()["q"], 4);
+        assert_eq!(f.per_queue_unblocked()["q"], 2, "only the re-activations");
+        assert_eq!(f.per_queue_oldest()["q"], 1);
+        let c = f.next_candidate(10).expect("re-activation");
+        assert_eq!((c.run, c.first_activation), (rid(2), false));
+        let order: Vec<RunId> = drain(&mut f, 10).iter().map(|e| e.run).collect();
+        assert_eq!(order, vec![rid(2), rid(5), rid(4)]);
+        assert!(f.next_candidate(10).is_none(), "first activations gated");
+        f.begin_round();
+        assert!(f.next_candidate(10).is_none(), "a new round keeps the gate");
+        // A new first activation joins the gated ones; a new re-activation is served.
+        f.insert(e(6, "q", 0, "", 0));
+        f.insert(re(7, "q", 0, "", 9));
+        assert_eq!(f.next_candidate(10).map(|c| c.run), Some(rid(7)));
+        let c = f.next_candidate(10).expect("c");
+        f.take(&c);
+        f.unpark_due(49);
+        assert!(f.next_candidate(49).is_none());
+        f.unpark_due(50);
+        assert!(!f.is_first_gated("q"));
+        assert_eq!(f.next_unpark_at(), None);
+        assert_eq!(f.next_candidate(50).map(|c| c.run), Some(rid(6)));
+        // ungate_all (a changed() bump) lifts it before the deadline.
+        f.gate_first("q", 1_000);
+        assert!(f.next_candidate(50).is_none());
+        f.ungate_all();
+        assert_eq!(f.next_candidate(50).map(|c| c.run), Some(rid(6)));
+        // A later gate replaces the deadline; emptying the queue drops the gate.
+        f.gate_first("q", 1_000);
+        f.gate_first("q", 2_000);
+        assert_eq!(f.next_unpark_at(), Some(2_000));
+        f.remove(&rid(6));
+        f.remove(&rid(1));
+        f.remove(&rid(3));
+        assert!(f.is_empty());
+        assert!(!f.is_first_gated("q"));
+        assert_eq!(f.next_unpark_at(), None);
+        f.gate_first("gone", 5);
+        assert!(!f.is_first_gated("gone"), "no gate on an empty queue");
+    }
+
+    /// A key gate (key throttle) holds back only that key's first activations; its
+    /// re-activations and other keys are served; a park of the same key still wins.
+    #[test]
+    fn key_gate_holds_only_the_keys_first_activations() {
+        let mut f = FairQueues::new();
+        f.insert(e(1, "q", 0, "a", 1));
+        f.insert(re(2, "q", 0, "a", 2));
+        f.insert(e(3, "q", 0, "b", 3));
+        f.insert(e(4, "q", 0, "a", 4));
+        assert_eq!(f.next_candidate(10).map(|c| c.run), Some(rid(1)));
+        f.gate_first_key("q", "a", 40);
+        assert_eq!(f.next_unpark_at(), Some(40));
+        assert_eq!(f.per_queue_unblocked()["q"], 2);
+        let order: Vec<RunId> = drain(&mut f, 10).iter().map(|e| e.run).collect();
+        assert_eq!(order, vec![rid(2), rid(3)]);
+        assert!(f.next_candidate(10).is_none());
+        f.insert(re(5, "q", 0, "a", 5));
+        f.park_key("q", "a", None);
+        assert!(f.next_candidate(10).is_none(), "parked wins over the gate");
+        assert_eq!(f.per_queue_unblocked()["q"], 0);
+        f.unpark_keys();
+        assert_eq!(f.next_candidate(10).map(|c| c.run), Some(rid(5)));
+        let c = f.next_candidate(10).expect("c");
+        f.take(&c);
+        f.unpark_due(40);
+        assert_eq!(f.next_candidate(40).map(|c| c.run), Some(rid(1)));
+        // The last entry of a gated key leaving drops the gate.
+        f.gate_first_key("q", "a", 90);
+        f.remove(&rid(1));
+        f.remove(&rid(4));
+        assert_eq!(f.next_unpark_at(), None);
+        f.insert(e(6, "q", 0, "a", 1));
+        assert_eq!(f.next_candidate(10).map(|c| c.run), Some(rid(6)));
+    }
+
     #[test]
     fn not_yet_due_entries_are_not_candidates() {
         let mut f = FairQueues::new();
@@ -877,7 +1183,7 @@ mod tests {
         #[test]
         fn take_returns_each_entry_exactly_once(
             ops in proptest::collection::vec(
-                (0u8..4, 0u64..40, 0u8..3, -2i32..3, 0u8..4, 0u64..20),
+                (0u8..6, 0u64..40, 0u8..3, -2i32..3, 0u8..4, 0u64..20),
                 1..200,
             ),
         ) {
@@ -889,16 +1195,32 @@ mod tests {
                 match op {
                     0 | 1 => {
                         f.set_weight(&format!("q{q}"), u32::from(k) + 1);
-                        f.insert(e(id, &format!("q{q}"), p, &format!("k{k}"), at));
+                        let mut x = e(id, &format!("q{q}"), p, &format!("k{k}"), at);
+                        x.first_activation = op == 0;
+                        f.insert(x);
                         live.insert(run);
                         taken.remove(&run);
                     }
                     2 => {
                         prop_assert_eq!(f.remove(&run).is_some(), live.remove(&run));
                     }
+                    3 => {
+                        // Throttle gates (07-23); `at` 0 lifts every gate (changed()).
+                        if at == 0 {
+                            f.ungate_all();
+                        } else if k < 2 {
+                            f.gate_first(&format!("q{q}"), at);
+                        } else {
+                            f.gate_first_key(&format!("q{q}"), &format!("k{k}"), at);
+                        }
+                        f.unpark_due(id % 20);
+                    }
                     _ => {
                         if let Some(c) = f.next_candidate(u64::MAX) {
                             prop_assert!(live.contains(&c.run));
+                            if c.first_activation {
+                                prop_assert!(!f.is_first_gated(&c.queue), "gated first activation proposed");
+                            }
                             if k == 0 {
                                 // Workflow paused: held, not returned.
                                 f.hold(&c);
@@ -914,6 +1236,8 @@ mod tests {
                 prop_assert_eq!(f.len(), live.len());
             }
             f.release_held();
+            f.ungate_all();
+            prop_assert_eq!(f.next_unpark_at(), None);
             while let Some(c) = f.next_candidate(u64::MAX) {
                 let t = f.take(&c).expect("present");
                 prop_assert!(live.remove(&t.run), "returned twice or unknown");

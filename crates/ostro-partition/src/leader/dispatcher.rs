@@ -33,9 +33,16 @@
 //! next due entry, then:
 //!
 //! 1. [`FlowControl::admit`] (`now_ms` from the injected clock): `Yes(permit)` continues;
-//!    `QueueBlocked{until}` and `Paused{Queue}` skip the queue for the rest of the round
-//!    (`until` joins the loop's deadline); `KeyBlocked{until}` parks the key (other keys
-//!    and queues go on) until `until` or the next [`FlowControl::changed`] bump;
+//!    a **throttle** block (`QueueBlocked{Some(until)}` / `KeyBlocked{Some(until)}` on a
+//!    first activation; throttles apply only to first activations, D-W13) gates only the
+//!    first activations of that queue (key) (`FairQueues::gate_first` /
+//!    `gate_first_key`) until `until` or the next [`FlowControl::changed`] bump, and the
+//!    queue's re-activations are still granted in the same round (plan 07-23: a skipped
+//!    queue made a re-activation behind a throttled first activation wait for `until`);
+//!    any other `QueueBlocked{until}` (concurrency) and `Paused{Queue}` skip the queue for
+//!    the rest of the round (`until` joins the loop's deadline); any other
+//!    `KeyBlocked{until}` parks the key (other keys and queues go on) until `until` or the
+//!    next [`FlowControl::changed`] bump;
 //!    `Paused{Workflow}` holds back that entry alone (`FairQueues::hold`) until the next
 //!    [`FlowControl::changed`] bump, and the rest of the queue (other workflows, even on
 //!    the same concurrency key) is still served in the same round. A held entry is not
@@ -556,6 +563,7 @@ impl Entry {
             key: self.concurrency_key.clone(),
             ready_at_ms: self.ready_at_ms,
             run,
+            first_activation: self.first_activation,
         }
     }
 }
@@ -1139,8 +1147,28 @@ impl Dispatcher {
                 continue;
             };
             let view = e.view();
+            let first = e.first_activation;
             let mut permit = match self.flow.admit(&view, now) {
                 Admit::Yes(p) => p,
+                Admit::QueueBlocked {
+                    until_ms: Some(until),
+                } if first => {
+                    // A throttle (first activations only, D-W13): gate the queue's first
+                    // activations until `until` (or `changed()`); its re-activations are
+                    // still served this round (07-23). `until` is in the future, so the
+                    // gate's timer never spins.
+                    self.st.fair.gate_first(&c.queue, until.max(now + 1));
+                    continue;
+                }
+                Admit::KeyBlocked {
+                    until_ms: Some(until),
+                } if first => {
+                    // A key throttle: only this key's first activations wait.
+                    self.st
+                        .fair
+                        .gate_first_key(&c.queue, &c.key, until.max(now + 1));
+                    continue;
+                }
                 Admit::QueueBlocked { until_ms } => {
                     self.st.fair.skip_queue(&c.queue);
                     self.queue_until = match (self.queue_until, until_ms) {
@@ -1656,7 +1684,8 @@ impl Dispatcher {
     }
 
     /// Earliest wake-up: next delayed ready time, next lease check, or the earliest
-    /// flow-control `until` (a `QueueBlocked` of the last round or a parked key).
+    /// flow-control `until` (a `QueueBlocked` of the last round, a parked key or a
+    /// first-activation gate).
     fn next_deadline(&self) -> Option<Instant> {
         let at_clock = [
             self.st.delayed.first().map(|&(at, _)| at),
@@ -1801,6 +1830,7 @@ impl Dispatcher {
                     match r {
                         Ok(()) => {
                             self.st.fair.unpark_keys();
+                            self.st.fair.ungate_all();
                             self.st.fair.release_held();
                         }
                         Err(_) => self.flow_live = false,

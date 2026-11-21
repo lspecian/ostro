@@ -29,8 +29,15 @@ pub enum Admit {
     /// Admitted; commit the permit once placement granted capacity.
     Yes(FlowPermit),
     /// The queue is at a limit; retry at `until_ms` (clock ms) or on `changed()`.
+    ///
+    /// `until_ms: Some` on a first activation means a throttle (time-based, first
+    /// activations only, D-W13): the dispatcher then holds back only the queue's first
+    /// activations until `until_ms` or `changed()` and keeps granting its re-activations.
+    /// Otherwise (concurrency: `None`) the queue is skipped for the dispatch round.
     QueueBlocked { until_ms: Option<u64> },
     /// This entry's concurrency key is at a limit; other keys of the queue may run.
+    /// `until_ms: Some` on a first activation (a key throttle) holds back only the key's
+    /// first activations; otherwise the whole key is parked.
     KeyBlocked { until_ms: Option<u64> },
     /// Paused. The scope decides what the dispatcher skips: a [`PauseScope::Queue`] pause
     /// skips the whole queue for the round; a [`PauseScope::Workflow`] pause holds back

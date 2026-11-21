@@ -10,6 +10,9 @@
 //! - a placement-blocked queue does not starve another queue (B2);
 //! - throttles see `first_activation` only from F7: re-grants (executor requeue, Retry,
 //!   lease expiry) are `first_activation == false` and are admitted (B1);
+//! - a throttled first activation ahead of a re-activation on the same partition, queue
+//!   and key holds back only first activations: the re-activation is granted as soon as
+//!   it is due (07-23, gap G1; queue- and key-scoped throttles);
 //! - the lease owns the flow permit and the reservation (both released on expiry);
 //!   `ExecOutcome::Abandoned` re-grants n + 1 without counting a failure;
 //!   `Action::RunPaused` revokes a running job and drops a queued entry;
@@ -453,6 +456,24 @@ async fn requeue(job: &Job) {
         events: vec![],
         derived: vec![Derived::new(derived::Intent::EnqueueReady(EnqueueReady {
             ready_at_ms: 0,
+        }))],
+    });
+    let o = job.handle.submit_one(cmd).await.expect("requeue submit");
+    assert_eq!(o, ApplyOutcome::Accepted);
+}
+
+/// Like [`requeue`], but the re-activation is due at `ready_at_ms` (a durable timer).
+async fn requeue_at(job: &Job, ready_at_ms: u64) {
+    let cmd = Command::events_appended(EventsAppended {
+        run_id: job.run.as_bytes().to_vec(),
+        token: Some(AttemptTokenMsg {
+            epoch: job.token.epoch.0,
+            n: job.token.n,
+        }),
+        from_seq: job.record.next_seq,
+        events: vec![],
+        derived: vec![Derived::new(derived::Intent::EnqueueReady(EnqueueReady {
+            ready_at_ms,
         }))],
     });
     let o = job.handle.submit_one(cmd).await.expect("requeue submit");
@@ -941,6 +962,130 @@ async fn reactivations_are_not_throttled() {
     );
     assert_eq!(o.stats.lease_expired.load(Ordering::Relaxed), 1);
     node.shutdown().await.expect("shutdown");
+}
+
+/// G1 (07-23): a throttled first activation sits ahead of a re-activation on the same
+/// partition, queue and concurrency key (FIFO by `ready_at`); `key_scoped` uses a key
+/// throttle (`KeyBlocked{Some}`) instead of a queue throttle (`QueueBlocked{Some}`). The
+/// throttle's `until` is 10 minutes away. The re-activation must be granted as soon as it
+/// is due, the first activation is never granted, and with no event the gated first
+/// activation is not re-probed (no spin).
+async fn throttled_first_activation_ahead_of_reactivation(key_scoped: bool) {
+    const DELAY_MS: u64 = 500;
+    let tmp = ostro_testkit::fs::tempdir();
+    let throttle = Arc::new(AtomicBool::new(false));
+    let due_at = Arc::new(Mutex::new(None::<u64>));
+    let fake = {
+        let (th, due) = (Arc::clone(&throttle), Arc::clone(&due_at));
+        Fake::new(move |mut job, idx| {
+            let (th, due) = (Arc::clone(&th), Arc::clone(&due));
+            boxed(async move {
+                if idx == 0 && job.record.workflow == "old" {
+                    // The throttle starts now; the run sleeps on a durable timer.
+                    th.store(true, Ordering::SeqCst);
+                    let at = now_ms() + DELAY_MS;
+                    *due.lock().expect("lock") = Some(at);
+                    requeue_at(&job, at).await;
+                    let _ = timeout(T, job.revoked.wait_for(|v| *v)).await;
+                }
+                ExecOutcome::Released
+            })
+        })
+    };
+    let flow = {
+        let th = Arc::clone(&throttle);
+        Arc::new(FakeFlow::new(move |v, now, _| {
+            if v.first && th.load(Ordering::SeqCst) {
+                let until = Some(now + 600_000);
+                if key_scoped {
+                    Decision::KeyBlocked(until)
+                } else {
+                    Decision::QueueBlocked(until)
+                }
+            } else {
+                Decision::Yes
+            }
+        }))
+    };
+    let mut o = Opts::new(&fake);
+    o.flow = Some(Arc::clone(&flow));
+    let node = open(tmp.path(), &o).await;
+    let h = h(&node);
+    let start = |run: &RunId, wf: &str| {
+        Command::start_run(StartRun {
+            workflow: wf.into(),
+            concurrency_key: "k".into(),
+            ..start_run(run)
+        })
+    };
+    let old = run_on(0);
+    submit_all(h, vec![start(&old, "old")]).await;
+    fake.wait_jobs(1, T).await;
+    wait_until(T, "re-activation scheduled", || {
+        due_at.lock().expect("lock").is_some()
+    })
+    .await;
+    // A first activation ahead of the sleeper (ready_at 100 < its timer), same key.
+    let new = run_on(0);
+    submit_all(h, vec![start(&new, "new")]).await;
+    let blocked = if key_scoped { "key" } else { "queue" };
+    wait_until(T, "first activation throttled", || {
+        flow.calls()
+            .iter()
+            .any(|(v, t)| v.workflow == "new" && *t == blocked)
+    })
+    .await;
+    let due = due_at.lock().expect("lock").expect("due");
+    assert!(
+        now_ms() < due,
+        "the first activation was throttled before the timer fired"
+    );
+    // The re-activation is granted once due, not at the throttle's `until`.
+    let seen = fake.wait_jobs(2, Duration::from_secs(5)).await;
+    let granted_at = now_ms();
+    assert_eq!(seen[1].run, old, "re-activation granted: {seen:?}");
+    assert_eq!(seen[1].token.n, 2);
+    assert!(
+        granted_at.saturating_sub(due) < 3_000,
+        "re-activation granted {} ms after due",
+        granted_at.saturating_sub(due)
+    );
+    // Admission saw the re-activation as such and admitted it.
+    assert!(
+        flow.calls()
+            .iter()
+            .any(|(v, t)| v.workflow == "old" && !v.first && *t == "yes")
+    );
+    // Quiet: the gated first activation is not re-probed without an event, never granted
+    // and burns no attempt.
+    sleep(Duration::from_millis(300)).await;
+    let probes = |f: &FakeFlow| {
+        f.calls()
+            .iter()
+            .filter(|(v, _)| v.workflow == "new")
+            .count()
+    };
+    let before = probes(&flow);
+    sleep(Duration::from_millis(400)).await;
+    assert_eq!(probes(&flow), before, "gated first activation re-probed");
+    assert!(before <= 4, "first activation probed {before} times");
+    assert_eq!(fake.seen().len(), 2);
+    assert_eq!(
+        attempt(h, &new),
+        None,
+        "throttled first activation burned an attempt"
+    );
+    node.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queue_throttle_on_first_activation_does_not_hold_reactivations() {
+    throttled_first_activation_ahead_of_reactivation(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn key_throttle_on_first_activation_does_not_hold_reactivations() {
+    throttled_first_activation_ahead_of_reactivation(true).await;
 }
 
 /// Lease expiry revokes the lease and releases both the flow permit and the reservation
