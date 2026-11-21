@@ -193,7 +193,7 @@ HTTP/JSON (OpenAPI) and gRPC with identical semantics; thin client libraries for
 | NFR-3.2 | Results are committed (fsync on single node; HW past them in a cluster) before any later step observes them |
 | NFR-3.3 | No acknowledged write is lost on leader failover (leader epochs + truncation; elect only from ISR) |
 | NFR-3.4 | Effects: HTTP effectively-once via stable idempotency keys; SQL exactly-once via transactional tokens |
-| NFR-3.5 | Executor failure: activation reassigned within `lease_ttl` (default 15 s) |
+| NFR-3.5 | Executor failure: activation reassigned within `lease_ttl` (default 30 s, `[executor] lease_ttl`; D-W14). A worker whose stream ends is re-dispatched at once; a stalled one after `lease_ttl` |
 | NFR-3.6 | Single node restart to serving: < 5 s for 1 M stored runs (snapshot + log tail replay) |
 | NFR-3.7 | Bottomless restore RPO ≤ segment seal interval (default 1 s / 1 MiB) |
 

@@ -99,3 +99,27 @@ Never `git add -A`, `git add .`, `git add -u`, `git commit -a`, `git stash`, `gi
 - **Phase 8 (parallel):** `Activate.traceparent` carries the activation span context and the worker sets `ostro_engine::telemetry` from it; remote guest logs reach the server's guest-log sink (07-12); the demand gauge value is set by Phase 7 (D-W12).
 - **Phase 12/13:** reuse the cluster CA, the `[cluster]` section and the cluster listener; cluster-wide flow-control quotas and N/N-1 worker versions are theirs.
 - **Phase 14:** per-tenant quotas become one more key level in `leader/fair.rs`; bearer-token enforcement on the demand endpoint.
+
+## Spike outcomes (folded in by 07-22)
+
+| Question | Outcome | Plan |
+|----------|---------|------|
+| rcgen / x509-parser / axum-server / instant-acme resolve deny-clean | Yes: rcgen 0.14.10 (`aws_lc_rs`, `pem`, `x509-parser`), x509-parser 0.18.1, axum-server 0.9.2 (`tls-rustls-no-provider`), instant-acme 0.8.5 (`aws-lc-rs`, `hyper-rustls`); arc-swap 1.9.5, libc, tokio-rustls 0.26.6, rustls-pki-types were already locked. `cargo deny check` clean on the stock deny.toml; no ring, chrono, openssl-sys, webpki-roots or native-tls in the normal tree; no banned duplicate (two tolerated ones: synstructure 0.13.2, untrusted 0.7.1). **No fallback was used** (D-W6/D-W7). | 07-02 |
+| instant-acme 0.8.5 API | `Account::builder()` / `builder_with_root(pem)`, `AccountBuilder::create` / `from_credentials`, `new_order(NewOrder)`, `Order::authorizations()` (stream), `AuthorizationHandle::challenge(ChallengeType)`, `ChallengeHandle::{key_authorization, set_ready}`, `poll_ready`, `finalize_csr(der)`, `poll_certificate` with `RetryPolicy` (500 ms, x1.5, 120 s). No `rcgen` feature, so the CSR is built with rcgen directly; `CryptoProvider::install_default(ostro_api::tls_provider())` once for instant-acme's hyper-rustls client. | 07-10 |
+| rcgen `CustomExtension::new_acme_identifier` | Exists in 0.14.10 (critical, OID 1.3.6.1.5.5.7.1.31, OCTET STRING of the digest); the hand-built fallback was not needed. | 07-10 |
+| GCRA implementation | Hand-rolled in `flow/limits.rs` (D-W24): ns resolution from the injected clock, `T = period/limit`, `tau = T x (burst-1)`; tentative dispatcher charges roll back unless committed after `Placement::reserve` Granted; StartRun checks queue + key TATs under one mutex and commits both or neither; key cells capped by `[flow] max_tracked_keys` with idle eviction. governor was not added. | 07-05, 07-08 |
+| Pebble builds with the local Go | Yes: Pebble v2.10.3 needs Go >= 1.25; Go's toolchain auto-switch fetched go1.26.11 (no system change). Order flow with `PEBBLE_VA_ALWAYS_VALID=1` and real HTTP-01 + TLS-ALPN-01 validation both passed (07-10). The optional `acme-pebble` workflow_dispatch job repeats it in CI. | 07-10, 07-22 |
+| axum-server vs the hand-rolled accept loop | axum-server 0.9.2 (`from_tcp_rustls` + `Handle::graceful_shutdown`) with one `ArcSwapOption<CertifiedKey>` resolver; the D-W7 fallback was not needed. | 07-06 |
+| 08-17 guest-log path | Settled at 07-01: `ActivationSink::guest_log(&self, GuestLogRecord)` + `handles_guest_logs()`. Remote guest logs travel as `GuestLogs` frames and reach the 08-17 `GuestLogSink` through `sink.guest_log`, the same path as embedded lines. | 07-01, 07-12 |
+| Await tokens of remote runs | D-W27 (leader-only minting, re-mint on Append, `conflict_expected`), implemented in 07-12. | 07-09, 07-12 |
+| Re-drive vs provider 409 in_progress | D-W28 (fix-0721): the 07-21 GAP (7 of 10,000 runs completed with 409) closed; the re-run passed with lost 0. | 06-10, 07-21 |
+| Fallback switches recorded in STATE.md during execution | None (no crate fallback; no keyspace or meta fallback: F1/F2/F7/F8 landed in Phase 5, D-W1). | all |
+
+### Gate-time decisions (07-22)
+
+- **TLS profile:** the binary passes `ostro dev` / `ostro server` to the server (`ServerOptions::with_tls_profile`); the `auto_sealing_key` heuristic remains only as the fallback for library callers that pass no profile.
+- **Revoked worker:** a re-join refused with a 4xx (revoked or expired token) ends the worker with that error (exit 1) instead of an endless retry loop. Transport errors, 408, 429 and 5xx keep retrying.
+- **`--ca-hash` with `files` / `acme` listeners:** the pinned handshake fails before any request byte, then the join is retried once with the platform verifier; the CA in the join response must still equal the pin (D-W20 as written; the 07-07 code pinned at the TLS layer in every mode, which broke the deploy/k8s files-mode manifests).
+- **CLI over TLS:** `https://` with the platform roots, or only the `--ca-file` / `OSTRO_CA_FILE` CA. ostro-cli enables reqwest's `rustls` feature (already enabled by ostro-worker/ostro-server; Cargo.lock unchanged).
+- **Run view:** `GET /v1/runs/{id}` / gRPC `RunInfo.pause` (field 21) / `ostro inspect` show `{reason, detail, at_ms}` while paused.
+- **Recorded, not changed:** resume keeps `attempt_failures` (user review; a reset changes apply semantics), no server-to-worker `Drain`, worker append batching for long activations, the auto-pause "completes after resume" leg needs a new guest. Owners in 07-VALIDATION "Follow-ups".

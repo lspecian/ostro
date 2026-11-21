@@ -273,7 +273,7 @@ Plans:
 - [x] 07-19-PLAN.md — SC4 e2e: concurrency, weights, priority, keyed fairness, throttle vs rate limit, pause/auto-pause, timeout while paused then /retry (DISP-03/04/05, OPS-01) (W7)
 - [x] 07-20-PLAN.md — SC5 e2e: KEDA metrics-api simulator drives real workers 0→N→0; real KEDA human_needed (WORK-05) (W7)
 - [x] 07-21-PLAN.md — SC3 fencing chaos: 10,000 runs, sharded/resumable, one charge per key, strict duplicate attribution, fenced_sends defined (QA-03) (W7)
-- [ ] 07-22-PLAN.md — PHASE-7 GATE: full ci-local, CI sync + optional Pebble/KEDA dispatch jobs, RESERVATIONS flip, docs, VALIDATION + human_needed, STATE (W8)
+- [x] 07-22-PLAN.md — PHASE-7 GATE: full ci-local, CI sync + optional Pebble/KEDA dispatch jobs, RESERVATIONS flip, docs, VALIDATION + human_needed, STATE (W8)
 
 ### Phase 8: Triggers, Bottomless & Observability
 **Goal**: Workflows start from webhooks and cron. A single node has real disaster recovery from object storage, and operators can trace and measure everything.

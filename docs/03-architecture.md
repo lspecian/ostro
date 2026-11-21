@@ -257,23 +257,35 @@ Activate{run, attempt, module_sha, journal (or cursor), input}
 
 - **Hot wait** (default ≤ 2 s per queue): keep the instance resident while short effects complete; otherwise **evict** (drop the call future and Store) and let the timer/signal/effect completion re-dispatch the run, which replays.
 - **In-flight effect recovery** (Phase 6) has no sweeper that re-sends from the journal, but it does need a wake. A re-dispatched run replays to an `effect_scheduled` without `effect_completed` and re-drives it with the **same idempotency key** (HTTP) or the same token (exactly-once SQL). A run that evicted on a hot-wait timeout with an effect in flight is not due anywhere, so a crash would strand it. Every in-flight effect therefore has an `effects` row (keyspace #12, `Intent::RegisterEffect`), and an accepted `LeaderAnnounced` gives every `Scheduled` run that still has one a ready row: runs suspended on in-flight effects are woken on leader start through their effects rows. Completions arrive only as `Cmd::CompleteEffect` (attempt-independent, first wins). See [connectors.md](connectors.md) §1.
-- **`EffectDriver` seam.** The engine never performs I/O itself. `ActivationSink::effect_driver()` (default `None`) hands it an `EffectDriver`; the engine calls `start` only after the append carrying `EffectScheduled` has committed, and again with `redrive = true` from replay. On server nodes the driver is the in-process bridge (`ServerEffectDriver` over `ostro-bridge`). In Phase 7 a worker supplies its own worker-side driver (the bridge runs in the worker; secrets come through `ResolveSecret`, completions through the server) and reuses `ostro_types::live` and `ostro-bridge` unchanged.
+- **`EffectDriver` seam.** The engine never performs I/O itself. `ActivationSink::effect_driver()` (default `None`) hands it an `EffectDriver`; the engine calls `start` only after the append carrying `EffectScheduled` has committed, and again with `redrive = true` from replay. On server nodes the driver is the in-process bridge (`ServerEffectDriver` over `ostro-bridge`). On a worker (Phase 7, D-W3) the driver is a proxy: `StartEffect` asks the leader, which verifies the request against the journal and runs the same `ServerEffectDriver`, so secrets never reach a worker (§5.3).
 
-### 5.3 Worker protocol (gRPC, bidirectional stream per server node)
+### 5.3 Worker protocol (gRPC `ostro.worker.v1`, one control stream + bulk RPCs per server node)
+
+As shipped in Phase 7 (D-W2, D-W3; details in [workers.md](workers.md)). Everything runs on one mTLS h2 connection to the cluster listener (7701), so a bulk transfer never delays a heartbeat.
 
 ```
+Execute.Session (bidirectional control stream)
 worker → server                                  server → worker
-Hello{id, version, wit_versions, labels,         Welcome{node_id, partitions led, limits}
-      capacity{slots, memory}}
-Credit{n}                                        Activate{run, attempt, module_sha, journal_page, …}
-Append{run, attempt, from_seq, events}           AppendAck{run, committed_seq} | Reject{fenced}
-ResolveSecret{run, attempt, name}  (mTLS)        SecretValue{…} (only if granted; never cached)
-FetchBlob{sha256}                                BlobChunk{…}
-Heartbeat{running runs, load}                    Cancel{run}
-Done{run, evicted|terminated}
+Hello{worker_id, proto_version, ostro_version,   Welcome{session_id, lease_ttl, heartbeat,
+      wasmtime_version, event_codec, wit,                max_frame_bytes, engine limits, members}
+      labels, slots, memory}                     GoAway{reason}   (version mismatch, revoke, shutdown)
+Credit{free_slots}                               Activate{run, token, module_sha, journal_len, …}
+Heartbeat{leases, free_slots, memory_used}       Input{run, token, up_to_seq}
+Done{run, token, outcome}                        Cancel{run, token} | CancelEffect{run, op}
+GuestLogs{…}   Drain{}
+
+Bulk RPCs (each checks peer certificate → session → lease of (run, token))
+FetchJournal{run, token, from, to}   → journal pages (≤ max_frame_bytes)
+FetchBlob{run, token, sha, offset}   → chunks (the run's module and the blobs its journal references)
+Append(stream of frames)             → AppendResult{next | fenced | conflict_expected | paused | rejected}
+StartEffect{token, op, redrive, redacted header values, http_retry} → started | rejected
+Renew{csr}                           → new client certificate
 ```
 
-Workers learn membership from `Welcome` and open one stream to **every** server node (each leader dispatches its own partitions). Workers are stateless; killing one only costs re-dispatch after `lease_ttl`.
+- The leader stays authoritative: it decodes every appended event and writes it through the run's `PartitionSink` (the same path as an embedded activation), re-mints await tokens with its own key (D-W27), and maps `Done` through the embedded outcome mapper.
+- **Effects are bridged back to the leader** instead of a `ResolveSecret` RPC: the leader checks the lease, loads the committed `EffectScheduled(op)`, checks the redacted header names against the journal copy, rebuilds the `LiveEffect` from the journal and runs the run's `ServerEffectDriver` (grants, egress, per-(run, attempt) secret resolution). Secret values never cross the stream.
+- Workers join with a `wkr_` token over the client listener (`POST /v1/workers/join`, CA pinned by `--ca-hash`) and get a 24 h client certificate; they learn the cluster endpoints from the join response and `Welcome.members`. Phase 7 keeps one session to the current endpoint; connecting to every node at once comes with Phase 12/13.
+- Workers are stateless apart from the AOT module cache. A killed worker's stream end abandons its jobs at once (re-grant, no failure counted); a stalled one loses its leases after `lease_ttl` (30 s default) and its late messages are fenced.
 
 ### 5.4 Resource governance
 
@@ -585,7 +597,9 @@ Unlike the pgflow design (pull-based work stealing from a shared table), the par
 | `workers` | Only connected workers matching the queue's label selector |
 | `auto` | Embedded first; spill to workers when any threshold trips (node CPU > 70% for 10 s, executor slots > 90%, resident Wasm memory > 85%, queue lag > 5 s); hysteresis −15% with a 30 s cool-down |
 
-**KEDA:** each node exports `ostro_queue_worker_demand{queue}` (runs ready for workers that no worker slot is taking) on `/metrics` and `GET /v1/queues/{q}/demand`. A `ScaledObject` with the `prometheus` or `metrics-api` scaler scales a worker Deployment, including to zero.
+**Demand (D-W12, as shipped).** `demand(q) = running_on_workers(q) + admissible_backlog_for_workers(q)`: for a `workers` queue the admissible backlog is the ready entries that pass flow admission (not paused, not throttled), capped by the queue's concurrency headroom; for an `auto` queue the same only while it is spilling, minus the free embedded slots (0 otherwise); an `embedded` queue's demand is 0. Running work counts, so KEDA does not scale a pool down under its running activations. Each node sets `ostro_queue_worker_demand{queue}` every second (`workers/demand.rs` owns the value), plus `ostro_queue_worker_backlog{queue}`, `ostro_workers_connected` and `ostro_worker_slots_free`, and serves `GET /v1/queues/{q}/demand` → `{queue, demand, backlog, running_on_workers, placement, spilling, workers, worker_slots_free}`.
+
+**KEDA:** a `ScaledObject` with the `metrics-api` scaler (single node, the demand endpoint) or the `prometheus` scaler (`sum(ostro_queue_worker_demand{queue="heavy"})`, clusters) scales a worker Deployment, including to zero; `targetValue` is the worker's `--slots`. Manifests: `deploy/keda/`, `deploy/k8s/`.
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -600,7 +614,8 @@ spec:
       metadata:
         url: "https://ostro.ostro.svc:7700/v1/queues/heavy/demand"
         valueLocation: "demand"
-        targetValue: "20"
+        targetValue: "8"              # = worker --slots
+        activationTargetValue: "0"
 ```
 
 ---
