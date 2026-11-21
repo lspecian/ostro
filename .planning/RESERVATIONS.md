@@ -13,6 +13,7 @@
    - `reserved P6/P7/P8`: block held for that phase.
      **Phase 6 gate 2026-11-20 (06-20):** every Phase 6 ordinal in code was verified against this file. Used rows are flipped to `exists (P6)` (written `exists (P6, <plan>)`): Cmd 13 `CompleteEffect`, Intent 9 `RegisterEffect` / 10 `CancelEffect`, InvalidCode 15 `BadEffectCompletion` and the keyspace #12 `effects` rows. Unused spares (Cmd 14–19, StartRun 24–27, Intent 11–12, EventKind 72–79, RejectReason 12–14, InvalidCode 16–17, Outbox 7, MetaKind 17–18, ext tags 16–31) stay `reserved P6`.
      **Phase 8 gate 2026-11-20 (08-22):** every Phase 8 ordinal in code was re-verified against this file (`08-22-rescheck.py`: every Cmd tag, keyspace and InvalidCode in code is `exists` or a placeholder; RESERVATIONS CHECK: PASS). The ordinal rows were flipped by 08-01 (Cmd 27 `ScheduleFire`, keyspace 16 `schedule_state`, InvalidCode 22 `BadScheduleFire` / 23 `ScheduleOwnerMismatch`) and are confirmed; the §11 Phase 8 names that shipped now read `exists (P8, <plan>)`. Unused Phase 8 slots stay `reserved P8`: Cmd 28–33, StartRun 32–35, Intent 17–18, EventKind 88–95, RejectReason 18–19, InvalidCode 24, Outbox kind 10, MetaKind 21, meta ext tags 48–63, and the `cron::` failpoint prefix.
+     **Phase 7 gate 2026-11-21 (07-01):** the code was re-verified against this file before any Phase 7 code (`07-01-rescheck.py`, output in 07-01-SUMMARY: every Cmd tag, intent, outbox kind, TerminalStatus, StartRun field, journal kind, keyspace, RejectReason, InvalidCode and MetaRecord in code is `exists` or a canonical placeholder; every Phase 7 block is empty in code apart from the `ReservedP7_18..21` InvalidCode placeholders; RESERVATIONS CHECK: PASS). Phase 5 F1/F2/F3/F4/F7/F8 landed, so Phase 7 needs 0 keyspaces and 0 meta variants. Phase 7 allocations: Cmd 20/21, RejectReason 15 and the §11 Phase 7 names (D-W18).
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -39,7 +40,9 @@ Sources:
 | 12 | CompleteToken | exists (P5, 05-01) |
 | 13 | CompleteEffect | exists (P6, 06-02) |
 | 14–19 | spare | reserved P6 |
-| 20–26 | (unspecified) | reserved P7 |
+| 20 | PauseRun `{run_id 1, reason u32 2, detail string 3, token AttemptTokenMsg 4 (optional; present = executor auto-pause, fenced), requested_at_ms 5}` | planned P7 (07-03) |
+| 21 | ResumeRun `{run_id 1, requested_at_ms 2}` | planned P7 (07-03) |
+| 22–26 | spare | reserved P7 |
 | 27 | ScheduleFire | exists (P8, 08-01) |
 | 28–33 | spare | reserved P8 |
 | 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9 |
@@ -168,8 +171,8 @@ Rules:
 | 14 | waits | exists (P5, 05-02) |
 | 15 | signal_seen | exists (P5, 05-02) |
 | 16 | schedule_state | exists (P8, 08-01; `Table::ScheduleState`, rows from 08-07) |
-| 17 | p7_a | reserved P7. **Not needed if 07-RESEARCH F1 lands** (05-02 adds `RunRecord.pause`). If F1 is rejected, rename to `run_pauses` in a docs-only commit before any placeholder is declared. |
-| 18 | p7_b | reserved P7. Not needed if F1 lands. |
+| 17 | p7_a | reserved P7, **unused** (F1 landed in 05-02: `RunRecord.pause: Option<PauseMark>`; verified by 07-01). Never declared by Phase 7; a later phase landing keyspace 19+ declares it as an empty placeholder under the placeholder rule. |
+| 18 | p7_b | reserved P7, **unused** (F1 landed in 05-02; verified by 07-01). Never declared by Phase 7. |
 | 19 | p9_a | reserved P9 (placeholder rule applies) |
 | (none) | `x_*` derived keyspaces (PF-11-2): outside TABLES, the digest, OSNP and blob GC; rebuilt from digest state. Reserved name: `x_run_index` (P11) | rule frozen in 05-20 |
 | 20+ | — | unallocated |
@@ -181,8 +184,11 @@ Rules:
 | 0–10 | StaleEpoch, Fenced, SeqMismatch, SeqGap, RunNotFound, RunTerminal, RunExists, IdempotencyConflict, PayloadTooLarge, WrongPartition, Invalid | exists (P2) |
 | 11 | RunCompleted | exists (P5, 05-02) |
 | 12–14 | — (P6 declared 0 needs) | reserved P6 |
-| 15–17 | — | reserved P7 |
+| 15 | RunPaused (outcome code 31) | planned P7 (07-03) |
+| 16–17 | spare | reserved P7 |
 | 18–19 | — (P8 declared 0) | reserved P8 |
+
+RejectReason 12–14 are absent in code at the Phase 7 gate (07-01, 2026-11-21: code ends at 11 `RunCompleted`). 07-03 declares `#[doc(hidden)] ReservedP6_12`, `ReservedP6_13`, `ReservedP6_14` if still absent (P-15 convention; never emitted, so never in the state hash) before `RunPaused` at 15. Nothing sits at 15–17.
 | 20–22 | — | reserved P9 |
 | 23–24 | — (Phase 13 repin / version-gate rejects; names chosen by 13-01) | reserved P13 |
 | 25+ | — | unallocated |
@@ -252,7 +258,7 @@ Rules (D20):
 | 15 | QueuePolicy (`queue_policies`) | exists (P5, 05-07) |
 | 16 | Webhook (`webhooks`) | exists (P5, 05-07), pre-freeze, for P8 F3 |
 | 17–18 | — (P6 uses existing Secret/Grant/Connection/Egress by convention: 0 needed) | reserved P6 |
-| 19–20 | — (QueueFlow / WorkflowFlow only if F2 is rejected) | reserved P7. **Not needed if 07-RESEARCH F2 lands** (05-07 puts the Phase 7 fields in QueuePolicy/WorkflowPolicy pre-freeze) |
+| 19–20 | — (QueueFlow / WorkflowFlow only if F2 had been rejected) | reserved P7, **unused** (F2 landed in 05-07: SpillPolicy, RateSpec, key_rate_limit, key_concurrency, on_retries_exhausted, placement, selector, WorkflowPolicy.paused; F8 `ApiToken.expires_at_ms` landed too; verified by 07-01). No Phase 7 META_FORMAT bump. |
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
 | 22–23 | — | reserved P9 |
 | 24–25 | — (fallback only if Phase 14 F2/F3/F4 had not landed pre-freeze) | reserved P14 |
@@ -375,3 +381,15 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Dedupe namespaces | `__rerun/`, `__onfail/`, `__bulk/`, `__dlq/` | P11 |
 | System run tag | `__ostro/rerun_from=<seq>` (zero-format rerun lineage, PF-11-4 fallback) | P11 |
 | Error kinds | `limit_exceeded`, `payload_too_large` (documented in WIT by 05-20) | P11 |
+| Crates | `ostro-worker`, `ostro-worker-proto` | P7 (07-02) |
+| Config sections | `[workers]`, `[worker]`, `[cluster]` (P7 creates; P12 extends with `[[cluster.peers]]`, `replication_listen`), `[cluster.tls]`, `[api.tls]`, `[flow]` | P7 (07-02) |
+| gRPC services | `ostro.worker.v1.Execute` (cluster listener, mTLS); `ostro.api.v1.Queues`, `ostro.api.v1.Workers` | P7 (07-02 / 07-11) |
+| REST paths | `/v1/queues/{name}/flow`, `/v1/queues/{name}/pause`, `/v1/queues/{name}/resume`, `/v1/queues/{name}/demand`; `/v1/workflows/{name}/pause`, `/v1/workflows/{name}/resume`; `/v1/runs/{id}/pause`, `/v1/runs/{id}/resume`; `/v1/workers`, `/v1/workers/join`, `/v1/workers/{id}/drain`, `/v1/workers/tokens` | P7 (07-11 / 07-14) |
+| Failpoint prefixes | `worker::`, `placement::`, `flow::` | P7 |
+| Metric prefixes | `ostro_worker_`, `ostro_workers_`, `ostro_placement_`, `ostro_flow_`; the **value** of `ostro_queue_worker_demand{queue}` (named and described only by 08-16; set by 07-16 `workers/demand.rs`), plus `ostro_queue_worker_backlog` | P7 (07-05 / 07-16) |
+| Id prefix / token scope | `wkr_` worker join tokens (`ApiToken{id: "wkr_<id>", scopes: ["worker:join"]}`) | P7 (07-14) |
+| CLI verbs | `ostro worker` (+ `ostro worker token create\|list\|revoke`), `ostro queue flow\|pause\|resume\|demand`, `ostro run pause\|resume`, `ostro workflow pause\|resume` | P7 (07-15) |
+| Data-dir entry | `<data_dir>/tls/` (`ca.crt`, `ca.key`, `node.crt`, `node.key`; keys 0600; cluster-scoped CA, D-W5) | P7 (07-06) |
+| Cert SAN URIs | `ostro://<cluster_id>/worker/<token_id>/<worker_id>` (join-issued), `ostro://<cluster_id>/worker/ext/<worker_id>` (external CA), `ostro://<cluster_id>/node/<node_id>` (node identity) | P7 (07-06 / 07-09) |
+| In-memory actions | `Action::RunPaused{run}`, `Action::RunResumed{run}` (informational, not persisted, not a RESERVATIONS space) | P7 (07-03) |
+| Note | `ostro-worker-proto` field numbers are versioned by `proto_version` inside that crate and are **not** a RESERVATIONS space | P7 (D-W2) |
