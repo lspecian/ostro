@@ -53,6 +53,13 @@
 //! P8-D21): `Node::open` has returned (every partition's readiness barrier is open and
 //! its leader services run) and the leaders are recorded in meta.
 //!
+//! Phase 7 (07-02) has one seam, [`crate::p7`] (D-W17): [`p7::init`] after the engine
+//! runtime (TLS state, worker registry, flow control, spill, join), [`p7::executor`] and
+//! [`p7::dispatcher_config`] build the dispatcher, [`p7::attach_node`] runs right after
+//! `Node::open`, [`p7::start_services`] after the services seam, and the client listener is
+//! served by [`p7::serve_client`] (plaintext until 07-06). The control plane holds
+//! [`p7::P7Shared`]; the ready line reads [`ServerHandle::client_endpoint`].
+//!
 //! One injectable clock (Phase 10 F5): [`ServerOptions::clock`] (the system clock by
 //! default) is the single `Arc<dyn Clock>` handed to `InitCluster`'s timestamp,
 //! `NodeConfig.clock` and the services' [`crate::services::ServiceCtx::clock`].
@@ -76,12 +83,13 @@ use ostro_engine::error::EngineError;
 use ostro_engine::runtime::{Runtime, RuntimeOptions};
 use ostro_meta::{MetaCommand, MetaError, MetaHandle, MetaResult};
 use ostro_partition::{
-    Clock, DispatcherConfig, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionSlot,
+    Clock, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionSlot,
 };
 use ostro_types::PartitionCount;
 use tempfile::TempDir;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::bridge_services::{BridgeEnv, BridgeServices};
@@ -90,10 +98,12 @@ use crate::control::{ControlCtx, ServerControlPlane, phase8_extensions};
 use crate::derive::MetaModules;
 use crate::executor::{EngineExecutor, ExecutorConfig, ExecutorHooks};
 use crate::leadership::MetaLeadership;
+use crate::p7::{self, P7Handles, P7Shared};
 use crate::retention::MetaPolicies;
 use crate::services::guest_logs::GuestLogSink;
 use crate::services::{ServiceCtx, Services};
 use crate::telemetry::{Telemetry, TelemetryError, TelemetryGuard};
+use crate::tls::ClientEndpoint;
 
 /// How long shutdown waits for in-flight HTTP/gRPC requests before closing them.
 const SERVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -139,6 +149,8 @@ pub enum ServerError {
     Invariant(String),
     #[error("telemetry: {0}")]
     Telemetry(#[from] TelemetryError),
+    #[error("workers / TLS: {0}")]
+    P7(#[from] p7::P7Error),
 }
 
 /// Wall-clock durations of the startup steps (logged at info; the 04-19 startup test
@@ -346,6 +358,28 @@ async fn start_inner(
     };
     timings.runtime = t.elapsed();
 
+    // 3b. Phase 7 seam (D-W17): TLS state, worker registry, flow control, spill, join.
+    let p7 = match p7::init(p7::P7Init {
+        config: Arc::new(cfg.clone()),
+        clock: Arc::clone(&clock),
+        data_dir: data_dir.clone(),
+        meta: Arc::clone(&meta),
+        runtime: Arc::clone(&runtime),
+        bridge: Some(Arc::clone(&bridge)),
+        cluster_id: cluster_id.clone(),
+        node_id,
+        lease_ttl: cfg.executor.lease_ttl.get(),
+    })
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            bridge.shutdown().await;
+            stop_meta(meta).await;
+            return Err(e.into());
+        }
+    };
+
     // 4. node + dispatcher(EngineExecutor).
     let t = Instant::now();
     let lease_ttl = cfg.executor.lease_ttl.get();
@@ -363,7 +397,7 @@ async fn start_inner(
             .with_clock(Arc::clone(&clock))
             .with_logger_provider(telemetry.as_ref().and_then(TelemetryGuard::logger_provider)),
     );
-    let executor: Arc<dyn Executor> = Arc::new(
+    let executor: Arc<dyn Executor> = p7::executor(
         EngineExecutor::new(Arc::clone(&runtime), exec_cfg)
             .with_hooks(hooks)
             .with_guest_log_sink(Arc::clone(&guest_logs))
@@ -375,6 +409,7 @@ async fn start_inner(
                     defaults: cfg.runs.clone(),
                 }),
             ),
+        &p7,
     );
     let stats = Arc::new(DispatcherStats::default());
     let mut node_cfg = NodeConfig::new(data_dir.clone(), count);
@@ -391,14 +426,11 @@ async fn start_inner(
         cfg.runs.clone(),
     ));
     node_cfg.backup_enabled = cfg.backup.enabled();
-    node_cfg.leader.dispatcher = Some(DispatcherConfig {
+    node_cfg.leader.dispatcher = Some(p7::dispatcher_config(
         executor,
-        lease_ttl,
-        slots: Arc::new(Semaphore::new(
-            usize::try_from(cfg.executor.slots).unwrap_or(usize::MAX),
-        )),
-        stats: Some(Arc::clone(&stats)),
-    });
+        Some(Arc::clone(&stats)),
+        &p7,
+    ));
     let node = match Node::open(node_cfg).await {
         Ok(n) => Arc::new(n),
         Err(e) => {
@@ -408,6 +440,7 @@ async fn start_inner(
         }
     };
     timings.node_open = t.elapsed();
+    p7::attach_node(&p7, &node);
     for slot in node.slots() {
         if let PartitionSlot::Ready(h) = slot {
             bridge.partitions().insert(h.clone());
@@ -437,7 +470,7 @@ async fn start_inner(
         .next()
         .map(|h| Arc::clone(h.blobs()));
     let ctl_blobs = blobs.clone();
-    let cfg = Arc::new(cfg);
+    let cfg = Arc::clone(&p7.config);
 
     // 4b. Services seam (P8-D21): every barrier is open and the leaders are recorded.
     let services = match blobs {
@@ -459,6 +492,20 @@ async fn start_inner(
         }
     };
 
+    // 4c. Phase 7 services (cluster listener / Execute service, spill, demand).
+    let p7_handles = match p7::start_services(&p7).await {
+        Ok(h) => h,
+        Err(e) => {
+            drop(p7);
+            drop(partitions);
+            services.shutdown().await;
+            bridge.shutdown().await;
+            shutdown_node(node).await;
+            stop_meta(meta).await;
+            return Err(e.into());
+        }
+    };
+
     // 5. API.
     let control = Arc::new(ServerControlPlane::new(
         Arc::clone(&meta),
@@ -467,6 +514,7 @@ async fn start_inner(
         Arc::clone(&runtime),
         Arc::clone(&cfg),
         Arc::clone(&bridge),
+        Arc::clone(&p7.shared),
     ));
     let api_cfg = ApiConfig {
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
@@ -492,14 +540,11 @@ async fn start_inner(
     if cfg.telemetry.metrics {
         app = app.merge(crate::telemetry::metrics_router());
     }
-    let (stop_tx, mut stop_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
+    let client_endpoint = p7::client_endpoint(&p7, local_addr);
+    let serve_client = p7::serve_client(&p7, listener, app);
     let serve = tokio::spawn(async move {
-        let res = axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let _ = stop_rx.wait_for(|stop| *stop).await;
-            })
-            .await;
+        let res = serve_client.await;
         if let Err(e) = &res {
             error!(error = %e, "API server stopped with an error");
         }
@@ -534,7 +579,9 @@ async fn start_inner(
         clock,
         telemetry: telemetry.take().unwrap_or_else(TelemetryGuard::disabled),
         stats,
-        stop_tx,
+        p7_shutdown: p7.shutdown.clone(),
+        p7_handles: Some(p7_handles),
+        client_endpoint,
         serve: Some(serve),
         done_rx,
         data_lock,
@@ -758,7 +805,12 @@ pub struct ServerHandle {
     /// OTel providers + Prometheus upkeep; shut down last.
     telemetry: TelemetryGuard,
     stats: Arc<DispatcherStats>,
-    stop_tx: watch::Sender<bool>,
+    /// Phase 7 shutdown (stops the client listener and the Phase 7 tasks).
+    p7_shutdown: CancellationToken,
+    /// Phase 7 tasks (07-02 seam); joined after the listener drained, before the services.
+    p7_handles: Option<P7Handles>,
+    /// How clients reach the client listener (scheme, address, fingerprint).
+    client_endpoint: ClientEndpoint,
     serve: Option<JoinHandle<std::io::Result<()>>>,
     done_rx: watch::Receiver<bool>,
     /// The exclusive `<data>/LOCK` descriptor, held until shutdown finishes (or drop).
@@ -781,6 +833,17 @@ impl ServerHandle {
     /// The bound API address (HTTP/1.1, h2c and gRPC).
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// How clients reach the client listener: `http`/`https`, the bound address and the
+    /// certificate fingerprint (Phase 7 seam; plaintext until 07-06).
+    pub fn client_endpoint(&self) -> &ClientEndpoint {
+        &self.client_endpoint
+    }
+
+    /// Phase 7 shared state (worker registry, flow control, gauges, TLS, join).
+    pub fn p7(&self) -> &Arc<P7Shared> {
+        &self.control.p7
     }
 
     /// The data directory in use (a temp dir in ephemeral mode).
@@ -876,14 +939,15 @@ impl ServerHandle {
             node,
             services,
             mut telemetry,
-            stop_tx,
+            p7_shutdown,
+            p7_handles,
             serve,
             data_lock,
             tempdir,
             ..
         } = self;
         control.stop_serving();
-        stop_tx.send_replace(true);
+        p7_shutdown.cancel();
         if let Some(mut serve) = serve {
             match tokio::time::timeout(SERVE_DRAIN_TIMEOUT, &mut serve).await {
                 Ok(Ok(Ok(()))) => {}
@@ -894,6 +958,10 @@ impl ServerHandle {
                     serve.abort();
                 }
             }
+        }
+        // Phase 7 tasks (stopped by `p7_shutdown` above).
+        if let Some(h) = p7_handles {
+            h.join().await;
         }
         // Services first: they hold node / meta clones until joined.
         if let Some(services) = services {
@@ -992,6 +1060,38 @@ mod tests {
             FAKE_MS + 5_000,
             "the services share the very same clock instance"
         );
+        h.shutdown().await.expect("shutdown");
+    }
+
+    /// Phase 7 seam (07-02): the stubs keep today's behaviour (plaintext endpoint, the
+    /// `[executor] slots` semaphore) and the shared state is wired and late-bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p7_seam_is_wired_and_behaviour_preserving() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = ServerConfig::server_defaults();
+        cfg.api.listen = "127.0.0.1:0".parse().expect("addr");
+        cfg.node.data_dir = dir.path().to_path_buf();
+        cfg.node.partitions = 2;
+        cfg.executor.slots = 7;
+        let h = start(cfg).await.expect("server start");
+        let ep = h.client_endpoint().clone();
+        assert_eq!(ep.scheme, "http");
+        assert_eq!(ep.addr, h.local_addr());
+        assert_eq!(ep.fingerprint, None);
+        assert_eq!(ep.url(), format!("http://{}", h.local_addr()));
+        let p7 = Arc::clone(h.p7());
+        assert_eq!(p7.tls.mode(), crate::tls::TlsMode::Off);
+        assert!(p7.engine.get().is_some(), "p7::executor stored the engine");
+        assert!(p7.bridge.is_some(), "the Phase 6 bridge is shared");
+        let node = p7.node.get().expect("p7::attach_node ran");
+        assert_eq!(node.partitions.iter().flatten().count(), 2);
+        assert!(node.blobs.is_some());
+        assert_eq!(p7.embedded_slots.available_permits(), 7);
+        assert_eq!(p7.registry.connected(), 0);
+        assert!(p7.gauges.snapshot().is_empty());
+        let d = crate::workers::demand::snapshot(&p7, "default");
+        assert_eq!((d.demand, d.placement.as_str()), (0, "embedded"));
+        drop(p7);
         h.shutdown().await.expect("shutdown");
     }
 }

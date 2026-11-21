@@ -26,11 +26,16 @@ pub enum ErrorCode {
     Internal,
     /// The operation is not implemented by this control plane (yet).
     Unimplemented,
+    /// A rate limit rejected the request (Phase 7, D-W21): HTTP 429 with `Retry-After`,
+    /// gRPC `RESOURCE_EXHAUSTED`; `details.retry_after_ms` says when to retry. gRPC shares
+    /// `RESOURCE_EXHAUSTED` with [`ErrorCode::PayloadTooLarge`]; clients tell them apart with
+    /// [`ErrorCode::from_grpc_code_and_details`].
+    RateLimited,
 }
 
 impl ErrorCode {
     /// Every code, in declaration order.
-    pub const ALL: [ErrorCode; 8] = [
+    pub const ALL: [ErrorCode; 9] = [
         ErrorCode::InvalidArgument,
         ErrorCode::NotFound,
         ErrorCode::Conflict,
@@ -39,6 +44,7 @@ impl ErrorCode {
         ErrorCode::Unavailable,
         ErrorCode::Internal,
         ErrorCode::Unimplemented,
+        ErrorCode::RateLimited,
     ];
 
     /// snake_case wire name (REST `error.code`).
@@ -52,6 +58,7 @@ impl ErrorCode {
             ErrorCode::Unavailable => "unavailable",
             ErrorCode::Internal => "internal",
             ErrorCode::Unimplemented => "unimplemented",
+            ErrorCode::RateLimited => "rate_limited",
         }
     }
 
@@ -66,6 +73,7 @@ impl ErrorCode {
             ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::Unimplemented => StatusCode::NOT_IMPLEMENTED,
+            ErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -80,15 +88,32 @@ impl ErrorCode {
             ErrorCode::Unavailable => tonic::Code::Unavailable,
             ErrorCode::Internal => tonic::Code::Internal,
             ErrorCode::Unimplemented => tonic::Code::Unimplemented,
+            ErrorCode::RateLimited => tonic::Code::ResourceExhausted,
         }
     }
 
-    /// Inverse of [`ErrorCode::grpc_code`] (unknown codes -> Internal).
+    /// Inverse of [`ErrorCode::grpc_code`] (unknown codes -> Internal). `RESOURCE_EXHAUSTED`
+    /// maps to [`ErrorCode::PayloadTooLarge`]; use [`ErrorCode::from_grpc_code_and_details`]
+    /// to recognise [`ErrorCode::RateLimited`].
     pub fn from_grpc_code(code: tonic::Code) -> ErrorCode {
         ErrorCode::ALL
             .into_iter()
             .find(|c| c.grpc_code() == code)
             .unwrap_or(ErrorCode::Internal)
+    }
+
+    /// [`ErrorCode::from_grpc_code`] refined by the status details: `RESOURCE_EXHAUSTED`
+    /// with a `retry_after_ms` detail is [`ErrorCode::RateLimited`].
+    pub fn from_grpc_code_and_details(
+        code: tonic::Code,
+        details: Option<&serde_json::Value>,
+    ) -> ErrorCode {
+        if code == tonic::Code::ResourceExhausted
+            && details.is_some_and(|d| d.get(RETRY_AFTER_MS).is_some())
+        {
+            return ErrorCode::RateLimited;
+        }
+        Self::from_grpc_code(code)
     }
 
     /// Inverse of [`ErrorCode::http_status`] (unknown statuses -> Internal).
@@ -99,6 +124,9 @@ impl ErrorCode {
             .unwrap_or(ErrorCode::Internal)
     }
 }
+
+/// The `details` key of [`ErrorCode::RateLimited`]: milliseconds until a retry may succeed.
+pub const RETRY_AFTER_MS: &str = "retry_after_ms";
 
 /// Machine-readable `details.reason` values that refine an [`ErrorCode`].
 ///
@@ -188,6 +216,18 @@ impl ApiError {
             format!("{method} is not implemented by this server"),
         )
         .with_details(serde_json::json!({ "method": method }))
+    }
+
+    /// RateLimited (HTTP 429 + `Retry-After`, gRPC RESOURCE_EXHAUSTED) with
+    /// `details.retry_after_ms` (D-W21).
+    pub fn rate_limited(message: impl Into<String>, retry_after_ms: u64) -> Self {
+        Self::new(ErrorCode::RateLimited, message)
+            .with_details(serde_json::json!({ RETRY_AFTER_MS: retry_after_ms }))
+    }
+
+    /// `details.retry_after_ms`, when present.
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        self.details.as_ref()?.get(RETRY_AFTER_MS)?.as_u64()
     }
 
     /// Conflict, `details.reason = "run_terminal"`, with the run's current status.
@@ -287,7 +327,17 @@ pub struct ErrorDetail {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.http_status(), axum::Json(self.to_body())).into_response()
+        // D-W21: a rate-limited answer says when to come back (whole seconds, rounded up).
+        let retry_after = match self.code {
+            ErrorCode::RateLimited => self.retry_after_ms().map(|ms| ms.div_ceil(1000)),
+            _ => None,
+        };
+        let mut res = (self.http_status(), axum::Json(self.to_body())).into_response();
+        if let Some(secs) = retry_after {
+            res.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, secs.into());
+        }
+        res
     }
 }
 
@@ -295,7 +345,7 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
 
-    const TABLE: [(ErrorCode, u16, tonic::Code); 8] = [
+    const TABLE: [(ErrorCode, u16, tonic::Code); 9] = [
         (
             ErrorCode::InvalidArgument,
             400,
@@ -316,6 +366,7 @@ mod tests {
         (ErrorCode::Unavailable, 503, tonic::Code::Unavailable),
         (ErrorCode::Internal, 500, tonic::Code::Internal),
         (ErrorCode::Unimplemented, 501, tonic::Code::Unimplemented),
+        (ErrorCode::RateLimited, 429, tonic::Code::ResourceExhausted),
     ];
 
     #[test]
@@ -329,7 +380,17 @@ mod tests {
                 ErrorCode::from_http_status(StatusCode::from_u16(http).unwrap()),
                 code
             );
-            assert_eq!(ErrorCode::from_grpc_code(grpc), code);
+            // RESOURCE_EXHAUSTED is shared (PayloadTooLarge, RateLimited): the details
+            // disambiguate.
+            let details = (code == ErrorCode::RateLimited)
+                .then(|| serde_json::json!({ RETRY_AFTER_MS: 1500 }));
+            assert_eq!(
+                ErrorCode::from_grpc_code_and_details(grpc, details.as_ref()),
+                code
+            );
+            if code != ErrorCode::RateLimited {
+                assert_eq!(ErrorCode::from_grpc_code(grpc), code);
+            }
         }
         assert_eq!(
             ErrorCode::from_grpc_code(tonic::Code::DataLoss),
@@ -401,5 +462,25 @@ mod tests {
             v,
             serde_json::json!({ "error": { "code": "not_found", "message": "x" } })
         );
+    }
+
+    #[test]
+    fn rate_limited_maps_to_429_with_retry_after() {
+        let e = ApiError::rate_limited("queue q is rate limited", 1_500);
+        assert_eq!(e.code, ErrorCode::RateLimited);
+        assert_eq!(e.code.as_str(), "rate_limited");
+        assert_eq!(e.retry_after_ms(), Some(1_500));
+        assert_eq!(e.grpc_code(), tonic::Code::ResourceExhausted);
+        let res = e.clone().into_response();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(res.headers()[axum::http::header::RETRY_AFTER], "2");
+        let v = serde_json::to_value(e.to_body()).unwrap();
+        assert_eq!(v["error"]["code"], "rate_limited");
+        assert_eq!(v["error"]["details"]["retry_after_ms"], 1_500);
+        // Exactly 1 s stays 1 s; other codes never carry the header.
+        let res = ApiError::rate_limited("x", 1_000).into_response();
+        assert_eq!(res.headers()[axum::http::header::RETRY_AFTER], "1");
+        let res = ApiError::payload_too_large("x").into_response();
+        assert!(res.headers().get(axum::http::header::RETRY_AFTER).is_none());
     }
 }

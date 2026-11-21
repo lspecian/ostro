@@ -53,6 +53,10 @@ pub const SECTIONS: &[&str] = &[
     "secrets",
     "egress",
     "connectors",
+    // Phase 7 (RESERVATIONS §11), parsed since 07-02. `[api.tls]` lives inside `[api]`.
+    "workers",
+    "cluster",
+    "flow",
 ];
 
 static PARSER: SpanParser = SpanParser::new();
@@ -167,6 +171,8 @@ pub struct ApiSection {
     pub max_module_bytes: u64,
     /// Maximum request body for non-deploy requests in bytes (default 4 MiB).
     pub max_request_bytes: u64,
+    /// `[api.tls]`: client-listener TLS (Phase 7, SEC-01; implemented by 07-06/07-10).
+    pub tls: ApiTlsSection,
 }
 
 impl Default for ApiSection {
@@ -175,6 +181,7 @@ impl Default for ApiSection {
             listen: SocketAddr::from(([0, 0, 0, 0], 7700)),
             max_module_bytes: 64 * MIB,
             max_request_bytes: 4 * MIB,
+            tls: ApiTlsSection::default(),
         }
     }
 }
@@ -355,6 +362,10 @@ pub struct ServerConfig {
     pub secrets: SecretsSection,
     pub egress: EgressSection,
     pub connectors: ConnectorsSection,
+    // Phase 7 sections (RESERVATIONS §11, plan 07-02); `[api.tls]` is `api.tls`.
+    pub workers: WorkersSection,
+    pub cluster: ClusterSection,
+    pub flow: FlowSection,
 }
 
 impl ServerConfig {
@@ -372,6 +383,8 @@ impl ServerConfig {
         // 06-DECISIONS: dev auto-generates `<data_dir>/sealing.key` when no key is
         // configured; the server profile refuses to store secrets instead.
         c.secrets.auto_sealing_key = true;
+        // D-W16: an ephemeral loopback cluster port, so parallel `ostro dev` never collide.
+        c.cluster.listen = SocketAddr::from(([127, 0, 0, 1], 0));
         c
     }
 
@@ -455,6 +468,72 @@ impl ServerConfig {
         self.secrets.to_bridge()?;
         self.egress.to_bridge()?;
         self.connectors.to_bridge()?;
+        // Phase 7 sections (07-02).
+        self.validate_phase7()?;
+        Ok(())
+    }
+
+    /// Phase 7 value checks (the TOML/env layer already rejects unknown keys and modes).
+    fn validate_phase7(&self) -> Result<(), ConfigError> {
+        let w = &self.workers;
+        if w.max_frame_bytes == 0 || w.max_frame_bytes > MAX_WORKER_FRAME_BYTES {
+            return Err(ConfigError::Invalid(format!(
+                "workers.max_frame_bytes must be within 1..={MAX_WORKER_FRAME_BYTES} (got {})",
+                w.max_frame_bytes
+            )));
+        }
+        if w.max_append_bytes < w.max_frame_bytes {
+            return Err(ConfigError::Invalid(
+                "workers.max_append_bytes must be at least workers.max_frame_bytes".into(),
+            ));
+        }
+        for (key, d) in [
+            ("workers.heartbeat", w.heartbeat),
+            ("workers.keepalive", w.keepalive),
+            ("workers.client_cert_ttl", w.client_cert_ttl),
+            ("workers.join_token_ttl", w.join_token_ttl),
+            ("workers.spill.sustain", w.spill.sustain),
+            ("workers.spill.cooldown", w.spill.cooldown),
+            ("api.tls.reload_poll", self.api.tls.reload_poll),
+            ("flow.idle_key_evict", self.flow.idle_key_evict),
+        ] {
+            if d.get().is_zero() {
+                return Err(ConfigError::Invalid(format!("{key} must be non-zero")));
+            }
+        }
+        for (key, v) in [
+            ("workers.spill.cpu_pct", w.spill.cpu_pct),
+            ("workers.spill.slots_pct", w.spill.slots_pct),
+            ("workers.spill.mem_pct", w.spill.mem_pct),
+            ("workers.spill.hysteresis_pct", w.spill.hysteresis_pct),
+        ] {
+            if !(1..=100).contains(&v) {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} must be within 1..=100 (got {v})"
+                )));
+            }
+        }
+        if self.flow.default_queue_weight == 0 {
+            return Err(ConfigError::Invalid(
+                "flow.default_queue_weight must be at least 1".into(),
+            ));
+        }
+        if self.flow.max_tracked_keys == 0 {
+            return Err(ConfigError::Invalid(
+                "flow.max_tracked_keys must be at least 1".into(),
+            ));
+        }
+        let tls = &self.api.tls;
+        if tls.mode == ApiTlsMode::Files && (tls.cert_file.is_none() || tls.key_file.is_none()) {
+            return Err(ConfigError::Invalid(
+                "api.tls.mode = \"files\" needs api.tls.cert_file and api.tls.key_file".into(),
+            ));
+        }
+        if tls.mode == ApiTlsMode::Acme && tls.acme.domains.is_empty() {
+            return Err(ConfigError::Invalid(
+                "api.tls.mode = \"acme\" needs at least one api.tls.acme.domains entry".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1050,6 +1129,261 @@ impl ConnectorsSection {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Phase 7 sections (RESERVATIONS §11; parsed since plan 07-02, implemented by 07-06..07-16)
+// ---------------------------------------------------------------------------------
+
+/// Upper bound of `[workers] max_frame_bytes` (the tonic message limit is 4 MiB, D-W2).
+pub const MAX_WORKER_FRAME_BYTES: u64 = 4 * MIB;
+
+/// Where runs execute by default (`[workers] default_placement`, `QueuePolicy.placement`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlacementSetting {
+    /// On this node's engine only.
+    #[default]
+    Embedded,
+    /// On remote workers only.
+    Workers,
+    /// Embedded first, spilling to workers under load (D-W9).
+    Auto,
+}
+
+/// `[workers.spill]`: spill hysteresis thresholds (D-W9).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SpillSection {
+    /// Process CPU (getrusage, normalised by `available_parallelism`) entry threshold, %.
+    pub cpu_pct: u32,
+    /// Embedded slot use entry threshold, %.
+    pub slots_pct: u32,
+    /// Wasm memory (engine budget) entry threshold, %.
+    pub mem_pct: u32,
+    /// Oldest ready entry older than this enters spilling.
+    pub lag: FriendlyDuration,
+    /// A CPU signal must hold this long.
+    pub sustain: FriendlyDuration,
+    /// Minimum dwell and exit window.
+    pub cooldown: FriendlyDuration,
+    /// Exit requires every signal below `entry * hysteresis_pct / 100`.
+    pub hysteresis_pct: u32,
+}
+
+impl Default for SpillSection {
+    fn default() -> Self {
+        Self {
+            cpu_pct: 70,
+            slots_pct: 90,
+            mem_pct: 85,
+            lag: FriendlyDuration::from_secs(5),
+            sustain: FriendlyDuration::from_secs(10),
+            cooldown: FriendlyDuration::from_secs(30),
+            hysteresis_pct: 85,
+        }
+    }
+}
+
+/// `[workers]`: the remote worker protocol and placement (D-W2, D-W4, D-W9, D-W16).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkersSection {
+    /// Serve the worker protocol on `[cluster] listen` (default true in both profiles).
+    pub enabled: bool,
+    /// Largest protocol frame in bytes (default 1 MiB; at most 4 MiB).
+    pub max_frame_bytes: u64,
+    /// Largest reassembled append in bytes (default 64 MiB).
+    pub max_append_bytes: u64,
+    /// Session heartbeat; the effective value is `min(heartbeat, lease_ttl / 3)` (W4).
+    pub heartbeat: FriendlyDuration,
+    /// h2 keepalive interval.
+    pub keepalive: FriendlyDuration,
+    /// Refuse workers of another Ostro version (default true).
+    pub require_same_version: bool,
+    /// Lifetime of join-issued client certificates (default 24 h).
+    pub client_cert_ttl: FriendlyDuration,
+    /// Default lifetime of `ostro worker token create` tokens (default 24 h).
+    pub join_token_ttl: FriendlyDuration,
+    /// Placement of queues without a `QueuePolicy.placement` (default `embedded`).
+    pub default_placement: PlacementSetting,
+    /// `[workers.spill]`.
+    pub spill: SpillSection,
+}
+
+impl Default for WorkersSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_frame_bytes: MIB,
+            max_append_bytes: 64 * MIB,
+            heartbeat: FriendlyDuration::from_secs(10),
+            keepalive: FriendlyDuration::from_secs(5),
+            require_same_version: true,
+            client_cert_ttl: FriendlyDuration::from_secs(24 * 3600),
+            join_token_ttl: FriendlyDuration::from_secs(24 * 3600),
+            default_placement: PlacementSetting::Embedded,
+            spill: SpillSection::default(),
+        }
+    }
+}
+
+impl WorkersSection {
+    /// `Welcome.heartbeat_ms`: `min(heartbeat, lease_ttl / 3)` (W4).
+    pub fn effective_heartbeat(&self, lease_ttl: Duration) -> Duration {
+        self.heartbeat.get().min(lease_ttl / 3)
+    }
+}
+
+/// `[cluster.tls]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClusterTlsSection {
+    /// External CA whose certificates are accepted as worker identities (cert-manager
+    /// path, D-W25); unset = only join-issued certificates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ca: Option<PathBuf>,
+}
+
+/// `[cluster]`: the cluster listener (worker protocol, mTLS always; D-W16).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClusterSection {
+    /// Listen address (server `0.0.0.0:7701`, dev `127.0.0.1:0`).
+    pub listen: SocketAddr,
+    /// Names / addresses advertised to workers (and in the node cert SANs); empty = the
+    /// bound address.
+    pub advertise: Vec<String>,
+    /// `[cluster.tls]`.
+    pub tls: ClusterTlsSection,
+}
+
+impl Default for ClusterSection {
+    fn default() -> Self {
+        Self {
+            listen: SocketAddr::from(([0, 0, 0, 0], 7701)),
+            advertise: Vec::new(),
+            tls: ClusterTlsSection::default(),
+        }
+    }
+}
+
+/// `[api.tls] mode` (D-W8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApiTlsMode {
+    /// Loopback plaintext; non-loopback self-signed in dev; the server profile refuses a
+    /// non-loopback listener without `files`/`acme` unless `allow_self_signed`.
+    #[default]
+    Auto,
+    Off,
+    SelfSigned,
+    Files,
+    Acme,
+}
+
+/// `[api.tls.acme] challenge`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AcmeChallenge {
+    /// TLS-ALPN-01 on the client listener (needs :443).
+    #[default]
+    #[serde(rename = "tls-alpn-01")]
+    TlsAlpn01,
+    /// HTTP-01 on `http01_listen` (needs :80).
+    #[serde(rename = "http-01")]
+    Http01,
+}
+
+/// Let's Encrypt production directory (the `[api.tls.acme] directory` default).
+pub const LETS_ENCRYPT_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/directory";
+
+/// `[api.tls.acme]` (07-10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AcmeSection {
+    pub domains: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// ACME directory URL (default Let's Encrypt production).
+    pub directory: String,
+    /// Extra CA bundle trusted for the directory (Pebble, private ACME).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory_ca_file: Option<PathBuf>,
+    /// Account + certificate cache; unset = `<data_dir>/tls/acme`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<PathBuf>,
+    pub challenge: AcmeChallenge,
+    /// HTTP-01 responder address.
+    pub http01_listen: SocketAddr,
+}
+
+impl Default for AcmeSection {
+    fn default() -> Self {
+        Self {
+            domains: Vec::new(),
+            email: None,
+            directory: LETS_ENCRYPT_DIRECTORY.to_owned(),
+            directory_ca_file: None,
+            cache_dir: None,
+            challenge: AcmeChallenge::TlsAlpn01,
+            http01_listen: SocketAddr::from(([0, 0, 0, 0], 80)),
+        }
+    }
+}
+
+/// `[api.tls]`: client-listener TLS (SEC-01, D-W7/D-W8; 07-06/07-10).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiTlsSection {
+    pub mode: ApiTlsMode,
+    /// PEM certificate chain (`files` mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_file: Option<PathBuf>,
+    /// PEM private key (`files` mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<PathBuf>,
+    /// Let the server profile serve a self-signed certificate on a non-loopback listener.
+    pub allow_self_signed: bool,
+    /// `files` mode mtime poll period.
+    pub reload_poll: FriendlyDuration,
+    /// `[api.tls.acme]`.
+    pub acme: AcmeSection,
+}
+
+impl Default for ApiTlsSection {
+    fn default() -> Self {
+        Self {
+            mode: ApiTlsMode::Auto,
+            cert_file: None,
+            key_file: None,
+            allow_self_signed: false,
+            reload_poll: FriendlyDuration::from_secs(30),
+            acme: AcmeSection::default(),
+        }
+    }
+}
+
+/// `[flow]`: node flow-control bookkeeping (DISP-03/04/05; 07-08).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FlowSection {
+    /// Most (queue, key) counters / GCRA cells kept; the idlest are evicted first.
+    pub max_tracked_keys: u64,
+    /// Evict an idle (queue, key) entry after this long.
+    pub idle_key_evict: FriendlyDuration,
+    /// DRR weight of queues without `QueuePolicy.weight`.
+    pub default_queue_weight: u32,
+}
+
+impl Default for FlowSection {
+    fn default() -> Self {
+        Self {
+            max_tracked_keys: 100_000,
+            idle_key_evict: FriendlyDuration::from_secs(600),
+            default_queue_weight: 1,
+        }
+    }
+}
+
 /// Explicit overrides from CLI flags; they win over every other layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Overrides {
@@ -1191,17 +1525,35 @@ fn toml_render(cfg: &ServerConfig) -> String {
                 serde_json::Value::Array(_) => val.to_string(),
                 // `[telemetry] otlp_headers` and `[secrets.vault]` / `[secrets.k8s]`: an
                 // inline table of scalars (unset keys omitted).
-                serde_json::Value::Object(map) => {
-                    let items: Vec<String> = map
-                        .iter()
-                        .filter(|(_, v)| !v.is_null())
-                        .map(|(k, v)| format!("{} = {v}", serde_json::Value::String(k.clone())))
-                        .collect();
-                    format!("{{ {} }}", items.join(", "))
-                }
+                // Phase 7 `[api] tls` / `[cluster] tls` / `[workers] spill` nest one more
+                // level (`tls.acme`): rendered recursively as inline tables.
+                serde_json::Value::Object(_) => inline_table(val),
             };
             let _ = writeln!(out, "{k} = {rendered}");
         }
     }
     out
+}
+
+/// A JSON value as a TOML inline value: objects become inline tables (recursively, unset
+/// keys omitted), everything else is its JSON form (valid TOML for strings, numbers,
+/// booleans and arrays of scalars).
+fn inline_table(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let items: Vec<String> = map
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| {
+                    format!(
+                        "{} = {}",
+                        serde_json::Value::String(k.clone()),
+                        inline_table(v)
+                    )
+                })
+                .collect();
+            format!("{{ {} }}", items.join(", "))
+        }
+        other => other.to_string(),
+    }
 }

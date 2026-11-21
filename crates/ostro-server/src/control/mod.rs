@@ -53,6 +53,7 @@ use ostro_types::{PartitionCount, PartitionId};
 
 use crate::bridge_services::BridgeServices;
 use crate::config::ServerConfig;
+use crate::p7::P7Shared;
 use crate::services::guest_logs::GuestLogSink;
 pub use watch::RunWatchers;
 
@@ -89,6 +90,9 @@ pub struct ServerControlPlane {
     /// The effects bridge (06-14): sealing key, secret resolver, object connector. 06-16
     /// implements the Phase 6 admin methods over it.
     pub(crate) bridge: Arc<BridgeServices>,
+    /// Phase 7 shared state (07-02 seam, B3): worker registry, flow control, gauges, TLS,
+    /// join. 07-14 implements the Phase 7 control-plane methods over it.
+    pub(crate) p7: Arc<P7Shared>,
 }
 
 impl std::fmt::Debug for ServerControlPlane {
@@ -108,6 +112,7 @@ impl ServerControlPlane {
         runtime: Arc<Runtime>,
         cfg: Arc<ServerConfig>,
         bridge: Arc<BridgeServices>,
+        p7: Arc<P7Shared>,
     ) -> Self {
         let blobs = partitions
             .iter()
@@ -129,6 +134,7 @@ impl ServerControlPlane {
             status_rows_read: Arc::new(AtomicU64::new(0)),
             watchers,
             bridge,
+            p7,
         }
     }
 

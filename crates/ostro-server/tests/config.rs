@@ -927,3 +927,233 @@ fn phase6_bad_values_name_the_key() {
     let err = load_toml("[secrets]\nproviders = [\"sealed\", \"bogus\"]\n").unwrap_err();
     assert!(err.contains("secrets"), "{err}");
 }
+
+// ---------------------------------------------------------------- Phase 7 sections (07-02)
+
+#[test]
+fn phase7_defaults_per_profile() {
+    use ostro_server::config::{AcmeChallenge, ApiTlsMode, PlacementSetting};
+    for (name, c) in [
+        ("dev", ServerConfig::dev_defaults()),
+        ("server", ServerConfig::server_defaults()),
+    ] {
+        let w = &c.workers;
+        assert!(w.enabled, "{name}");
+        assert_eq!(w.max_frame_bytes, 1024 * 1024, "{name}");
+        assert_eq!(w.max_append_bytes, 64 * 1024 * 1024, "{name}");
+        assert_eq!(w.heartbeat.get(), Duration::from_secs(10), "{name}");
+        assert_eq!(w.keepalive.get(), Duration::from_secs(5), "{name}");
+        assert!(w.require_same_version, "{name}");
+        assert_eq!(w.client_cert_ttl.get(), Duration::from_secs(24 * 3600));
+        assert_eq!(w.join_token_ttl.get(), Duration::from_secs(24 * 3600));
+        assert_eq!(w.default_placement, PlacementSetting::Embedded);
+        assert_eq!(
+            (w.spill.cpu_pct, w.spill.slots_pct, w.spill.mem_pct),
+            (70, 90, 85)
+        );
+        assert_eq!(w.spill.lag.get(), Duration::from_secs(5));
+        assert_eq!(w.spill.sustain.get(), Duration::from_secs(10));
+        assert_eq!(w.spill.cooldown.get(), Duration::from_secs(30));
+        assert_eq!(w.spill.hysteresis_pct, 85);
+        // W4: min(heartbeat, lease_ttl / 3).
+        assert_eq!(
+            w.effective_heartbeat(c.executor.lease_ttl.get()),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            w.effective_heartbeat(Duration::from_secs(15)),
+            Duration::from_secs(5)
+        );
+
+        let t = &c.api.tls;
+        assert_eq!(t.mode, ApiTlsMode::Auto, "{name}: D-W8");
+        assert_eq!((t.cert_file.as_ref(), t.key_file.as_ref()), (None, None));
+        assert!(!t.allow_self_signed);
+        assert_eq!(t.reload_poll.get(), Duration::from_secs(30));
+        assert!(t.acme.domains.is_empty());
+        assert_eq!(
+            t.acme.directory,
+            "https://acme-v02.api.letsencrypt.org/directory"
+        );
+        assert_eq!(t.acme.cache_dir, None, "unset = <data_dir>/tls/acme");
+        assert_eq!(t.acme.challenge, AcmeChallenge::TlsAlpn01);
+        assert_eq!(t.acme.http01_listen, "0.0.0.0:80".parse().unwrap());
+
+        assert!(c.cluster.advertise.is_empty());
+        assert_eq!(c.cluster.tls.client_ca, None);
+
+        assert_eq!(c.flow.max_tracked_keys, 100_000);
+        assert_eq!(c.flow.idle_key_evict.get(), Duration::from_secs(600));
+        assert_eq!(c.flow.default_queue_weight, 1);
+    }
+    // D-W16: an ephemeral loopback cluster port in dev, 7701 on every interface in server.
+    assert_eq!(
+        ServerConfig::dev_defaults().cluster.listen,
+        "127.0.0.1:0".parse::<SocketAddr>().unwrap()
+    );
+    assert_eq!(
+        ServerConfig::server_defaults().cluster.listen,
+        "0.0.0.0:7701".parse::<SocketAddr>().unwrap()
+    );
+}
+
+#[test]
+fn phase7_sections_parse_from_toml() {
+    use ostro_server::config::{AcmeChallenge, ApiTlsMode, PlacementSetting};
+    let c = load_toml(
+        r#"
+[api.tls]
+mode = "acme"
+allow_self_signed = true
+reload_poll = "10s"
+
+[api.tls.acme]
+domains = ["ostro.example.com"]
+email = "ops@example.com"
+directory = "https://localhost:14000/dir"
+directory_ca_file = "/etc/pebble/ca.pem"
+cache_dir = "/var/lib/ostro/acme"
+challenge = "http-01"
+http01_listen = "0.0.0.0:8080"
+
+[workers]
+enabled = false
+max_frame_bytes = 65536
+max_append_bytes = 1048576
+heartbeat = "2s"
+default_placement = "auto"
+
+[workers.spill]
+cpu_pct = 60
+cooldown = "1m"
+
+[cluster]
+listen = "10.0.0.5:7801"
+advertise = ["ostro-0.ostro.svc", "10.0.0.5"]
+
+[cluster.tls]
+client_ca = "/etc/ostro/worker-ca.pem"
+
+[flow]
+max_tracked_keys = 10
+idle_key_evict = "30s"
+default_queue_weight = 3
+"#,
+    )
+    .expect("parse");
+    assert_eq!(c.api.tls.mode, ApiTlsMode::Acme);
+    assert!(c.api.tls.allow_self_signed);
+    assert_eq!(c.api.tls.reload_poll.get(), Duration::from_secs(10));
+    assert_eq!(c.api.tls.acme.domains, ["ostro.example.com"]);
+    assert_eq!(c.api.tls.acme.email.as_deref(), Some("ops@example.com"));
+    assert_eq!(c.api.tls.acme.challenge, AcmeChallenge::Http01);
+    assert_eq!(
+        c.api.tls.acme.http01_listen,
+        "0.0.0.0:8080".parse().unwrap()
+    );
+    assert_eq!(
+        c.api.tls.acme.cache_dir.as_deref(),
+        Some(std::path::Path::new("/var/lib/ostro/acme"))
+    );
+    assert!(!c.workers.enabled);
+    assert_eq!(c.workers.max_frame_bytes, 65536);
+    assert_eq!(c.workers.heartbeat.get(), Duration::from_secs(2));
+    assert_eq!(c.workers.default_placement, PlacementSetting::Auto);
+    assert_eq!(c.workers.spill.cpu_pct, 60);
+    assert_eq!(c.workers.spill.cooldown.get(), Duration::from_secs(60));
+    assert_eq!(
+        c.workers.spill.slots_pct, 90,
+        "untouched keys keep defaults"
+    );
+    assert_eq!(c.cluster.listen, "10.0.0.5:7801".parse().unwrap());
+    assert_eq!(c.cluster.advertise, ["ostro-0.ostro.svc", "10.0.0.5"]);
+    assert_eq!(
+        c.cluster.tls.client_ca.as_deref(),
+        Some(std::path::Path::new("/etc/ostro/worker-ca.pem"))
+    );
+    assert_eq!(c.flow.max_tracked_keys, 10);
+    assert_eq!(c.flow.idle_key_evict.get(), Duration::from_secs(30));
+    assert_eq!(c.flow.default_queue_weight, 3);
+}
+
+#[test]
+fn phase7_env_overrides() {
+    use ostro_server::config::ApiTlsMode;
+    let c = load_toml_env(
+        "",
+        &env(&[
+            ("OSTRO_WORKERS__MAX_FRAME_BYTES", "131072"),
+            ("OSTRO_WORKERS__ENABLED", "false"),
+            ("OSTRO_CLUSTER__LISTEN", "127.0.0.1:7999"),
+            ("OSTRO_FLOW__DEFAULT_QUEUE_WEIGHT", "4"),
+            ("OSTRO_API__TLS__MODE", "self-signed"),
+        ]),
+    )
+    .expect("env");
+    assert_eq!(c.workers.max_frame_bytes, 131072);
+    assert!(!c.workers.enabled);
+    assert_eq!(c.cluster.listen, "127.0.0.1:7999".parse().unwrap());
+    assert_eq!(c.flow.default_queue_weight, 4);
+    assert_eq!(c.api.tls.mode, ApiTlsMode::SelfSigned);
+}
+
+#[test]
+fn phase7_invalid_values_are_rejected() {
+    for (body, needle) in [
+        ("[api.tls]\nmode = \"tls13\"\n", "tls13"),
+        ("[api.tls]\nmodez = \"off\"\n", "modez"),
+        ("[api.tls.acme]\nchallenge = \"dns-01\"\n", "dns-01"),
+        ("[workers]\ndefault_placement = \"gpu\"\n", "gpu"),
+        ("[workers]\nmax_frame_bytes = 0\n", "max_frame_bytes"),
+        ("[workers]\nmax_frame_bytes = 8388608\n", "max_frame_bytes"),
+        (
+            "[workers]\nmax_frame_bytes = 1048576\nmax_append_bytes = 1024\n",
+            "max_append_bytes",
+        ),
+        ("[workers]\nheartbeat = \"0s\"\n", "workers.heartbeat"),
+        ("[workers.spill]\ncpu_pct = 0\n", "cpu_pct"),
+        ("[workers.spill]\nhysteresis_pct = 101\n", "hysteresis_pct"),
+        ("[workers.spill]\nbogus = 1\n", "bogus"),
+        ("[cluster]\nlisten = \"not an addr\"\n", "listen"),
+        ("[cluster.tls]\nca = \"x\"\n", "ca"),
+        ("[flow]\ndefault_queue_weight = 0\n", "default_queue_weight"),
+        ("[flow]\nunknown = 1\n", "unknown"),
+        ("[api.tls]\nmode = \"files\"\n", "cert_file"),
+        ("[api.tls]\nmode = \"acme\"\n", "domains"),
+    ] {
+        let err = load_toml(body).expect_err(body);
+        assert!(err.contains(needle), "{body:?}: {err}");
+    }
+    let err = load_toml_env("", &env(&[("OSTRO_API__TLS__MODE", "bogus")])).unwrap_err();
+    assert!(err.contains("bogus"), "{err}");
+}
+
+#[test]
+fn phase7_sections_round_trip_through_toml_and_print() {
+    let mut c = ServerConfig::server_defaults();
+    c.api.tls.acme.domains = vec!["a.example".into(), "b.example".into()];
+    c.api.tls.acme.email = Some("ops@example.com".into());
+    c.api.tls.cert_file = Some("/etc/ostro/tls.crt".into());
+    c.cluster.advertise = vec!["ostro-0".into()];
+    c.cluster.tls.client_ca = Some("/etc/ostro/ca.pem".into());
+    c.workers.spill.lag = Duration::from_millis(1500).into();
+    c.flow.idle_key_evict = Duration::from_secs(90).into();
+    let s = c.to_toml_string();
+    for needle in ["[workers]", "[cluster]", "[flow]", "tls = {", "spill = {"] {
+        assert!(s.contains(needle), "{needle} missing:\n{s}");
+    }
+    assert!(s.contains("\"a.example\""), "{s}");
+    assert!(s.contains("\"challenge\" = \"tls-alpn-01\""), "{s}");
+    assert!(s.contains("\"mode\" = \"auto\""), "{s}");
+    let dir = tempfile::tempdir().unwrap();
+    let p = write_toml(&dir, &s);
+    let back = load_layered(
+        ServerConfig::dev_defaults(),
+        Some(&p),
+        true,
+        &no_env(),
+        &Overrides::default(),
+    )
+    .expect("reload printed config");
+    assert_eq!(back, c);
+}

@@ -29,6 +29,11 @@
 //!
 //! Phase 8 (08-21): [`effect_trace::TraceEffectHooks`] fills the effect hooks with outbound
 //! `traceparent` propagation (live request copy only) and `effect:<kind>` spans.
+//!
+//! Phase 7 (07-02): [`p7`] is the single wiring seam (D-W17) called from [`server`]; the
+//! Phase 7 modules [`tls`] (client-listener TLS, cluster CA), [`flow`] (node flow control)
+//! and [`workers`] (registry, worker protocol, placement, spill, demand) are stubs with
+//! fixed signatures until their plans (07-06 .. 07-16) fill them.
 
 pub mod bridge_services;
 pub mod config;
@@ -37,16 +42,20 @@ pub mod derive;
 pub mod effect_trace;
 pub mod effects;
 pub mod executor;
+pub mod flow;
 pub mod journal_io;
 pub mod leadership;
 pub mod logging;
 pub mod meta_view;
+pub mod p7;
 pub mod retention;
 pub mod run_started;
 pub mod server;
 pub mod services;
 pub mod sink;
 pub mod telemetry;
+pub mod tls;
+pub mod workers;
 
 pub use server::{
     LOCK_FILE, Server, ServerError, ServerHandle, ServerOptions, StartupTimings, start,
