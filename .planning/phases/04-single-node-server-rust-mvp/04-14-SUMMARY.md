@@ -132,7 +132,7 @@ The in-module tests cover the pure `State` handling:
 
 **4. Commit shape:** the plan's TDD RED/GREEN split per task was not followed. Lease state is part of the core loop, so Tasks 1 and 2 landed as one feat commit (src) and one test commit.
 
-**5. Build isolation:** the shared `target/` was being rebuilt by parallel executors' worktrees. Cargo hashes workspace path packages relative to the workspace root, so worktrees overwrite each other's artifacts, and one test build linked a stale ostro-partition rlib. Verification used `CARGO_TARGET_DIR=/home/lspecian/Development/ostro/target/wt14`.
+**5. Build isolation:** the shared `target/` was being rebuilt by parallel executors' worktrees. Cargo hashes workspace path packages relative to the workspace root, so worktrees overwrite each other's artifacts, and one test build linked a stale ostro-partition rlib. Verification used `CARGO_TARGET_DIR=<repo>/target/wt14`.
 
 ## Known limitations / notes for later plans
 

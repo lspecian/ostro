@@ -139,7 +139,7 @@ Rule for every row: executors never edit the shared checkout (worktree-only, see
 Edits, builds and tests happen in the plan's own **scratch worktree under /tmp**, never in the shared checkout. Commits go through a **private index** and add only the plan's own files.
 
 ```bash
-REPO=/home/lspecian/Development/ostro
+REPO=<repo>
 WT=/tmp/ostro-wt-14-NN                      # once per plan; never inside $REPO
 git -C "$REPO" worktree add --detach "$WT" HEAD
 base=$(git -C "$REPO" rev-parse HEAD); echo "$base" > "$(git -C "$WT" rev-parse --git-dir)/p14-base"

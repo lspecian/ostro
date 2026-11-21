@@ -87,7 +87,7 @@ Phase 10 runs after Phase 9. Phase 7/8 plans may still be in flight, and **Phase
 Executors share one checkout with Phase 7/8/11 executors. Edits, builds and tests happen in a **scratch worktree under /tmp**, never inside the repo. Commits go through a **private index** in the main checkout and add only the plan's own files.
 
 ```bash
-REPO=/home/lspecian/Development/ostro
+REPO=<repo>
 WT=/tmp/ostro-wt-10-NN                      # once per plan; never inside $REPO
 git -C "$REPO" worktree add --detach "$WT" HEAD
 export CARGO_TARGET_DIR=/tmp/ostro-target-10-NN   # per plan, avoids lock contention between parallel plans

@@ -103,7 +103,7 @@ Phase 11 runs in parallel with Phases 9 and 10 (Phases 7 and 8 are complete by D
 Executors share one checkout with Phase 9/10 executors. Edits, builds and tests happen in a **scratch worktree under /tmp**, never inside the repo. Commits go through a **private index** in the main checkout and add only the plan's own files (the Phase 10 procedure).
 
 ```bash
-REPO=/home/lspecian/Development/ostro
+REPO=<repo>
 WT=/tmp/ostro-wt-11-NN                      # once per plan; never inside $REPO
 git -C "$REPO" worktree add --detach "$WT" HEAD
 base=$(git -C "$REPO" rev-parse HEAD); echo "$base" > "$(git -C "$WT" rev-parse --git-dir)/p11-base"

@@ -109,7 +109,7 @@ completed: 2026-11-19
    - Its workload schedules timers due at 5_000 ms. On the real clock those are overdue, so the timer service can journal `TimerFired` at seq 1 before the test's completing `EventsAppended{from_seq: 1}`, which is then rejected `SeqMismatch{expected: 2}`.
    - Fix: the completing append follows `SeqMismatch` to `expected`. The workload's shape is unchanged.
    - Commit `177b787`.
-5. **Verification target dir.** A first ci-local run with the shared `CARGO_TARGET_DIR=/home/lspecian/Development/ostro/target` showed `apply_timer_input` failing with RED-state results while the same tests passed in isolation.
+5. **Verification target dir.** A first ci-local run with the shared `CARGO_TARGET_DIR=<repo>/target` showed `apply_timer_input` failing with RED-state results while the same tests passed in isolation.
    - The likely cause: ostro-partition artifacts are shared between worktrees with the same metadata hash, and a parallel executor building an older checkout (pre-04-13 `timer.rs`) overwrote them.
    - The final verification used a private target dir in the scratchpad.
 

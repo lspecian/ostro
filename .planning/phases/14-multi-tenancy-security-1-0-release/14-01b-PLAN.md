@@ -105,8 +105,8 @@ Output: seam, stubs, call sites, config, CLI/client stubs, fuzz bins, `scripts/f
 </objective>
 
 <execution_context>
-@/home/lspecian/.claude/get-shit-done/workflows/execute-plan.md
-@/home/lspecian/.claude/get-shit-done/templates/summary.md
+@~/.claude/get-shit-done/workflows/execute-plan.md
+@~/.claude/get-shit-done/templates/summary.md
 </execution_context>
 
 <context>

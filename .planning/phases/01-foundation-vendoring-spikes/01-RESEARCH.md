@@ -150,7 +150,7 @@ pip3 install ziglang==0.15.2   # or download zig 0.15.2; cargo-zigbuild finds `p
 Source: `chronik-stream` @ `08715f4867c9f40e409c68d8e212bd9479d620c0` (2026-11-18). Line counts are from `wc -l` at that commit.
 
 **Getting the source:**
-- The reference clone lives in a session scratchpad: `/tmp/claude-1000/-home-lspecian-Development-ostro/452f1f4d-a741-44e7-95c7-294b1ecd23ff/scratchpad/src/chronik-stream`. **It may not survive into the executor's session.**
+- The reference clone lives in a session scratchpad: `<scratchpad>/src/chronik-stream`. **It may not survive into the executor's session.**
 - The plan's first vendoring task must therefore do this: `git clone https://github.com/lspecian/chronik-stream "$TMPDIR/chronik" && git -C "$TMPDIR/chronik" checkout 08715f4867c9f40e409c68d8e212bd9479d620c0`, outside the workspace.
 - Copy the files, then never reference that path. **Do not commit a vendoring script that points at the repo.**
 

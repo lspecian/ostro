@@ -105,7 +105,7 @@ Rule for every row: before the first edit, `git status --porcelain -- <file>` mu
 Executors share one checkout. Edits, builds and tests happen in a **per-plan scratch worktree under /tmp**, never inside the repo. Commits go through a **private index** in the main checkout and add only the plan's own files.
 
 ```bash
-REPO=/home/lspecian/Development/ostro
+REPO=<repo>
 WT=/tmp/ostro-wt-13-NN                      # once per plan; never inside $REPO
 git -C "$REPO" worktree add --detach "$WT" HEAD
 base=$(git -C "$REPO" rev-parse HEAD); echo "$base" > "$(git -C "$WT" rev-parse --git-dir)/p13-base"
