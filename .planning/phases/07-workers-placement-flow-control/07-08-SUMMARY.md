@@ -128,3 +128,10 @@ The start path had no dedupe lookup outside the dry run, so `rate_limit::admit` 
 ## Self-Check: PASSED
 - FOUND: crates/ostro-server/src/flow/{mod,limits,policy_view,rate_limit}.rs, tests/flow_control.rs, tests/auto_pause.rs
 - FOUND: commits cf6fc39, 46a5056, a01adc0 on main
+
+## Post-plan fixes
+
+- **fix-0705 closes the "workflow pause blocks other workflows on the same queue" follow-up above.**
+  - `NodeFlow::admit` now returns `Admit::Paused { scope: PauseScope::Queue }` for a paused queue, and `Admit::Paused { scope: PauseScope::Workflow }` for a paused workflow. The queue check now comes first, so when both are paused the whole queue is skipped.
+  - The dispatcher holds back only the workflow-paused entry, until the next `changed()` bump. The flow watcher already bumps on a policy apply, so the resume wakes it with no change here. See 07-05-SUMMARY "Post-plan fixes".
+  - `tests/flow_control.rs::paused_workflow_holds_entries_and_resume_wakes_dispatchers` is back on the shared-queue scenario: `smoke` runs on queue `default` while `cpu-burn` is paused on `default`. It starts two `smoke` runs, and both must complete before the resume.

@@ -157,3 +157,26 @@ pub enum ExecOutcome { Released, Reactivate, Retry { after_ms: u64 }, Fenced, Ab
   - `QueueGauges::snapshot()` gives per-queue sums of `ready`, `ready_unblocked` (admissible: excludes `QueueBlocked`/`Paused` queues and `KeyBlocked` keys, includes placement-blocked work), `oldest_ready_at_ms`, `running_embedded` and `running_on_workers`.
   - Gauges are written only when `DispatcherConfig.gauges` is `Some`. `p7::dispatcher_config` should set it to `P7Shared.gauges`.
   - `ostro_queue_worker_demand` is still describe-only in dispatcher.rs, and its value belongs to 07-16.
+
+## Post-plan fixes
+
+- **fix-0705: a workflow pause no longer holds back its whole shared queue** (found by 07-08). `Admit::Paused` made the dispatcher call `fair.skip_queue`. When the next candidate of a shared queue belonged to a paused workflow, every other workflow on that queue stopped being granted on that partition until the paused workflow resumed.
+  - `Admit::Paused` now carries a scope: `Paused { scope: PauseScope::Queue | PauseScope::Workflow }` (`PauseScope` is re-exported from `ostro_partition`).
+  - `Paused{Queue}` still skips the queue for the round.
+  - `Paused{Workflow}` calls the new `FairQueues::hold(&candidate)`, which takes that one entry out of selection without charging its key or the queue's turn. The rest of the queue is served in the same round, including other workflows on the same concurrency key.
+  - Held entries come back via `FairQueues::release_held()` on the next flow-control `changed()` bump, in the same select arm as `unpark_keys`. They are not probed again until then, so a queue whose every entry is paused costs nothing per loop turn and cannot spin.
+  - If the flow's `changed()` channel is closed, held entries are released at the start of each round, which falls back to per-round probing.
+  - Held entries still count in `len` / `is_empty` / `per_queue_counts` / `per_queue_oldest`. They are excluded from `per_queue_unblocked`, so the `ready_unblocked` gauge leaves them out. `remove` and `insert` handle held entries, and `clear` drops them.
+  - Fairness is unchanged: weighted DRR, bands and key DRR. A released entry rejoins its key at the band's current round. A held entry is never granted, so it burns no attempt.
+  - Tests:
+    - `leader::fair::tests::held_entry_skips_only_itself`, plus a hold op in the proptest.
+    - `dispatcher_flow::paused_workflow_on_shared_queue_does_not_block_others`: the paused workflow sits at the head of the unkeyed FIFO and of a shared key. The other workflow gets every grant, the held entries are not re-probed without a bump, and after the resume bump they are granted with n = 1.
+  - Verification, on the base `57d50ce`, all with `--test-threads=1`:
+    - `ostro-partition`: lib `fair` 15 passed; `dispatcher` 17; `dispatcher_flow` 13; `dispatcher_failpoints` 4 (`--features failpoints`); `p7_contract` 6.
+    - `ostro-server`: lib `flow` 19; `flow_control` 10; `auto_pause` 2; `executor` 8.
+    - Clippy `-D warnings` is clean for both crates (all targets, with and without `failpoints`), and `cargo fmt --all --check` is clean.
+  - Negative control: with the fake flow returning `Paused{Queue}` for the paused workflow (the old behaviour), the new `dispatcher_flow` test fails with `timed out waiting for 4 jobs; saw 0`.
+  - After the merge onto main `7b88bc3`, which includes 07-09 and 07-13:
+    - Clippy is clean, and `flow_control` passed 10.
+    - In `dispatcher_flow`, 11 passed and 2 failed, `abandoned_regrants_without_counting_a_failure` and `reactivations_are_not_throttled`. Both hit `node open timed out` (the 120 s `OPEN_T`, `dispatcher_flow.rs:403`) at load average around 60.
+    - Rerun alone, both passed (the first one's open took 108 s at load 68), and the new test passed again.
