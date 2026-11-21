@@ -3162,3 +3162,847 @@ mod bridge {
         assert_eq!(get("list egress empty").unwrap(), json!([]));
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Phase 7 (07-11): queue flow, pause/resume, demand, workers, join tokens, join
+// ---------------------------------------------------------------------------------
+
+mod phase7 {
+    use super::*;
+    use ostro_api::phase7::{self as p7, Placement, WorkerInfo};
+    use ostro_proto::api::v1::{
+        queues_client::QueuesClient, runs_client::RunsClient, workers_client::WorkersClient,
+        workflows_client::WorkflowsClient,
+    };
+
+    const CSR: &str =
+        "-----BEGIN CERTIFICATE REQUEST-----\nZmFrZQ==\n-----END CERTIFICATE REQUEST-----\n";
+
+    /// Errors keyed by code and details; RateLimited disambiguated by its details.
+    fn grpc_err7(s: tonic::Status) -> (ErrorCode, Option<Value>) {
+        let details = status_details(&s);
+        (
+            ErrorCode::from_grpc_code_and_details(s.code(), details.as_ref()),
+            details,
+        )
+    }
+
+    /// Normalise a flow (either transport) through the domain type.
+    fn flow_info(v: p7::QueueFlowInfo) -> Value {
+        serde_json::to_value(v).expect("flow json")
+    }
+
+    fn placement_name(v: i32) -> Value {
+        match pb::Placement::try_from(v).expect("placement") {
+            pb::Placement::Unspecified => Value::Null,
+            pb::Placement::Embedded => json!("embedded"),
+            pb::Placement::Workers => json!("workers"),
+            pb::Placement::Auto => json!("auto"),
+        }
+    }
+
+    fn exhaust_name(v: i32) -> Option<p7::ExhaustAction> {
+        match pb::ExhaustAction::try_from(v).expect("exhaust") {
+            pb::ExhaustAction::Unspecified => None,
+            pb::ExhaustAction::Fail => Some(p7::ExhaustAction::Fail),
+            pb::ExhaustAction::Pause => Some(p7::ExhaustAction::Pause),
+        }
+    }
+
+    fn rate(r: Option<pb::RateSpec>) -> Option<p7::RateSpecDto> {
+        r.map(|r| p7::RateSpecDto {
+            limit: r.limit,
+            period_ms: r.period_ms,
+            burst: r.burst,
+        })
+    }
+
+    fn pb_flow_info(i: pb::QueueFlowInfo) -> Value {
+        let f = i.flow.unwrap_or_default();
+        let placement = match placement_name(f.placement) {
+            Value::Null => None,
+            v => Some(serde_json::from_value(v).expect("placement")),
+        };
+        flow_info(p7::QueueFlowInfo {
+            queue: i.queue,
+            version: i.version,
+            flow: p7::QueueFlow {
+                placement,
+                selector: f.selector,
+                spill: f.spill.map(|s| p7::SpillPolicyDto {
+                    cpu_pct: s.cpu_pct as u8,
+                    slots_pct: s.slots_pct as u8,
+                    mem_pct: s.mem_pct as u8,
+                    lag_ms: s.lag_ms,
+                    sustain_ms: s.sustain_ms,
+                    cooldown_ms: s.cooldown_ms,
+                    hysteresis_pct: s.hysteresis_pct as u8,
+                }),
+                concurrency: f.concurrency,
+                weight: f.weight,
+                key_concurrency: f.key_concurrency,
+                throttle: rate(f.throttle),
+                key_throttle: rate(f.key_throttle),
+                rate_limit: rate(f.rate_limit),
+                key_rate_limit: rate(f.key_rate_limit),
+                on_retries_exhausted: exhaust_name(f.on_retries_exhausted),
+                paused: f.paused,
+            },
+        })
+    }
+
+    fn pause(name: &str, paused: bool, changed: bool) -> Value {
+        json!({ "name": name, "paused": paused, "changed": changed })
+    }
+
+    fn pb_worker(w: &pb::WorkerInfo) -> Value {
+        let labels: std::collections::BTreeMap<_, _> = w.labels.clone().into_iter().collect();
+        json!({
+            "worker_id": w.worker_id, "labels": labels, "slots": w.slots,
+            "free_slots": w.free_slots, "leases": w.leases,
+            "connected_at_ms": w.connected_at_ms, "node_id": w.node_id,
+            "draining": w.draining,
+        })
+    }
+
+    fn rest_worker(v: &Value) -> Value {
+        json!({
+            "worker_id": v["worker_id"], "labels": v["labels"], "slots": v["slots"],
+            "free_slots": v["free_slots"], "leases": v["leases"],
+            "connected_at_ms": v["connected_at_ms"], "node_id": v["node_id"],
+            "draining": v["draining"],
+        })
+    }
+
+    fn token_info(id: &Value, created: &Value, expires: &Value) -> Value {
+        json!({ "token_id": id, "created_at_ms": created, "expires_at_ms": expires })
+    }
+
+    #[derive(Clone, Default)]
+    struct Flow {
+        body: Value,
+        expected: Option<u64>,
+    }
+
+    trait P7Client {
+        async fn get_flow(&mut self, q: &str) -> Out;
+        async fn put_flow(&mut self, q: &str, f: Flow) -> Out;
+        async fn pause_queue(&mut self, q: &str) -> Out;
+        async fn resume_queue(&mut self, q: &str) -> Out;
+        async fn demand(&mut self, q: &str) -> Out;
+        async fn pause_workflow(&mut self, w: &str) -> Out;
+        async fn resume_workflow(&mut self, w: &str) -> Out;
+        async fn pause_run(&mut self, r: &str, detail: Option<&str>) -> Out;
+        async fn resume_run(&mut self, r: &str) -> Out;
+        async fn list_workers(&mut self) -> Out;
+        async fn drain(&mut self, w: &str) -> Out;
+        async fn create_token(&mut self, ttl_ms: Option<u64>) -> Out;
+        async fn list_tokens(&mut self) -> Out;
+        async fn revoke(&mut self, id: &str) -> Out;
+        async fn join(&mut self, token: &str, worker_id: &str, csr: &str) -> Out;
+        async fn start_on(&mut self, queue: &str) -> Out;
+    }
+
+    impl P7Client for RestClient {
+        async fn get_flow(&mut self, q: &str) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/queues/{q}/flow", self.base)))
+                .await?;
+            Ok(flow_info(serde_json::from_value(v).expect("flow")))
+        }
+
+        async fn put_flow(&mut self, q: &str, f: Flow) -> Out {
+            let mut body = f.body.clone();
+            if let Some(e) = f.expected {
+                body["expected_version"] = json!(e);
+            }
+            let v = self
+                .send(
+                    self.http
+                        .put(format!("{}/v1/queues/{q}/flow", self.base))
+                        .json(&body),
+                )
+                .await?;
+            Ok(flow_info(serde_json::from_value(v).expect("flow")))
+        }
+
+        async fn pause_queue(&mut self, q: &str) -> Out {
+            self.send(self.http.post(format!("{}/v1/queues/{q}/pause", self.base)))
+                .await
+        }
+
+        async fn resume_queue(&mut self, q: &str) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/queues/{q}/resume", self.base)),
+            )
+            .await
+        }
+
+        async fn demand(&mut self, q: &str) -> Out {
+            self.send(self.http.get(format!("{}/v1/queues/{q}/demand", self.base)))
+                .await
+        }
+
+        async fn pause_workflow(&mut self, w: &str) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/workflows/{w}/pause", self.base)),
+            )
+            .await
+        }
+
+        async fn resume_workflow(&mut self, w: &str) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/workflows/{w}/resume", self.base)),
+            )
+            .await
+        }
+
+        async fn pause_run(&mut self, r: &str, detail: Option<&str>) -> Out {
+            let req = self.http.post(format!("{}/v1/runs/{r}/pause", self.base));
+            let req = match detail {
+                Some(d) => req.json(&json!({ "detail": d })),
+                None => req,
+            };
+            let v = self.send(req).await?;
+            Ok(json!({ "name": v["run_id"], "paused": v["paused"], "changed": v["changed"] }))
+        }
+
+        async fn resume_run(&mut self, r: &str) -> Out {
+            let v = self
+                .send(self.http.post(format!("{}/v1/runs/{r}/resume", self.base)))
+                .await?;
+            Ok(json!({ "name": v["run_id"], "paused": v["paused"], "changed": v["changed"] }))
+        }
+
+        async fn list_workers(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/workers", self.base)))
+                .await?;
+            Ok(Value::Array(
+                v["workers"]
+                    .as_array()
+                    .expect("workers")
+                    .iter()
+                    .map(rest_worker)
+                    .collect(),
+            ))
+        }
+
+        async fn drain(&mut self, w: &str) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/workers/{w}/drain", self.base)),
+            )
+            .await
+        }
+
+        async fn create_token(&mut self, ttl_ms: Option<u64>) -> Out {
+            let req = self.http.post(format!("{}/v1/workers/tokens", self.base));
+            let req = match ttl_ms {
+                Some(t) => req.json(&json!({ "ttl_ms": t })),
+                None => req,
+            };
+            self.send(req).await
+        }
+
+        async fn list_tokens(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/workers/tokens", self.base)))
+                .await?;
+            Ok(Value::Array(
+                v["tokens"]
+                    .as_array()
+                    .expect("tokens")
+                    .iter()
+                    .map(|t| token_info(&t["token_id"], &t["created_at_ms"], &t["expires_at_ms"]))
+                    .collect(),
+            ))
+        }
+
+        async fn revoke(&mut self, id: &str) -> Out {
+            self.send(
+                self.http
+                    .delete(format!("{}/v1/workers/tokens/{id}", self.base)),
+            )
+            .await?;
+            Ok(json!({}))
+        }
+
+        async fn join(&mut self, token: &str, worker_id: &str, csr: &str) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/workers/join", self.base))
+                    .json(&json!({
+                        "token": token, "csr_pem": csr, "worker_id": worker_id,
+                        "labels": { "zone": "a" },
+                    })),
+            )
+            .await
+        }
+
+        async fn start_on(&mut self, queue: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/workflows/greet/runs", self.base))
+                        .json(&json!({ "input": {}, "queue": queue })),
+                )
+                .await?;
+            Ok(json!({ "run_id": v["run_id"] }))
+        }
+    }
+
+    struct P7Grpc {
+        queues: QueuesClient<Channel>,
+        workers: WorkersClient<Channel>,
+        runs: RunsClient<Channel>,
+        workflows: WorkflowsClient<Channel>,
+    }
+
+    impl P7Grpc {
+        async fn connect(addr: SocketAddr) -> Self {
+            let ch = Channel::from_shared(format!("http://{addr}"))
+                .expect("uri")
+                .connect()
+                .await
+                .expect("h2c connect");
+            P7Grpc {
+                queues: QueuesClient::new(ch.clone()),
+                workers: WorkersClient::new(ch.clone()),
+                runs: RunsClient::new(ch.clone()),
+                workflows: WorkflowsClient::new(ch),
+            }
+        }
+    }
+
+    /// The REST JSON body as the proto flow (the scenario writes REST JSON).
+    fn pb_flow(body: &Value) -> pb::QueueFlow {
+        // Unknown enum names map to an out-of-range proto value: both transports reject.
+        let placement = match body.get("placement").and_then(Value::as_str) {
+            None => pb::Placement::Unspecified as i32,
+            Some(s) => Placement::parse(s).map_or(99, |p| match p {
+                Placement::Embedded => pb::Placement::Embedded as i32,
+                Placement::Workers => pb::Placement::Workers as i32,
+                Placement::Auto => pb::Placement::Auto as i32,
+            }),
+        };
+        let exhaust = match body.get("on_retries_exhausted").and_then(Value::as_str) {
+            None => pb::ExhaustAction::Unspecified as i32,
+            Some("fail") => pb::ExhaustAction::Fail as i32,
+            Some("pause") => pb::ExhaustAction::Pause as i32,
+            Some(_) => 99,
+        };
+        let rate = |k: &str| {
+            body.get(k).map(|r| pb::RateSpec {
+                limit: r["limit"].as_u64().unwrap_or(0) as u32,
+                period_ms: r["period_ms"].as_u64().unwrap_or(0),
+                burst: r.get("burst").and_then(Value::as_u64).unwrap_or(0) as u32,
+            })
+        };
+        let u32_of = |k: &str| body.get(k).and_then(Value::as_u64).map(|v| v as u32);
+        pb::QueueFlow {
+            placement,
+            selector: body
+                .get("selector")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|s| s.as_str().expect("selector").to_owned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            spill: body.get("spill").map(|s| pb::SpillPolicy {
+                cpu_pct: s["cpu_pct"].as_u64().unwrap_or(0) as u32,
+                slots_pct: s["slots_pct"].as_u64().unwrap_or(0) as u32,
+                mem_pct: s["mem_pct"].as_u64().unwrap_or(0) as u32,
+                lag_ms: s["lag_ms"].as_u64().unwrap_or(0),
+                sustain_ms: s["sustain_ms"].as_u64().unwrap_or(0),
+                cooldown_ms: s["cooldown_ms"].as_u64().unwrap_or(0),
+                hysteresis_pct: s["hysteresis_pct"].as_u64().unwrap_or(0) as u32,
+            }),
+            concurrency: u32_of("concurrency"),
+            weight: u32_of("weight"),
+            key_concurrency: u32_of("key_concurrency"),
+            throttle: rate("throttle"),
+            key_throttle: rate("key_throttle"),
+            rate_limit: rate("rate_limit"),
+            key_rate_limit: rate("key_rate_limit"),
+            on_retries_exhausted: exhaust,
+            paused: body.get("paused").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
+
+    fn pb_queue_pause(s: pb::QueuePauseState) -> Value {
+        pause(&s.queue, s.paused, s.changed)
+    }
+
+    fn pb_wf_pause(s: pb::WorkflowPauseState) -> Value {
+        pause(&s.workflow, s.paused, s.changed)
+    }
+
+    fn pb_run_pause(s: pb::RunPauseState) -> Value {
+        pause(&s.run_id, s.paused, s.changed)
+    }
+
+    impl P7Client for P7Grpc {
+        async fn get_flow(&mut self, q: &str) -> Out {
+            let r = self
+                .queues
+                .get_queue_flow(pb::GetQueueFlowRequest { name: q.into() })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_flow_info(r.into_inner()))
+        }
+
+        async fn put_flow(&mut self, q: &str, f: Flow) -> Out {
+            let r = self
+                .queues
+                .put_queue_flow(pb::PutQueueFlowRequest {
+                    name: q.into(),
+                    flow: Some(pb_flow(&f.body)),
+                    expected_version: f.expected,
+                })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_flow_info(r.into_inner()))
+        }
+
+        async fn pause_queue(&mut self, q: &str) -> Out {
+            let r = self
+                .queues
+                .pause_queue(pb::PauseQueueRequest { name: q.into() })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_queue_pause(r.into_inner()))
+        }
+
+        async fn resume_queue(&mut self, q: &str) -> Out {
+            let r = self
+                .queues
+                .resume_queue(pb::ResumeQueueRequest { name: q.into() })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_queue_pause(r.into_inner()))
+        }
+
+        async fn demand(&mut self, q: &str) -> Out {
+            let d = self
+                .queues
+                .get_queue_demand(pb::GetQueueDemandRequest { name: q.into() })
+                .await
+                .map_err(grpc_err7)?
+                .into_inner();
+            Ok(json!({
+                "queue": d.queue, "demand": d.demand, "backlog": d.backlog,
+                "running_on_workers": d.running_on_workers,
+                "placement": placement_name(d.placement), "spilling": d.spilling,
+                "workers": d.workers, "worker_slots_free": d.worker_slots_free,
+            }))
+        }
+
+        async fn pause_workflow(&mut self, w: &str) -> Out {
+            let r = self
+                .workflows
+                .pause_workflow(pb::PauseWorkflowRequest { name: w.into() })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_wf_pause(r.into_inner()))
+        }
+
+        async fn resume_workflow(&mut self, w: &str) -> Out {
+            let r = self
+                .workflows
+                .resume_workflow(pb::ResumeWorkflowRequest { name: w.into() })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_wf_pause(r.into_inner()))
+        }
+
+        async fn pause_run(&mut self, r: &str, detail: Option<&str>) -> Out {
+            let s = self
+                .runs
+                .pause_run(pb::PauseRunRequest {
+                    run_id: r.into(),
+                    detail: detail.map(str::to_owned),
+                })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_run_pause(s.into_inner()))
+        }
+
+        async fn resume_run(&mut self, r: &str) -> Out {
+            let s = self
+                .runs
+                .resume_run(pb::ResumeRunRequest { run_id: r.into() })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(pb_run_pause(s.into_inner()))
+        }
+
+        async fn list_workers(&mut self) -> Out {
+            let r = self
+                .workers
+                .list_workers(pb::ListWorkersRequest {})
+                .await
+                .map_err(grpc_err7)?;
+            Ok(Value::Array(
+                r.into_inner().workers.iter().map(pb_worker).collect(),
+            ))
+        }
+
+        async fn drain(&mut self, w: &str) -> Out {
+            let r = self
+                .workers
+                .drain_worker(pb::DrainWorkerRequest {
+                    worker_id: w.into(),
+                })
+                .await
+                .map_err(grpc_err7)?
+                .into_inner();
+            Ok(json!({ "worker_id": r.worker_id, "already_draining": r.already_draining }))
+        }
+
+        async fn create_token(&mut self, ttl_ms: Option<u64>) -> Out {
+            let c = self
+                .workers
+                .create_worker_token(pb::CreateWorkerTokenRequest { ttl_ms })
+                .await
+                .map_err(grpc_err7)?
+                .into_inner();
+            Ok(json!({
+                "token_id": c.token_id, "token": c.token, "join_command": c.join_command,
+                "expires_at_ms": c.expires_at_ms,
+            }))
+        }
+
+        async fn list_tokens(&mut self) -> Out {
+            let r = self
+                .workers
+                .list_worker_tokens(pb::ListWorkerTokensRequest {})
+                .await
+                .map_err(grpc_err7)?;
+            Ok(Value::Array(
+                r.into_inner()
+                    .tokens
+                    .iter()
+                    .map(|t| {
+                        token_info(
+                            &json!(t.token_id),
+                            &json!(t.created_at_ms),
+                            &json!(t.expires_at_ms),
+                        )
+                    })
+                    .collect(),
+            ))
+        }
+
+        async fn revoke(&mut self, id: &str) -> Out {
+            self.workers
+                .revoke_worker_token(pb::RevokeWorkerTokenRequest {
+                    token_id: id.into(),
+                })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(json!({}))
+        }
+
+        async fn join(&mut self, token: &str, worker_id: &str, csr: &str) -> Out {
+            let r = self
+                .workers
+                .join_worker(pb::JoinWorkerRequest {
+                    token: token.into(),
+                    csr_pem: csr.into(),
+                    worker_id: worker_id.into(),
+                    labels: [("zone".to_owned(), "a".to_owned())].into(),
+                })
+                .await
+                .map_err(grpc_err7)?
+                .into_inner();
+            Ok(json!({
+                "client_cert_pem": r.client_cert_pem, "ca_cert_pem": r.ca_cert_pem,
+                "endpoints": r.endpoints, "renew_after_ms": r.renew_after_ms,
+                "cluster_id": r.cluster_id,
+            }))
+        }
+
+        async fn start_on(&mut self, queue: &str) -> Out {
+            let r = self
+                .runs
+                .start(pb::StartRunRequest {
+                    workflow: "greet".into(),
+                    input_json: b"{}".to_vec(),
+                    queue: Some(queue.into()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(grpc_err7)?;
+            Ok(json!({ "run_id": r.into_inner().run_id }))
+        }
+    }
+
+    async fn setup(cp: &FakeControlPlane) {
+        let wasm = fake_module(&[("greet", 1)]);
+        cp.upload_module(ostro_api::domain::UploadModule {
+            sha256: sha256_hex(&wasm),
+            wasm,
+            language: None,
+            tenant: None,
+            name: None,
+        })
+        .await
+        .expect("upload");
+        for (id, free, labels) in [("w-a", 2u32, vec![("gpu", "true")]), ("w-b", 1, vec![])] {
+            cp.add_worker(WorkerInfo {
+                worker_id: id.into(),
+                labels: labels
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect(),
+                slots: 4,
+                free_slots: free,
+                leases: 4 - free,
+                connected_at_ms: 1_700_000_000_000,
+                node_id: 1,
+                draining: false,
+            });
+        }
+    }
+
+    async fn scenario<C: P7Client>(c: &mut C) -> Vec<(String, Out)> {
+        let mut t: Vec<(String, Out)> = Vec::new();
+        macro_rules! keep {
+            ($label:expr, $e:expr) => {{
+                let out = $e.await;
+                t.push(($label.to_owned(), out.clone()));
+                out
+            }};
+        }
+        macro_rules! step {
+            ($label:expr, $e:expr) => {{
+                let out = $e.await;
+                t.push(($label.to_owned(), out));
+            }};
+        }
+        let full = json!({
+            "placement": "workers",
+            "selector": ["gpu=true", "zone in (eu-1,eu-2)"],
+            "spill": { "cpu_pct": 70, "slots_pct": 90, "mem_pct": 85, "lag_ms": 5000,
+                "sustain_ms": 10000, "cooldown_ms": 30000, "hysteresis_pct": 85 },
+            "concurrency": 8, "weight": 2, "key_concurrency": 1,
+            "throttle": { "limit": 10, "period_ms": 1000, "burst": 5 },
+            "key_throttle": { "limit": 1, "period_ms": 500 },
+            "rate_limit": { "limit": 100, "period_ms": 60000 },
+            "key_rate_limit": { "limit": 5, "period_ms": 60000, "burst": 1 },
+            "on_retries_exhausted": "pause",
+        });
+        step!("get flow (never stored)", c.get_flow("gpu"));
+        step!(
+            "put flow",
+            c.put_flow(
+                "gpu",
+                Flow {
+                    body: full.clone(),
+                    expected: Some(0)
+                }
+            )
+        );
+        step!("get flow", c.get_flow("gpu"));
+        step!(
+            "put flow stale version",
+            c.put_flow(
+                "gpu",
+                Flow {
+                    body: full.clone(),
+                    expected: Some(0)
+                }
+            )
+        );
+        for (label, body) in [
+            ("put flow bad placement", json!({ "placement": "gpu" })),
+            (
+                "put flow bad exhaust",
+                json!({ "on_retries_exhausted": "retry" }),
+            ),
+            (
+                "put flow period 0",
+                json!({ "throttle": { "limit": 1, "period_ms": 0 } }),
+            ),
+            (
+                "put flow bad selector",
+                json!({ "selector": ["zone in eu-1"] }),
+            ),
+            (
+                "put flow too many selectors",
+                json!({ "selector": vec!["a"; 33] }),
+            ),
+            (
+                "put flow spill pct",
+                json!({ "spill": { "cpu_pct": 101, "slots_pct": 0, "mem_pct": 0,
+                    "lag_ms": 0, "sustain_ms": 0, "cooldown_ms": 0, "hysteresis_pct": 0 } }),
+            ),
+        ] {
+            step!(
+                label,
+                c.put_flow(
+                    "gpu",
+                    Flow {
+                        body,
+                        expected: None
+                    }
+                )
+            );
+        }
+        step!(
+            "put flow unconditional",
+            c.put_flow(
+                "gpu",
+                Flow {
+                    body: json!({ "placement": "workers" }),
+                    expected: None
+                }
+            )
+        );
+        step!("pause queue", c.pause_queue("gpu"));
+        step!("pause queue again", c.pause_queue("gpu"));
+        step!("get flow paused", c.get_flow("gpu"));
+        step!("demand paused", c.demand("gpu"));
+        step!("resume queue", c.resume_queue("gpu"));
+        step!("resume queue again", c.resume_queue("gpu"));
+        let run = keep!("start on gpu", c.start_on("gpu"));
+        step!("start on gpu 2", c.start_on("gpu"));
+        step!("demand", c.demand("gpu"));
+        step!("demand embedded queue", c.demand("other"));
+        step!("pause workflow", c.pause_workflow("greet"));
+        step!("pause workflow again", c.pause_workflow("greet"));
+        step!("pause unknown workflow", c.pause_workflow("nope"));
+        step!("resume workflow", c.resume_workflow("greet"));
+        let run_id = run.expect("run")["run_id"]
+            .as_str()
+            .expect("run id")
+            .to_owned();
+        step!("pause run", c.pause_run(&run_id, Some("maintenance")));
+        step!("pause run again", c.pause_run(&run_id, None));
+        step!("demand with paused run", c.demand("gpu"));
+        step!("resume run", c.resume_run(&run_id));
+        step!("resume run again", c.resume_run(&run_id));
+        step!("pause unknown run", c.pause_run("run-999999", None));
+        let long = "x".repeat(1025);
+        step!("pause run long detail", c.pause_run(&run_id, Some(&long)));
+        step!("list workers", c.list_workers());
+        step!("drain worker", c.drain("w-a"));
+        step!("drain worker again", c.drain("w-a"));
+        step!("drain unknown worker", c.drain("w-x"));
+        step!("list workers drained", c.list_workers());
+        let created = keep!("create token", c.create_token(Some(3_600_000)));
+        step!("create token ttl 0", c.create_token(Some(0)));
+        step!("create token default ttl", c.create_token(None));
+        step!("list tokens", c.list_tokens());
+        let created = created.expect("token");
+        let token = created["token"].as_str().expect("token").to_owned();
+        let token_id = created["token_id"].as_str().expect("id").to_owned();
+        step!("join", c.join(&token, "w-c", CSR));
+        step!(
+            "join bad secret",
+            c.join(&format!("{token_id}.nope"), "w-c", CSR)
+        );
+        step!("join bad csr", c.join(&token, "w-c", "not a csr"));
+        step!("join bad worker id", c.join(&token, "w c", CSR));
+        step!("revoke token", c.revoke(&token_id));
+        step!("revoke token again", c.revoke(&token_id));
+        step!("join revoked", c.join(&token, "w-c", CSR));
+        step!(
+            "rate limit flow",
+            c.put_flow(
+                "rl",
+                Flow {
+                    body: json!({ "rate_limit": { "limit": 1, "period_ms": 3_600_000 } }),
+                    expected: None
+                }
+            )
+        );
+        step!("start on rl", c.start_on("rl"));
+        step!("start on rl limited", c.start_on("rl"));
+        t
+    }
+
+    #[tokio::test]
+    async fn phase7_rest_and_grpc_transcripts_are_equal() {
+        let rest_srv = serve(cfg()).await;
+        let grpc_srv = serve(cfg()).await;
+        setup(&rest_srv.cp).await;
+        setup(&grpc_srv.cp).await;
+        let rest = scenario(&mut RestClient::new(rest_srv.addr)).await;
+        let grpc = scenario(&mut P7Grpc::connect(grpc_srv.addr).await).await;
+        assert_eq!(rest.len(), grpc.len());
+        for ((label, r), (_, g)) in rest.iter().zip(grpc.iter()) {
+            assert_eq!(r, g, "step {label:?} differs between REST and gRPC");
+        }
+
+        let get = |l: &str| rest.iter().find(|(x, _)| x == l).expect(l).1.clone();
+        let err = |l: &str| get(l).expect_err(l);
+        for l in [
+            "put flow bad placement",
+            "put flow bad exhaust",
+            "put flow period 0",
+            "put flow bad selector",
+            "put flow too many selectors",
+            "put flow spill pct",
+            "pause run long detail",
+            "create token ttl 0",
+            "join bad secret",
+            "join bad csr",
+            "join bad worker id",
+            "join revoked",
+        ] {
+            assert_eq!(err(l).0, ErrorCode::InvalidArgument, "{l}");
+        }
+        for l in [
+            "pause unknown workflow",
+            "pause unknown run",
+            "drain unknown worker",
+            "revoke token again",
+        ] {
+            assert_eq!(err(l).0, ErrorCode::NotFound, "{l}");
+        }
+        assert_eq!(
+            err("put flow stale version").0,
+            ErrorCode::PreconditionFailed
+        );
+        let limited = err("start on rl limited");
+        assert_eq!(limited.0, ErrorCode::RateLimited);
+        assert!(
+            limited.1.expect("details")["retry_after_ms"]
+                .as_u64()
+                .is_some()
+        );
+        assert_eq!(
+            err("join revoked").1.expect("details")["reason"],
+            "join_token_invalid"
+        );
+        assert_eq!(get("put flow").unwrap()["version"], 1);
+        assert_eq!(get("get flow").unwrap(), get("put flow").unwrap());
+        assert_eq!(get("get flow paused").unwrap()["paused"], true);
+        assert_eq!(get("pause queue again").unwrap()["changed"], false);
+        assert_eq!(get("demand").unwrap()["demand"], 2);
+        assert_eq!(get("demand paused").unwrap()["demand"], 0);
+        assert_eq!(get("demand with paused run").unwrap()["backlog"], 1);
+        assert_eq!(
+            get("demand embedded queue").unwrap()["placement"],
+            "embedded"
+        );
+        assert_eq!(get("list workers drained").unwrap()[0]["draining"], true);
+        assert_eq!(
+            get("list tokens").unwrap().as_array().map(Vec::len),
+            Some(2)
+        );
+        // The token secret is in the create answer only.
+        let secret = get("create token").unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!get("list tokens").unwrap().to_string().contains(&secret));
+    }
+}

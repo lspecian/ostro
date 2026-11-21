@@ -19,6 +19,7 @@ use utoipa_axum::routes;
 
 use crate::domain::{self, ControlPlane};
 use crate::error::{ApiError, ErrorBody};
+use crate::phase7;
 
 /// Router state: the control plane.
 pub type CpState = Arc<dyn ControlPlane>;
@@ -2192,6 +2193,330 @@ pub fn object_routes() -> OpenApiRouter<CpState> {
 // Router
 // ---------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------
+// Phase 7 (07-11): queue flow, pause/resume, demand, workers, join tokens, join
+// ---------------------------------------------------------------------------------
+
+/// `Cache-Control: no-store` for responses that carry a secret.
+fn no_store<T: IntoResponse>(status: StatusCode, body: T) -> Response {
+    let mut res = (status, body).into_response();
+    res.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    res
+}
+
+/// A queue's flow configuration and record version.
+#[utoipa::path(
+    get,
+    path = "/v1/queues/{name}/flow",
+    tag = "queues",
+    params(("name" = String, Path, description = "Queue name")),
+    responses(
+        (status = 200, description = "Flow configuration (version 0 = never stored)", body = phase7::QueueFlowInfo),
+        (status = 400, description = "Invalid queue name", body = ErrorBody),
+    )
+)]
+async fn get_queue_flow(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<phase7::QueueFlowInfo>, ApiError> {
+    Ok(Json(cp.get_queue_flow(name).await?))
+}
+
+/// Replace a queue's flow configuration (placement, selector, spill, concurrency,
+/// weight, throttles, rate limits, auto-pause, paused). CAS: body `expected_version`
+/// or `If-Match` (both given = they must agree).
+#[utoipa::path(
+    put,
+    path = "/v1/queues/{name}/flow",
+    tag = "queues",
+    params(
+        ("name" = String, Path, description = "Queue name"),
+        ("If-Match" = Option<String>, Header, description = "Expected record version (alternative to expected_version)"),
+    ),
+    request_body = phase7::PutQueueFlowBody,
+    responses(
+        (status = 200, description = "Stored flow configuration", body = phase7::QueueFlowInfo),
+        (status = 400, description = "Invalid flow (selector, period_ms, percentages, enum names)", body = ErrorBody),
+        (status = 412, description = "Stale expected_version", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+    )
+)]
+async fn put_queue_flow(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<phase7::PutQueueFlowBody>, JsonRejection>,
+) -> Result<Json<phase7::QueueFlowInfo>, ApiError> {
+    let b = json_body(body)?;
+    let expected = match (b.expected_version, if_match_version(&headers)?) {
+        (Some(a), Some(h)) if a != h => {
+            return Err(ApiError::invalid_argument(
+                "expected_version and If-Match disagree",
+            ));
+        }
+        (a, h) => a.or(h),
+    };
+    Ok(Json(cp.put_queue_flow(name, b.flow, expected).await?))
+}
+
+/// Pause a queue: no new activations are granted (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/queues/{name}/pause",
+    tag = "queues",
+    params(("name" = String, Path, description = "Queue name")),
+    responses(
+        (status = 200, description = "Paused (changed = false on repeats)", body = phase7::PauseState),
+        (status = 400, description = "Invalid queue name", body = ErrorBody),
+    )
+)]
+async fn pause_queue(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<phase7::PauseState>, ApiError> {
+    Ok(Json(cp.pause_queue(name).await?))
+}
+
+/// Resume a paused queue (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/queues/{name}/resume",
+    tag = "queues",
+    params(("name" = String, Path, description = "Queue name")),
+    responses(
+        (status = 200, description = "Resumed (changed = false on repeats)", body = phase7::PauseState),
+        (status = 400, description = "Invalid queue name", body = ErrorBody),
+    )
+)]
+async fn resume_queue(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<phase7::PauseState>, ApiError> {
+    Ok(Json(cp.resume_queue(name).await?))
+}
+
+/// A queue's worker demand (the KEDA scaling signal, D-W12).
+#[utoipa::path(
+    get,
+    path = "/v1/queues/{name}/demand",
+    tag = "queues",
+    params(("name" = String, Path, description = "Queue name")),
+    responses(
+        (status = 200, description = "Demand snapshot", body = phase7::DemandSnapshot),
+        (status = 400, description = "Invalid queue name", body = ErrorBody),
+    )
+)]
+async fn queue_demand(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<phase7::DemandSnapshot>, ApiError> {
+    Ok(Json(cp.queue_demand(name).await?))
+}
+
+/// Pause a workflow: its runs get no new activations (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/workflows/{name}/pause",
+    tag = "workflows",
+    params(("name" = String, Path, description = "Workflow name")),
+    responses(
+        (status = 200, description = "Paused (changed = false on repeats)", body = phase7::PauseState),
+        (status = 404, description = "Unknown workflow", body = ErrorBody),
+    )
+)]
+async fn pause_workflow(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<phase7::PauseState>, ApiError> {
+    Ok(Json(cp.pause_workflow(name).await?))
+}
+
+/// Resume a paused workflow (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/workflows/{name}/resume",
+    tag = "workflows",
+    params(("name" = String, Path, description = "Workflow name")),
+    responses(
+        (status = 200, description = "Resumed (changed = false on repeats)", body = phase7::PauseState),
+        (status = 404, description = "Unknown workflow", body = ErrorBody),
+    )
+)]
+async fn resume_workflow(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(name): Path<String>,
+) -> Result<Json<phase7::PauseState>, ApiError> {
+    Ok(Json(cp.resume_workflow(name).await?))
+}
+
+/// Pause a run: no further activations until resumed (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/runs/{run_id}/pause",
+    tag = "runs",
+    params(("run_id" = String, Path, description = "Run id")),
+    request_body(content = phase7::PauseRunRequest, description = "Optional; an empty body means no detail"),
+    responses(
+        (status = 200, description = "Paused (changed = false on repeats)", body = phase7::RunPauseState),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 404, description = "Unknown run", body = ErrorBody),
+        (status = 409, description = "Run already terminal (details.reason = run_terminal)", body = ErrorBody),
+    )
+)]
+async fn pause_run(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(run_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<phase7::RunPauseState>, ApiError> {
+    let b: phase7::PauseRunRequest = optional_json_body(body)?;
+    Ok(Json(cp.pause_run(run_id, b.detail).await?))
+}
+
+/// Resume a paused run (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/runs/{run_id}/resume",
+    tag = "runs",
+    params(("run_id" = String, Path, description = "Run id")),
+    responses(
+        (status = 200, description = "Resumed (changed = false on repeats)", body = phase7::RunPauseState),
+        (status = 404, description = "Unknown run", body = ErrorBody),
+        (status = 409, description = "Run already terminal (details.reason = run_terminal)", body = ErrorBody),
+    )
+)]
+async fn resume_run(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(run_id): Path<String>,
+) -> Result<Json<phase7::RunPauseState>, ApiError> {
+    Ok(Json(cp.resume_run(run_id).await?))
+}
+
+/// Connected workers.
+#[utoipa::path(
+    get,
+    path = "/v1/workers",
+    tag = "workers",
+    responses((status = 200, description = "Workers, sorted by id", body = phase7::WorkerList))
+)]
+async fn list_workers(
+    State(cp): State<Arc<dyn ControlPlane>>,
+) -> Result<Json<phase7::WorkerList>, ApiError> {
+    Ok(Json(phase7::WorkerList {
+        workers: cp.list_workers().await?,
+    }))
+}
+
+/// Drain a worker: no new work, in-flight activations finish (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/workers/{id}/drain",
+    tag = "workers",
+    params(("id" = String, Path, description = "Worker id")),
+    responses(
+        (status = 200, description = "Draining", body = phase7::DrainResult),
+        (status = 404, description = "Unknown worker", body = ErrorBody),
+    )
+)]
+async fn drain_worker(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(id): Path<String>,
+) -> Result<Json<phase7::DrainResult>, ApiError> {
+    Ok(Json(cp.drain_worker(id).await?))
+}
+
+/// Create a worker join token. The secret (`token`) is in this response only.
+#[utoipa::path(
+    post,
+    path = "/v1/workers/tokens",
+    tag = "workers",
+    request_body(content = phase7::CreateWorkerTokenRequest, description = "Optional; an empty body means the default lifetime"),
+    responses(
+        (status = 201, description = "Created (Cache-Control: no-store)", body = phase7::WorkerTokenCreated),
+        (status = 400, description = "Invalid ttl_ms", body = ErrorBody),
+    )
+)]
+async fn create_worker_token(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Response, ApiError> {
+    let req: phase7::CreateWorkerTokenRequest = optional_json_body(body)?;
+    let created = cp.create_worker_token(req).await?;
+    Ok(no_store(StatusCode::CREATED, Json(created)))
+}
+
+/// Worker join tokens, without their secrets.
+#[utoipa::path(
+    get,
+    path = "/v1/workers/tokens",
+    tag = "workers",
+    responses((status = 200, description = "Tokens, sorted by id", body = phase7::WorkerTokenList))
+)]
+async fn list_worker_tokens(
+    State(cp): State<Arc<dyn ControlPlane>>,
+) -> Result<Json<phase7::WorkerTokenList>, ApiError> {
+    Ok(Json(phase7::WorkerTokenList {
+        tokens: cp.list_worker_tokens().await?,
+    }))
+}
+
+/// Revoke a join token: join and renewal are refused and its sessions closed.
+#[utoipa::path(
+    delete,
+    path = "/v1/workers/tokens/{id}",
+    tag = "workers",
+    params(("id" = String, Path, description = "Token id (wkr_...)")),
+    responses(
+        (status = 204, description = "Revoked"),
+        (status = 404, description = "Unknown token", body = ErrorBody),
+    )
+)]
+async fn revoke_worker_token(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    cp.revoke_worker_token(id).await?;
+    Ok(no_content())
+}
+
+/// Join: exchange a join token and a CSR for a worker client certificate.
+#[utoipa::path(
+    post,
+    path = "/v1/workers/join",
+    tag = "workers",
+    request_body = phase7::JoinRequest,
+    responses(
+        (status = 200, description = "Client certificate, CA and cluster endpoints", body = phase7::JoinResponse),
+        (status = 400, description = "Invalid request, or the token is unknown, revoked or expired (details.reason = join_token_invalid)", body = ErrorBody),
+    )
+)]
+async fn join_worker(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    body: Result<Json<phase7::JoinRequest>, JsonRejection>,
+) -> Result<Json<phase7::JoinResponse>, ApiError> {
+    let req = json_body(body)?;
+    Ok(Json(cp.join_worker(req).await?))
+}
+
+/// The Phase 7 routes (07-11), merged into [`api_routes`].
+fn phase7_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
+    r.routes(routes!(get_queue_flow, put_queue_flow))
+        .routes(routes!(pause_queue))
+        .routes(routes!(resume_queue))
+        .routes(routes!(queue_demand))
+        .routes(routes!(pause_workflow))
+        .routes(routes!(resume_workflow))
+        .routes(routes!(pause_run))
+        .routes(routes!(resume_run))
+        .routes(routes!(list_workers))
+        .routes(routes!(drain_worker))
+        .routes(routes!(create_worker_token, list_worker_tokens))
+        .routes(routes!(revoke_worker_token))
+        .routes(routes!(join_worker))
+}
+
 /// Base OpenAPI metadata; paths are added by [`api_routes`].
 #[derive(OpenApi)]
 #[openapi(
@@ -2210,6 +2535,7 @@ pub fn object_routes() -> OpenApiRouter<CpState> {
         (name = "admin", description = "Online backup (Phase 8)"),
         (name = "secrets", description = "Write-only secrets and origin-bound secret grants (Phase 6)"),
         (name = "connectors", description = "Connections, module egress policies and presigned object URLs (Phase 6)"),
+        (name = "workers", description = "Worker administration, join tokens and join (Phase 7)"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )
@@ -2244,7 +2570,7 @@ pub fn api_routes(max_module_bytes: usize) -> OpenApiRouter<CpState> {
         .routes(routes!(readyz))
         .routes(routes!(openapi_json))
         .routes(routes!(ui_shell));
-    bridge_routes(r)
+    phase7_routes(bridge_routes(r))
 }
 
 #[cfg(test)]

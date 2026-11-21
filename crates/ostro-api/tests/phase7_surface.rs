@@ -473,3 +473,473 @@ async fn phase7_fake_rate_limit() {
     // Other queues are not limited.
     cp.start_run(start("other")).await.expect("other");
 }
+
+// ---------------------------------------------------------------------------------
+// REST routes, RateLimited on both transports, OpenAPI
+// ---------------------------------------------------------------------------------
+
+struct Server {
+    addr: std::net::SocketAddr,
+    cp: Arc<FakeControlPlane>,
+    http: reqwest::Client,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl Server {
+    async fn start() -> Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let cp = Arc::new(fake_with_workflow().await);
+        let dyn_cp: Arc<dyn ControlPlane> = cp.clone();
+        let app = ostro_api::router(dyn_cp, ostro_api::ApiConfig::default());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        Server {
+            addr,
+            cp,
+            http: reqwest::Client::builder()
+                .http1_only()
+                .build()
+                .expect("client"),
+            task,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
+    }
+
+    async fn call(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (
+        reqwest::StatusCode,
+        reqwest::header::HeaderMap,
+        serde_json::Value,
+    ) {
+        let mut req = self.http.request(method, self.url(path));
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let resp = req.send().await.expect("send");
+        let (status, headers) = (resp.status(), resp.headers().clone());
+        let text = resp.text().await.expect("body");
+        let v = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        (status, headers, v)
+    }
+}
+
+#[tokio::test]
+async fn phase7_rest_routes_and_status_codes() {
+    use reqwest::Method;
+    use reqwest::StatusCode as S;
+    use serde_json::json;
+    let srv = Server::start().await;
+
+    // Flow: GET defaults, PUT, CAS via body and If-Match, validation.
+    let (s, _, v) = srv.call(Method::GET, "/v1/queues/q/flow", None).await;
+    assert_eq!(
+        (s, &v["version"], &v["queue"]),
+        (S::OK, &json!(0), &json!("q"))
+    );
+    let flow = json!({
+        "placement": "workers", "selector": ["gpu=true"], "concurrency": 4,
+        "throttle": {"limit": 5, "period_ms": 1000}, "on_retries_exhausted": "pause",
+        "expected_version": 0
+    });
+    let (s, _, v) = srv
+        .call(Method::PUT, "/v1/queues/q/flow", Some(flow.clone()))
+        .await;
+    assert_eq!(s, S::OK, "{v}");
+    assert_eq!(
+        (&v["version"], &v["placement"], &v["throttle"]["burst"]),
+        (&json!(1), &json!("workers"), &json!(0))
+    );
+    let (s, _, v) = srv.call(Method::PUT, "/v1/queues/q/flow", Some(flow)).await;
+    assert_eq!(
+        (s, &v["error"]["code"]),
+        (S::PRECONDITION_FAILED, &json!("precondition_failed"))
+    );
+    let resp = srv
+        .http
+        .put(srv.url("/v1/queues/q/flow"))
+        .header("If-Match", "\"1\"")
+        .json(&json!({ "weight": 2 }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), S::OK);
+    let resp = srv
+        .http
+        .put(srv.url("/v1/queues/q/flow"))
+        .header("If-Match", "2")
+        .json(&json!({ "expected_version": 3 }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), S::BAD_REQUEST, "If-Match and body disagree");
+    for bad in [
+        json!({ "placement": "gpu" }),
+        json!({ "rate_limit": { "limit": 1, "period_ms": 0 } }),
+        json!({ "selector": ["zone in eu"] }),
+        json!({ "spill": { "cpu_pct": 300, "slots_pct": 0, "mem_pct": 0, "lag_ms": 0,
+            "sustain_ms": 0, "cooldown_ms": 0, "hysteresis_pct": 0 } }),
+    ] {
+        let (s, _, v) = srv
+            .call(Method::PUT, "/v1/queues/q/flow", Some(bad.clone()))
+            .await;
+        assert_eq!(
+            (s, &v["error"]["code"]),
+            (S::BAD_REQUEST, &json!("invalid_argument")),
+            "{bad}"
+        );
+    }
+
+    // Queue pause/resume/demand.
+    let (s, _, v) = srv.call(Method::POST, "/v1/queues/q/pause", None).await;
+    assert_eq!(
+        (s, &v),
+        (
+            S::OK,
+            &json!({ "name": "q", "paused": true, "changed": true })
+        )
+    );
+    let (s, _, v) = srv.call(Method::POST, "/v1/queues/q/resume", None).await;
+    assert_eq!((s, &v["paused"]), (S::OK, &json!(false)));
+    let (s, _, v) = srv.call(Method::GET, "/v1/queues/q/demand", None).await;
+    assert_eq!(s, S::OK);
+    let keys: Vec<&String> = v.as_object().expect("object").keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "backlog",
+            "demand",
+            "placement",
+            "queue",
+            "running_on_workers",
+            "spilling",
+            "worker_slots_free",
+            "workers"
+        ]
+    );
+
+    // Workflow pause/resume.
+    let (s, _, _) = srv
+        .call(Method::POST, "/v1/workflows/greet/pause", None)
+        .await;
+    assert_eq!(s, S::OK);
+    let (s, _, _) = srv
+        .call(Method::POST, "/v1/workflows/nope/pause", None)
+        .await;
+    assert_eq!(s, S::NOT_FOUND);
+    let (s, _, _) = srv
+        .call(Method::POST, "/v1/workflows/greet/resume", None)
+        .await;
+    assert_eq!(s, S::OK);
+
+    // Run pause (empty and JSON bodies) / resume.
+    let run = srv.cp.start_run(start("q")).await.expect("start").run_id;
+    let (s, _, v) = srv
+        .call(Method::POST, &format!("/v1/runs/{run}/pause"), None)
+        .await;
+    assert_eq!((s, &v["changed"]), (S::OK, &json!(true)), "{v}");
+    let (s, _, v) = srv
+        .call(
+            Method::POST,
+            &format!("/v1/runs/{run}/pause"),
+            Some(json!({ "detail": "x" })),
+        )
+        .await;
+    assert_eq!((s, &v["changed"]), (S::OK, &json!(false)));
+    let (s, _, _) = srv
+        .call(
+            Method::POST,
+            &format!("/v1/runs/{run}/pause"),
+            Some(json!({ "nope": 1 })),
+        )
+        .await;
+    assert_eq!(s, S::BAD_REQUEST);
+    let (s, _, v) = srv
+        .call(Method::POST, &format!("/v1/runs/{run}/resume"), None)
+        .await;
+    assert_eq!((s, &v["paused"]), (S::OK, &json!(false)));
+    let (s, _, _) = srv
+        .call(Method::POST, "/v1/runs/run-999999/pause", None)
+        .await;
+    assert_eq!(s, S::NOT_FOUND);
+
+    // Workers.
+    srv.cp.add_worker(worker("w-1", 2, &[("gpu", "true")]));
+    let (s, _, v) = srv.call(Method::GET, "/v1/workers", None).await;
+    assert_eq!(
+        (s, &v["workers"][0]["labels"]["gpu"]),
+        (S::OK, &json!("true"))
+    );
+    let (s, _, v) = srv.call(Method::POST, "/v1/workers/w-1/drain", None).await;
+    assert_eq!((s, &v["already_draining"]), (S::OK, &json!(false)));
+    let (s, _, _) = srv.call(Method::POST, "/v1/workers/w-9/drain", None).await;
+    assert_eq!(s, S::NOT_FOUND);
+
+    // Tokens: created once (201, no-store), listed without the secret, revoked.
+    let (s, h, created) = srv.call(Method::POST, "/v1/workers/tokens", None).await;
+    assert_eq!(s, S::CREATED);
+    assert_eq!(h[reqwest::header::CACHE_CONTROL], "no-store");
+    let token = created["token"].as_str().expect("token").to_owned();
+    let id = created["token_id"].as_str().expect("id").to_owned();
+    let (s, _, _) = srv
+        .call(
+            Method::POST,
+            "/v1/workers/tokens",
+            Some(json!({ "ttl_ms": 0 })),
+        )
+        .await;
+    assert_eq!(s, S::BAD_REQUEST);
+    let (s, _, list) = srv.call(Method::GET, "/v1/workers/tokens", None).await;
+    assert_eq!(
+        (s, list["tokens"].as_array().map(Vec::len)),
+        (S::OK, Some(1))
+    );
+    let secret = token.split_once('.').expect("secret").1;
+    assert!(!list.to_string().contains(secret));
+
+    // Join.
+    let join =
+        json!({ "token": token, "csr_pem": CSR, "worker_id": "w-2", "labels": {"zone": "a"} });
+    let (s, _, v) = srv
+        .call(Method::POST, "/v1/workers/join", Some(join.clone()))
+        .await;
+    assert_eq!(
+        (s, &v["cluster_id"]),
+        (S::OK, &json!(FAKE_CLUSTER_ID)),
+        "{v}"
+    );
+    let (s, _, v) = srv
+        .call(
+            Method::POST,
+            "/v1/workers/join",
+            Some(json!({ "token": "wkr_1.x", "csr_pem": CSR, "worker_id": "w" })),
+        )
+        .await;
+    assert_eq!(
+        (s, &v["error"]["details"]["reason"]),
+        (S::BAD_REQUEST, &json!("join_token_invalid"))
+    );
+    let (s, _, _) = srv
+        .call(Method::DELETE, &format!("/v1/workers/tokens/{id}"), None)
+        .await;
+    assert_eq!(s, S::NO_CONTENT);
+    let (s, _, _) = srv
+        .call(Method::DELETE, &format!("/v1/workers/tokens/{id}"), None)
+        .await;
+    assert_eq!(s, S::NOT_FOUND);
+    let (s, _, _) = srv.call(Method::POST, "/v1/workers/join", Some(join)).await;
+    assert_eq!(s, S::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn phase7_rate_limited_on_rest_and_grpc() {
+    use ostro_proto::api::v1 as pb;
+    use serde_json::json;
+    let srv = Server::start().await;
+    let (s, _, _) = srv
+        .call(
+            reqwest::Method::PUT,
+            "/v1/queues/rl/flow",
+            Some(json!({ "rate_limit": { "limit": 1, "period_ms": 3_600_000 } })),
+        )
+        .await;
+    assert_eq!(s, reqwest::StatusCode::OK);
+    let body = json!({ "input": {}, "queue": "rl" });
+    let (s, _, _) = srv
+        .call(
+            reqwest::Method::POST,
+            "/v1/workflows/greet/runs",
+            Some(body.clone()),
+        )
+        .await;
+    assert!(s.is_success(), "{s}");
+    // REST: 429 + Retry-After (whole seconds, rounded up) + details.retry_after_ms.
+    let (s, h, v) = srv
+        .call(
+            reqwest::Method::POST,
+            "/v1/workflows/greet/runs",
+            Some(body),
+        )
+        .await;
+    assert_eq!(s, reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(v["error"]["code"], "rate_limited");
+    let ms = v["error"]["details"]["retry_after_ms"]
+        .as_u64()
+        .expect("retry_after_ms");
+    let secs: u64 = h[reqwest::header::RETRY_AFTER]
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("seconds");
+    assert_eq!(secs, ms.div_ceil(1000));
+    // gRPC: RESOURCE_EXHAUSTED with the same details; the details disambiguate.
+    let mut runs = pb::runs_client::RunsClient::connect(format!("http://{}", srv.addr))
+        .await
+        .expect("connect");
+    let st = runs
+        .start(pb::StartRunRequest {
+            workflow: "greet".into(),
+            input_json: b"{}".to_vec(),
+            queue: Some("rl".into()),
+            ..Default::default()
+        })
+        .await
+        .expect_err("rate limited");
+    assert_eq!(st.code(), tonic::Code::ResourceExhausted);
+    let details = ostro_api::grpc::status_details(&st);
+    assert!(
+        details
+            .as_ref()
+            .is_some_and(|d| d["retry_after_ms"].as_u64().is_some())
+    );
+    assert_eq!(
+        ErrorCode::from_grpc_code_and_details(st.code(), details.as_ref()),
+        ErrorCode::RateLimited
+    );
+}
+
+#[test]
+fn phase7_openapi_paths() {
+    let doc = serde_json::to_value(ostro_api::openapi()).expect("serialize");
+    let paths = doc["paths"].as_object().expect("paths");
+    for (path, method) in [
+        ("/v1/queues/{name}/flow", "get"),
+        ("/v1/queues/{name}/flow", "put"),
+        ("/v1/queues/{name}/pause", "post"),
+        ("/v1/queues/{name}/resume", "post"),
+        ("/v1/queues/{name}/demand", "get"),
+        ("/v1/workflows/{name}/pause", "post"),
+        ("/v1/workflows/{name}/resume", "post"),
+        ("/v1/runs/{run_id}/pause", "post"),
+        ("/v1/runs/{run_id}/resume", "post"),
+        ("/v1/workers", "get"),
+        ("/v1/workers/{id}/drain", "post"),
+        ("/v1/workers/tokens", "post"),
+        ("/v1/workers/tokens", "get"),
+        ("/v1/workers/tokens/{id}", "delete"),
+        ("/v1/workers/join", "post"),
+    ] {
+        assert!(
+            paths.get(path).and_then(|p| p.get(method)).is_some(),
+            "{method} {path} missing from OpenAPI"
+        );
+    }
+    let schemas = doc["components"]["schemas"].as_object().expect("schemas");
+    for s in [
+        "QueueFlow",
+        "QueueFlowInfo",
+        "PutQueueFlowBody",
+        "RateSpecDto",
+        "SpillPolicyDto",
+        "Placement",
+        "ExhaustAction",
+        "PauseState",
+        "PauseRunRequest",
+        "RunPauseState",
+        "DemandSnapshot",
+        "WorkerInfo",
+        "WorkerList",
+        "DrainResult",
+        "CreateWorkerTokenRequest",
+        "WorkerTokenCreated",
+        "WorkerTokenInfo",
+        "WorkerTokenList",
+        "JoinRequest",
+        "JoinResponse",
+    ] {
+        assert!(schemas.contains_key(s), "schema {s} missing");
+    }
+}
+
+/// W9: the document is a semantic superset of the base snapshot (07-11 Task 1 records
+/// it): every base `paths[p][method]` and `components.schemas[s]` is present and equal
+/// as a JSON value. Re-ordering by utoipa cannot fail this check; only a changed or
+/// removed base entry does.
+#[test]
+fn openapi_superset() {
+    let Ok(base_path) = std::env::var("OSTRO_OPENAPI_BASE") else {
+        eprintln!(
+            "SKIP openapi_superset: OSTRO_OPENAPI_BASE is unset (point it at the base \
+             snapshot, e.g. target/07-11-base-openapi.snap)"
+        );
+        return;
+    };
+    let mut p = std::path::PathBuf::from(&base_path);
+    if p.is_relative() && !p.exists() {
+        // Relative to the workspace root (cargo runs tests in the package directory).
+        p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(&base_path);
+    }
+    let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+    // Strip the insta header (`---` ... `---`): the JSON starts at the first `{` line.
+    let json_start = text
+        .find("\n{")
+        .map(|i| i + 1)
+        .or_else(|| text.starts_with('{').then_some(0))
+        .expect("JSON body in the base snapshot");
+    let base: serde_json::Value =
+        serde_json::from_str(&text[json_start..]).expect("base snapshot JSON");
+    let new = serde_json::to_value(ostro_api::openapi()).expect("serialize");
+
+    let base_paths = base["paths"].as_object().expect("base paths");
+    let new_paths = new["paths"].as_object().expect("paths");
+    let mut checked = 0usize;
+    for (path, item) in base_paths {
+        let new_item = new_paths
+            .get(path)
+            .unwrap_or_else(|| panic!("base path {path} removed"));
+        for (method, op) in item.as_object().expect("path item") {
+            assert_eq!(
+                new_item.get(method),
+                Some(op),
+                "base operation {method} {path} changed"
+            );
+            checked += 1;
+        }
+    }
+    let base_schemas = base["components"]["schemas"].as_object().expect("schemas");
+    let new_schemas = new["components"]["schemas"].as_object().expect("schemas");
+    for (name, schema) in base_schemas {
+        assert_eq!(
+            new_schemas.get(name),
+            Some(schema),
+            "base schema {name} changed or removed"
+        );
+        checked += 1;
+    }
+    let added_paths: Vec<String> = new_paths
+        .iter()
+        .flat_map(|(p, item)| {
+            item.as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(m, _)| base_paths.get(p).and_then(|b| b.get(*m)).is_none())
+                .map(move |(m, _)| format!("{} {p}", m.to_uppercase()))
+        })
+        .collect();
+    let added_schemas: Vec<&String> = new_schemas
+        .keys()
+        .filter(|s| !base_schemas.contains_key(*s))
+        .collect();
+    println!("openapi_superset: {checked} base entries unchanged");
+    println!("added operations ({}): {added_paths:#?}", added_paths.len());
+    println!("added schemas ({}): {added_schemas:?}", added_schemas.len());
+    assert!(checked > 0);
+}

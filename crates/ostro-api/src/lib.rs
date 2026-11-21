@@ -20,8 +20,9 @@ pub use openapi::openapi;
 pub use phase8::ApiExtensions;
 
 use ostro_proto::api::v1::{
-    connectors_server::ConnectorsServer, modules_server::ModulesServer, runs_server::RunsServer,
-    secrets_server::SecretsServer, tokens_server::TokensServer, workflows_server::WorkflowsServer,
+    connectors_server::ConnectorsServer, modules_server::ModulesServer,
+    queues_server::QueuesServer, runs_server::RunsServer, secrets_server::SecretsServer,
+    tokens_server::TokensServer, workers_server::WorkersServer, workflows_server::WorkflowsServer,
 };
 use ostro_proto::health::v1::{
     CheckRequest, CheckResponse,
@@ -79,7 +80,7 @@ pub fn ui_shell_html() -> String {
 
 /// Build the combined one-port router: REST (`/v1/...`), `/openapi.json`, `/healthz`,
 /// `/readyz`, the UI shell at `/`, and the tonic gRPC services (`ostro.health.v1.Health`,
-/// `ostro.api.v1.{Modules,Workflows,Runs,Tokens,Secrets,Connectors}`) under their
+/// `ostro.api.v1.{Modules,Workflows,Runs,Tokens,Secrets,Connectors,Queues,Workers}`) under their
 /// `/<package>.<Service>/` paths. The Phase 6 presign route
 /// (`/v1/objects/{connection}/{key}`, [`rest::object_routes`]) is mounted outside the
 /// REST middleware stack.
@@ -128,6 +129,15 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
         )
         .add_service(
             ConnectorsServer::new(grpc::GrpcConnectors(cp.clone()))
+                .max_decoding_message_size(cfg.max_request_bytes),
+        )
+        // Phase 7 (07-11): queue flow/pause/demand, worker admin and join.
+        .add_service(
+            QueuesServer::new(grpc::GrpcQueues(cp.clone()))
+                .max_decoding_message_size(cfg.max_request_bytes),
+        )
+        .add_service(
+            WorkersServer::new(grpc::GrpcWorkers(cp.clone()))
                 .max_decoding_message_size(cfg.max_request_bytes),
         );
     let grpc = phase8::add_grpc_services(grpc, &ext, cfg.max_request_bytes)

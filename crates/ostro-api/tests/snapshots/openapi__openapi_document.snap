@@ -928,6 +928,214 @@ expression: pretty
         }
       }
     },
+    "/v1/queues/{name}/demand": {
+      "get": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "A queue's worker demand (the KEDA scaling signal, D-W12).",
+        "operationId": "queue_demand",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Demand snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemandSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid queue name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/queues/{name}/flow": {
+      "get": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "A queue's flow configuration and record version.",
+        "operationId": "get_queue_flow",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flow configuration (version 0 = never stored)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueFlowInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid queue name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "Replace a queue's flow configuration (placement, selector, spill, concurrency,\nweight, throttles, rate limits, auto-pause, paused). CAS: body `expected_version`\nor `If-Match` (both given = they must agree).",
+        "operationId": "put_queue_flow",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "description": "Expected record version (alternative to expected_version)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutQueueFlowBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored flow configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueFlowInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid flow (selector, period_ms, percentages, enum names)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Stale expected_version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds api.max_request_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/queues/{name}/pause": {
+      "post": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "Pause a queue: no new activations are granted (idempotent).",
+        "operationId": "pause_queue",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paused (changed = false on repeats)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid queue name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/queues/{name}/policy": {
       "get": {
         "tags": [
@@ -999,6 +1207,48 @@ expression: pretty
           },
           "400": {
             "description": "Invalid duration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/queues/{name}/resume": {
+      "post": {
+        "tags": [
+          "queues"
+        ],
+        "summary": "Resume a paused queue (idempotent).",
+        "operationId": "resume_queue",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumed (changed = false on repeats)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid queue name",
             "content": {
               "application/json": {
                 "schema": {
@@ -1386,6 +1636,79 @@ expression: pretty
         }
       }
     },
+    "/v1/runs/{run_id}/pause": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Pause a run: no further activations until resumed (idempotent).",
+        "operationId": "pause_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; an empty body means no detail",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Paused (changed = false on repeats)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPauseState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Run already terminal (details.reason = run_terminal)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{run_id}/result": {
       "get": {
         "tags": [
@@ -1445,6 +1768,58 @@ expression: pretty
           },
           "404": {
             "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/resume": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Resume a paused run (idempotent).",
+        "operationId": "resume_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumed (changed = false on repeats)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPauseState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Run already terminal (details.reason = run_terminal)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2620,6 +2995,206 @@ expression: pretty
         }
       }
     },
+    "/v1/workers": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Connected workers.",
+        "operationId": "list_workers",
+        "responses": {
+          "200": {
+            "description": "Workers, sorted by id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerList"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/join": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Join: exchange a join token and a CSR for a worker client certificate.",
+        "operationId": "join_worker",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JoinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Client certificate, CA and cluster endpoints",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JoinResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, or the token is unknown, revoked or expired (details.reason = join_token_invalid)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/tokens": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Worker join tokens, without their secrets.",
+        "operationId": "list_worker_tokens",
+        "responses": {
+          "200": {
+            "description": "Tokens, sorted by id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerTokenList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Create a worker join token. The secret (`token`) is in this response only.",
+        "operationId": "create_worker_token",
+        "requestBody": {
+          "description": "Optional; an empty body means the default lifetime",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkerTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerTokenCreated"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ttl_ms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/tokens/{id}": {
+      "delete": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Revoke a join token: join and renewal are refused and its sessions closed.",
+        "operationId": "revoke_worker_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Token id (wkr_...)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "404": {
+            "description": "Unknown token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/{id}/drain": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "summary": "Drain a worker: no new work, in-flight activations finish (idempotent).",
+        "operationId": "drain_worker",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Worker id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Draining",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrainResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown worker",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workflows": {
       "get": {
         "tags": [
@@ -2725,6 +3300,48 @@ expression: pretty
         }
       }
     },
+    "/v1/workflows/{name}/pause": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Pause a workflow: its runs get no new activations (idempotent).",
+        "operationId": "pause_workflow",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paused (changed = false on repeats)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseState"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown workflow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workflows/{name}/policy": {
       "get": {
         "tags": [
@@ -2810,6 +3427,48 @@ expression: pretty
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown workflow",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{name}/resume": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "Resume a paused workflow (idempotent).",
+        "operationId": "resume_workflow",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resumed (changed = false on repeats)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseState"
                 }
               }
             }
@@ -3091,6 +3750,22 @@ expression: pretty
           }
         }
       },
+      "CreateWorkerTokenRequest": {
+        "type": "object",
+        "description": "`POST /v1/workers/tokens` body (optional).",
+        "properties": {
+          "ttl_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Token lifetime in ms (> 0); absent = `[workers] join_token_ttl`.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "DeletedDto": {
         "type": "object",
         "description": "Delete result.",
@@ -3106,6 +3781,82 @@ expression: pretty
           "name": {
             "type": "string",
             "description": "Deleted record name."
+          }
+        }
+      },
+      "DemandSnapshot": {
+        "type": "object",
+        "description": "Worker demand of a queue (D-W12): `demand = running_on_workers + admissible\nbacklog for workers` (`embedded` queues: 0; `auto`: the backlog only while\nspilling). The KEDA scaling signal.",
+        "required": [
+          "queue",
+          "demand",
+          "backlog",
+          "running_on_workers",
+          "placement",
+          "spilling",
+          "workers",
+          "worker_slots_free"
+        ],
+        "properties": {
+          "backlog": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Admissible ready entries waiting for a worker.",
+            "minimum": 0
+          },
+          "demand": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Worker slots the queue could use now.",
+            "minimum": 0
+          },
+          "placement": {
+            "$ref": "#/components/schemas/Placement",
+            "description": "Effective placement."
+          },
+          "queue": {
+            "type": "string",
+            "description": "Queue name."
+          },
+          "running_on_workers": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Activations of the queue running on workers.",
+            "minimum": 0
+          },
+          "spilling": {
+            "type": "boolean",
+            "description": "`auto` placement is currently spilling to workers."
+          },
+          "worker_slots_free": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Free worker slots (all workers).",
+            "minimum": 0
+          },
+          "workers": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Connected workers.",
+            "minimum": 0
+          }
+        }
+      },
+      "DrainResult": {
+        "type": "object",
+        "description": "`POST /v1/workers/{id}/drain` response.",
+        "required": [
+          "worker_id",
+          "already_draining"
+        ],
+        "properties": {
+          "already_draining": {
+            "type": "boolean",
+            "description": "True when the worker already was draining."
+          },
+          "worker_id": {
+            "type": "string",
+            "description": "Worker id."
           }
         }
       },
@@ -3179,6 +3930,14 @@ expression: pretty
             "description": "Human-readable message."
           }
         }
+      },
+      "ExhaustAction": {
+        "type": "string",
+        "description": "What happens when a run exhausts its retries.",
+        "enum": [
+          "fail",
+          "pause"
+        ]
       },
       "GrantDto": {
         "type": "object",
@@ -3302,6 +4061,78 @@ expression: pretty
         "format": "binary",
         "description": "Raw webhook payload (documentation-only schema of the hook body)."
       },
+      "JoinRequest": {
+        "type": "object",
+        "description": "`POST /v1/workers/join` body: the 07-07 worker's join contract. `Debug` redacts\nthe token.",
+        "required": [
+          "token",
+          "csr_pem",
+          "worker_id"
+        ],
+        "properties": {
+          "csr_pem": {
+            "type": "string",
+            "description": "PEM PKCS#10 CSR of a key generated in the worker's memory."
+          },
+          "labels": {
+            "type": "object",
+            "description": "Worker labels (keys: selector keys; values: selector values).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "token": {
+            "type": "string",
+            "description": "`wkr_<id>.<secret>`."
+          },
+          "worker_id": {
+            "type": "string",
+            "description": "Worker id: 1..=128 bytes of `[A-Za-z0-9_.:-]`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "JoinResponse": {
+        "type": "object",
+        "description": "`POST /v1/workers/join` response.",
+        "required": [
+          "client_cert_pem",
+          "ca_cert_pem",
+          "endpoints",
+          "renew_after_ms",
+          "cluster_id"
+        ],
+        "properties": {
+          "ca_cert_pem": {
+            "type": "string",
+            "description": "PEM cluster CA certificate."
+          },
+          "client_cert_pem": {
+            "type": "string",
+            "description": "PEM client certificate (SAN URI `ostro://<cluster>/worker/<token_id>/<worker_id>`)."
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "Cluster id."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Cluster listener endpoints (`host:port`)."
+          },
+          "renew_after_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Renew the certificate after this many ms.",
+            "minimum": 0
+          }
+        }
+      },
       "ListWorkflowsResponse": {
         "type": "object",
         "description": "Workflow listing.",
@@ -3393,6 +4224,52 @@ expression: pretty
           "terminate_other"
         ]
       },
+      "PauseRunRequest": {
+        "type": "object",
+        "description": "`POST /v1/runs/{run_id}/pause` body (optional).",
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Operator note stored with the pause mark (at most 1024 bytes)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PauseState": {
+        "type": "object",
+        "description": "Pause state of a queue or workflow after a pause/resume call.",
+        "required": [
+          "name",
+          "paused",
+          "changed"
+        ],
+        "properties": {
+          "changed": {
+            "type": "boolean",
+            "description": "False when it already was in the requested state (idempotent repeat)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Queue or workflow name."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Paused after the call."
+          }
+        }
+      },
+      "Placement": {
+        "type": "string",
+        "description": "Where a queue's runs execute.",
+        "enum": [
+          "embedded",
+          "workers",
+          "auto"
+        ]
+      },
       "PutConnectionBody": {
         "type": "object",
         "description": "`PUT /v1/connections/{name}` body.",
@@ -3428,6 +4305,29 @@ expression: pretty
         },
         "additionalProperties": false
       },
+      "PutQueueFlowBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueueFlow",
+            "description": "The flow configuration (replaces every flow field)."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "expected_version": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "The `version` the caller read; a stale value answers 412.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "`PUT /v1/queues/{name}/flow` body: the flow fields plus an optional CAS version."
+      },
       "PutSecretBody": {
         "type": "object",
         "description": "`PUT /v1/secrets/{name}` body: exactly one of `value` (UTF-8) or `value_b64`\n(standard base64, padding optional). Write-only.",
@@ -3450,6 +4350,183 @@ expression: pretty
           }
         },
         "additionalProperties": false
+      },
+      "QueueFlow": {
+        "type": "object",
+        "description": "A queue's flow configuration (stored in the meta `QueuePolicy` Phase 7 fields).\nAbsent fields mean no limit or the server default.",
+        "properties": {
+          "concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum concurrently running activations of the queue.",
+            "minimum": 0
+          },
+          "key_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum concurrently running activations per concurrency key.",
+            "minimum": 0
+          },
+          "key_rate_limit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RateSpecDto",
+                "description": "Run-start rate limit per concurrency key."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "key_throttle": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RateSpecDto",
+                "description": "Activation start throttle per concurrency key."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "on_retries_exhausted": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExhaustAction",
+                "description": "What happens when a run exhausts its retries; absent = `fail`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "The queue is paused (no new activations are granted)."
+          },
+          "placement": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "Placement; absent = `[workers] default_placement`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rate_limit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RateSpecDto",
+                "description": "Run-start rate limit of the queue (excess starts answer 429 `rate_limited`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "selector": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Worker label selector requirements, ANDed (see the module docs for the\ngrammar): at most 32 entries of at most 128 bytes."
+          },
+          "spill": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SpillPolicyDto",
+                "description": "Per-queue spill thresholds for `auto`; absent = `[workers.spill]`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "throttle": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RateSpecDto",
+                "description": "Activation start throttle of the queue."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "weight": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Fair-share weight (default `[flow] default_queue_weight`).",
+            "minimum": 0
+          }
+        }
+      },
+      "QueueFlowInfo": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueueFlow",
+            "description": "The flow configuration."
+          },
+          {
+            "type": "object",
+            "required": [
+              "queue",
+              "version"
+            ],
+            "properties": {
+              "queue": {
+                "type": "string",
+                "description": "Queue name."
+              },
+              "version": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Meta record version (CAS token for `expected_version`); 0 = never stored.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A queue's flow configuration with its record version."
+      },
+      "RateSpecDto": {
+        "type": "object",
+        "description": "`limit` events per `period_ms` (> 0), with `burst` extra tokens.",
+        "required": [
+          "limit",
+          "period_ms"
+        ],
+        "properties": {
+          "burst": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Extra tokens on top of `limit`.",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Events per period.",
+            "minimum": 0
+          },
+          "period_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Period length in ms; must be > 0.",
+            "minimum": 0
+          }
+        }
       },
       "RetryBody": {
         "type": "object",
@@ -3755,6 +4832,29 @@ expression: pretty
               "$ref": "#/components/schemas/RunLogLine"
             },
             "description": "Lines, oldest first."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          }
+        }
+      },
+      "RunPauseState": {
+        "type": "object",
+        "description": "Pause state of a run after a pause/resume call.",
+        "required": [
+          "run_id",
+          "paused",
+          "changed"
+        ],
+        "properties": {
+          "changed": {
+            "type": "boolean",
+            "description": "False when the run already was in the requested state."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Paused after the call."
           },
           "run_id": {
             "type": "string",
@@ -4120,6 +5220,63 @@ expression: pretty
           "duplicate": {
             "type": "boolean",
             "description": "`request_id` was already seen for this run."
+          }
+        }
+      },
+      "SpillPolicyDto": {
+        "type": "object",
+        "description": "Auto-placement spill thresholds. Percentages are 0..=100.",
+        "required": [
+          "cpu_pct",
+          "slots_pct",
+          "mem_pct",
+          "lag_ms",
+          "sustain_ms",
+          "cooldown_ms",
+          "hysteresis_pct"
+        ],
+        "properties": {
+          "cooldown_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minimum dwell before spilling stops, in ms.",
+            "minimum": 0
+          },
+          "cpu_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Process CPU %.",
+            "minimum": 0
+          },
+          "hysteresis_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Exit threshold as a % of the entry threshold.",
+            "minimum": 0
+          },
+          "lag_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Oldest-ready queue lag in ms.",
+            "minimum": 0
+          },
+          "mem_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Wasm memory %.",
+            "minimum": 0
+          },
+          "slots_pct": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Embedded slot utilisation %.",
+            "minimum": 0
+          },
+          "sustain_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a signal must stay above its threshold, in ms.",
+            "minimum": 0
           }
         }
       },
@@ -4558,6 +5715,161 @@ expression: pretty
           }
         }
       },
+      "WorkerInfo": {
+        "type": "object",
+        "description": "A connected worker.",
+        "required": [
+          "worker_id",
+          "labels",
+          "slots",
+          "free_slots",
+          "leases",
+          "connected_at_ms",
+          "node_id",
+          "draining"
+        ],
+        "properties": {
+          "connected_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the session opened (Unix ms).",
+            "minimum": 0
+          },
+          "draining": {
+            "type": "boolean",
+            "description": "Draining: no new work is assigned."
+          },
+          "free_slots": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Slots not holding a lease.",
+            "minimum": 0
+          },
+          "labels": {
+            "type": "object",
+            "description": "Worker labels (matched by queue selectors).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "leases": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Leases held.",
+            "minimum": 0
+          },
+          "node_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Server node holding the session.",
+            "minimum": 0
+          },
+          "slots": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Advertised slots.",
+            "minimum": 0
+          },
+          "worker_id": {
+            "type": "string",
+            "description": "Worker id (from its certificate)."
+          }
+        }
+      },
+      "WorkerList": {
+        "type": "object",
+        "description": "`GET /v1/workers` response.",
+        "required": [
+          "workers"
+        ],
+        "properties": {
+          "workers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkerInfo"
+            },
+            "description": "Workers, sorted by id."
+          }
+        }
+      },
+      "WorkerTokenCreated": {
+        "type": "object",
+        "description": "A freshly created join token. `token` is shown here once and never again;\n`Debug` redacts it (and the join command that embeds it).",
+        "required": [
+          "token_id",
+          "token",
+          "join_command",
+          "expires_at_ms"
+        ],
+        "properties": {
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry (Unix ms).",
+            "minimum": 0
+          },
+          "join_command": {
+            "type": "string",
+            "description": "A ready-to-run `ostro worker --join .. --token .. --ca-hash ..` line."
+          },
+          "token": {
+            "type": "string",
+            "description": "`wkr_<id>.<secret>`; only in this response."
+          },
+          "token_id": {
+            "type": "string",
+            "description": "Token id (`wkr_<id>`)."
+          }
+        }
+      },
+      "WorkerTokenInfo": {
+        "type": "object",
+        "description": "A join token without its secret.",
+        "required": [
+          "token_id",
+          "created_at_ms"
+        ],
+        "properties": {
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (Unix ms).",
+            "minimum": 0
+          },
+          "expires_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Expiry (Unix ms), when set.",
+            "minimum": 0
+          },
+          "token_id": {
+            "type": "string",
+            "description": "Token id (`wkr_<id>`)."
+          }
+        }
+      },
+      "WorkerTokenList": {
+        "type": "object",
+        "description": "`GET /v1/workers/tokens` response.",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkerTokenInfo"
+            },
+            "description": "Tokens, sorted by id."
+          }
+        }
+      },
       "WorkflowDto": {
         "type": "object",
         "description": "A workflow.",
@@ -4693,6 +6005,10 @@ expression: pretty
     {
       "name": "connectors",
       "description": "Connections, module egress policies and presigned object URLs (Phase 6)"
+    },
+    {
+      "name": "workers",
+      "description": "Worker administration, join tokens and join (Phase 7)"
     },
     {
       "name": "health",
