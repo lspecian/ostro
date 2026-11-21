@@ -9,9 +9,10 @@
 //! [`NodeFlow`] is the node's `FlowControl` (one per node, shared by every partition's
 //! dispatcher, installed by [`install`]):
 //!
-//! - `admit(entry, now_ms)`: workflow or queue paused → `Paused`; queue `concurrency`
-//!   reached → `QueueBlocked{None}`; key `key_concurrency` reached (key = the entry's
-//!   `concurrency_key`; empty = unkeyed, never key-limited) → `KeyBlocked{None}`; for a
+//! - `admit(entry, now_ms)`: queue paused → `Paused{Queue}` (the dispatcher skips the
+//!   queue); workflow paused → `Paused{Workflow}` (only that workflow's entries wait,
+//!   the rest of the queue is served); queue `concurrency` reached → `QueueBlocked{None}`;
+//!   key `key_concurrency` reached (key = the entry's `concurrency_key`; empty = unkeyed, never key-limited) → `KeyBlocked{None}`; for a
 //!   first activation only, queue `throttle` / key `key_throttle` not conforming →
 //!   `QueueBlocked` / `KeyBlocked` with `until_ms` = the earliest conforming instant
 //!   (throttles queue the excess, they never reject); else `Yes(permit)`.
@@ -44,7 +45,7 @@ use ostro_meta::MetaView;
 use ostro_meta::records::ON_EXHAUSTED_PAUSE;
 use ostro_partition::store::values::RunRecord;
 use ostro_partition::{
-    Admit, Clock, DispatcherConfig, EntryView, FlowControl, FlowPermit, QueueGauges,
+    Admit, Clock, DispatcherConfig, EntryView, FlowControl, FlowPermit, PauseScope, QueueGauges,
 };
 use tokio::sync::watch;
 use tracing::warn;
@@ -263,14 +264,20 @@ impl FlowControl for NodeFlow {
     fn admit(&self, e: &EntryView<'_>, now_ms: u64) -> Admit {
         self.inner.last_now_ms.fetch_max(now_ms, Ordering::AcqRel);
         self.refresh_policies();
-        if self.policies.workflow(e.workflow).is_some_and(|w| w.paused) {
-            count(e.queue, "paused");
-            return Admit::Paused;
-        }
+        // Queue pause first: it holds the whole queue, a workflow pause only that
+        // workflow's entries (the dispatcher keeps serving the rest of the queue).
         let p = self.policies.queue(e.queue);
         if p.as_ref().is_some_and(|p| p.paused) {
             count(e.queue, "paused");
-            return Admit::Paused;
+            return Admit::Paused {
+                scope: PauseScope::Queue,
+            };
+        }
+        if self.policies.workflow(e.workflow).is_some_and(|w| w.paused) {
+            count(e.queue, "paused");
+            return Admit::Paused {
+                scope: PauseScope::Workflow,
+            };
         }
         let p = p.as_deref();
         let req = AdmitReq {
@@ -459,11 +466,15 @@ mod tests {
         .await;
         assert!(matches!(
             flow.admit(&entry("q", "w", "", true), 2),
-            Admit::Paused
+            Admit::Paused {
+                scope: PauseScope::Workflow
+            }
         ));
         assert!(matches!(
             flow.admit(&entry("other", "w", "", true), 2),
-            Admit::Paused
+            Admit::Paused {
+                scope: PauseScope::Workflow
+            }
         ));
         drop(yes(flow.admit(&entry("other", "w2", "", true), 2)));
         meta.stop().await;
@@ -532,7 +543,9 @@ mod tests {
         put(&meta, qp(true)).await;
         assert!(matches!(
             flow.admit(&entry("pq", "w", "", true), 1),
-            Admit::Paused
+            Admit::Paused {
+                scope: PauseScope::Queue
+            }
         ));
         let mut changed = flow.changed();
         changed.mark_unchanged();

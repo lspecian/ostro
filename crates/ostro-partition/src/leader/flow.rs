@@ -2,9 +2,9 @@
 //! and the per-queue gauges shared with placement, demand and Phase 8 metrics.
 //!
 //! - [`FlowControl::admit`] decides whether an entry may start now: per-queue and per-key
-//!   concurrency, throttles (first activations only, D-W13) and pauses. Time is the
-//!   injected clock's milliseconds (`now_ms`, D-W26); `until_ms` tells the dispatcher when
-//!   to look again.
+//!   concurrency, throttles (first activations only, D-W13) and pauses (queue- or
+//!   workflow-scoped, [`PauseScope`]). Time is the injected clock's milliseconds
+//!   (`now_ms`, D-W26); `until_ms` tells the dispatcher when to look again.
 //! - A granted admission carries a [`FlowPermit`]. Its charge is **tentative** until the
 //!   dispatcher's `Placement::reserve` returns `Granted` and it calls
 //!   [`FlowPermit::commit`]; an uncommitted permit rolls the charge back on drop (W2).
@@ -32,8 +32,20 @@ pub enum Admit {
     QueueBlocked { until_ms: Option<u64> },
     /// This entry's concurrency key is at a limit; other keys of the queue may run.
     KeyBlocked { until_ms: Option<u64> },
-    /// The workflow or queue is paused.
-    Paused,
+    /// Paused. The scope decides what the dispatcher skips: a [`PauseScope::Queue`] pause
+    /// skips the whole queue for the round; a [`PauseScope::Workflow`] pause holds back
+    /// only this entry (until the next `changed()` bump) and the rest of the queue is
+    /// still served.
+    Paused { scope: PauseScope },
+}
+
+/// What an [`Admit::Paused`] covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PauseScope {
+    /// The entry's queue is paused: every entry of the queue waits.
+    Queue,
+    /// The entry's workflow is paused: other workflows of the same queue still run.
+    Workflow,
 }
 
 type Hook = Box<dyn FnOnce() + Send + Sync>;

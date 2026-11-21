@@ -33,9 +33,15 @@
 //! next due entry, then:
 //!
 //! 1. [`FlowControl::admit`] (`now_ms` from the injected clock): `Yes(permit)` continues;
-//!    `QueueBlocked{until}` and `Paused` skip the queue for the rest of the round (`until`
-//!    joins the loop's deadline); `KeyBlocked{until}` parks the key (other keys and queues
-//!    go on) until `until` or the next [`FlowControl::changed`] bump.
+//!    `QueueBlocked{until}` and `Paused{Queue}` skip the queue for the rest of the round
+//!    (`until` joins the loop's deadline); `KeyBlocked{until}` parks the key (other keys
+//!    and queues go on) until `until` or the next [`FlowControl::changed`] bump;
+//!    `Paused{Workflow}` holds back that entry alone (`FairQueues::hold`) until the next
+//!    [`FlowControl::changed`] bump, and the rest of the queue (other workflows, even on
+//!    the same concurrency key) is still served in the same round. A held entry is not
+//!    probed again until that bump, so a queue whose every entry is paused costs nothing
+//!    per loop turn and never spins. (If the flow control's `changed()` channel is
+//!    closed, held entries are released at every round instead.)
 //! 2. [`Placement::reserve`]: `Granted(r)` commits the flow permit (W2: the charge becomes
 //!    final only now), takes the entry and starts the grant with the permit and the
 //!    reservation in the lease; `Blocked` drops (rolls back) the permit and parks the queue
@@ -65,8 +71,8 @@
 //!
 //! **Gauges.** With [`DispatcherConfig::gauges`] set, every loop turn (one batch of state
 //! changes, not per entry) publishes this partition's [`QueueGauge`] per queue when it
-//! changed: `ready` (due entries), `ready_unblocked` (minus entries of skipped queues and
-//! parked keys in the last round), `oldest_ready_at_ms`, and the leases by
+//! changed: `ready` (due entries), `ready_unblocked` (minus entries of skipped queues,
+//! parked keys in the last round and held entries), `oldest_ready_at_ms`, and the leases by
 //! [`ReservationKind`]. Shutdown removes the partition's rows. The rebuild records
 //! `ostro_flow_rebuild_entries` (gauge) and `ostro_flow_rebuild_seconds` (histogram).
 //!
@@ -209,7 +215,7 @@ use tracing::{debug, error, info, warn};
 
 use super::LeaderCtx;
 use super::fair::{FairEntry, FairQueues};
-use super::flow::{Admit, FlowControl, FlowPermit, NoFlow, QueueGauge, QueueGauges};
+use super::flow::{Admit, FlowControl, FlowPermit, NoFlow, PauseScope, QueueGauge, QueueGauges};
 use super::placement::{
     EntryView, Placement, Reservation, ReservationKind, Reserve, SemaphorePlacement,
 };
@@ -1113,6 +1119,10 @@ impl Dispatcher {
     fn dispatch_available(&mut self) {
         self.queue_until = None;
         self.st.fair.begin_round();
+        if !self.flow_live {
+            // No `changed()` bump can release held entries any more: probe them per round.
+            self.st.fair.release_held();
+        }
         if !self.st.has_ready() {
             drop(self.held_slot.take());
             return;
@@ -1143,8 +1153,17 @@ impl Dispatcher {
                     self.st.fair.park_key(&c.queue, &c.key, until_ms);
                     continue;
                 }
-                Admit::Paused => {
+                Admit::Paused {
+                    scope: PauseScope::Queue,
+                } => {
                     self.st.fair.skip_queue(&c.queue);
+                    continue;
+                }
+                Admit::Paused {
+                    scope: PauseScope::Workflow,
+                } => {
+                    // Only this workflow waits; the rest of the queue goes on (07-05 fix).
+                    self.st.fair.hold(&c);
                     continue;
                 }
             };
@@ -1780,7 +1799,10 @@ impl Dispatcher {
                 },
                 r = self.flow_rx.changed(), if flow_live => {
                     match r {
-                        Ok(()) => self.st.fair.unpark_keys(),
+                        Ok(()) => {
+                            self.st.fair.unpark_keys();
+                            self.st.fair.release_held();
+                        }
                         Err(_) => self.flow_live = false,
                     }
                     Flow::Continue

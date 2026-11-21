@@ -22,6 +22,13 @@
 //! its `until_ms` passes ([`FairQueues::unpark_due`]) or [`FairQueues::unpark_all`]; other
 //! keys of the band keep being served.
 //!
+//! A held entry ([`FairQueues::hold`], from a workflow-scoped `Admit::Paused`) leaves the
+//! selection on its own until [`FairQueues::release_held`] (the next flow-control
+//! `changed()` bump): every other entry of its key, band and queue keeps being served, and
+//! holding charges neither the key nor the queue's turn. Held entries still count in
+//! [`FairQueues::len`], [`FairQueues::per_queue_counts`] and
+//! [`FairQueues::per_queue_oldest`], not in [`FairQueues::per_queue_unblocked`].
+//!
 //! Pure: no I/O and no clock reads (time is the caller's clock milliseconds), BTreeMap /
 //! BTreeSet only. Insert, remove and take are O(log n); [`FairQueues::next_candidate`] is
 //! O(log n) per queue and band it looks at.
@@ -132,6 +139,10 @@ pub struct FairQueues {
     parked_keys: BTreeMap<(String, String), Option<u64>>,
     /// Timed parks `(until_ms, queue, key)`.
     park_until: BTreeSet<(u64, String, String)>,
+    /// Entries held out of the selection (workflow paused), by run.
+    held: BTreeMap<RunId, FairEntry>,
+    /// Held entries per queue by `(ready_at, run)`.
+    held_q: BTreeMap<String, BTreeSet<(u64, RunId)>>,
 }
 
 impl FairQueues {
@@ -141,23 +152,28 @@ impl FairQueues {
 
     /// Number of entries.
     pub fn len(&self) -> usize {
-        self.index.len()
+        self.index.len() + self.held.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
+        self.index.is_empty() && self.held.is_empty()
     }
 
     pub fn contains(&self, run: &RunId) -> bool {
-        self.index.contains_key(run)
+        self.index.contains_key(run) || self.held.contains_key(run)
     }
 
-    /// Entries per non-empty queue.
+    /// Entries per non-empty queue (held entries included).
     pub fn per_queue_counts(&self) -> BTreeMap<String, usize> {
-        self.queues
+        let mut out: BTreeMap<String, usize> = self
+            .queues
             .iter()
             .map(|(q, s)| (q.clone(), s.len))
-            .collect()
+            .collect();
+        for (q, h) in &self.held_q {
+            *out.entry(q.clone()).or_default() += h.len();
+        }
+        out
     }
 
     /// Names of the non-empty queues.
@@ -165,18 +181,28 @@ impl FairQueues {
         self.queues.keys().cloned().collect()
     }
 
-    /// Oldest `ready_at_ms` per non-empty queue.
+    /// Oldest `ready_at_ms` per non-empty queue (held entries included).
     pub fn per_queue_oldest(&self) -> BTreeMap<String, u64> {
-        self.queues
+        let mut out: BTreeMap<String, u64> = self
+            .queues
             .iter()
             .filter_map(|(q, s)| s.ats.first().map(|(at, _)| (q.clone(), *at)))
-            .collect()
+            .collect();
+        for (q, h) in &self.held_q {
+            if let Some(&(at, _)) = h.first() {
+                out.entry(q.clone())
+                    .and_modify(|o| *o = (*o).min(at))
+                    .or_insert(at);
+            }
+        }
+        out
     }
 
     /// Entries per non-empty queue that flow control did not hold back in the last round:
-    /// not in a skipped queue (`QueueBlocked` / `Paused`) and not in a parked key
-    /// (`KeyBlocked`). A placement-parked queue still counts (admissible, no capacity: the
-    /// gauges' `ready_unblocked`, input of worker demand).
+    /// not in a skipped queue (`QueueBlocked` / queue `Paused`), not in a parked key
+    /// (`KeyBlocked`) and not held (workflow `Paused`). A placement-parked queue still
+    /// counts (admissible, no capacity: the gauges' `ready_unblocked`, input of worker
+    /// demand).
     pub fn per_queue_unblocked(&self) -> BTreeMap<String, usize> {
         let mut out = BTreeMap::new();
         for (q, s) in &self.queues {
@@ -199,6 +225,9 @@ impl FairQueues {
                 s.len.saturating_sub(parked)
             };
             out.insert(q.clone(), n);
+        }
+        for q in self.held_q.keys() {
+            out.entry(q.clone()).or_insert(0);
         }
         out
     }
@@ -241,8 +270,17 @@ impl FairQueues {
             .insert(e.run, (e.queue, e.priority, e.key, e.ready_at_ms));
     }
 
-    /// Remove `run`; returns its entry.
+    /// Remove `run` (queued or held); returns its entry.
     pub fn remove(&mut self, run: &RunId) -> Option<FairEntry> {
+        if let Some(e) = self.held.remove(run) {
+            if let Some(h) = self.held_q.get_mut(&e.queue) {
+                h.remove(&(e.ready_at_ms, *run));
+                if h.is_empty() {
+                    self.held_q.remove(&e.queue);
+                }
+            }
+            return Some(e);
+        }
         let (queue, priority, key, at) = self.index.remove(run)?;
         let parked = self.key_parked(&queue, &key);
         if let Some(q) = self.queues.get_mut(&queue) {
@@ -409,6 +447,36 @@ impl FairQueues {
         self.skipped.insert(queue.to_owned());
     }
 
+    /// Hold the candidate out of the selection until [`Self::release_held`] (its workflow
+    /// is paused). The rest of its key, band and queue stays servable; neither the key nor
+    /// the queue's turn is charged.
+    pub fn hold(&mut self, c: &Candidate) {
+        if self.held.contains_key(&c.run) {
+            return;
+        }
+        if let Some(e) = self.remove(&c.run) {
+            self.held_q
+                .entry(e.queue.clone())
+                .or_default()
+                .insert((e.ready_at_ms, e.run));
+            self.held.insert(e.run, e);
+        }
+    }
+
+    /// Put every held entry back into the selection (a flow-control `changed()` bump).
+    pub fn release_held(&mut self) {
+        let held = std::mem::take(&mut self.held);
+        self.held_q.clear();
+        for e in held.into_values() {
+            self.insert(e);
+        }
+    }
+
+    /// Whether any entry is held.
+    pub fn has_held(&self) -> bool {
+        !self.held.is_empty()
+    }
+
     /// Skip `queue` until [`Self::unpark_queues`] (placement had no capacity).
     pub fn park_queue(&mut self, queue: &str) {
         self.parked_queues.insert(queue.to_owned());
@@ -468,10 +536,11 @@ impl FairQueues {
         }
     }
 
-    /// Unpark every queue and key.
+    /// Unpark every queue and key and release every held entry.
     pub fn unpark_all(&mut self) {
         self.unpark_queues();
         self.unpark_keys();
+        self.release_held();
     }
 
     /// Whether any queue is parked (placement had no capacity).
@@ -484,7 +553,7 @@ impl FairQueues {
         !self.parked_queues.is_empty() || !self.parked_keys.is_empty()
     }
 
-    /// Drop every entry and park (weights stay).
+    /// Drop every entry (held ones too) and park (weights stay).
     pub fn clear(&mut self) {
         let weights = std::mem::take(&mut self.weights);
         *self = Self {
@@ -682,6 +751,62 @@ mod tests {
         assert_eq!(drain(&mut f, 10).len(), 2);
     }
 
+    /// A held entry (workflow paused) leaves only itself out: the rest of its key and
+    /// queue is still served, other queues keep their turns, and release puts it back.
+    #[test]
+    fn held_entry_skips_only_itself() {
+        let mut f = FairQueues::new();
+        f.insert(e(1, "q", 0, "", 1)); // paused workflow, head of the shared key
+        f.insert(e(2, "q", 0, "", 2));
+        f.insert(e(3, "q", 0, "", 3));
+        f.insert(e(4, "r", 0, "", 1));
+        let c = f.next_candidate(10).expect("c");
+        assert_eq!(c.run, rid(1));
+        f.hold(&c);
+        f.hold(&c); // idempotent
+        assert_eq!(f.len(), 4);
+        assert!(f.contains(&rid(1)));
+        assert!(f.has_held());
+        assert_eq!(f.per_queue_counts()["q"], 3);
+        assert_eq!(f.per_queue_unblocked()["q"], 2);
+        assert_eq!(f.per_queue_oldest()["q"], 1);
+        // Holding moved no turn: q is served, then r, then q.
+        let order: Vec<RunId> = drain(&mut f, 10).iter().map(|e| e.run).collect();
+        assert_eq!(order, vec![rid(2), rid(4), rid(3)]);
+        assert!(
+            f.next_candidate(10).is_none(),
+            "only the held entry is left"
+        );
+        assert!(!f.is_empty());
+        assert_eq!(f.per_queue_counts()["q"], 1);
+        assert_eq!(f.per_queue_unblocked()["q"], 0);
+        f.begin_round();
+        assert!(f.next_candidate(10).is_none(), "a new round keeps it held");
+        f.release_held();
+        assert!(!f.has_held());
+        assert_eq!(f.next_candidate(10).map(|c| c.run), Some(rid(1)));
+        // A held entry can be removed or replaced.
+        let c = f.next_candidate(10).expect("c");
+        f.hold(&c);
+        assert_eq!(f.remove(&rid(1)).map(|e| e.run), Some(rid(1)));
+        assert!(f.is_empty());
+        assert!(f.per_queue_counts().is_empty());
+        f.insert(e(5, "q", 0, "", 1));
+        let c = f.next_candidate(10).expect("c");
+        f.hold(&c);
+        f.insert(e(5, "q", 0, "", 2));
+        assert!(!f.has_held(), "re-insert replaces the held entry");
+        assert_eq!(f.len(), 1);
+        let c = f.next_candidate(10).expect("c");
+        f.hold(&c);
+        f.unpark_all();
+        assert_eq!(f.next_candidate(10).map(|c| c.run), Some(rid(5)));
+        let c = f.next_candidate(10).expect("c");
+        f.hold(&c);
+        f.clear();
+        assert!(f.is_empty() && !f.has_held());
+    }
+
     #[test]
     fn not_yet_due_entries_are_not_candidates() {
         let mut f = FairQueues::new();
@@ -774,14 +899,21 @@ mod tests {
                     _ => {
                         if let Some(c) = f.next_candidate(u64::MAX) {
                             prop_assert!(live.contains(&c.run));
-                            let t = f.take(&c).expect("candidate present");
-                            prop_assert!(taken.insert(t.run), "returned twice");
-                            live.remove(&t.run);
+                            if k == 0 {
+                                // Workflow paused: held, not returned.
+                                f.hold(&c);
+                                prop_assert!(f.contains(&c.run));
+                            } else {
+                                let t = f.take(&c).expect("candidate present");
+                                prop_assert!(taken.insert(t.run), "returned twice");
+                                live.remove(&t.run);
+                            }
                         }
                     }
                 }
                 prop_assert_eq!(f.len(), live.len());
             }
+            f.release_held();
             while let Some(c) = f.next_candidate(u64::MAX) {
                 let t = f.take(&c).expect("present");
                 prop_assert!(live.remove(&t.run), "returned twice or unknown");

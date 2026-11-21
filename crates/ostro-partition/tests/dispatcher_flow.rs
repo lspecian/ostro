@@ -4,7 +4,8 @@
 //!
 //! - admission and reservation happen before the grant, so a blocked entry never burns an
 //!   attempt number (the eventual token is n = 1);
-//! - queue caps, key caps with `until`, `Paused` queues (resumed on `changed()`), weighted
+//! - queue caps, key caps with `until`, `Paused` queues (resumed on `changed()`), a paused
+//!   workflow on a shared queue holds back only its own entries (fix-0705), weighted
 //!   fairness (3:1 over 400 dispatches) and strict priority bands;
 //! - a placement-blocked queue does not starve another queue (B2);
 //! - throttles see `first_activation` only from F7: re-grants (executor requeue, Retry,
@@ -28,8 +29,8 @@ use std::time::Duration;
 use common::{OPEN_T, T, run_on, start_run};
 use ostro_partition::{
     Admit, ApplyOutcome, Clock, DispatcherConfig, DispatcherStats, EntryView, ExecOutcome,
-    Executor, FlowControl, FlowPermit, Job, Node, NodeConfig, PartitionHandle, Placement,
-    QueueGauges, Reservation, ReservationKind, Reserve, SystemClock,
+    Executor, FlowControl, FlowPermit, Job, Node, NodeConfig, PartitionHandle, PauseScope,
+    Placement, QueueGauges, Reservation, ReservationKind, Reserve, SystemClock,
 };
 use ostro_types::command::{
     AttemptTokenMsg, Derived, EnqueueReady, EventsAppended, PauseRun, ResumeRun, StartRun, derived,
@@ -162,7 +163,10 @@ enum Decision {
     Yes,
     QueueBlocked(Option<u64>),
     KeyBlocked(Option<u64>),
+    /// Queue-scoped pause.
     Paused,
+    /// Workflow-scoped pause.
+    PausedWorkflow,
 }
 
 type FlowScript = dyn Fn(&View, u64, &FakeFlow) -> Decision + Send + Sync;
@@ -217,6 +221,7 @@ impl FlowControl for FakeFlow {
             Decision::QueueBlocked(_) => "queue",
             Decision::KeyBlocked(_) => "key",
             Decision::Paused => "paused",
+            Decision::PausedWorkflow => "paused_workflow",
         };
         self.calls.lock().expect("lock").push((v, tag));
         match d {
@@ -240,7 +245,12 @@ impl FlowControl for FakeFlow {
             }
             Decision::QueueBlocked(until_ms) => Admit::QueueBlocked { until_ms },
             Decision::KeyBlocked(until_ms) => Admit::KeyBlocked { until_ms },
-            Decision::Paused => Admit::Paused,
+            Decision::Paused => Admit::Paused {
+                scope: PauseScope::Queue,
+            },
+            Decision::PausedWorkflow => Admit::Paused {
+                scope: PauseScope::Workflow,
+            },
         }
     }
 
@@ -669,6 +679,100 @@ async fn paused_queue_is_held_and_resumes_on_changed() {
     assert_eq!(seen.iter().filter(|s| s.queue == "p").count(), 2);
     for s in &seen {
         assert_eq!(s.token.n, 1);
+    }
+    node.shutdown().await.expect("shutdown");
+}
+
+/// A paused workflow on a shared queue holds back only its own entries (fix-0705): its
+/// entries sit at the head of the queue (older `ready_at`, the unkeyed FIFO and a shared
+/// concurrency key), yet the other workflow of the same queue keeps being granted. A held
+/// entry is not probed again until a `changed()` bump (no spin while everything left is
+/// paused), burns no attempt, and is granted n = 1 after the resume bump.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paused_workflow_on_shared_queue_does_not_block_others() {
+    let tmp = ostro_testkit::fs::tempdir();
+    let fake = Fake::releasing();
+    let paused = Arc::new(AtomicBool::new(true));
+    let flow = {
+        let paused = Arc::clone(&paused);
+        Arc::new(FakeFlow::new(move |v, _, _| {
+            if v.workflow == "wp" && paused.load(Ordering::SeqCst) {
+                Decision::PausedWorkflow
+            } else {
+                Decision::Yes
+            }
+        }))
+    };
+    let mut o = Opts::new(&fake);
+    o.flow = Some(Arc::clone(&flow));
+    let node = open(tmp.path(), &o).await;
+    let h = h(&node);
+    let start = |run: &RunId, wf: &str, key: &str, at: u64| {
+        Command::start_run(StartRun {
+            workflow: wf.into(),
+            ready_at_ms: at,
+            concurrency_key: key.into(),
+            ..start_run(run)
+        })
+    };
+    // Paused workflow first (older ready_at): the head of the unkeyed FIFO and of key "k".
+    let held: Vec<(RunId, &str)> = vec![(run_on(0), ""), (run_on(0), ""), (run_on(0), "k")];
+    submit_all(h, held.iter().map(|(r, k)| start(r, "wp", k, 50)).collect()).await;
+    let free: Vec<(RunId, &str)> = vec![
+        (run_on(0), ""),
+        (run_on(0), ""),
+        (run_on(0), ""),
+        (run_on(0), "k"),
+    ];
+    submit_all(
+        h,
+        free.iter().map(|(r, k)| start(r, "wf", k, 100)).collect(),
+    )
+    .await;
+    let seen = fake.wait_jobs(free.len(), T).await;
+    let held_runs: Vec<RunId> = held.iter().map(|(r, _)| *r).collect();
+    assert!(
+        seen.iter()
+            .all(|s| !held_runs.contains(&s.run) && s.queue == "q"),
+        "paused workflow granted: {seen:?}"
+    );
+    let mut got: Vec<RunId> = seen.iter().map(|s| s.run).collect();
+    got.sort();
+    let mut want: Vec<RunId> = free.iter().map(|(r, _)| *r).collect();
+    want.sort();
+    assert_eq!(got, want, "every entry of the other workflow granted");
+    for (r, _) in &held {
+        assert_eq!(attempt(h, r), None, "no attempt while paused");
+    }
+    // No spin: once only held entries are left, nothing probes them until a bump.
+    sleep(Duration::from_millis(300)).await;
+    let probes = |f: &FakeFlow| {
+        f.calls()
+            .iter()
+            .filter(|(_, t)| *t == "paused_workflow")
+            .count()
+    };
+    let before = probes(&flow);
+    assert!(before >= held.len(), "every held entry probed: {before}");
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        probes(&flow),
+        before,
+        "held entries re-probed without a bump"
+    );
+    assert_eq!(fake.seen().len(), free.len());
+    // Resume: one bump releases them.
+    paused.store(false, Ordering::SeqCst);
+    flow.bump();
+    let seen = fake.wait_jobs(free.len() + held.len(), T).await;
+    for (r, _) in &held {
+        assert!(
+            seen.iter().any(|s| s.run == *r),
+            "held run granted after resume"
+        );
+    }
+    for s in &seen {
+        assert_eq!(s.token.n, 1, "no attempt burned");
     }
     node.shutdown().await.expect("shutdown");
 }

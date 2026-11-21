@@ -379,11 +379,14 @@ async fn paused_workflow_holds_entries_and_resume_wakes_dispatchers() {
     for _ in 0..3 {
         ids.push(start(&s, "cpu-burn", json!({"input": {"ms": 1}})).await);
     }
-    // Another workflow is unaffected. It runs on its own queue: the 07-05 dispatcher treats
-    // `Admit::Paused` as a queue-level skip, so a paused workflow's entry at the head of a
-    // shared queue holds that queue back for the round (follow-up in 07-08-SUMMARY).
-    let other = start(&s, "smoke", json!({"input": {"x": 1}, "queue": "free"})).await;
+    // Another workflow on the same queue (`default`) is unaffected: a workflow-scoped pause
+    // holds back only that workflow's entries, even when they are at the head of the shared
+    // queue (fix-0705; 07-08 had moved this run to a separate queue as a workaround).
+    let other = start(&s, "smoke", json!({"input": {"x": 1}})).await;
     wait_completed(&s, &other, LIMIT).await;
+    // And again after the held entries were probed (a later round, same partitions).
+    let again = start(&s, "smoke", json!({"input": {"x": 2}})).await;
+    wait_completed(&s, &again, LIMIT).await;
     assert_held_then_resumed(&s, &ids, MetaRecord::WorkflowPolicy(paused(false))).await;
     s.shutdown().await;
 }
