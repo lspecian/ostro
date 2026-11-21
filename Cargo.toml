@@ -116,6 +116,19 @@ kube = { version = "5.1.0", default-features = false, features = ["client", "rus
 k8s-openapi = { version = "0.29.0", features = ["v1_33"] }
 # same version as already in Cargo.lock
 base64 = "0.22"
+# Phase 7 workers / placement / flow control (plan 07-02 declares every Phase 7 dependency
+# once, D-W17; versions verified 2026-11-21). rcgen defaults pull ring: always off. No
+# governor here: Phase 7 hand-rolls GCRA (D-W24). tonic TLS features (`tls-aws-lc`,
+# `tls-connect-info`) are enabled at member level in ostro-server and ostro-worker.
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
+x509-parser = "0.18.1"
+axum-server = { version = "0.9.2", default-features = false, features = ["tls-rustls-no-provider"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "hyper-rustls"] }
+# already in Cargo.lock (same versions)
+arc-swap = "1.9"
+libc = "0.2"
+tokio-rustls = { version = "0.26", default-features = false }
+rustls-pki-types = "1"
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

@@ -15,7 +15,7 @@ path = "src/main.rs"
 # (ostro-server and everything under it) and calls `fail::FailScenario::setup()` in `main`,
 # so the FAILPOINTS env var configures them. Build it out of the way of the release binary:
 #   cargo build --release -p ostro --features failpoints --target-dir target/failpoints
-failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints", "ostro-backup/failpoints"]
+failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints", "ostro-backup/failpoints", "ostro-worker/failpoints"]
 
 [dependencies]
 mimalloc.workspace = true
@@ -29,12 +29,13 @@ ostro-api = { path = "../ostro-api" }
 ostro-cli = { path = "../ostro-cli" }
 # Phase 8: `ostro restore` / `ostro backup` (08-18)
 ostro-backup = { path = "../ostro-backup" }
+# Phase 7: `ostro worker` (07-15)
+ostro-worker = { path = "../ostro-worker" }
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
 # spawned-binary tests (04-19): REST + gRPC health against the real binary
 tokio.workspace = true
-reqwest.workspace = true
 tempfile.workspace = true
 tonic.workspace = true
 ostro-proto = { path = "../ostro-proto" }
@@ -42,6 +43,12 @@ ostro-proto = { path = "../ostro-proto" }
 sha2.workspace = true
 # CLI-06 (05-14): --json snapshots of the client verbs
 insta.workspace = true
+# Phase 7 (07-02): worker/TLS e2e (07-17..07-21): mock provider + canary, HTTPS client,
+# files-mode certs (reqwest also serves the 04-19 spawned-binary tests)
+ostro-testkit = { workspace = true, features = ["mock-http", "canary"] }
+reqwest = { workspace = true, features = ["rustls", "json"] }
+rcgen.workspace = true
+x509-parser.workspace = true
 
 [lints]
 workspace = true

@@ -33,7 +33,7 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 # to its failpoint test target (plan 05-18); the whole crate is still linted with the feature.
 # `ostro:<target>` entries are the spawned-binary Phase 6 crash tests (06-17 fx_redrive,
 # 06-18 fx_sql_crash); the crate is linted once (check_failpoints de-duplicates).
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash)
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)

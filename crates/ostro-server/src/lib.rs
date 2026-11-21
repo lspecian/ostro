@@ -74,3 +74,19 @@ mod phase8_dep_anchors {
 mod phase6_dep_anchors {
     use base64 as _;
 }
+
+// Phase 7 dependencies declared once by plan 07-02 (D-W17) for 07-06 (CA, TLS listener),
+// 07-09/07-12 (worker protocol), 07-10 (ACME) and 07-13 (getrusage); anchored like the
+// Phase 6/8 ones above until the owning modules consume them.
+mod phase7_dep_anchors {
+    use arc_swap as _;
+    use axum_server as _;
+    use instant_acme as _;
+    use libc as _;
+    use ostro_worker_proto as _;
+    use rcgen as _;
+    use rustls as _;
+    use rustls_pki_types as _;
+    use tokio_rustls as _;
+    use x509_parser as _;
+}

@@ -1,0 +1,46 @@
+[package]
+name = "ostro-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The worker runtime library behind `ostro worker` (Phase 7, WORK-01/02). The worker runs
+# only the engine; the leader keeps fencing, derive, effects and secrets (D-W3). Every
+# dependency later waves need is declared here by 07-02 (D-W17); 07-07 implements it.
+[dependencies]
+ostro-engine = { path = "../ostro-engine" }
+ostro-types.workspace = true
+ostro-worker-proto = { path = "../ostro-worker-proto" }
+# mTLS to the cluster listener; never tls-ring / tls-webpki-roots / tls-native-roots
+tonic = { workspace = true, features = ["tls-aws-lc", "tls-connect-info"] }
+rustls.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+# POST /v1/workers/join over TLS pinned to the CA hash
+reqwest = { workspace = true, features = ["rustls", "json"] }
+# in-memory key + CSR; peer-cert parsing
+rcgen.workspace = true
+x509-parser.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# [worker] TOML file (same loader as the server config)
+config.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+fail = { workspace = true, optional = true }
+
+[features]
+failpoints = ["dep:fail", "fail/failpoints"]
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+ostro-testkit.workspace = true
+
+[lints]
+workspace = true

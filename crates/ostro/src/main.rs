@@ -22,6 +22,9 @@ use clap::{Parser, Subcommand};
 use ostro_server::config::{EnvSource, Overrides, ServerConfig, load_layered};
 use ostro_server::logging::init_tracing;
 use ostro_server::{Server, ServerHandle};
+// Phase 7: `ostro worker` (07-15) runs `ostro_worker::run`; the dependency is declared by
+// 07-02 (D-W17) and anchored here until then.
+use ostro_worker as _;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

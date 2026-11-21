@@ -1,0 +1,26 @@
+[package]
+name = "ostro-worker-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# `ostro.worker.v1`: the leader <-> worker Execute service (D-W2) and the postcard
+# `WireOutcome` mirror of `ostro_engine::ActivationOutcome` (D-W19). Field numbers belong to
+# this crate and are versioned by `PROTO_VERSION`, not by RESERVATIONS.md.
+[dependencies]
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+serde.workspace = true
+postcard.workspace = true
+ostro-engine = { path = "../ostro-engine" }
+ostro-types.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+tonic-prost-build.workspace = true
+
+[lints]
+workspace = true
