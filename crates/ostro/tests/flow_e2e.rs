@@ -38,8 +38,8 @@ mod p7;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use common::events_of;
-use p7::{P7_T, P7Api, P7Cluster, P7Opts};
+use common::{events_of, step_completions};
+use p7::{P7_T, P7Api, P7Cluster, P7Opts, WorkerOpts};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
@@ -672,4 +672,504 @@ async fn list_runs(api: &P7Api, query: &str) -> Vec<String> {
             None => return out,
         }
     }
+}
+
+// ---------------------------------------------------------------------------------
+// Task 2: pause, resume, auto-pause, timeout while paused
+// ---------------------------------------------------------------------------------
+
+/// Whether the run is paused and live: `/retry` dry run answers `mode = resumed` only for
+/// a non-terminal paused run (07-14 alias; the run view has no pause field).
+async fn is_paused(api: &P7Api, id: &str) -> bool {
+    let (st, v) = api
+        .post(&format!("/v1/runs/{id}/retry"), json!({"dry_run": true}))
+        .await;
+    let live = api
+        .run(id)
+        .await
+        .is_some_and(|r| r["status"].as_str().is_some_and(|s| !terminal(s)));
+    st == StatusCode::OK && v["mode"] == "resumed" && live
+}
+
+/// Journal length via a binary search over `history?from_seq=N&limit=1`.
+async fn journal_len(api: &P7Api, id: &str) -> u64 {
+    let has = |n: u64| {
+        let api = api.clone();
+        let id = id.to_owned();
+        async move {
+            let (st, p) = api
+                .get(&format!("/v1/runs/{id}/history?from_seq={n}&limit=1"))
+                .await;
+            assert_eq!(st, StatusCode::OK, "{p}");
+            p["events"].as_array().is_some_and(|e| !e.is_empty())
+        }
+    };
+    let mut hi = 1u64;
+    while has(hi).await {
+        hi *= 2;
+    }
+    let mut lo = 0u64; // has(lo) or lo == 0
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if has(mid).await {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if has(0).await { lo + 1 } else { 0 }
+}
+
+/// Kinds of a run's history, in order.
+async fn kinds(api: &P7Api, id: &str) -> Vec<String> {
+    api.history(id)
+        .await
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or("").to_owned())
+        .collect()
+}
+
+fn count(k: &[String], kind: &str) -> usize {
+    k.iter().filter(|x| *x == kind).count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_run() {
+    let _serial = SERIAL.lock().await;
+    let t0 = Instant::now();
+    let c = P7Cluster::start(opts(4, 4, "")).await;
+    c.api.deploy("signals").await;
+    // `fifo`: three waits for signal `x`, one per step of the run.
+    let id = c
+        .api
+        .start("signals", json!({"input": {"mode": "fifo"}}))
+        .await;
+    wait_until("first wait", P7_T, || {
+        let api = c.api.clone();
+        let id = id.clone();
+        async move { count(&kinds(&api, &id).await, "signal_wait_started") >= 1 }
+    })
+    .await;
+    ok_post(
+        &c.api,
+        &format!("/v1/runs/{id}/signals/x"),
+        json!({"payload": 1}),
+    )
+    .await;
+    wait_until("second wait", P7_T, || {
+        let api = c.api.clone();
+        let id = id.clone();
+        async move { count(&kinds(&api, &id).await, "signal_wait_started") >= 2 }
+    })
+    .await;
+
+    // Pause mid-run.
+    let p = ok_post(&c.api, &format!("/v1/runs/{id}/pause"), json!({})).await;
+    assert_eq!(
+        (p["paused"].clone(), p["changed"].clone()),
+        (json!(true), json!(true)),
+        "{p}"
+    );
+    let p = ok_post(&c.api, &format!("/v1/runs/{id}/pause"), json!({})).await;
+    assert_eq!(p["changed"], false, "a repeat pause reports no change: {p}");
+    assert!(is_paused(&c.api, &id).await, "run not reported paused");
+    let before = kinds(&c.api, &id).await;
+    let grants_before = grants_of(&c, &id).len();
+
+    // A signal while paused is journaled but does not wake the run.
+    ok_post(
+        &c.api,
+        &format!("/v1/runs/{id}/signals/x"),
+        json!({"payload": 2}),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let during = kinds(&c.api, &id).await;
+    let added: Vec<&String> = during[before.len()..].iter().collect();
+    eprintln!(
+        "flow_e2e::pause_run: before pause {} events, while paused +{added:?}, grants {} -> {}",
+        before.len(),
+        grants_before,
+        grants_of(&c, &id).len()
+    );
+    assert_eq!(during[..before.len()], before[..], "history rewritten");
+    assert!(
+        !added.is_empty(),
+        "the signal sent while paused was not journaled"
+    );
+    for k in &added {
+        assert!(
+            k.starts_with("signal_"),
+            "progress while paused (event {k}): {added:?}"
+        );
+    }
+    assert_eq!(
+        count(&during, "signal_wait_started"),
+        count(&before, "signal_wait_started"),
+        "a new wait started while paused"
+    );
+    assert_eq!(
+        grants_of(&c, &id).len(),
+        grants_before,
+        "activated while paused"
+    );
+    let r = c.api.run(&id).await.expect("run");
+    assert!(!terminal(r["status"].as_str().unwrap_or("")), "{r}");
+
+    ok_post(
+        &c.api,
+        &format!("/v1/runs/{id}/signals/x"),
+        json!({"payload": 3}),
+    )
+    .await;
+    let rs = ok_post(&c.api, &format!("/v1/runs/{id}/resume"), json!({})).await;
+    assert_eq!(
+        (rs["paused"].clone(), rs["changed"].clone()),
+        (json!(false), json!(true)),
+        "{rs}"
+    );
+    let r = wait_end(&c.api, &id, P7_T).await;
+    assert_eq!(r["status"], "completed", "{r}");
+    assert_eq!(r["result"], json!([1, 2, 3]), "{r}");
+    eprintln!("flow_e2e::pause_run: total {:?}", t0.elapsed());
+}
+
+/// Queue or workflow pause: an in-flight activation finishes, 5 new runs do not start
+/// for 2 s, resume completes them all.
+async fn pause_scope(workflow_scope: bool) {
+    let label = if workflow_scope {
+        "pause_workflow"
+    } else {
+        "pause_queue"
+    };
+    let t0 = Instant::now();
+    let c = P7Cluster::start(opts(4, 4, "")).await;
+    c.api.deploy("cpu-burn").await;
+    c.api.deploy("smoke").await;
+    let q = "pzq";
+    let inflight = c
+        .api
+        .start("cpu-burn", json!({"input": {"ms": 1500}, "queue": q}))
+        .await;
+    wait_until("in-flight grant", P7_T, || {
+        let ok = !grants_of(&c, &inflight).is_empty();
+        async move { ok }
+    })
+    .await;
+    let (pause, resume) = if workflow_scope {
+        (
+            "/v1/workflows/cpu-burn/pause".to_owned(),
+            "/v1/workflows/cpu-burn/resume".to_owned(),
+        )
+    } else {
+        (
+            format!("/v1/queues/{q}/pause"),
+            format!("/v1/queues/{q}/resume"),
+        )
+    };
+    let p = ok_post(&c.api, &pause, json!({})).await;
+    assert_eq!(
+        (p["paused"].clone(), p["changed"].clone()),
+        (json!(true), json!(true)),
+        "{p}"
+    );
+    let t_paused = Instant::now();
+    let mut held = Vec::new();
+    for _ in 0..5 {
+        held.push(
+            c.api
+                .start("cpu-burn", json!({"input": {"ms": 10}, "queue": q}))
+                .await,
+        );
+    }
+    // The in-flight activation finishes its current activation.
+    let r = wait_end(&c.api, &inflight, P7_T).await;
+    assert_eq!(r["status"], "completed", "{r}");
+    // A workflow pause leaves other workflows on the same queue running (fix-0705).
+    let other = if workflow_scope {
+        let s = c
+            .api
+            .start("smoke", json!({"input": {"k": 1}, "queue": q}))
+            .await;
+        let r = wait_end(&c.api, &s, P7_T).await;
+        assert_eq!(
+            r["status"], "completed",
+            "smoke under a cpu-burn pause: {r}"
+        );
+        "; smoke on the same queue completed while paused"
+    } else {
+        ""
+    };
+    let wait = Duration::from_secs(2).saturating_sub(t_paused.elapsed());
+    tokio::time::sleep(wait.max(Duration::from_secs(2))).await;
+    for id in &held {
+        assert!(grants_of(&c, id).is_empty(), "{id} granted while paused");
+        let r = c.api.run(id).await.expect("run");
+        assert_eq!(r["status"], "ready", "{r}");
+    }
+    let held_for = t_paused.elapsed();
+    let rs = ok_post(&c.api, &resume, json!({})).await;
+    assert_eq!(
+        (rs["paused"].clone(), rs["changed"].clone()),
+        (json!(false), json!(true)),
+        "{rs}"
+    );
+    let t_res = Instant::now();
+    assert_all_completed(&wait_all(&c.api, &held).await);
+    eprintln!(
+        "flow_e2e::{label}: in-flight run completed while paused, 5 runs held {held_for:?} \
+         (no grant), all 5 completed {:?} after resume{other}; total {:?}",
+        t_res.elapsed(),
+        t0.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_queue() {
+    let _serial = SERIAL.lock().await;
+    pause_scope(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_workflow() {
+    let _serial = SERIAL.lock().await;
+    pause_scope(true).await;
+}
+
+/// `wit-surface` workflow `panic`: step `before-panic`, then a guest panic outside any
+/// step (`AttemptFailed(Trap)`, retryable) on every attempt. retry-probe's `trap` mode is
+/// selected by raw UTF-8 input, which the JSON start APIs cannot send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_pause() {
+    let _serial = SERIAL.lock().await;
+    let t0 = Instant::now();
+    let c = P7Cluster::start(opts(
+        4,
+        4,
+        "max_attempt_failures = 2\nretry_backoff = \"50ms\"",
+    ))
+    .await;
+    c.api.deploy("wit-surface").await;
+    let flow = c
+        .api
+        .set_flow("ap", json!({"on_retries_exhausted": "pause"}))
+        .await;
+    assert_eq!(flow["on_retries_exhausted"], "pause", "{flow}");
+
+    let id = c.api.start("panic", json!({"queue": "ap"})).await;
+    wait_until("auto-pause", P7_T, || {
+        let api = c.api.clone();
+        let id = id.clone();
+        async move {
+            if let Some(r) = api.run(&id).await {
+                assert!(
+                    !terminal(r["status"].as_str().unwrap_or("")),
+                    "run ended instead of pausing: {r}"
+                );
+            }
+            is_paused(&api, &id).await
+        }
+    })
+    .await;
+    let r = c.api.run(&id).await.expect("run");
+    // Both attempts used (max_attempt_failures = 2); the exhausting failure pauses
+    // instead of being counted.
+    assert_eq!(r["attempt"], 2, "{r}");
+    assert!(r["result"].is_null(), "{r}");
+    let g1 = grants_of(&c, &id).len();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(grants_of(&c, &id).len(), g1, "granted while auto-paused");
+    assert!(is_paused(&c.api, &id).await);
+
+    // `/retry` on a paused run is resume: 200, mode resumed, the run is granted again.
+    let rv = ok_post(&c.api, &format!("/v1/runs/{id}/retry"), json!({})).await;
+    assert_eq!(rv["mode"], "resumed", "{rv}");
+    assert_eq!(rv["run_id"].as_str(), Some(id.as_str()), "{rv}");
+    wait_until("re-grant after /retry", P7_T, || {
+        let n = grants_of(&c, &id).len();
+        async move { n > g1 }
+    })
+    .await;
+    // The guest panics on every attempt, so the resumed run exhausts again and is
+    // auto-paused again rather than failing.
+    wait_until("auto-pause after resume", P7_T, || {
+        let api = c.api.clone();
+        let id = id.clone();
+        async move { is_paused(&api, &id).await }
+    })
+    .await;
+    let r2 = c.api.run(&id).await.expect("run");
+    assert!(!terminal(r2["status"].as_str().unwrap_or("")), "{r2}");
+    let g2 = grants_of(&c, &id).len();
+
+    // Without the policy the same workflow fails (Phase 5 behaviour).
+    let plain = c.api.start("panic", json!({"queue": "fq"})).await;
+    let rf = wait_end(&c.api, &plain, P7_T).await;
+    assert_eq!(rf["status"], "failed", "{rf}");
+    eprintln!(
+        "flow_e2e::auto_pause: paused at attempt {} (grants {g1}); /retry -> \
+         {rv}; re-granted and re-paused (grants {g2}, attempt_failures {}); without the \
+         policy: {} after {} grants; total {:?}",
+        r["attempt"],
+        r2["attempt_failures"],
+        rf["status"],
+        grants_of(&c, &plain).len(),
+        t0.elapsed()
+    );
+}
+
+/// `smoke` declares a 60 s run timeout (the only short one among the test guests; the
+/// start API has no run-timeout field).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timeout_while_paused() {
+    let _serial = SERIAL.lock().await;
+    let t0 = Instant::now();
+    let c = P7Cluster::start(opts(4, 4, "")).await;
+    c.api.deploy("smoke").await;
+    // Pause before the first grant: hold the queue, pause the run, release the queue.
+    ok_post(&c.api, "/v1/queues/tw/pause", json!({})).await;
+    let id = c
+        .api
+        .start("smoke", json!({"input": {"v": 7}, "queue": "tw"}))
+        .await;
+    let created = c.api.run(&id).await.expect("run")["created_at_ms"]
+        .as_u64()
+        .expect("created_at_ms");
+    let p = ok_post(&c.api, &format!("/v1/runs/{id}/pause"), json!({})).await;
+    assert_eq!(p["changed"], true, "{p}");
+    ok_post(&c.api, "/v1/queues/tw/resume", json!({})).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(grants_of(&c, &id).is_empty(), "granted while paused");
+    assert!(is_paused(&c.api, &id).await);
+
+    // The run timeout fires although the run is paused.
+    let r = wait_end(&c.api, &id, Duration::from_secs(150)).await;
+    assert_eq!(r["status"], "timed_out", "{r}");
+    let ended = r["completed_at_ms"].as_u64().expect("completed_at_ms");
+    let (st, b) = c
+        .api
+        .post(&format!("/v1/runs/{id}/resume"), json!({}))
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "resume of a timed-out run: {b}");
+
+    // D1 resume in place: granted again (a stale pause mark would hold it) and completes.
+    let rv = ok_post(&c.api, &format!("/v1/runs/{id}/retry"), json!({})).await;
+    assert_eq!(rv["mode"], "resumed", "{rv}");
+    let t_retry = Instant::now();
+    wait_until("completed after retry", P7_T, || {
+        let api = c.api.clone();
+        let id = id.clone();
+        async move {
+            api.run(&id)
+                .await
+                .is_some_and(|r| r["status"] == "completed")
+        }
+    })
+    .await;
+    let r = c.api.run(&id).await.expect("run");
+    assert_eq!(r["result"], json!({"v": 7}), "{r}");
+    assert!(!grants_of(&c, &id).is_empty());
+    eprintln!(
+        "flow_e2e::timeout_while_paused: timed out {} ms after creation while paused; \
+         resume 409; /retry {rv} -> completed in {:?}; total {:?}",
+        ended.saturating_sub(created),
+        t_retry.elapsed(),
+        t0.elapsed()
+    );
+}
+
+/// Workers queue: pausing a run executing on a worker revokes its lease (the worker
+/// cancels the activation, progress stops); resume continues it on the worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_on_worker() {
+    let _serial = SERIAL.lock().await;
+    let t0 = Instant::now();
+    let c = P7Cluster::start(opts(4, 4, "")).await;
+    let w = c.spawn_worker(WorkerOpts::new("pause-w1", 2).label("pool", "pz"));
+    c.wait_workers(1).await;
+    c.api.deploy("timeouts").await;
+    c.api
+        .set_flow(
+            "wq",
+            json!({"placement": "workers", "selector": ["pool=pz"]}),
+        )
+        .await;
+    // The worker appends a busy activation's events when the activation ends (no append
+    // was visible mid-activation in 07-19's probes), so "executing" is read from the
+    // dispatcher's lease gauge, not from journal growth.
+    let n: u64 = std::env::var("P719_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000);
+    let id = c
+        .api
+        .start(
+            "timeouts",
+            json!({"input": {"mode": "busy_steps", "n": n}, "queue": "wq"}),
+        )
+        .await;
+    wait_until("executing on the worker", P7_T, || {
+        let api = c.api.clone();
+        async move {
+            api.demand("wq").await["running_on_workers"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        }
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let p = ok_post(&c.api, &format!("/v1/runs/{id}/pause"), json!({})).await;
+    assert_eq!(p["changed"], true, "{p}");
+    let t_pause = Instant::now();
+    // The revoke releases the lease (the worker cancels the activation).
+    wait_until("lease released after pause", P7_T, || {
+        let api = c.api.clone();
+        async move { api.demand("wq").await["running_on_workers"] == 0 }
+    })
+    .await;
+    let released = t_pause.elapsed();
+    let r = c.api.run(&id).await.expect("run");
+    assert!(
+        !terminal(r["status"].as_str().unwrap_or("")),
+        "the run finished before the pause took effect (raise P719_N): {r}"
+    );
+    let l1 = journal_len(&c.api, &id).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let l2 = journal_len(&c.api, &id).await;
+    assert_eq!(l1, l2, "journal grew while paused");
+    let r = c.api.run(&id).await.expect("run");
+    assert!(!terminal(r["status"].as_str().unwrap_or("")), "{r}");
+    assert!(is_paused(&c.api, &id).await);
+    assert_eq!(grants_of(&c, &id).len(), 1, "{:?}", grants_of(&c, &id));
+    let at_pause = l1;
+
+    let rs = ok_post(&c.api, &format!("/v1/runs/{id}/resume"), json!({})).await;
+    assert_eq!(rs["changed"], true, "{rs}");
+    let t_res = Instant::now();
+    let r = wait_end(&c.api, &id, LONG).await;
+    assert_eq!(r["status"], "completed", "{r}");
+    assert_eq!(r["result"], format!("busy:{n}"), "{r}");
+    let ns: Vec<u64> = grants_of(&c, &id).iter().map(|g| g.n).collect();
+    let g = ns.len();
+    assert!(g >= 2, "not re-granted after resume: {ns:?}");
+    assert!(
+        ns.windows(2).all(|w| w[0] < w[1]),
+        "attempt tokens not increasing: {ns:?}"
+    );
+    let h = c.api.history(&id).await;
+    assert_eq!(step_completions(&h, "b0"), 1, "steps re-executed");
+    let out = c.server().output();
+    let remote = out.matches(&format!("remote activate run={id}")).count();
+    assert!(remote >= 2, "both activations on the worker: {remote}");
+    let errors = w.error_lines();
+    eprintln!(
+        "flow_e2e::pause_on_worker: n = {n}; lease released {released:?} after the pause, \
+         journal frozen at {at_pause} events for 2 s; resumed -> completed in {:?}, grant tokens {ns:?}, \
+         remote activations {remote}, worker ERROR lines {}; total {:?}",
+        t_res.elapsed(),
+        errors.len(),
+        t0.elapsed()
+    );
+    drop(w);
 }
