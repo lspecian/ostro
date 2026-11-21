@@ -1,4 +1,4 @@
-# Ostro on-disk format (Phase 2, with Phase 4 additions in §12, Phase 5 additions in §13, the freeze rules in §14 and Phase 8 additions in §15)
+# Ostro on-disk format (Phase 2, with Phase 4 additions in §12, Phase 5 additions in §13, the freeze rules in §14, Phase 8 additions in §15, Phase 6 additions in §16 and Phase 7 additions in §17)
 
 **Status: FROZEN v0.1 (2026-11-19, plan 05-20).** First fixed at the end of Phase 2 (plan 02-16). This document describes what the code writes today. Each section names the source file that defines the format, and the golden files and tests that pin it. The frozen sources of truth, the evolution rules and the mixed-version rules are in **§14**; the on-disk corpus that pins this format is `tests/format-corpus/v0.1` (`crates/ostro-partition/tests/format_corpus.rs`). Ordinals and reserved names come only from `.planning/RESERVATIONS.md`.
 
@@ -181,6 +181,8 @@ Folded into the rolling hash, so they are part of the format. New codes are appe
 | Rejected(WrongPartition) | 25 |
 | Rejected(Invalid(_)) (any detail) | 26 |
 | Rejected(RunCompleted) | 27 (Phase 5, §13) |
+| Rejected(ReservedP6_12..14) | 28–30 (placeholders, never emitted; Phase 7, §17) |
+| Rejected(RunPaused) | 31 (Phase 7, §17) |
 
 `InvalidCode` details (Decode, Empty, BadRunId, MissingToken, EventsNotContiguous, MissingField, NotImplemented, BadIntent, FieldTooLong, BadSource, TruncateBeyondEnd; Phase 4: BadLength, NotRunning) are not hashed separately, because the command bytes that determine them are hashed. They are append-only.
 
@@ -500,3 +502,40 @@ Asserted with the `ApplyBatch` read counter in `crates/ostro-partition/tests/app
 | `CompleteEffect` | run record + effects point read = **2** (1 when rejected before the row read) |
 | non-resumable terminal transition | **+ 1** effects prefix scan by run |
 | accepted `LeaderAnnounced` | **1** full effects scan **+ 1** run-record read per distinct run with rows |
+
+## 17. Phase 7 additions (additive; plan 07-03)
+
+Every ordinal below comes from the Phase 7 block of `.planning/RESERVATIONS.md` (D-W18). Nothing frozen in §14 changes: the additions follow §14.2. Golden vectors `pause_run_operator`, `pause_run_auto` and `resume_run` are appended to `crates/ostro-types/tests/golden/commands.txt`; every older line is byte-identical and old bytes decode unchanged. Apply routes both commands to `apply/pause.rs`, which rejects them with `Invalid(NotImplemented)` (outcome code 26) until 07-04 implements them.
+
+**`Cmd::PauseRun` = tag 20** (`crates/ostro-types/src/command.rs`). Routed by run id (`PauseRun::run_id`), like the Phase 5 run commands.
+
+| Field | Number | Type | Meaning |
+|---|---|---|---|
+| `run_id` | 1 | bytes | target run (18 bytes) |
+| `reason` | 2 | u32 | `0` operator (`PAUSE_REASON_OPERATOR`), `1` retries exhausted (`PAUSE_REASON_RETRIES_EXHAUSTED`); same numbering as `PauseMark.reason` |
+| `detail` | 3 | string | human-readable detail, at most 4 KiB (`MAX_PAUSE_DETAIL_LEN` = 4096) |
+| `token` | 4 | `AttemptTokenMsg` (optional) | present = executor auto-pause, fenced like `EventsAppended` (only the current attempt may issue it); absent = operator pause |
+| `requested_at_ms` | 5 | u64 | request time set by the submitter; becomes `PauseMark.at_ms` |
+
+**`Cmd::ResumeRun` = tag 21.**
+
+| Field | Number | Type | Meaning |
+|---|---|---|---|
+| `run_id` | 1 | bytes | target run (18 bytes) |
+| `requested_at_ms` | 2 | u64 | request time set by the submitter (the resumed run's ready time) |
+
+Cmd tags 22–26 stay spare (reserved P7).
+
+**`RejectReason::RunPaused` = declaration index 15, outcome code 31** (`apply/outcome.rs`). `RejectReason` is declaration-indexed (code = 16 + index), so indices 12–14, which Phase 6 never used, are held by the canonical `#[doc(hidden)]` placeholders `ReservedP6_12`, `ReservedP6_13`, `ReservedP6_14` (codes 28–30). Apply never emits them, so they never reach the state hash; a phase claiming one renames it in place. Indices 16–17 stay spare (reserved P7).
+
+**No new keyspace, meta variant or journal kind.** The pre-freeze findings F1/F2 landed in Phase 5, so Phase 7 needs none: keyspaces 17/18 and meta variants 19/20 stay unused, `META_FORMAT` and `EVENT_CODEC_VER` are unchanged. Phase 7 also uses these pre-freeze fields:
+- **F7 `ReadyValue.first`** (carried as `first_activation` on `query::ReadyEntryRow` and `Action::EnqueueReady`): `true` when no attempt was ever granted (`RunRecord.current_attempt.is_none()` at enqueue). It feeds the first-activation throttle.
+- **F8 `ApiToken.expires_at_ms: Option<u64>`** (meta): the expiry of worker join tokens (`wkr_`).
+
+**In-memory actions** (not an on-disk format, not a RESERVATIONS space): `Action::RunPaused { run }` and `Action::RunResumed { run }`, emitted by 07-04 after commit and consumed by the dispatcher in 07-05. Until then its wildcard arm ignores them.
+
+**`RunRecord.pause` semantics** (F1 `Option<PauseMark { reason u8, at_ms, detail }>`, stored since Phase 5; enforced by 07-04):
+- `PauseRun` on a Scheduled, Ready or Running run sets `pause = Some(PauseMark { reason, at_ms: requested_at_ms, detail })`, removes any ready row and emits `Action::RunPaused`. A Running run stays Running in the store. It costs exactly 1 point read (the run record). On a run that is already paused it is `Accepted` with no change; on a terminal run it is `RunTerminal`; on an unknown run, `RunNotFound`. A token that is not the current attempt is rejected `Fenced`/`StaleEpoch`, exactly as for `EventsAppended`.
+- While a run is paused, `enqueue_ready` (every caller) writes no ready row and pushes no `EnqueueReady`: the run is left `Ready` with `rec.ready = None`. `EventsAppended` and `AttemptGranted` are rejected `RunPaused` atomically (nothing in the batch applies). Inputs (timers, signals, tokens, effect completions, cancel requests) are still journaled but do not wake the run. `TerminateRun` and the run-timeout timer still terminate it.
+- Every terminal transition clears `pause` (Phase 5's `terminal::on_terminal` hook), so no terminal run is paused, and no run is both paused and has a ready row.
+- `ResumeRun` on a paused run clears the mark. A Ready or Running run is re-enqueued through `enqueue_ready` at `requested_at_ms` (ready row + `EnqueueReady`, `first_activation` from F7); a Scheduled run is only cleared. It emits `Action::RunResumed`. On a run that is not paused it is `Accepted` with no change; on a terminal run, `RunTerminal`.

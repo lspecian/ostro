@@ -22,8 +22,14 @@
 //! | `Rejected(WrongPartition)`           | 25   |
 //! | `Rejected(Invalid(_))` (any code)    | 26   |
 //! | `Rejected(RunCompleted)`             | 27   |
+//! | `Rejected(ReservedP6_12..14)`        | 28–30 (never emitted) |
+//! | `Rejected(RunPaused)`                | 31   |
 //!
-//! Indices come only from `.planning/RESERVATIONS.md` §7 (`RunCompleted` = 11, Phase 5).
+//! Indices come only from `.planning/RESERVATIONS.md` §7 (`RunCompleted` = 11, Phase 5;
+//! `RunPaused` = 15, Phase 7). `RejectReason` is declaration-indexed like [`InvalidCode`], so
+//! 07-03 declared the canonical `#[doc(hidden)]` placeholders `ReservedP6_12..14` for Phase 6's
+//! unused slots (P-15 rule); they are never emitted, so they never reach the state hash. A
+//! phase claiming one of them renames it in place.
 //!
 //! The [`InvalidCode`] detail is not part of the hash code (the command
 //! bytes are folded anyway, and they determine the detail). `InvalidCode`
@@ -81,6 +87,19 @@ pub enum RejectReason {
     /// The run completed successfully and cannot be retried (`RetryRun` on a `Completed` run,
     /// D1; the API maps it to 409 `run_completed`). Phase 5 (05-02), index 11.
     RunCompleted,
+    // RESERVATIONS.md §7: placeholders for Phase 6's unused slots 12..=14 (never emitted;
+    // declared by 07-03, P-15 convention).
+    #[doc(hidden)]
+    ReservedP6_12,
+    #[doc(hidden)]
+    ReservedP6_13,
+    #[doc(hidden)]
+    ReservedP6_14,
+    /// The run is paused (`RunRecord.pause` is set): executor commands (`EventsAppended`,
+    /// `AttemptGranted`) are refused until `ResumeRun`. Phase 7 (07-03; emitted from 07-04),
+    /// index 15, outcome code 31.
+    // RESERVATIONS.md: P7 = RejectReason 15..17
+    RunPaused,
 }
 
 /// Detail of a `Rejected(Invalid)` outcome.
@@ -161,6 +180,10 @@ impl RejectReason {
             RejectReason::WrongPartition => 9,
             RejectReason::Invalid(_) => 10,
             RejectReason::RunCompleted => 11,
+            RejectReason::ReservedP6_12 => 12,
+            RejectReason::ReservedP6_13 => 13,
+            RejectReason::ReservedP6_14 => 14,
+            RejectReason::RunPaused => 15,
         }
     }
 }
@@ -226,6 +249,17 @@ pub enum Action {
         run: RunId,
         seq: u64,
     },
+    /// The run was paused (`PauseRun` accepted on a non-paused run). In memory only (not a
+    /// RESERVATIONS space). Phase 7: declared by 07-03, emitted by 07-04; the dispatcher's
+    /// wildcard arm ignores it until 07-05.
+    RunPaused {
+        run: RunId,
+    },
+    /// The run was resumed (`ResumeRun` accepted on a paused run). In memory only. Phase 7:
+    /// declared by 07-03, emitted by 07-04, consumed by 07-05.
+    RunResumed {
+        run: RunId,
+    },
 }
 
 #[cfg(test)]
@@ -282,6 +316,10 @@ mod tests {
                 26,
             ),
             (ApplyOutcome::Rejected(RejectReason::RunCompleted), 27),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP6_12), 28),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP6_13), 29),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP6_14), 30),
+            (ApplyOutcome::Rejected(RejectReason::RunPaused), 31),
         ];
         for (o, code) in cases {
             assert_eq!(o.code(), code, "{o:?}");

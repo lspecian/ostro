@@ -14,6 +14,10 @@ use ostro_types::command::{
     decode_command, encode_command,
 };
 use ostro_types::command::{
+    MAX_PAUSE_DETAIL_LEN, PAUSE_REASON_OPERATOR, PAUSE_REASON_RETRIES_EXHAUSTED, PauseRun,
+    ResumeRun,
+};
+use ostro_types::command::{
     MAX_REQUEST_ID_LEN, OverlapPolicy, ScheduleFire, ScheduleFireKind, cron_idempotency_key,
     cron_manual_idempotency_key,
 };
@@ -446,7 +450,44 @@ fn all_golden() -> Vec<(&'static str, Command)> {
     v.extend(golden_appended_v5());
     v.extend(golden_appended_v8());
     v.extend(golden_appended_v6());
+    v.extend(golden_appended_v7());
     v
+}
+
+// ---- Plan 07-03: Phase 7 contract ---------------------------------------------------------
+
+/// Vectors appended by plan 07-03 (Phase 7 contract; OPS-01, D-W18): an operator pause, an
+/// executor auto-pause (with the attempt token) and a resume.
+fn golden_appended_v7() -> Vec<(&'static str, Command)> {
+    vec![
+        (
+            "pause_run_operator",
+            Command::pause_run(PauseRun {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                reason: PAUSE_REASON_OPERATOR,
+                detail: "maintenance window".into(),
+                token: None,
+                requested_at_ms: 9_200,
+            }),
+        ),
+        (
+            "pause_run_auto",
+            Command::pause_run(PauseRun {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                reason: PAUSE_REASON_RETRIES_EXHAUSTED,
+                detail: "retries exhausted after 5 attempts".into(),
+                token: token(7, 3),
+                requested_at_ms: 9_201,
+            }),
+        ),
+        (
+            "resume_run",
+            Command::resume_run(ResumeRun {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                requested_at_ms: 9_300,
+            }),
+        ),
+    ]
 }
 
 // ---- Plan 06-02: Phase 6 contract ---------------------------------------------------------
@@ -1460,5 +1501,134 @@ fn phase6_golden_lines_follow_phase8() {
             "complete_effect_blob",
             "events_appended_effects"
         ]
+    );
+}
+
+#[test]
+fn phase7_vectors_round_trip() {
+    let v = golden_appended_v7();
+    for (name, c) in &v {
+        let back = decode_command(&encode_command(c)).expect("decode");
+        assert_eq!(&back, c, "{name} round trip");
+    }
+    let names: Vec<&str> = v.iter().map(|(_, c)| c.kind_name()).collect();
+    assert_eq!(names, ["PauseRun", "PauseRun", "ResumeRun"]);
+    // The golden bytes decode to the same commands.
+    for (name, c) in v {
+        assert_eq!(
+            decode_command(&golden_line(name)).expect("decode"),
+            c,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn phase7_tags_from_first_principles() {
+    use prost::Message as _;
+    // Cmd tag 20 (LEN): key = 20 << 3 | 2 = 162 = varint `a2 01`; tag 21: 170 = `aa 01`.
+    assert_eq!(
+        hex(&encode_command(&Command::pause_run(PauseRun::default()))),
+        "a20100"
+    );
+    assert_eq!(
+        hex(&encode_command(&Command::resume_run(ResumeRun::default()))),
+        "aa0100"
+    );
+    // PauseRun: run_id 1 bytes, reason 2 u32, detail 3 string, token 4 LEN, requested_at_ms 5.
+    let p = PauseRun {
+        run_id: vec![0xAB], // 0a 01 ab
+        reason: 1,          // 10 01
+        detail: "d".into(), // 1a 01 64
+        token: token(1, 2), // 22 04 08 01 10 02
+        requested_at_ms: 3, // 28 03
+    };
+    assert_eq!(hex(&p.encode_to_vec()), "0a01ab10011a01642204080110022803");
+    // ResumeRun: run_id 1, requested_at_ms 2.
+    let r = ResumeRun {
+        run_id: vec![0xAB],
+        requested_at_ms: 5,
+    };
+    assert_eq!(hex(&r.encode_to_vec()), "0a01ab1005");
+    // Reason numbering = PauseMark.reason (0 operator, 1 retries exhausted).
+    assert_eq!(PAUSE_REASON_OPERATOR, 0);
+    assert_eq!(PAUSE_REASON_RETRIES_EXHAUSTED, 1);
+}
+
+#[test]
+fn phase7_golden_lines_follow_phase6() {
+    // Append-only: the Phase 7 lines come after 06-02's three (lines 24..27).
+    let names: Vec<&str> = GOLDEN
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split_once('\t').expect("name<TAB>hex").0)
+        .collect();
+    assert_eq!(names[26], "events_appended_effects");
+    assert_eq!(
+        &names[27..30],
+        ["pause_run_operator", "pause_run_auto", "resume_run"]
+    );
+}
+
+#[test]
+fn old_bytes_decode_unchanged_after_phase7() {
+    // Every line written before 07-03 decodes and re-encodes byte-identically.
+    let pre: Vec<(&str, Command)> = {
+        let mut v = golden_commands();
+        v.extend(golden_appended());
+        v.extend(golden_appended_v5());
+        v.extend(golden_appended_v8());
+        v.extend(golden_appended_v6());
+        v
+    };
+    assert_eq!(pre.len(), 27);
+    for (name, c) in pre {
+        let old = golden_line(name);
+        let back = decode_command(&old).expect("old bytes decode");
+        assert_eq!(back, c, "{name}");
+        assert_eq!(encode_command(&back).as_ref(), old.as_slice(), "{name}");
+    }
+}
+
+#[test]
+fn phase7_run_id_token_and_limits() {
+    let id = run(9, 0x42);
+    let b = id.as_bytes().to_vec();
+    let mut p = PauseRun {
+        run_id: b.clone(),
+        ..Default::default()
+    };
+    assert_eq!(p.run_id(), Ok(id));
+    assert_eq!(p.run_id().map(|r| r.partition()), Ok(PartitionId(9)));
+    assert_eq!(p.token(), None, "operator pause carries no token");
+    p.token = token(4, 6);
+    assert_eq!(
+        p.token(),
+        Some(AttemptToken {
+            epoch: Epoch(4),
+            n: 6
+        })
+    );
+    p.detail = "x".repeat(MAX_PAUSE_DETAIL_LEN);
+    assert!(p.check_limits().is_ok());
+    p.detail.push('x');
+    assert!(p.check_limits().is_err());
+    assert_eq!(MAX_PAUSE_DETAIL_LEN, 4096);
+    assert_eq!(
+        ResumeRun {
+            run_id: b,
+            ..Default::default()
+        }
+        .run_id(),
+        Ok(id)
+    );
+    assert_eq!(
+        ResumeRun {
+            run_id: vec![1, 2],
+            ..Default::default()
+        }
+        .run_id(),
+        Err(IdError::BadLength(2))
     );
 }

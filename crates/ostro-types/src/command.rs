@@ -7,9 +7,9 @@
 //!   fields, new oneof variants, new enum values.
 //! - Field numbers and oneof tags are never reused or renumbered. A removed field's number is
 //!   retired forever.
-//! - Reserved for future use: `Cmd` tags `14..=26` and `28..=63` (blocks per phase in
-//!   `.planning/RESERVATIONS.md`; 13 is Phase 6's `CompleteEffect`, 27 is Phase 8's
-//!   `ScheduleFire`).
+//! - Reserved for future use: `Cmd` tags `14..=19`, `22..=26` and `28..=63` (blocks per phase in
+//!   `.planning/RESERVATIONS.md`; 13 is Phase 6's `CompleteEffect`, 20/21 are Phase 7's
+//!   `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`).
 //!   Unknown fields are skipped on decode, so an
 //!   older binary can read a log that carries newer optional fields.
 //! - The bytes are pinned by `tests/golden/commands.txt`.
@@ -87,6 +87,15 @@
 //!   ([`crate::routing::schedule_owner`]). Golden vectors appended (`schedule_fire_*`); every
 //!   older line is byte-identical. Apply rejects it with `Invalid(NotImplemented)` until 08-07.
 //! - Idempotency keys of cron starts: [`cron_idempotency_key`] / [`cron_manual_idempotency_key`].
+//!
+//! # Phase 7 additions (plan 07-03, post-freeze, additive)
+//!
+//! - [`Cmd::PauseRun`] at tag 20 and [`Cmd::ResumeRun`] at tag 21 (RESERVATIONS.md P7 block
+//!   20..=26; D-W18). Routed by run id like the Phase 5 run commands ([`PauseRun::run_id`],
+//!   [`ResumeRun::run_id`]). A `PauseRun` carrying `token` is an executor auto-pause and is
+//!   fenced like `EventsAppended`; without it, it is an operator pause. Golden vectors
+//!   appended (`pause_run_operator`, `pause_run_auto`, `resume_run`); every older line is
+//!   byte-identical. Apply rejects both with `Invalid(NotImplemented)` until 07-04.
 
 use bytes::Bytes;
 use prost::Message;
@@ -136,10 +145,15 @@ pub const fn is_reserved_op(op: u64) -> bool {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Command {
     /// The command variant. `None` only for malformed/empty input (apply rejects it as invalid).
-    /// Tags 14..=26 and 28..=63 are reserved for future variants (`.planning/RESERVATIONS.md` §1;
-    /// 13 is Phase 6's `CompleteEffect`, 27 is Phase 8's `ScheduleFire`).
+    /// Tags 14..=19, 22..=26 and 28..=63 are reserved for future variants
+    /// (`.planning/RESERVATIONS.md` §1; 13 is Phase 6's `CompleteEffect`, 20/21 are Phase 7's
+    /// `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`).
     // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
-    #[prost(oneof = "Cmd", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 27")]
+    // RESERVATIONS.md: P7 = 20..26
+    #[prost(
+        oneof = "Cmd",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 27"
+    )]
     pub cmd: Option<Cmd>,
 }
 
@@ -196,6 +210,15 @@ pub enum Cmd {
     // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
     #[prost(message, tag = "13")]
     CompleteEffect(CompleteEffect),
+    /// Pause a run (Phase 7, OPS-01): operator pause, or an executor auto-pause when `token`
+    /// is present (fenced).
+    // RESERVATIONS.md: P7 = 20..26
+    #[prost(message, tag = "20")]
+    PauseRun(PauseRun),
+    /// Resume a paused run (Phase 7, OPS-01).
+    // RESERVATIONS.md: P7 = 20..26
+    #[prost(message, tag = "21")]
+    ResumeRun(ResumeRun),
 }
 
 /// A new leader epoch.
@@ -1029,6 +1052,50 @@ pub fn complete_effect_payload(
     .1
 }
 
+/// Maximum length of [`PauseRun::detail`], in bytes (4 KiB). Phase 7.
+pub const MAX_PAUSE_DETAIL_LEN: usize = 4096;
+/// [`PauseRun::reason`]: paused by an operator (same numbering as the stored
+/// `PauseMark.reason`). Phase 7.
+pub const PAUSE_REASON_OPERATOR: u32 = 0;
+/// [`PauseRun::reason`]: auto-paused by the executor because the workflow's retries were
+/// exhausted (`on_retries_exhausted = pause`). Phase 7.
+pub const PAUSE_REASON_RETRIES_EXHAUSTED: u32 = 1;
+
+/// Pause a run (Phase 7, `Cmd` tag 20; OPS-01, D-W18).
+///
+/// Without `token` it is an operator pause. With `token` it is an executor auto-pause and is
+/// fenced: only the run's current attempt may issue it (same check as `EventsAppended`).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct PauseRun {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// Pause reason: [`PAUSE_REASON_OPERATOR`] (0) or [`PAUSE_REASON_RETRIES_EXHAUSTED`] (1);
+    /// same numbering as the stored `PauseMark.reason`.
+    #[prost(uint32, tag = "2")]
+    pub reason: u32,
+    /// Human-readable detail, at most [`MAX_PAUSE_DETAIL_LEN`] bytes.
+    #[prost(string, tag = "3")]
+    pub detail: String,
+    /// The fencing token of the attempt that auto-pauses the run; `None` for an operator pause.
+    #[prost(message, optional, tag = "4")]
+    pub token: Option<AttemptTokenMsg>,
+    /// Request time (ms), set by the submitter; becomes `PauseMark.at_ms`.
+    #[prost(uint64, tag = "5")]
+    pub requested_at_ms: u64,
+}
+
+/// Resume a paused run (Phase 7, `Cmd` tag 21; OPS-01, D-W18).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ResumeRun {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// Request time (ms), set by the submitter.
+    #[prost(uint64, tag = "2")]
+    pub requested_at_ms: u64,
+}
+
 /// Encode a command to its frozen protobuf bytes.
 pub fn encode_command(c: &Command) -> Bytes {
     Bytes::from(c.encode_to_vec())
@@ -1119,6 +1186,16 @@ impl Command {
         Self::of(Cmd::CompleteEffect(c))
     }
 
+    /// `PauseRun` (Phase 7).
+    pub fn pause_run(p: PauseRun) -> Self {
+        Self::of(Cmd::PauseRun(p))
+    }
+
+    /// `ResumeRun` (Phase 7).
+    pub fn resume_run(r: ResumeRun) -> Self {
+        Self::of(Cmd::ResumeRun(r))
+    }
+
     /// Variant name (for logs and metrics); `"None"` for an empty command.
     pub fn kind_name(&self) -> &'static str {
         match &self.cmd {
@@ -1137,6 +1214,8 @@ impl Command {
             Some(Cmd::CompleteToken(_)) => "CompleteToken",
             Some(Cmd::ScheduleFire(_)) => "ScheduleFire",
             Some(Cmd::CompleteEffect(_)) => "CompleteEffect",
+            Some(Cmd::PauseRun(_)) => "PauseRun",
+            Some(Cmd::ResumeRun(_)) => "ResumeRun",
         }
     }
 }
@@ -1253,6 +1332,30 @@ impl ScheduleFire {
 }
 
 impl CompleteEffect {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+}
+
+impl PauseRun {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+
+    /// The auto-pause fencing token; `None` for an operator pause.
+    pub fn token(&self) -> Option<AttemptToken> {
+        self.token.map(AttemptToken::from)
+    }
+
+    /// Checks `detail` ≤ [`MAX_PAUSE_DETAIL_LEN`].
+    pub fn check_limits(&self) -> Result<(), FieldTooLong> {
+        check_len("detail", self.detail.len(), MAX_PAUSE_DETAIL_LEN)
+    }
+}
+
+impl ResumeRun {
     /// The target run id; `Err` unless exactly 18 bytes.
     pub fn run_id(&self) -> Result<RunId, IdError> {
         parse_run_id(&self.run_id)

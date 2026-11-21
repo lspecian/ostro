@@ -35,6 +35,7 @@ mod inputs;
 mod lifecycle;
 mod outbox;
 pub mod outcome;
+mod pause;
 mod retention;
 pub(crate) mod run;
 mod schedule;
@@ -149,6 +150,9 @@ fn dispatch(
         Cmd::ScheduleFire(s) => schedule::apply_schedule_fire(b, cur, s, actions),
         // Phase 6 (06-03): first completion wins, 2 reads (`effects.rs`).
         Cmd::CompleteEffect(c) => effects::apply_complete_effect(b, cur, c, actions),
+        // Phase 7 (07-03 routing stubs; implemented in 07-04): pause / resume (`pause.rs`).
+        Cmd::PauseRun(p) => pause::apply_pause_run(b, cur, p, actions),
+        Cmd::ResumeRun(r) => pause::apply_resume_run(b, cur, r, actions),
     }
 }
 
