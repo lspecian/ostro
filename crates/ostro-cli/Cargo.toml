@@ -8,9 +8,10 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
-# REST transport (CLI-06): json + http2 only, no TLS until SEC-01 (workspace pin is
-# default-features = false).
-reqwest.workspace = true
+# REST transport (CLI-06): json + http2; `rustls` (aws-lc-rs + platform verifier, the
+# same reqwest features ostro-worker/ostro-server already enable) for https:// servers
+# (07-22, SEC-01). The workspace pin is default-features = false.
+reqwest = { workspace = true, features = ["rustls"] }
 serde_json.workspace = true
 # friendly durations, same parser as ServerConfig / the REST API
 jiff.workspace = true

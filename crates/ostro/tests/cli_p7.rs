@@ -842,3 +842,67 @@ fn ready_line_server_profile_auto_rule_ignores_auto_sealing_key() {
     );
     assert!(!out.contains("listening on"), "{out}");
 }
+
+/// `ostro <args>` against an https server: (exit code, stdout, stderr).
+fn run_cli_https(
+    port: u16,
+    ca_file: Option<&std::path::Path>,
+    args: &[&str],
+) -> (i32, String, String) {
+    let mut cmd = command();
+    cmd.env("OSTRO_SERVER", format!("https://127.0.0.1:{port}"))
+        .args(args)
+        .stdin(std::process::Stdio::null());
+    if let Some(ca) = ca_file {
+        cmd.env("OSTRO_CA_FILE", ca);
+    }
+    let (st, out, err) = run_to_end(cmd);
+    (st.code().unwrap_or(-1), out, err)
+}
+
+#[tokio::test]
+async fn cli_over_tls_trusts_the_cluster_ca_and_join_shows_the_bound_port() {
+    // 07-22: the CLI reaches a TLS listener (SEC-01). A non-loopback `ostro dev` serves a
+    // leaf issued by the cluster CA (D-W20), so `--ca-file <data>/tls/ca.crt` verifies it;
+    // without it the platform roots refuse the certificate. The join command printed by
+    // `worker token create` carries the bound port, not `:0` (07-14 follow-up).
+    let _g = SERIAL.lock().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = dir.path().join("data");
+    let mut s = Spawned::spawn(dev(
+        dir.path(),
+        &[
+            "--listen",
+            "0.0.0.0:0",
+            "--data-dir",
+            data.to_str().expect("utf-8"),
+        ],
+    ));
+    let line = wait_line(&s, |l| l.contains(" listening on "));
+    let (addr, _) =
+        parse_tls_ready(&line).unwrap_or_else(|| panic!("not a TLS ready line: {line}"));
+    let port = addr.port();
+    let ca = data.join("tls").join("ca.crt");
+    assert!(ca.is_file(), "no cluster CA at {}", ca.display());
+
+    let (code, out, err) = run_cli_https(
+        port,
+        Some(&ca),
+        &["worker", "token", "create", "--ttl", "1h"],
+    );
+    assert_eq!(code, 0, "stdout: {out}\nstderr: {err}");
+    let expect = format!("--join https://127.0.0.1:{port} ");
+    assert!(
+        out.contains(&expect),
+        "join command without the bound port: {out}"
+    );
+    let (code, out, err) = run_cli_https(port, Some(&ca), &["worker", "token", "list"]);
+    assert_eq!(code, 0, "stdout: {out}\nstderr: {err}");
+    assert!(out.contains("wkr_"), "{out}");
+
+    // The platform roots do not trust the cluster CA.
+    let (code, out, err) = run_cli_https(port, None, &["worker", "token", "list"]);
+    assert_eq!(code, 1, "stdout: {out}\nstderr: {err}");
+    assert!(err.contains("https://127.0.0.1:"), "{err}");
+    s.stop_clean("TERM");
+}

@@ -46,11 +46,15 @@ pub struct Conn {
     /// Per-request timeout (friendly duration; a long-poll adds its wait).
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     pub timeout: Duration,
+    /// PEM CA certificate to trust for an https:// server instead of the platform roots
+    /// (e.g. the cluster CA `<data_dir>/tls/ca.crt` behind a self-signed listener).
+    #[arg(long, env = "OSTRO_CA_FILE", value_name = "PEM")]
+    pub ca_file: Option<std::path::PathBuf>,
 }
 
 impl Conn {
     fn client(&self) -> Result<Client, CallError> {
-        Client::new(&self.server, self.timeout)
+        Client::with_ca(&self.server, self.timeout, self.ca_file.as_deref())
     }
 
     fn out(&self) -> Out {

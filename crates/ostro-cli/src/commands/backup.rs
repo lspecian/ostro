@@ -48,6 +48,9 @@ pub struct BackupArgs {
     /// Download timeout (friendly duration).
     #[arg(long, default_value = "1h", value_parser = parse_duration)]
     pub timeout: Duration,
+    /// PEM CA certificate to trust for an https:// server instead of the platform roots.
+    #[arg(long, env = "OSTRO_CA_FILE", value_name = "PEM")]
+    pub ca_file: Option<PathBuf>,
 }
 
 /// S3 addressing style.
@@ -218,10 +221,14 @@ pub async fn download(args: &BackupArgs) -> Result<Value, CallError> {
     let url = base
         .join("v1/admin/backup")
         .map_err(|e| CallError::Usage(format!("server URL: {e}")))?;
-    let http = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .no_proxy()
         .user_agent(concat!("ostro-cli/", env!("CARGO_PKG_VERSION")))
-        .timeout(args.timeout)
+        .timeout(args.timeout);
+    if let Some(path) = &args.ca_file {
+        builder = builder.tls_certs_only(crate::client::ca_certs(path).map_err(CallError::Usage)?);
+    }
+    let http = builder
         .build()
         .map_err(|e| CallError::Transport(format!("cannot build the HTTP client: {e}")))?;
     let mut resp = http

@@ -2,9 +2,12 @@
 //!
 //! Every method returns the response body as a [`serde_json::Value`], so `--json` can
 //! print it verbatim. Non-2xx answers become [`CallError::Api`] with the server's error
-//! body preserved (`{"error": {"code", "message", "details"}}`). Transport only:
-//! plain HTTP/1.1 + h2c via reqwest, no TLS until SEC-01.
+//! body preserved (`{"error": {"code", "message", "details"}}`). Transport: HTTP/1.1 and
+//! h2 via reqwest; `https://` servers (SEC-01, 07-22) are verified against the platform
+//! roots, or only against `--ca-file` (for example the cluster CA `<data_dir>/tls/ca.crt`
+//! that issues the self-signed listener certificate, D-W20).
 
+use std::path::Path;
 use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder, Url};
@@ -69,7 +72,7 @@ pub struct Client {
     timeout: Duration,
 }
 
-/// Parse a `--server` value: `http://host:port[/prefix]`, or `host:port` (http implied).
+/// Parse a `--server` value: `http(s)://host:port[/prefix]`, or `host:port` (http implied).
 pub fn parse_server(s: &str) -> Result<Url, String> {
     let s = s.trim();
     let with_scheme = if s.contains("://") {
@@ -79,13 +82,7 @@ pub fn parse_server(s: &str) -> Result<Url, String> {
     };
     let url = Url::parse(&with_scheme).map_err(|e| format!("invalid server URL {s:?}: {e}"))?;
     match url.scheme() {
-        "http" => {}
-        "https" => {
-            return Err(format!(
-                "invalid server URL {s:?}: https is not supported yet (TLS lands with SEC-01); \
-                 use http://"
-            ));
-        }
+        "http" | "https" => {}
         other => {
             return Err(format!(
                 "invalid server URL {s:?}: unsupported scheme {other}"
@@ -98,14 +95,42 @@ pub fn parse_server(s: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+/// The PEM certificates in `path` (at least one).
+pub fn ca_certs(path: &Path) -> Result<Vec<reqwest::Certificate>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("--ca-file {}: {e}", path.display()))?;
+    let certs = reqwest::Certificate::from_pem_bundle(&pem)
+        .map_err(|e| format!("--ca-file {}: {e}", path.display()))?;
+    if certs.is_empty() {
+        return Err(format!(
+            "--ca-file {}: no PEM certificate found",
+            path.display()
+        ));
+    }
+    Ok(certs)
+}
+
 impl Client {
     /// A client for `server` (see [`parse_server`]); `timeout` bounds every request (a
     /// long-poll gets its wait added on top).
     pub fn new(server: &str, timeout: Duration) -> Result<Self, CallError> {
+        Self::with_ca(server, timeout, None)
+    }
+
+    /// [`Client::new`] trusting only the PEM CA certificate(s) in `ca_file` for `https://`
+    /// (`None` = the platform roots).
+    pub fn with_ca(
+        server: &str,
+        timeout: Duration,
+        ca_file: Option<&Path>,
+    ) -> Result<Self, CallError> {
         let base = parse_server(server).map_err(CallError::Usage)?;
-        let http = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .no_proxy()
-            .user_agent(concat!("ostro-cli/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("ostro-cli/", env!("CARGO_PKG_VERSION")));
+        if let Some(path) = ca_file {
+            builder = builder.tls_certs_only(ca_certs(path).map_err(CallError::Usage)?);
+        }
+        let http = builder
             .build()
             .map_err(|e| CallError::Transport(format!("cannot build the HTTP client: {e}")))?;
         Ok(Self {
@@ -381,9 +406,27 @@ mod tests {
             parse_server(DEFAULT_SERVER).unwrap().as_str(),
             "http://127.0.0.1:7700/"
         );
-        let e = parse_server("https://example.com").unwrap_err();
-        assert!(e.contains("https is not supported"), "{e}");
+        assert_eq!(
+            parse_server("https://example.com:7700").unwrap().as_str(),
+            "https://example.com:7700/"
+        );
         assert!(parse_server("ftp://x").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "").unwrap();
+        let e = Client::with_ca("https://h:1", Duration::from_secs(1), Some(&empty)).unwrap_err();
+        assert!(
+            e.message().contains("no PEM certificate"),
+            "{}",
+            e.message()
+        );
+        let e = Client::with_ca(
+            "https://h:1",
+            Duration::from_secs(1),
+            Some(&dir.path().join("missing.pem")),
+        )
+        .unwrap_err();
+        assert!(e.message().contains("--ca-file"), "{}", e.message());
     }
 
     #[test]

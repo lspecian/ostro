@@ -184,9 +184,27 @@ fn usage_and_connection_errors() {
     let (code, _, err) = run_cli(addr, &["signal", "r1", "x", "--payload", "not json"]);
     assert_eq!(code, 2);
     assert!(err.contains("not valid JSON"), "{err}");
-    let (code, _, err) = run_cli(addr, &["ls", "--server", "https://x"]);
+    // https:// is accepted since 07-22 (SEC-01); an unreachable https server is a
+    // transport error (exit 1), a bad --ca-file a usage error (exit 2).
+    let https = format!("https://{addr}");
+    let (code, _, err) = run_cli(addr, &["ls", "--server", https.as_str()]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("cannot reach the Ostro server at https://"),
+        "{err}"
+    );
+    let (code, _, err) = run_cli(
+        addr,
+        &[
+            "ls",
+            "--server",
+            "https://x",
+            "--ca-file",
+            "/nonexistent/ca.pem",
+        ],
+    );
     assert_eq!(code, 2, "{err}");
-    assert!(err.contains("https is not supported"), "{err}");
+    assert!(err.contains("--ca-file"), "{err}");
     let (code, _, err) = run_cli(addr, &["deploy", "/nonexistent/x.wasm"]);
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("cannot read"), "{err}");
