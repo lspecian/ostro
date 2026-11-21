@@ -253,7 +253,7 @@ Plans:
 
 Plans:
 - [x] 07-01-PLAN.md — PHASE-7 GATE (Phase 6 complete, Phase 5 F1–F4/F7/F8 landed, code vs RESERVATIONS.md) + Phase 7 ordinals/names reserved + decisions D-W1..D-W25 and coordination rules to STATE (W1)
-- [ ] 07-02-PLAN.md — Every Phase 7 dependency (no governor), ostro-worker-proto + ostro-worker skeleton, partition Placement/FlowControl/QueueGauges contracts, p7.rs seam (P7Shared with engine/bridge/join, attach_node, DispatcherHooks), ControlPlane p7 field, config sections, ErrorCode::RateLimited (W2)
+- [x] 07-02-PLAN.md — Every Phase 7 dependency (no governor), ostro-worker-proto + ostro-worker skeleton, partition Placement/FlowControl/QueueGauges contracts, p7.rs seam (P7Shared with engine/bridge/join, attach_node, DispatcherHooks), ControlPlane p7 field, config sections, ErrorCode::RateLimited (W2)
 - [x] 07-03-PLAN.md — Format contract: Cmd 20 PauseRun / 21 ResumeRun, RejectReason 15 RunPaused, Action::RunPaused/RunResumed, apply routing stubs (OPS-01) (W2)
 - [ ] 07-04-PLAN.md — Run pause/resume apply: enqueue_ready gate, RunPaused rejects, pause cleared on every terminal transition, sink RunPaused → Fenced, rebuild_digest gen_pause with RetryRun (OPS-01) (W3)
 - [ ] 07-05-PLAN.md — Dispatcher generalisation: fair.rs, admission + reservation before grant (placement-blocked queues parked, others served), F7 first_activation, FlowPermit commit after Granted, Abandoned, pause actions, gauges (DISP-03/04/05, WORK-03) (W3)
