@@ -270,6 +270,9 @@ pub fn dev(cwd: &Path, args: &[&str]) -> Command {
 /// `ostro server` with the given extra args, run from `cwd`.
 pub fn server(cwd: &Path, args: &[&str]) -> Command {
     let mut cmd = command();
+    // 07-09: the server profile's cluster listener defaults to 0.0.0.0:7701; spawned test
+    // servers use an ephemeral loopback port so they never collide.
+    cmd.env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0");
     cmd.current_dir(cwd).arg("server").args(args);
     cmd
 }

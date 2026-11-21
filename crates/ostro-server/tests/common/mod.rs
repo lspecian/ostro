@@ -478,6 +478,9 @@ impl Default for ServerOpts {
 pub fn server_config(dir: &Path, opts: &ServerOpts) -> ServerConfig {
     let mut cfg = ServerConfig::server_defaults();
     cfg.api.listen = "127.0.0.1:0".parse().expect("addr");
+    // 07-09: the server profile's cluster listener defaults to 0.0.0.0:7701; parallel test
+    // servers need an ephemeral loopback port.
+    cfg.cluster.listen = "127.0.0.1:0".parse().expect("addr");
     cfg.node.data_dir = dir.to_path_buf();
     cfg.node.partitions = opts.partitions;
     cfg.node.ephemeral = opts.ephemeral;

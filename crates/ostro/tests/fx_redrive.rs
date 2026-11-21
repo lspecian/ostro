@@ -278,7 +278,9 @@ impl Node {
             .arg("--data-dir")
             .arg(self.work.path().join("data"))
             .arg("--listen")
-            .arg("127.0.0.1:0");
+            .arg("127.0.0.1:0")
+            // 07-09: ephemeral loopback cluster listener (server default 0.0.0.0:7701).
+            .env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0");
         match failpoints {
             Some(fp) => cmd.env("FAILPOINTS", fp),
             None => cmd.env_remove("FAILPOINTS"),

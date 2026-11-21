@@ -1034,6 +1034,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = ServerConfig::server_defaults();
         cfg.api.listen = "127.0.0.1:0".parse().expect("addr");
+        cfg.cluster.listen = "127.0.0.1:0".parse().expect("addr");
         cfg.node.data_dir = dir.path().to_path_buf();
         cfg.node.partitions = 2;
         let clock = ManualClock::new(FAKE_MS);
@@ -1070,6 +1071,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = ServerConfig::server_defaults();
         cfg.api.listen = "127.0.0.1:0".parse().expect("addr");
+        cfg.cluster.listen = "127.0.0.1:0".parse().expect("addr");
         cfg.node.data_dir = dir.path().to_path_buf();
         cfg.node.partitions = 2;
         cfg.executor.slots = 7;
