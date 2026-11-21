@@ -30,6 +30,7 @@ pub mod effects;
 pub mod error;
 pub mod ops;
 pub mod registry;
+pub mod saga;
 pub mod step;
 
 pub use children::{CHILD_TERMINATED, ChildOptions, ChildRun};
@@ -40,6 +41,7 @@ pub use effects::{
 };
 pub use error::{ContinueAsNew, StepError, WorkflowError};
 pub use ops::{CANCELLATION, Completion, Op, OpId, is_cancellation};
+pub use saga::{CompensationFailure, Saga, SagaReport};
 
 /// The canonical JSON payload codec every SDK shares (pinned by
 /// `conformance/vectors/json.json`): compact separators, non-ASCII kept as UTF-8,
@@ -91,6 +93,7 @@ pub mod prelude {
     pub use crate::error::{ContinueAsNew, StepError, WorkflowError};
     pub use crate::ops::{Completion, Op};
     pub use crate::registry::Workflow;
+    pub use crate::saga::Saga;
     pub use crate::step::{StepOptions, run_step};
     pub use crate::{join, select};
     pub use ostro_sdk_macros::{step, workflow};

@@ -88,11 +88,11 @@ impl StepError {
 
     /// Convert to the WIT `failure` variant.
     pub(crate) fn to_failure(&self) -> Failure {
-        failure_of(&self.kind, &self.message, self.retryable)
+        failure_of(&self.kind, &self.message, self.retryable, None)
     }
 }
 
-fn failure_of(kind: &str, message: &str, retryable: bool) -> Failure {
+fn failure_of(kind: &str, message: &str, retryable: bool, details: Option<&[u8]>) -> Failure {
     if !retryable && kind == TIMEOUT {
         return Failure::Timeout;
     }
@@ -102,7 +102,10 @@ fn failure_of(kind: &str, message: &str, retryable: bool) -> Failure {
     let info = ErrorInfo {
         kind: kind.to_string(),
         message: message.to_string(),
-        details: None,
+        details: details.map(|d| crate::bindings::ostro::runtime::types::Payload {
+            content_type: JSON.to_string(),
+            data: d.to_vec(),
+        }),
     };
     if retryable {
         Failure::Retryable(info)
@@ -213,6 +216,8 @@ pub struct WorkflowError {
     /// Whether the host may retry the run under its run retry policy.
     pub retryable: bool,
     continuation: Option<Box<ContinueAsNew>>,
+    /// JSON-encoded `error-info.details` (see [`WorkflowError::with_details`]).
+    details: Option<Vec<u8>>,
 }
 
 impl WorkflowError {
@@ -223,6 +228,7 @@ impl WorkflowError {
             message: message.into(),
             retryable: true,
             continuation: None,
+            details: None,
         }
     }
 
@@ -233,6 +239,7 @@ impl WorkflowError {
             message: message.into(),
             retryable: false,
             continuation: None,
+            details: None,
         }
     }
 
@@ -248,6 +255,24 @@ impl WorkflowError {
         }
     }
 
+    /// Attach JSON `details` (WIT `error-info.details`, `application/json`), replacing any
+    /// earlier details. They reach the host with a retryable or non-retryable failure; the
+    /// reserved `timeout` / `cancelled` failures carry no details. If `details` cannot be
+    /// JSON-encoded the error is returned unchanged.
+    pub fn with_details<T: Serialize + ?Sized>(mut self, details: &T) -> Self {
+        if let Ok(d) = serde_json::to_vec(details) {
+            self.details = Some(d);
+        }
+        self
+    }
+
+    /// The JSON details attached with [`with_details`](Self::with_details), if any.
+    pub fn details(&self) -> Option<serde_json::Value> {
+        self.details
+            .as_deref()
+            .and_then(|d| serde_json::from_slice(d).ok())
+    }
+
     /// The continue-as-new request this error carries, if any.
     pub fn continuation(&self) -> Option<&ContinueAsNew> {
         self.continuation.as_deref()
@@ -260,7 +285,12 @@ impl WorkflowError {
 
     /// Convert to the WIT `failure` variant.
     pub(crate) fn to_failure(&self) -> Failure {
-        failure_of(&self.kind, &self.message, self.retryable)
+        failure_of(
+            &self.kind,
+            &self.message,
+            self.retryable,
+            self.details.as_deref(),
+        )
     }
 }
 
@@ -271,6 +301,7 @@ impl From<ContinueAsNew> for WorkflowError {
             message: "continue-as-new".to_string(),
             retryable: false,
             continuation: Some(Box::new(c)),
+            details: None,
         }
     }
 }
@@ -282,6 +313,7 @@ impl From<StepError> for WorkflowError {
             message: e.message,
             retryable: e.retryable,
             continuation: None,
+            details: None,
         }
     }
 }
@@ -373,6 +405,23 @@ mod tests {
         assert!(!e.is_continue_as_new());
         assert_eq!(e.kind, INVALID_JSON);
         assert!(!WorkflowError::non_retryable("k", "m").is_continue_as_new());
+    }
+
+    #[test]
+    fn workflow_error_details_reach_the_failure() {
+        let e = WorkflowError::non_retryable("k", "m").with_details(&serde_json::json!({"a": 1}));
+        assert_eq!(e.details(), Some(serde_json::json!({"a": 1})));
+        match e.to_failure() {
+            Failure::NonRetryable(i) => {
+                let d = i.details.expect("details");
+                assert_eq!(d.content_type, JSON);
+                assert_eq!(d.data, br#"{"a":1}"#);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let c = WorkflowError::from(StepError::cancelled()).with_details(&1);
+        assert!(matches!(c.to_failure(), Failure::Cancelled));
+        assert_eq!(WorkflowError::retryable("k", "m").details(), None);
     }
 
     #[test]

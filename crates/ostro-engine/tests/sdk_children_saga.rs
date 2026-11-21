@@ -452,3 +452,106 @@ mod children {
         );
     }
 }
+
+mod saga {
+    use super::*;
+
+    const SAGA: &str = "sdk-saga";
+
+    /// The run failed non-retryable with `kind`; returns its JSON details.
+    fn failed_with(outcome: &ActivationOutcome, kind: &str, journal: &[Event]) -> Value {
+        match outcome {
+            ActivationOutcome::Failed {
+                failure: Failure::NonRetryable(i),
+            } => {
+                assert_eq!(i.kind, kind, "{journal:#?}");
+                let d = i.details.as_ref().expect("error details");
+                assert_eq!(d.content_type, "application/json");
+                serde_json::from_slice(&d.data).expect("JSON details")
+            }
+            other => panic!("expected non-retryable {kind}, got {other:?} (journal: {journal:#?})"),
+        }
+    }
+
+    #[tokio::test]
+    async fn saga_three_compensates_in_reverse_order() {
+        let p = guest(SAGA).await;
+        let (outcome, journal) = activate(&p, start(&p, "saga_three", &Value::Null)).await;
+        let details = failed_with(&outcome, "book_c_failed", &journal);
+        assert_eq!(
+            step_names(&journal),
+            ["book_a", "book_b", "book_c", "cancel_b", "cancel_a"]
+        );
+        assert_eq!(
+            details,
+            json!({"compensated": ["cancel_b", "cancel_a"], "compensation_failures": []})
+        );
+        assert_replays(&p, &outcome, &journal).await;
+    }
+
+    #[tokio::test]
+    async fn saga_comp_fails_continues_past_a_failing_compensation() {
+        let p = guest(SAGA).await;
+        let (outcome, journal) = activate(&p, start(&p, "saga_comp_fails", &Value::Null)).await;
+        let details = failed_with(&outcome, "book_c_failed", &journal);
+        assert_eq!(
+            step_names(&journal),
+            ["book_a", "book_b", "book_c", "cancel_b", "cancel_a"]
+        );
+        assert_eq!(details["compensated"], json!(["cancel_a"]));
+        assert_eq!(
+            details["compensation_failures"],
+            json!([{
+                "compensation": "cancel_b",
+                "error": {"kind": "cancel_b_failed", "message": "refund rejected", "retryable": false}
+            }])
+        );
+        assert_replays(&p, &outcome, &journal).await;
+    }
+
+    #[tokio::test]
+    async fn saga_cancelled_still_compensates_shielded_and_ends_cancelled() {
+        let p = guest(SAGA).await;
+        let (outcome, mut journal) = activate(&p, start(&p, "saga_cancelled", &Value::Null)).await;
+        assert_evicted(&outcome, &journal);
+        assert_eq!(step_names(&journal), ["book_a", "book_b"]);
+        commit(&mut journal, vec![cancel_requested()]);
+        let (outcome, journal) = activate(&p, journal).await;
+        assert_eq!(
+            outcome,
+            ActivationOutcome::Failed {
+                failure: Failure::Cancelled
+            },
+            "{journal:#?}"
+        );
+        assert_eq!(
+            step_names(&journal),
+            ["book_a", "book_b", "cancel_b", "cancel_a"]
+        );
+        // The compensations come after the cancel in journal order.
+        let cancel_seq = journal
+            .iter()
+            .find(|e| e.body.kind() == EventKind::CancelRequested)
+            .map(|e| e.seq)
+            .expect("cancel");
+        let first_comp = journal
+            .iter()
+            .find(|e| matches!(&e.body, EventBody::StepCompleted(s) if s.name == "cancel_b"))
+            .map(|e| e.seq)
+            .expect("cancel_b");
+        assert!(cancel_seq < first_comp, "{journal:#?}");
+        assert_replays(&p, &outcome, &journal).await;
+    }
+
+    #[tokio::test]
+    async fn saga_ok_runs_no_compensation() {
+        let p = guest(SAGA).await;
+        let (outcome, journal) = activate(&p, start(&p, "saga_ok", &Value::Null)).await;
+        assert_eq!(
+            output_json(&outcome, &journal),
+            json!({"booked": ["a", "b", "c"], "pending_compensations": 2})
+        );
+        assert_eq!(step_names(&journal), ["book_a", "book_b", "book_c"]);
+        assert_replays(&p, &outcome, &journal).await;
+    }
+}
