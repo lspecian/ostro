@@ -239,8 +239,11 @@ async fn count(db: &MyTestDb, q: &str) -> i64 {
         .unwrap()
 }
 
+/// Setup statements go over the text protocol (COM_QUERY): `sqlx::query` always prepares on
+/// MySQL, and statements such as `CREATE FUNCTION` are refused by the prepared-statement
+/// protocol (ER_UNSUPPORTED_PS, 1295).
 async fn ddl(db: &MyTestDb, q: &str) {
-    sqlx::query(sqlx::AssertSqlSafe(q.to_owned()))
+    sqlx::raw_sql(sqlx::AssertSqlSafe(q.to_owned()))
         .execute(db.pool())
         .await
         .unwrap();
