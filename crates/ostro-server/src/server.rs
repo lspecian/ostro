@@ -198,6 +198,10 @@ pub struct ServerOptions {
     pub clock: Arc<dyn Clock>,
     /// Executor test hooks (full-server lease/zombie tests). The binary never sets hooks.
     pub hooks: Arc<ExecutorHooks>,
+    /// The profile whose `[api.tls] mode = "auto"` rule applies (D-W8). The binary sets
+    /// it (`ostro dev` / `ostro server`); `None` derives it from the configuration
+    /// ([`crate::tls::TlsProfile::of`]).
+    pub tls_profile: Option<crate::tls::TlsProfile>,
 }
 
 impl Default for ServerOptions {
@@ -206,6 +210,7 @@ impl Default for ServerOptions {
             // The one production clock (injection root); tests pass their own.
             clock: Arc::new(ostro_partition::SystemClock), // clock-exempt: injection root
             hooks: Arc::new(ExecutorHooks::default()),
+            tls_profile: None,
         }
     }
 }
@@ -226,6 +231,13 @@ impl ServerOptions {
     /// Use executor test hooks.
     pub fn with_hooks(mut self, hooks: Arc<ExecutorHooks>) -> Self {
         self.hooks = hooks;
+        self
+    }
+
+    /// Apply `profile`'s `[api.tls] mode = "auto"` rule (D-W8) instead of deriving the
+    /// profile from the configuration.
+    pub fn with_tls_profile(mut self, profile: crate::tls::TlsProfile) -> Self {
+        self.tls_profile = Some(profile);
         self
     }
 }
@@ -261,7 +273,11 @@ async fn start_inner(
     opts: ServerOptions,
     telemetry: &mut Option<TelemetryGuard>,
 ) -> Result<ServerHandle, ServerError> {
-    let ServerOptions { clock, hooks } = opts;
+    let ServerOptions {
+        clock,
+        hooks,
+        tls_profile,
+    } = opts;
     // clock-exempt: startup step durations are reported (StartupTimings), never used for logic.
     let t0 = Instant::now();
     let count = PartitionCount::new(cfg.node.partitions)
@@ -369,6 +385,8 @@ async fn start_inner(
         cluster_id: cluster_id.clone(),
         node_id,
         lease_ttl: cfg.executor.lease_ttl.get(),
+        tls_profile,
+        client_addr: Some(local_addr),
     })
     .await
     {

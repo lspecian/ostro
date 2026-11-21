@@ -119,7 +119,8 @@ pub(crate) fn join_url(cp: &ServerControlPlane) -> String {
         TlsMode::Off => "http",
         TlsMode::SelfSigned | TlsMode::Files | TlsMode::Acme => "https",
     };
-    let listen = loopback_if_unspecified(cp.cfg.api.listen);
+    // The bound address (07-22): an ephemeral `[api] listen = …:0` shows the real port.
+    let listen = loopback_if_unspecified(cp.p7.client_addr.unwrap_or(cp.cfg.api.listen));
     if mode == TlsMode::Acme
         && let Some(domain) = cp.cfg.api.tls.acme.domains.first()
     {

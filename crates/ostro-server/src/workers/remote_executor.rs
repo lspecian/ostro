@@ -512,7 +512,9 @@ impl RemoteRunner {
             revoked: false,
         };
         let (mut seqs_open, mut sink_open) = (true, true);
-        let mut cancel_deadline: Option<tokio::time::Instant> = None;
+        // A relative bound on the wait for `Done` after `Cancel` (a pinned tokio sleep; no
+        // clock read, Phase 10 F5).
+        let mut cancel_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
         let done = loop {
             tokio::select! {
                 biased;
@@ -521,9 +523,9 @@ impl RemoteRunner {
                     let msg = v1::Cancel { run: Some(wire_run(&run)), token: Some(wire_token(token)), reason: 0 };
                     hooks.remote.record(WireDir::Out, "cancel", &[&wire_run(&run).run_id]);
                     rj.send(v1::server_msg::Msg::Cancel(msg));
-                    cancel_deadline = Some(tokio::time::Instant::now() + self.cancel_wait);
+                    cancel_timer = Some(Box::pin(tokio::time::sleep(self.cancel_wait)));
                 }
-                _ = sleep_until_opt(cancel_deadline), if cancel_deadline.is_some() => {
+                () = sleep_opt(cancel_timer.as_mut()), if cancel_timer.is_some() => {
                     debug!(%run, "no Done after Cancel within the bound");
                     break None;
                 }
@@ -827,9 +829,9 @@ impl RemoteRunner {
     }
 }
 
-async fn sleep_until_opt(at: Option<tokio::time::Instant>) {
-    match at {
-        Some(at) => tokio::time::sleep_until(at).await,
+async fn sleep_opt(timer: Option<&mut std::pin::Pin<Box<tokio::time::Sleep>>>) {
+    match timer {
+        Some(t) => t.as_mut().await,
         None => std::future::pending().await,
     }
 }

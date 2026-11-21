@@ -51,7 +51,7 @@ use crate::bridge_services::BridgeServices;
 use crate::config::ServerConfig;
 use crate::executor::EngineExecutor;
 use crate::flow::NodeFlow;
-use crate::tls::{self, ClientEndpoint, TlsError, TlsState};
+use crate::tls::{self, ClientEndpoint, TlsError, TlsProfile, TlsState};
 use crate::workers::join::JoinService;
 use crate::workers::registry::WorkerRegistry;
 use crate::workers::spill::SpillHandle;
@@ -108,6 +108,10 @@ pub struct P7Shared {
     pub bridge: Option<Arc<BridgeServices>>,
     /// Partition handles + blob store, set by [`attach_node`] after `Node::open`.
     pub node: OnceLock<NodeRefs>,
+    /// The client listener's bound address (07-22: the join command shows the real port
+    /// when `[api] listen` asks for an ephemeral one). `None` when the caller did not
+    /// pass it; `[api] listen` is used then.
+    pub client_addr: Option<SocketAddr>,
 }
 
 impl std::fmt::Debug for P7Shared {
@@ -163,6 +167,12 @@ pub struct P7Init {
     pub cluster_id: String,
     pub node_id: u64,
     pub lease_ttl: Duration,
+    /// The profile whose `[api.tls] mode = "auto"` rule applies (D-W8). `None` falls back
+    /// to [`TlsProfile::of`] (the `auto_sealing_key` heuristic) for library callers that
+    /// do not know it; the binary always passes the profile it started (07-22).
+    pub tls_profile: Option<TlsProfile>,
+    /// The client listener's bound address (see [`P7Shared::client_addr`]).
+    pub client_addr: Option<SocketAddr>,
 }
 
 /// Build the Phase 7 context: TLS (`tls::init`), registry, flow control, spill, join.
@@ -177,8 +187,14 @@ pub async fn init(i: P7Init) -> Result<P7Ctx, P7Error> {
         cluster_id,
         node_id,
         lease_ttl,
+        tls_profile,
+        client_addr,
     } = i;
-    let tls = tls::init(&config, &data_dir, &cluster_id)?;
+    let profile = tls_profile.unwrap_or_else(|| TlsProfile::of(&config));
+    let tls = tls::init_with_profile(&config, &data_dir, &cluster_id, profile)?;
+    // ACME renewal scheduling reads the injected clock (Phase 10 F5, D-W26). First call
+    // wins: in a process that starts several servers (tests) the first clock stays.
+    tls::acme::set_clock(Arc::clone(&clock));
     let view = meta.view().clone();
     let gauges = Arc::new(QueueGauges::new());
     let shared = Arc::new(P7Shared {
@@ -198,6 +214,7 @@ pub async fn init(i: P7Init) -> Result<P7Ctx, P7Error> {
         engine: OnceLock::new(),
         bridge,
         node: OnceLock::new(),
+        client_addr,
     });
     Ok(P7Ctx {
         config,

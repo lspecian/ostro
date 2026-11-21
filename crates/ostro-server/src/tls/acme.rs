@@ -94,6 +94,8 @@ fn clock() -> Arc<dyn Clock> {
     CLOCK
         .get()
         .cloned()
+        // clock-exempt: fallback injection root for library callers; `p7::init` always
+        // injects the node clock with `set_clock` (07-22).
         .unwrap_or_else(|| Arc::new(SystemClock) as Arc<dyn Clock>)
 }
 

@@ -26,9 +26,10 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+use ostro_server::ServerHandle;
 use ostro_server::config::{EnvSource, Overrides, ServerConfig, load_layered};
 use ostro_server::logging::init_tracing;
-use ostro_server::{Server, ServerHandle};
+use ostro_server::tls::TlsProfile;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -132,7 +133,7 @@ fn main() -> ExitCode {
                     if ephemeral {
                         cfg.node.ephemeral = true;
                     }
-                    run_server("ostro dev", cfg, started)
+                    run_server("ostro dev", cfg, TlsProfile::Dev, started)
                 }
                 Err(e) => fail(e),
             }
@@ -158,15 +159,14 @@ fn main() -> ExitCode {
                 print!("{}", cfg.to_toml_string());
                 return ExitCode::SUCCESS;
             }
-            // D-W8 / 07-06 follow-up: the server profile's `auto` rule applies even when
-            // `secrets.auto_sealing_key = true` (the flag tls::init reads as the dev
-            // marker), so a non-loopback `auto` listener is refused here as well.
-            if let Err(e) =
-                ostro_server::tls::effective_mode(&cfg, ostro_server::tls::TlsProfile::Server)
-            {
+            // D-W8: the server profile's `auto` rule applies whatever the configuration
+            // says (`secrets.auto_sealing_key` included). The server enforces it too
+            // (`ServerOptions::with_tls_profile`, 07-22); checking here first gives the
+            // one-line error before the runtime starts.
+            if let Err(e) = ostro_server::tls::effective_mode(&cfg, TlsProfile::Server) {
                 return fail(e);
             }
-            run_server("ostro server", cfg, started)
+            run_server("ostro server", cfg, TlsProfile::Server, started)
         }
         Some(Command::Backup(a)) => run_backup(&a),
         Some(Command::Restore(a)) => run_restore(&a),
@@ -289,7 +289,7 @@ fn run_restore(a: &ostro_cli::commands::backup::RestoreArgs) -> ExitCode {
 }
 
 /// Start the server, print the ready line, wait for a signal, shut down.
-fn run_server(name: &str, cfg: ServerConfig, started: Instant) -> ExitCode {
+fn run_server(name: &str, cfg: ServerConfig, profile: TlsProfile, started: Instant) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("ostro")
@@ -307,7 +307,8 @@ fn run_server(name: &str, cfg: ServerConfig, started: Instant) -> ExitCode {
             Ok(s) => s,
             Err(e) => return fail(format!("cannot install signal handlers: {e}")),
         };
-        let handle = match Server::start(cfg).await {
+        let opts = ostro_server::ServerOptions::default().with_tls_profile(profile);
+        let handle = match ostro_server::server::start_with_options(cfg, opts).await {
             Ok(h) => h,
             Err(e) => return fail(e),
         };
