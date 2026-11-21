@@ -15,6 +15,9 @@
 //! - [`watch`]: the long-poll [`RunWatchers`] hub and `await_result` (05-13).
 //! - [`bridge`]: Phase 6 bridge administration: sealed secrets, grants, connections,
 //!   egress policies and the local presign route (06-16).
+//! - [`p7_flow`] / [`p7_pause`] (07-14): the Phase 7 control plane: queue flow (meta
+//!   `QueuePolicy` F2 fields), queue / workflow / run pause and resume, and the paused-run
+//!   `/retry` alias.
 //!
 //! Phase 8 (08-10): the controllers behind `ostro_api::phase8`, each holding the one
 //! [`ControlCtx`] built in `server.rs` and installed through [`phase8_extensions`]:
@@ -42,6 +45,7 @@ use ostro_api::domain::{
     SecretInfo, SignalRequest, SignalResponse, StartRunRequest, StartRunResult, TerminateRequest,
     TerminateResponse, UploadModule, UploadModuleResult, WorkflowInfo,
 };
+use ostro_api::phase7::{PauseState, QueueFlow, QueueFlowInfo, RunPauseState};
 use ostro_api::{ApiError, ApiExtensions};
 use ostro_blob::BlobStore;
 use ostro_engine::runtime::Runtime;
@@ -64,6 +68,8 @@ pub mod lifecycle;
 pub mod list;
 pub mod modules;
 pub mod names;
+pub mod p7_flow;
+pub mod p7_pause;
 pub mod policy;
 pub mod run_logs;
 pub mod runs;
@@ -252,6 +258,10 @@ impl ControlPlane for ServerControlPlane {
     }
 
     async fn retry_run(&self, r: RetryRequest) -> Result<RetryResponse, ApiError> {
+        // 07-14: `/retry` on a paused, non-terminal run resumes it (see [`p7_pause`]).
+        if let Some(resumed) = p7_pause::retry_alias(self, &r).await? {
+            return Ok(resumed);
+        }
         lifecycle::retry_run(self, r).await
     }
 
@@ -349,6 +359,49 @@ impl ControlPlane for ServerControlPlane {
         req: PresignedObjectRequest,
     ) -> Result<PresignedObjectResponse, ApiError> {
         bridge::presigned_object(self, req).await
+    }
+
+    // --- Phase 7 control plane (07-14): see [`p7_flow`], [`p7_pause`] ---
+
+    async fn get_queue_flow(&self, queue: String) -> Result<QueueFlowInfo, ApiError> {
+        p7_flow::get_queue_flow(self, queue).await
+    }
+
+    async fn put_queue_flow(
+        &self,
+        queue: String,
+        flow: QueueFlow,
+        expected_version: Option<u64>,
+    ) -> Result<QueueFlowInfo, ApiError> {
+        p7_flow::put_queue_flow(self, queue, flow, expected_version).await
+    }
+
+    async fn pause_queue(&self, queue: String) -> Result<PauseState, ApiError> {
+        p7_flow::pause_queue(self, queue).await
+    }
+
+    async fn resume_queue(&self, queue: String) -> Result<PauseState, ApiError> {
+        p7_flow::resume_queue(self, queue).await
+    }
+
+    async fn pause_workflow(&self, workflow: String) -> Result<PauseState, ApiError> {
+        p7_flow::pause_workflow(self, workflow).await
+    }
+
+    async fn resume_workflow(&self, workflow: String) -> Result<PauseState, ApiError> {
+        p7_flow::resume_workflow(self, workflow).await
+    }
+
+    async fn pause_run(
+        &self,
+        run_id: String,
+        detail: Option<String>,
+    ) -> Result<RunPauseState, ApiError> {
+        p7_pause::pause_run(self, run_id, detail).await
+    }
+
+    async fn resume_run(&self, run_id: String) -> Result<RunPauseState, ApiError> {
+        p7_pause::resume_run(self, run_id).await
     }
 
     /// Serving, meta has a leader, and every partition slot is `Ready` and not failed.
