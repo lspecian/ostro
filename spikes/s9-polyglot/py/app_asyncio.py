@@ -12,6 +12,8 @@ Workflows:
   imported at module level: with `--stub-wasi` there is no filesystem at run time, so a
   first import inside `run` traps (see `lazy-import`).
 - `lazy-import`: imports a stdlib module (`fractions`) for the first time inside `run`.
+- `hash-probe`: str hash seed baked into the snapshot (`hash("ostro")`, hash flags, and the
+  PYTHONHASHSEED the pre-init interpreter saw), for the reproducibility analysis.
 """
 
 # --- SDK-IMPORTS BEGIN ---
@@ -61,6 +63,7 @@ class Workflows(wit_world.exports.Workflows):
             workflows.WorkflowMeta("classes", 1, None, None),
             workflows.WorkflowMeta("loop-check", 1, None, None),
             workflows.WorkflowMeta("lazy-import", 1, None, None),
+            workflows.WorkflowMeta("hash-probe", 1, None, None),
         ]
 
     def run(self, name: str, input: types.Payload) -> workflows.RunResult:
@@ -75,6 +78,14 @@ class Workflows(wit_world.exports.Workflows):
             if loop_proto is None:
                 return workflows.RunResult_Completed(_payload('{"error":"loop_proto not staged"}'))
             return workflows.RunResult_Completed(_payload(json.dumps(loop_proto.selfcheck())))
+        if name == "hash-probe":
+            env = sys.modules["os"].environ.get("PYTHONHASHSEED")
+            return workflows.RunResult_Completed(
+                _payload(
+                    '{"hash":%d,"hash_randomization":%d,"PYTHONHASHSEED":"%s","set_order":%s}'
+                    % (hash("ostro"), sys.flags.hash_randomization, env, _list(list({"a", "b", "c", "d"})))
+                )
+            )
         if name == "lazy-import":
             import fractions
 

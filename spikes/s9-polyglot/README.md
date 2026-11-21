@@ -11,7 +11,7 @@ and nothing here is part of the root workspace (`spikes` is in the root `exclude
 | `ts/probe.ts` | SdkPromise + SDK-owned job loop prototype for the real world, plus the result-mapping, surrogate and environment probes. Built for QuickJS and StarlingMonkey. |
 | `ts/lowering_fixture.ts` | Async-construct coverage fixture (question 9); `run.sh` stages it with `probe.ts` and a generated `dep.ts` (with and without top-level await). |
 | `ts/package.json` | jco 1.42.0 + componentize-js 0.23.0 pins (componentize-qjs 0.5.0 comes with jco). |
-| `run.sh` | `build`, `measure`, `probes`, `repro`, `summary`, `all`. |
+| `run.sh` | `build`, `measure`, `probes`, `repro` (builds + `repro.txt`), `repro-analyze` (diff analysis only), `summary`, `all`. |
 
 Run (needs uv, Node 24, cargo; network for the first uv/npm fetch):
 

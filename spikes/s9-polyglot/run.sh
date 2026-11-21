@@ -8,6 +8,7 @@
 #   probes   lowering, export naming, result mapping, surrogates, TS SdkPromise on the
 #            real engine (QJS + SM), Python OstroLoop in the embedded CPython (Task 2)
 #   repro    3 wrapper + 3 plain builds of py-base and ts-qjs, byte diffs (Task 3)
+#   repro-analyze  re-run only the diff analysis over out/repro
 #
 # Every measurement appends JSON lines to docs/spikes/data/S9/measurements.jsonl
 # (S9_FRESH=1 truncates it first); repro writes docs/spikes/data/S9/repro.txt.
@@ -257,6 +258,21 @@ do_probes() {
             --field toml='wit_directory = "wit"' --field build_exit="$rc" --field log="$(tail -1 "$n/$c.log")"
     done
 
+    # The SDK ships the Workflows class; the app only re-exports it.
+    local re="$n/reexport"; mkdir -p "$re/ostrolib/wit"
+    cp "$WIT/runtime.wit" "$re/ostrolib/wit/"
+    printf 'wit_directory = "wit"\n' > "$re/ostrolib/componentize-py.toml"
+    cp "$HERE/py/app_asyncio.py" "$re/ostrolib/__init__.py"
+    printf 'from ostrolib import Workflows  # re-exported SDK class\n' > "$re/app.py"
+    rc=0
+    (cd "$re" && "${CPY[@]}" componentize --stub-wasi -p . app -o re.wasm) > "$n/reexport.log" 2>&1 || rc=$?
+    note py-naming componentize-py export_naming --field case=library_class_reexported_by_app \
+        --field app='from ostrolib import Workflows' --field build_exit="$rc" --field log="$(tail -1 "$n/reexport.log")"
+    if [ "$rc" = 0 ]; then
+        "$H" fuel "$re/re.wasm" --workflow hello --guest py-reexport --backend componentize-py \
+            --probe export_naming --out "$JSONL" >/dev/null
+    fi
+
     log "Python OstroLoop prototype inside the embedded CPython"
     "$H" fuel "$OUT/py-loop.wasm" --workflow loop-check --workflow classes --workflow lazy-import --guest py-loop \
         --backend componentize-py --probe py_loop --out "$JSONL" >/dev/null
@@ -297,36 +313,140 @@ do_repro() {
             sleep 3
         done
     done
-    python3 -I - "$r" "$sde" > "$DATA/repro.txt" <<'EOF'
+    echo "$sde" > "$r/sde.txt"
+    harness
+    for mode in plain wrapper; do
+        for i in 1 2 3; do
+            "$H" fuel "$r/py-$mode-$i.wasm" --workflow hash-probe --guest "py-$mode-$i" \
+                --backend componentize-py --probe repro_hash --out "$r/hash.jsonl" >/dev/null
+        done
+    done
+    analyze_repro
+}
+
+# Structural byte-diff of the repro builds: whole-file sha/length/cmp -l, then a walk of
+# the component binary (nested core modules and components) that names every differing
+# section, splits data sections into segments, and reports common prefix/suffix plus
+# 4-byte LE / f64 Unix timestamps near the build times inside equal-length segments.
+analyze_repro() {
+    local r="$OUT/repro"
+    python3 -I - "$r" > "$DATA/repro.txt" <<'EOF'
 import hashlib, os, struct, sys
-r, sde = sys.argv[1], int(sys.argv[2])
+r = sys.argv[1]
+sde = int(open(os.path.join(r, "sde.txt")).read())
 times = {}
 for line in open(os.path.join(r, "times.txt")):
     mode, i, s, e = line.split()
     times[(mode, i)] = (int(s.split("=")[1]), int(e.split("=")[1]))
 lo = min(s for s, _ in times.values()) - 3600
 hi = max(e for _, e in times.values()) + 60
+
+MOD = {0: "custom", 1: "type", 2: "import", 3: "function", 4: "table", 5: "memory", 6: "global",
+       7: "export", 8: "start", 9: "element", 10: "code", 11: "data", 12: "datacount"}
+COMP = {0: "custom", 1: "core-module", 2: "core-instance", 3: "core-type", 4: "component",
+        5: "instance", 6: "alias", 7: "type", 8: "canon", 9: "start", 10: "import", 11: "export"}
+
+def leb(b, i):
+    v = s = 0
+    while True:
+        x = b[i]; i += 1
+        v |= (x & 0x7F) << s; s += 7
+        if x < 0x80:
+            return v, i
+
+def name_of(b, i):
+    n, j = leb(b, i)
+    return b[j:j + n].decode("utf-8", "replace")
+
+def data_segments(b, s, e):
+    out = []
+    n, i = leb(b, s)
+    for k in range(n):
+        flags, i = leb(b, i)
+        if flags == 2:
+            _, i = leb(b, i)
+        if flags in (0, 2):
+            while b[i] != 0x0B:
+                i += 1
+            i += 1
+        size, i = leb(b, i)
+        out.append((f"seg{k}", i, i + size))
+        i += size
+    return out
+
+def walk(b, start, end, path, kind, out):
+    i = start + 8
+    idx = {"m": 0, "c": 0}
+    sec = 0
+    while i < end:
+        sid = b[i]; i += 1
+        size, i = leb(b, i)
+        s, e = i, i + size
+        if kind == "component" and sid == 1:
+            walk(b, s, e, f"{path}/module{idx['m']}", "module", out); idx["m"] += 1
+        elif kind == "component" and sid == 4:
+            walk(b, s, e, f"{path}/component{idx['c']}", "component", out); idx["c"] += 1
+        else:
+            label = (MOD if kind == "module" else COMP).get(sid, f"id{sid}")
+            if sid == 0:
+                label += ":" + name_of(b, s)
+            key = f"{path}/s{sec}:{label}"
+            if kind == "module" and sid == 11:
+                for name, ss, se in data_segments(b, s, e):
+                    out.append((f"{key}/{name}", ss, se))
+            else:
+                out.append((key, s, e))
+        sec += 1
+        i = e
+
+def sections(b):
+    out = []
+    walk(b, 0, len(b), "", "component", out)
+    return out
+
+def stamps(a, b):
+    hits = []
+    for k in range(0, len(a) - 3):
+        if a[k] != b[k] or a[k + 1] != b[k + 1] or a[k + 2] != b[k + 2] or a[k + 3] != b[k + 3]:
+            x = struct.unpack_from("<I", a, k)[0]; y = struct.unpack_from("<I", b, k)[0]
+            if x != y and lo <= x <= hi and lo <= y <= hi:
+                hits.append((k, "u32", x, y))
+    for k in range(0, len(a) - 7):
+        if a[k:k + 8] != b[k:k + 8]:
+            x = struct.unpack_from("<d", a, k)[0]; y = struct.unpack_from("<d", b, k)[0]
+            if x != y and lo <= x <= hi and lo <= y <= hi:
+                hits.append((k, "f64", x, y))
+    return hits
+
+def prefix_suffix(a, b):
+    n = min(len(a), len(b))
+    p = 0
+    while p < n and a[p] == b[p]:
+        p += 1
+    q = 0
+    while q < n - p and a[-1 - q] == b[-1 - q]:
+        q += 1
+    return p, q
+
 print("S9 reproducibility (plan 09-04 Task 3)")
-print(f"SOURCE_DATE_EPOCH (HEAD commit time) = {sde}")
+print(f"SOURCE_DATE_EPOCH (HEAD commit time) = {sde}; plausible build-time window for timestamps: [{lo}, {hi}]")
 print("wrapper = D-P9-3 step 1: sources staged into a fresh temp dir with every mtime = SOURCE_DATE_EPOCH,")
 print("          PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 TZ=UTC LC_ALL=C SOURCE_DATE_EPOCH exported.")
 print("plain   = same pinned commands, fresh temp stage dir (python) / in-tree source (ts), no env.")
-print("Toolchains: componentize-py 0.25.1 (--stub-wasi), jco 1.42.0 + componentize-qjs 0.5.0;")
-print("builds >= 3 s apart (sleep 3).")
+print("Toolchains: componentize-py 0.25.1 (--stub-wasi), jco 1.42.0 + componentize-qjs 0.5.0; builds >= 3 s apart.")
+print("Whole-file cmp counts are positional (a length change shifts everything after it); the section")
+print("walk below is the meaningful diff: each differing section/data segment with sizes, common")
+print("prefix/suffix, and for equal-length pieces the differing byte count and timestamp hits.")
 print()
-def ts_hits(a, b, offs):
-    """Diff offsets covered by a 4-byte LE u32 that is a plausible Unix time in both files."""
-    hits = {}
-    for o in offs:
-        for start in range(o - 3, o + 1):
-            if start < 0 or start + 4 > len(a):
-                continue
-            x = struct.unpack_from("<I", a, start)[0]
-            y = struct.unpack_from("<I", b, start)[0]
-            if x != y and lo <= x <= hi and lo <= y <= hi:
-                hits[start] = (x, y)
-                break
-    return hits
+import json
+print("Snapshot str-hash seed per Python build (hash-probe workflow, run on the fake host):")
+for line in open(os.path.join(r, "hash.jsonl")):
+    d = json.loads(line)
+    print(f"  {d['guest']}: {d['runs'][0]['first']['outcome'].get('completed')}")
+print("  -> the host PYTHONHASHSEED=0 never reaches the pre-init interpreter (componentize-py's")
+print("     WasiCtxBuilder sets only PYTHONUNBUFFERED/PYTHONHOME/PYTHONPATH), so every build bakes")
+print("     a fresh random hash seed (and set iteration order) into the snapshot.")
+print()
 for lang in ("py", "qjs"):
     for mode in ("plain", "wrapper"):
         files = [os.path.join(r, f"{lang}-{mode}-{i}.wasm") for i in (1, 2, 3)]
@@ -342,30 +462,37 @@ for lang in ("py", "qjs"):
                 print(f"  {pair}: identical")
                 continue
             n = min(len(a), len(b))
-            offs = [k for k in range(n) if a[k] != b[k]]
-            print(f"  {pair}: lengths {len(a)} vs {len(b)}; differing bytes (cmp -l) = {len(offs)}"
-                  f"{' + length tail ' + str(abs(len(a)-len(b))) if len(a) != len(b) else ''}")
-            print(f"    first offsets: {[hex(o) for o in offs[:12]]}")
-            runs, prev = [], None
-            for o in offs:
-                if prev is None or o > prev + 1:
-                    runs.append([o, o])
+            cmpl = sum(1 for k in range(n) if a[k] != b[k])
+            first = [hex(k) for k in range(n) if a[k] != b[k]][:8]
+            print(f"  {pair}: lengths {len(a)} vs {len(b)}; cmp -l | wc -l = {cmpl}; first offsets {first}")
+            sa, sb = sections(a), sections(b)
+            if [k for k, _, _ in sa] != [k for k, _, _ in sb]:
+                print("    section layout differs (count/order)")
+            ka = {k: (s, e) for k, s, e in sa}
+            pieces, eq_bytes, eq_n, len_changed, u32, f64 = [], 0, 0, 0, [], []
+            missing = sum(1 for k, _, _ in sb if k not in ka) + sum(1 for k in ka if k not in {k for k, _, _ in sb})
+            for k, s, e in sb:
+                if k not in ka:
+                    continue
+                pa = a[ka[k][0]:ka[k][1]]; pb = b[s:e]
+                if pa == pb:
+                    continue
+                if len(pa) == len(pb):
+                    eq_n += 1
+                    eq_bytes += sum(1 for u, v in zip(pa, pb) if u != v)
+                    for off, kind, u, v in stamps(pa, pb):
+                        (u32 if kind == "u32" else f64).append((k, off, u, v, pa[max(0, off - 12):off + 16]))
                 else:
-                    runs[-1][1] = o
-                prev = o
-            print(f"    contiguous runs: {len(runs)}; sizes: {sorted(set(e - s + 1 for s, e in runs))[:10]}")
-            hits = ts_hits(a, b, offs)
-            covered = sum(1 for o in offs if any(s <= o < s + 4 for s in hits))
-            print(f"    4-byte LE Unix timestamps in [{lo}, {hi}] covering diffs: {len(hits)} values, "
-                  f"{covered}/{len(offs)} differing bytes")
-            for s in list(hits)[:6]:
-                u, v = hits[s]
-                ctx = a[max(0, s - 24):s + 28]
-                printable = "".join(chr(c) if 32 <= c < 127 else "." for c in ctx)
-                print(f"      @{hex(s)}: {u} vs {v} (delta {v - u} s)  context: {printable!r}")
-            if not hits:
-                for s, e in runs[:4]:
-                    print(f"      run {hex(s)}..{hex(e)}: {a[s:e+1].hex()} vs {b[s:e+1].hex()}")
+                    len_changed += 1
+                pieces.append((max(len(pa), len(pb)), k, len(pa), len(pb)))
+            secs = sorted({k.split("/seg")[0] for _, k, _, _ in pieces})
+            print(f"    differing pieces: {len(pieces)} (equal length: {eq_n} with {eq_bytes} differing bytes;"
+                  f" length changed: {len_changed}; present in one build only: {missing}) in sections {secs[:6]}")
+            print(f"    timestamps in equal-length pieces: u32 LE = {len(u32)}, f64 = {len(f64)}")
+            for k, off, u, v, ctx in (u32[:3] + f64[:3]):
+                print(f"      {k} @{hex(off)}: {u} vs {v} (delta {round(v - u, 3)} s; SOURCE_DATE_EPOCH {'matches' if sde in (int(u), int(v)) else 'absent'}) ctx {ctx.hex()}")
+            for size, k, la, lb in sorted(pieces, reverse=True)[:4]:
+                print(f"      largest: {k}: {la} vs {lb} B")
         print()
 EOF
     cat "$DATA/repro.txt"
@@ -376,6 +503,7 @@ case "${1:-all}" in
     measure) [ -n "${S9_FRESH:-}" ] && : > "$JSONL"; do_measure ;;
     probes) do_probes ;;
     repro) do_repro ;;
+    repro-analyze) analyze_repro ;;
     summary) summary ;;
     all) [ -n "${S9_FRESH:-}" ] && : > "$JSONL"; harness; do_build; do_measure; do_probes; do_repro ;;
     *) echo "usage: $0 <build|measure|probes|repro|summary|all>" >&2; exit 2 ;;

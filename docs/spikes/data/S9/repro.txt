@@ -1,0 +1,154 @@
+S9 reproducibility (plan 09-04 Task 3)
+SOURCE_DATE_EPOCH (HEAD commit time) = 1795289796; plausible build-time window for timestamps: [1795286791, 1795290503]
+wrapper = D-P9-3 step 1: sources staged into a fresh temp dir with every mtime = SOURCE_DATE_EPOCH,
+          PYTHONHASHSEED=0 PYTHONDONTWRITEBYTECODE=1 TZ=UTC LC_ALL=C SOURCE_DATE_EPOCH exported.
+plain   = same pinned commands, fresh temp stage dir (python) / in-tree source (ts), no env.
+Toolchains: componentize-py 0.25.1 (--stub-wasi), jco 1.42.0 + componentize-qjs 0.5.0; builds >= 3 s apart.
+Whole-file cmp counts are positional (a length change shifts everything after it); the section
+walk below is the meaningful diff: each differing section/data segment with sizes, common
+prefix/suffix, and for equal-length pieces the differing byte count and timestamp hits.
+
+Snapshot str-hash seed per Python build (hash-probe workflow, run on the fake host):
+  py-plain-1: {"hash":-1166120006,"hash_randomization":1,"PYTHONHASHSEED":"None","set_order":["d","a","b","c"]}
+  py-plain-2: {"hash":-1463856087,"hash_randomization":1,"PYTHONHASHSEED":"None","set_order":["d","c","b","a"]}
+  py-plain-3: {"hash":1204097277,"hash_randomization":1,"PYTHONHASHSEED":"None","set_order":["a","c","b","d"]}
+  py-wrapper-1: {"hash":386909567,"hash_randomization":1,"PYTHONHASHSEED":"None","set_order":["d","c","b","a"]}
+  py-wrapper-2: {"hash":-1655147867,"hash_randomization":1,"PYTHONHASHSEED":"None","set_order":["c","b","a","d"]}
+  py-wrapper-3: {"hash":-550551063,"hash_randomization":1,"PYTHONHASHSEED":"None","set_order":["a","c","b","d"]}
+  -> the host PYTHONHASHSEED=0 never reaches the pre-init interpreter (componentize-py's
+     WasiCtxBuilder sets only PYTHONUNBUFFERED/PYTHONHOME/PYTHONPATH), so every build bakes
+     a fresh random hash seed (and set iteration order) into the snapshot.
+
+== Python py-base (componentize-py), plain
+  py-plain-1.wasm  sha256=02c3642914d799c84a46266694e12a0d5fc447ad6330ba91a5fb81c08430cba4  bytes=18424519
+  py-plain-2.wasm  sha256=ada867c0bfe1ec9fcc60532f8ec47d1ce890b56518a3eaf3c5c7a6135cb551be  bytes=18360930
+  py-plain-3.wasm  sha256=0dcabfe0e7ac970f442a3e5783893052d3d0e2adf309c73610bad0d46a885e33  bytes=18385582
+  build1 vs build2: lengths 18424519 vs 18360930; cmp -l | wc -l = 15136115; first offsets ['0xa19', '0xa1a', '0xa1b', '0xef7d', '0xef7e', '0xef7f', '0xef81', '0xef82']
+    section layout differs (count/order)
+    differing pieces: 1507 (equal length: 70 with 42268 differing bytes; length changed: 1437; present in one build only: 18) in sections ['/module0/s9:data', '/module1/s2:export', '/module10/s0:type', '/module10/s2:export', '/module11/s0:type', '/module11/s1:function']
+    timestamps in equal-length pieces: u32 LE = 6, f64 = 0
+      /module0/s9:data/seg25 @0xc400: 1795290401 vs 1795290412 (delta 11 s; SOURCE_DATE_EPOCH absent) ctx 0000000001d8f0f44a59b6bf21f5016b0000000068b0490000000000
+      /module0/s9:data/seg25 @0xc418: 1795290401 vs 1795290412 (delta 11 s; SOURCE_DATE_EPOCH absent) ctx 00000000010000003004000021f5016b081c4400a4c4621d682c3900
+      /module0/s9:data/seg25 @0xc430: 1795290401 vs 1795290412 (delta 11 s; SOURCE_DATE_EPOCH absent) ctx 682c3900018938000000000021f5016b00000000a3fabd0b5465b3e7
+      largest: /module0/s9:data/seg1893: 1157203 vs 41575 B
+      largest: /module0/s9:data/seg1819: 7495 vs 212855 B
+      largest: /module0/s9:data/seg1802: 184407 vs 1443 B
+      largest: /module0/s9:data/seg1822: 170847 vs 15183 B
+  build2 vs build3: lengths 18360930 vs 18385582; cmp -l | wc -l = 12671503; first offsets ['0xa19', '0xa1a', '0xa1b', '0xef7d', '0xef7e', '0xef7f', '0xef81', '0xef82']
+    section layout differs (count/order)
+    differing pieces: 1512 (equal length: 67 with 41049 differing bytes; length changed: 1445; present in one build only: 9) in sections ['/module0/s9:data', '/module1/s0:type', '/module1/s1:function', '/module1/s2:export', '/module1/s3:code', '/module10/s0:type']
+    timestamps in equal-length pieces: u32 LE = 6, f64 = 0
+      /module0/s9:data/seg25 @0xc400: 1795290412 vs 1795290422 (delta 10 s; SOURCE_DATE_EPOCH absent) ctx 0000000001d8f0f44a59b6bf2cf5016b0000000068b0490000000000
+      /module0/s9:data/seg25 @0xc418: 1795290412 vs 1795290424 (delta 12 s; SOURCE_DATE_EPOCH absent) ctx 0000000001000000300400002cf5016ba8214400bdddef19682c3900
+      /module0/s9:data/seg25 @0xc430: 1795290412 vs 1795290422 (delta 10 s; SOURCE_DATE_EPOCH absent) ctx 682c390001893800000000002cf5016b000000000bb7580cbc6dbfbf
+      largest: /module0/s9:data/seg1898: 1648 vs 1168848 B
+      largest: /module0/s9:data/seg1910: 1122271 vs 611 B
+      largest: /module0/s9:data/seg1826: 2539 vs 221531 B
+      largest: /module0/s9:data/seg1819: 212855 vs 367 B
+  build1 vs build3: lengths 18424519 vs 18385582; cmp -l | wc -l = 15101058; first offsets ['0xa19', '0xa1a', '0xa1b', '0xef7d', '0xef7e', '0xef7f', '0xef81', '0xef92']
+    section layout differs (count/order)
+    differing pieces: 1446 (equal length: 256 with 57089 differing bytes; length changed: 1190; present in one build only: 9) in sections ['/module0/s9:data', '/module1/s0:type', '/module1/s1:function', '/module1/s2:export', '/module1/s3:code', '/module10/s0:type']
+    timestamps in equal-length pieces: u32 LE = 6, f64 = 4
+      /module0/s9:data/seg25 @0xc400: 1795290401 vs 1795290422 (delta 21 s; SOURCE_DATE_EPOCH absent) ctx 0000000001d8f0f44a59b6bf21f5016b0000000068b0490000000000
+      /module0/s9:data/seg25 @0xc418: 1795290401 vs 1795290424 (delta 23 s; SOURCE_DATE_EPOCH absent) ctx 00000000010000003004000021f5016b081c4400a4c4621d682c3900
+      /module0/s9:data/seg25 @0xc430: 1795290401 vs 1795290422 (delta 21 s; SOURCE_DATE_EPOCH absent) ctx 682c3900018938000000000021f5016b00000000a3fabd0b5465b3e7
+      /module0/s9:data/seg842 @0x1b4: 1795290397.7688575 vs 1795290421.4155347 (delta 23.647 s; SOURCE_DATE_EPOCH absent) ctx 23000000010000001c813700f63471477dc0da41272a27005f636163
+      /module0/s9:data/seg992 @0x86: 1795290401.5010126 vs 1795290424.4876697 (delta 22.987 s; SOURCE_DATE_EPOCH absent) ctx 23000000010000001c813700971060487dc0da416a9ca82301000000
+      /module0/s9:data/seg993 @0x2122: 1795290401.152998 vs 1795290422.6995912 (delta 21.547 s; SOURCE_DATE_EPOCH absent) ctx 23000000010000001c813700b8ca49487dc0da414fdbfb1704000000
+      largest: /module0/s9:data/seg1898: 880 vs 1168848 B
+      largest: /module0/s9:data/seg1893: 1157203 vs 5515 B
+      largest: /module0/s9:data/seg1826: 199 vs 221531 B
+      largest: /module0/s9:data/seg1820: 1576 vs 193519 B
+
+== Python py-base (componentize-py), wrapper
+  py-wrapper-1.wasm  sha256=0f802a2096a0af06684394bcaa37047f57a710d16cd2743f9f53c3f002db48b3  bytes=18381059
+  py-wrapper-2.wasm  sha256=da186844ad194edd99fd10b41689a000742349ebce87764e3e671c2bb4a094ba  bytes=18385596
+  py-wrapper-3.wasm  sha256=2914eacc1f7242abb5388ee1e0757f68ee7cb37ec79c549cee8fe11031ed792d  bytes=18346831
+  build1 vs build2: lengths 18381059 vs 18385596; cmp -l | wc -l = 14892928; first offsets ['0xa19', '0xa1a', '0xef7d', '0xef7e', '0xef81', '0xef82', '0xef92', '0xef93']
+    section layout differs (count/order)
+    differing pieces: 1501 (equal length: 64 with 42243 differing bytes; length changed: 1437; present in one build only: 24) in sections ['/module0/s9:data', '/module1/s0:type', '/module1/s1:function', '/module1/s2:export', '/module1/s3:code', '/module10/s0:type']
+    timestamps in equal-length pieces: u32 LE = 6, f64 = 0
+      /module0/s9:data/seg25 @0xc400: 1795290430 vs 1795290436 (delta 6 s; SOURCE_DATE_EPOCH absent) ctx 0000000001d8f0f44a59b6bf3ef5016b0000000068b0490000000000
+      /module0/s9:data/seg25 @0xc418: 1795290430 vs 1795290436 (delta 6 s; SOURCE_DATE_EPOCH absent) ctx 0000000001000000300400003ef5016bf86a5e006b6f8c37682c3900
+      /module0/s9:data/seg25 @0xc430: 1795290430 vs 1795290436 (delta 6 s; SOURCE_DATE_EPOCH absent) ctx 682c390001893800000000003ef5016b00000000716ee92ad70882f5
+      largest: /module0/s9:data/seg1887: 6880 vs 1115104 B
+      largest: /module0/s9:data/seg1836: 215255 vs 515 B
+      largest: /module0/s9:data/seg1813: 2138 vs 212287 B
+      largest: /module0/s9:data/seg1831: 166751 vs 672 B
+  build2 vs build3: lengths 18385596 vs 18346831; cmp -l | wc -l = 15016760; first offsets ['0xa19', '0xa1a', '0xa1b', '0xef7d', '0xef7e', '0xef7f', '0xef81', '0xef92']
+    section layout differs (count/order)
+    differing pieces: 1502 (equal length: 75 with 44226 differing bytes; length changed: 1427; present in one build only: 7) in sections ['/module0/s9:data', '/module1/s0:type', '/module1/s2:export', '/module10/s0:type', '/module10/s2:export', '/module11/s0:type']
+    timestamps in equal-length pieces: u32 LE = 6, f64 = 0
+      /module0/s9:data/seg25 @0xc400: 1795290436 vs 1795290442 (delta 6 s; SOURCE_DATE_EPOCH absent) ctx 0000000001d8f0f44a59b6bf44f5016b0000000068b0490000000000
+      /module0/s9:data/seg25 @0xc418: 1795290436 vs 1795290442 (delta 6 s; SOURCE_DATE_EPOCH absent) ctx 00000000010000003004000044f5016be82886009f3e362a682c3900
+      /module0/s9:data/seg25 @0xc430: 1795290436 vs 1795290442 (delta 6 s; SOURCE_DATE_EPOCH absent) ctx 682c3900018938000000000044f5016b000000004235561d28f45bc2
+      largest: /module0/s9:data/seg1887: 1115104 vs 19 B
+      largest: /module0/s9:data/seg1892: 1532 vs 798217 B
+      largest: /module0/s9:data/seg1890: 1560 vs 293774 B
+      largest: /module0/s9:data/seg1813: 212287 vs 2240 B
+  build1 vs build3: lengths 18381059 vs 18346831; cmp -l | wc -l = 12647161; first offsets ['0xa19', '0xa1a', '0xa1b', '0xef7d', '0xef7e', '0xef7f', '0xef81', '0xef82']
+    section layout differs (count/order)
+    differing pieces: 1494 (equal length: 74 with 43046 differing bytes; length changed: 1420; present in one build only: 31) in sections ['/module0/s9:data', '/module1/s0:type', '/module1/s1:function', '/module1/s2:export', '/module1/s3:code', '/module10/s0:type']
+    timestamps in equal-length pieces: u32 LE = 6, f64 = 0
+      /module0/s9:data/seg25 @0xc400: 1795290430 vs 1795290442 (delta 12 s; SOURCE_DATE_EPOCH absent) ctx 0000000001d8f0f44a59b6bf3ef5016b0000000068b0490000000000
+      /module0/s9:data/seg25 @0xc418: 1795290430 vs 1795290442 (delta 12 s; SOURCE_DATE_EPOCH absent) ctx 0000000001000000300400003ef5016bf86a5e006b6f8c37682c3900
+      /module0/s9:data/seg25 @0xc430: 1795290430 vs 1795290442 (delta 12 s; SOURCE_DATE_EPOCH absent) ctx 682c390001893800000000003ef5016b00000000716ee92ad70882f5
+      largest: /module0/s9:data/seg1892: 591 vs 798217 B
+      largest: /module0/s9:data/seg1890: 27583 vs 293774 B
+      largest: /module0/s9:data/seg1836: 215255 vs 9096 B
+      largest: /module0/s9:data/seg1803: 1610 vs 174487 B
+
+== TS ts-qjs (QuickJS), plain
+  qjs-plain-1.wasm  sha256=626da2d921774f4d9d0b224b6ae4979d798cdb8ba46a630f37ccc32e0867f43e  bytes=1699562
+  qjs-plain-2.wasm  sha256=d7b84a2b979162942824e939a571bef9e91becbec70b87009b7ad2f94685bb3f  bytes=1699532
+  qjs-plain-3.wasm  sha256=fdb2bffbe7786c400690854b7d85da1b07796f840a9b999142d5e3f2fba95dc3  bytes=1699530
+  build1 vs build2: lengths 1699562 vs 1699532; cmp -l | wc -l = 1296197; first offsets ['0xa19', '0x2151', '0x2152', '0x38ed', '0x3ae6', '0x4566', '0x4567', '0x4568']
+    differing pieces: 9 (equal length: 8 with 85 differing bytes; length changed: 1; present in one build only: 0) in sections ['/component0/component0/module0/s8:data']
+    timestamps in equal-length pieces: u32 LE = 0, f64 = 0
+      largest: /component0/component0/module0/s8:data/seg6026: 99 vs 69 B
+      largest: /component0/component0/module0/s8:data/seg2231: 85 vs 85 B
+      largest: /component0/component0/module0/s8:data/seg81: 57 vs 57 B
+      largest: /component0/component0/module0/s8:data/seg108: 45 vs 45 B
+  build2 vs build3: lengths 1699532 vs 1699530; cmp -l | wc -l = 1255768; first offsets ['0xa19', '0x2151', '0x38ed', '0x3ae6', '0x3ae9', '0x4566', '0x4567', '0x4568']
+    section layout differs (count/order)
+    differing pieces: 2905 (equal length: 776 with 2584 differing bytes; length changed: 2129; present in one build only: 2) in sections ['/component0/component0/module0/s8:data']
+    timestamps in equal-length pieces: u32 LE = 0, f64 = 0
+      largest: /component0/component0/module0/s8:data/seg6043: 25539 vs 9 B
+      largest: /component0/component0/module0/s8:data/seg6041: 3 vs 25539 B
+      largest: /component0/component0/module0/s8:data/seg6326: 25518 vs 19 B
+      largest: /component0/component0/module0/s8:data/seg6324: 2 vs 25518 B
+  build1 vs build3: lengths 1699562 vs 1699530; cmp -l | wc -l = 1296003; first offsets ['0xa19', '0x2151', '0x2152', '0x38ed', '0x3ae6', '0x3ae9', '0x4566', '0x4567']
+    section layout differs (count/order)
+    differing pieces: 2905 (equal length: 776 with 2584 differing bytes; length changed: 2129; present in one build only: 2) in sections ['/component0/component0/module0/s8:data']
+    timestamps in equal-length pieces: u32 LE = 0, f64 = 0
+      largest: /component0/component0/module0/s8:data/seg6043: 25539 vs 9 B
+      largest: /component0/component0/module0/s8:data/seg6041: 3 vs 25539 B
+      largest: /component0/component0/module0/s8:data/seg6326: 25518 vs 19 B
+      largest: /component0/component0/module0/s8:data/seg6324: 2 vs 25518 B
+
+== TS ts-qjs (QuickJS), wrapper
+  qjs-wrapper-1.wasm  sha256=98e3ebb60a3a9cafd150d14fee832177749ebdfe306afe7ef4fda8ea18a584ff  bytes=1699605
+  qjs-wrapper-2.wasm  sha256=709e9c82aaece045e0b3dcab6338c40e1ea6ed11ecfa2c3ef3a8b609570511cd  bytes=1699605
+  qjs-wrapper-3.wasm  sha256=6d3e2c051c9196b9579939a8d73afce331bd8b7c19e394e15e828554d1aff167  bytes=1699605
+  build1 vs build2: lengths 1699605 vs 1699605; cmp -l | wc -l = 133; first offsets ['0x4566', '0x4567', '0x4568', '0x4569', '0x456a', '0x456b', '0x4570', '0x4571']
+    differing pieces: 9 (equal length: 9 with 133 differing bytes; length changed: 0; present in one build only: 0) in sections ['/component0/component0/module0/s8:data']
+    timestamps in equal-length pieces: u32 LE = 0, f64 = 0
+      largest: /component0/component0/module0/s8:data/seg6026: 99 vs 99 B
+      largest: /component0/component0/module0/s8:data/seg2231: 85 vs 85 B
+      largest: /component0/component0/module0/s8:data/seg81: 57 vs 57 B
+      largest: /component0/component0/module0/s8:data/seg108: 45 vs 45 B
+  build2 vs build3: lengths 1699605 vs 1699605; cmp -l | wc -l = 137; first offsets ['0x4566', '0x4567', '0x4568', '0x4569', '0x456a', '0x456b', '0x4570', '0x4571']
+    differing pieces: 17 (equal length: 17 with 137 differing bytes; length changed: 0; present in one build only: 0) in sections ['/component0/component0/module0/s8:data']
+    timestamps in equal-length pieces: u32 LE = 0, f64 = 0
+      largest: /component0/component0/module0/s8:data/seg2231: 85 vs 85 B
+      largest: /component0/component0/module0/s8:data/seg3383: 67 vs 67 B
+      largest: /component0/component0/module0/s8:data/seg81: 57 vs 57 B
+      largest: /component0/component0/module0/s8:data/seg1789: 51 vs 51 B
+  build1 vs build3: lengths 1699605 vs 1699605; cmp -l | wc -l = 189; first offsets ['0x4566', '0x4567', '0x4568', '0x4569', '0x456a', '0x456b', '0x4570', '0x4571']
+    differing pieces: 18 (equal length: 18 with 189 differing bytes; length changed: 0; present in one build only: 0) in sections ['/component0/component0/module0/s8:data']
+    timestamps in equal-length pieces: u32 LE = 0, f64 = 0
+      largest: /component0/component0/module0/s8:data/seg6026: 99 vs 99 B
+      largest: /component0/component0/module0/s8:data/seg2231: 85 vs 85 B
+      largest: /component0/component0/module0/s8:data/seg3383: 67 vs 67 B
+      largest: /component0/component0/module0/s8:data/seg81: 57 vs 57 B
+
