@@ -1,9 +1,8 @@
 """Host contract of the Ostro Python SDK.
 
-This is the **only** module that touches componentize-py's generated bindings
-(`wit_world`). Everything else in the SDK talks to the host through the `Host`
-protocol below, so host-side unit tests can install a fake host and the SDK core
-never depends on the bindings' shape.
+Everything in the SDK talks to the host through the `Host` protocol below (the
+generated `wit_world` bindings are adapted in `ostro._bindings`), so host-side unit
+tests can install a fake host and the SDK core never depends on the bindings' shape.
 
 `Host` mirrors the frozen WIT world `ostro:runtime@0.1.0` (`ostro/wit/runtime.wit`)
 1:1, with Python types:
@@ -17,8 +16,8 @@ never depends on the bindings' shape.
   (``seconds * 10**9 + nanoseconds``); the adapter converts both ways.
 
 Imports trap during component initialisation (the componentize-py snapshot), so
-nothing here calls the host at import time; `_bindings_host()` imports
-`wit_world` lazily, inside the guest only.
+nothing here calls the host at import time. The guest adapter lives in
+`ostro._bindings`, the only importer of `wit_world`; `ostro.export()` installs it.
 """
 
 from __future__ import annotations
@@ -297,5 +296,18 @@ def current() -> Host:
 
 
 def _bindings_host() -> Host:
-    """Adapt componentize-py's generated `wit_world` bindings to `Host` (guest only)."""
-    raise NotImplementedError("guest bindings land in 09-08")
+    """Adapt componentize-py's generated `wit_world` bindings to `Host` (guest only).
+
+    `ostro.export()` normally installs the adapter at pre-init; this fallback covers
+    callers that reach `current()` first. The import is a no-op lookup inside a guest
+    (`ostro.export()` already imported the module during pre-init).
+    """
+    try:
+        from . import _bindings
+    except ImportError:
+        raise NotImplementedError(
+            "no Ostro host installed, and the guest bindings (wit_world, the 09-08 host "
+            "contract adapter in ostro._bindings) exist only inside a componentize-py "
+            "guest; install a host with ostro._host.install()"
+        ) from None
+    return _bindings.BindingsHost()

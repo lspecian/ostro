@@ -183,10 +183,10 @@ class OstroLoop(asyncio.AbstractEventLoop):
                     self._complete(op, outcome)
             return root.result()
         finally:
-            self._sdk_closed = True
-            self._running = False
             for exit_, state in reversed(hook_state):
                 exit_(state)
+            self._sdk_closed = True
+            self._running = False
             _active = previous_active
             events._set_running_loop(previous_loop)
 

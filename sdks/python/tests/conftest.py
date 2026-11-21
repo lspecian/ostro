@@ -6,7 +6,7 @@ Run from `sdks/python` with `python -m pytest` so `ostro` is importable.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,7 +30,7 @@ from ostro._host import (
     StepStart,
 )
 
-__all__ = ["CANCELLATION_OP", "FIRST_OP", "FakeHost", "FakeStep"]
+__all__ = ["CANCELLATION_OP", "FIRST_OP", "FakeHost", "FakeStep", "methods", "run_in_loop"]
 
 #: Op ids handed out by the fake host start here and grow by one per allocating call,
 #: so they never collide with small list indices in assertions.
@@ -222,6 +222,35 @@ class FakeHost:
     def log_emit(self, level: LogLevel, message: str, fields: list[tuple[str, str]]) -> None:
         self._record("log_emit", level, message, list(fields))
         self.logs.append((level, message, list(fields)))
+
+
+def methods(host: FakeHost) -> list[str]:
+    """The method names `host` recorded, in call order."""
+    return [m for m, _ in host.calls]
+
+
+def run_in_loop(host: FakeHost, body: Callable[[Any], Awaitable[Any]]) -> Any:
+    """Run ``await body(ctx)`` as one activation on a fresh `OstroLoop` over `host`."""
+    from ostro.ctx import Ctx
+    from ostro.loop import OstroLoop
+
+    loop = OstroLoop(host)
+    ctx = Ctx(loop)
+    try:
+        return loop.run_until_complete(body(ctx))
+    finally:
+        loop.close()
+
+
+@pytest.fixture
+def registry(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A fresh workflow registry swapped in for the SDK's global one."""
+    import sys
+
+    mod = sys.modules["ostro.export"]
+    fresh = mod.Registry()
+    monkeypatch.setattr(mod, "_registry", fresh)
+    return fresh
 
 
 @pytest.fixture
