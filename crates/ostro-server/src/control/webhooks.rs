@@ -9,8 +9,11 @@
 //! 2. **Read the secret**: the sealed meta record named by `secret_ref` (see "Secrets").
 //! 3. **Verify** the raw body bytes and headers with
 //!    [`ostro_triggers::webhook::verify`] under the verifier from
-//!    `VerifierSpec::from_meta(w.verifier, &w.verifier_config, w.tolerance_s)`, with `now`
+//!    `VerifierSpec::from_meta(w.verifier, &w.verifier_config, tolerance)`, with `now`
 //!    from the injected clock ([`super::ControlCtx::clock`], never the system clock).
+//!    `tolerance` is the webhook's own `tolerance_s`; when that is 0, Stripe, Slack and
+//!    Standard Webhooks fall back to `[triggers] webhook_tolerance` (default 300 s, see
+//!    [`effective_tolerance_s`]). Generic HMAC keeps 0 = no replay window.
 //!    Malformed / missing header / bad signature / stale = 401 (`details.reason`), an
 //!    invalid spec or unreadable secret = 500. Nothing has parsed the body yet, and
 //!    nothing is submitted on any failure.
@@ -559,7 +562,12 @@ impl WebhookController {
             );
         };
         let error = |e: ApiError| (Outcome::Error, Err(e));
-        let spec = match VerifierSpec::from_meta(w.verifier, &w.verifier_config, w.tolerance_s) {
+        let tolerance_s = effective_tolerance_s(
+            w.verifier,
+            w.tolerance_s,
+            self.ctx.config.triggers.webhook_tolerance.get(),
+        );
+        let spec = match VerifierSpec::from_meta(w.verifier, &w.verifier_config, tolerance_s) {
             Ok(s) => s,
             Err(_) => {
                 tracing::warn!(hook = %w.name, "webhook verifier configuration is invalid");
@@ -1004,6 +1012,21 @@ impl HookIngress for WebhookController {
     }
 }
 
+/// The replay window used at delivery: the webhook's own `tolerance_s`, or, when that is 0,
+/// `[triggers] webhook_tolerance` for the kinds whose signature always carries a timestamp
+/// (Stripe, Slack, Standard Webhooks). Generic HMAC (0 = no window; its template may not
+/// sign a timestamp), GitHub and None (no timestamp) keep their stored value.
+fn effective_tolerance_s(verifier: u8, tolerance_s: u32, fallback: std::time::Duration) -> u32 {
+    let timestamped = matches!(
+        VerifierKind::from_u8(verifier),
+        Some(VerifierKind::Stripe | VerifierKind::Slack | VerifierKind::StandardWebhooks)
+    );
+    if tolerance_s > 0 || !timestamped {
+        return tolerance_s;
+    }
+    u32::try_from(fallback.as_secs()).unwrap_or(u32::MAX).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,6 +1059,34 @@ mod tests {
             secret_ref: "s".into(),
             ..VerifierDto::default()
         }
+    }
+
+    #[test]
+    fn webhook_tolerance_is_the_fallback_for_timestamped_kinds() {
+        let cfg = std::time::Duration::from_secs(45);
+        for k in [VERIFIER_STRIPE, VERIFIER_SLACK, VERIFIER_STANDARD_WEBHOOKS] {
+            // Own value wins; 0 falls back to [triggers] webhook_tolerance.
+            assert_eq!(effective_tolerance_s(k, 120, cfg), 120);
+            assert_eq!(effective_tolerance_s(k, 0, cfg), 45);
+        }
+        assert_eq!(
+            VerifierSpec::from_meta(
+                VERIFIER_STRIPE,
+                b"",
+                effective_tolerance_s(VERIFIER_STRIPE, 0, cfg)
+            ),
+            Ok(VerifierSpec::Stripe { tolerance_s: 45 })
+        );
+        // Generic HMAC (0 = no window), GitHub and None (no timestamp) are unchanged.
+        for k in [VERIFIER_GENERIC_HMAC, VERIFIER_GITHUB, VERIFIER_NONE] {
+            assert_eq!(effective_tolerance_s(k, 0, cfg), 0);
+        }
+        assert_eq!(effective_tolerance_s(VERIFIER_GENERIC_HMAC, 60, cfg), 60);
+        // A sub-second setting still yields a window (never 0 = "verifier default").
+        assert_eq!(
+            effective_tolerance_s(VERIFIER_SLACK, 0, std::time::Duration::from_millis(10)),
+            1
+        );
     }
 
     #[test]

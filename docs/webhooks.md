@@ -26,10 +26,10 @@ POST /hooks/{name}
 - The body limit is `[triggers] webhook_body_limit` (default 1 MiB, `1048576`). A larger
   body is rejected with `413` before the webhook is even looked up.
 - There is no gRPC form: a signature covers the raw HTTP body and headers.
-- The replay window defaults to 300 s for Stripe, Slack and Standard Webhooks (see
-  `tolerance_s` below). The node-level key `[triggers] webhook_tolerance` (default `300s`) is
-  parsed and validated but **not wired yet** (Phase 8 gate finding, 08-22): the per-webhook
-  `tolerance_s`, else the built-in 300 s default, is what the verifier uses.
+- The replay window for Stripe, Slack and Standard Webhooks is the webhook's own
+  `tolerance_s` (see below); when that is unset (0), the node-level key
+  `[triggers] webhook_tolerance` (default `300s`) applies (08-23). Generic HMAC keeps
+  unset = no replay window; GitHub and `none` carry no timestamp.
 
 ## Defining a webhook
 
@@ -104,8 +104,8 @@ Notes per provider:
                 "timestamp_header": "x-timestamp", "template": "{ts}.{body}", "tolerance_s": 300 }
   ```
 
-- **`tolerance_s`:** the replay window in seconds. Unset means 300 s for Stripe, Slack and
-  Standard Webhooks, and no window for generic HMAC. It is measured against the server's
+- **`tolerance_s`:** the replay window in seconds. Unset means `[triggers] webhook_tolerance`
+  (default 300 s) for Stripe, Slack and Standard Webhooks, and no window for generic HMAC. It is measured against the server's
   clock (the one injectable clock).
 
 ## Idempotency
