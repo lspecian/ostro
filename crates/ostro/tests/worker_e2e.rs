@@ -399,6 +399,37 @@ async fn join() {
 // paging: 64 KiB frames, 2,000 steps, 3 MiB result + 3 MiB input
 // ---------------------------------------------------------------------------------
 
+/// Polls the run's history (incrementally, from the last seen seq) until an event of
+/// `kind` appears.
+async fn wait_for_kind(c: &P7Cluster, id: &str, kind: &str, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    let mut from = 0u64;
+    loop {
+        let (st, p) = c
+            .api
+            .get(&format!("/v1/runs/{id}/history?from_seq={from}&limit=100"))
+            .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        let events = p["events"].as_array().expect("events");
+        if events.iter().any(|e| e["kind"] == kind) {
+            return;
+        }
+        match p["next_from_seq"].as_u64() {
+            Some(n) => from = n,
+            None => {
+                assert!(
+                    Instant::now() < deadline,
+                    "{kind} on {id} not within {limit:?}"
+                );
+                if let Some(seq) = events.last().and_then(|e| e["seq"].as_u64()) {
+                    from = seq + 1;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
 async fn long_run(c: &P7Cluster, queue: &str, big_input: &Value) -> (String, Value) {
     let id = c
         .api
@@ -410,6 +441,11 @@ async fn long_run(c: &P7Cluster, queue: &str, big_input: &Value) -> (String, Val
             }),
         )
         .await;
+    // Signal only once the run waits for it. A signal posted earlier is buffered and its
+    // `signal_payload` event lands wherever the post races the run's steps (right after
+    // `run_started` when the worker has not picked the run up yet), so the embedded and
+    // remote histories would differ by timing alone.
+    wait_for_kind(c, &id, "signal_wait_started", Duration::from_secs(300)).await;
     let (st, v) = c
         .api
         .post(
