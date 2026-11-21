@@ -36,6 +36,7 @@ metrics:
 
 1. `bb50464` test(07-20): KEDA metrics-api scaler simulator
 2. `2f6ef07` test(07-20): SC5 KEDA simulator drives workers 0→N→0
+3. `874a765` test(07-20): simulator polls the metrics-api URL path directly
 
 ## Scaler (KEDA metrics-api semantics)
 
@@ -85,15 +86,16 @@ Unit tests (6, filter `scaler`):
 | 11.4 | 0 | 0 | 0 | 0 | 0 | 2 | 0 |
 | 11.9 – 15.4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
-### Measured (3 green runs)
+### Measured (4 green runs)
 
 | Run | Peak N | ≥ 2 workers after burst | Last run done | Pool at 0 | Zero after last run | SIGTERMs | Runs moved by a drain |
 |---|---|---|---|---|---|---|---|
 | 1 | 4 | 0.90 s | 6.47 s | 11.90 s | 5.44 s | 4 | 2 (2 extra activations) |
 | 2 | 4 | 0.90 s | 6.41 s | 11.91 s | 5.49 s | 4 | 2 |
 | 3 | 4 | 0.69 s | 6.20 s | 11.70 s | 5.49 s | 4 | 1 |
+| 4 | 4 | 0.61 s | 6.12 s | 11.12 s | 5.00 s | 4 | 2 |
 
-- The pool reached 0 one cool-down plus one poll after the last run every time.
+- The pool reached 0 one cool-down (plus at most one poll) after the last run every time.
 - Demand stayed at 3 while the parked sleeps were leased on workers (Pitfall 4 / D-W12): the pool held at 2 and never went to 0 under load.
 - The 4 → 3 → 2 drains evicted leased runs. They were re-granted on a surviving worker and completed exactly once.
 
@@ -101,7 +103,7 @@ Unit tests (6, filter `scaler`):
 
 - Task 1: `cargo test -p ostro --test keda_sim --locked -- scaler`: `test result: ok. 6 passed`.
 - Task 2: `cargo test -p ostro --test keda_sim --locked -- --test-threads=1 zero_to_n_to_zero`: `test result: ok. 1 passed` (plan verify command, exit 0).
-- Whole file `-- --test-threads=1`: `7 passed`, twice in a row.
+- Whole file `-- --test-threads=1`: `7 passed`, three times (the last one after the direct-URL change).
 - No `ostro` process from `target/wt-07-20` was left running after the runs.
 - `cargo clippy -p ostro --test keda_sim --locked -- -D warnings` is clean, `cargo fmt -p ostro --check` is clean, and the build is warning-free.
 - Not run: `bash scripts/ci-local.sh` (shared-load policy; 07-17/18/19/21 and the Phase 8 campaign are running). 07-22 runs the gate.
@@ -128,4 +130,4 @@ The local simulator stands in for KEDA. A real ScaledObject run needs a cluster 
 ## Self-Check: PASSED
 
 - FOUND: crates/ostro/tests/keda_sim.rs (559 lines ≥ 150; contains `/demand`)
-- FOUND: commits bb50464, 2f6ef07 on main
+- FOUND: commits bb50464, 2f6ef07, 874a765 on main
