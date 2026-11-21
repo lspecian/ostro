@@ -3,14 +3,18 @@
 //! - [`spec`]: the language-neutral scenario model (`conformance/spec/<leg>/<ID>.json`) and
 //!   the catalogue (`conformance/spec/catalogue.json`, written once by plan 09-02).
 //! - [`inspect`]: component import/export/core-instance inspection (wasmparser).
+//! - [`polyglot`]: Python/TypeScript guest builds via `sdks/scripts/build-guest.sh`, cached
+//!   by source hash under `target/polyglot-guests`.
 //!
 //! The Python/TypeScript legs live behind the `polyglot` feature (D-P9-12); everything
 //! else runs without guest toolchains.
 
 pub mod inspect;
+pub mod polyglot;
 pub mod spec;
 
 pub use inspect::{ComponentInfo, inspect};
+pub use polyglot::{Mode, build};
 
 use std::path::PathBuf;
 

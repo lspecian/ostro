@@ -1,0 +1,11 @@
+{
+  "name": "ostro-guest-toolchain",
+  "private": true,
+  "description": "Pinned guest build toolchain for sdks/scripts/build-guest.sh (jco 1.42.0, componentize-js 0.23.0)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "devDependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/jco": "1.42.0"
+  }
+}
