@@ -61,6 +61,7 @@ Notes:
 - **The component has 11 static core `Instantiate` entries spread over 24 nested components, but wasmtime needs `max_core_instances_per_component = 13`.** That figure is the bisected pool minimum, `m[pool/ts-qjs].min_core_instances_per_component`.
 - QJS also uses **3 memories** (one of 25 pages and two of 0 pages) and **3 tables**. Python and SM use 1 memory and 2 tables.
 - The memory floor is 1,638,400 B (25 pages).
+- **Counting rule for ENG-2.** 09-02's inspector reports py 111, QJS 53 and SM 8 core instances (STATE). Those numbers are this spike's `Instantiate` + `FromExports` entries (38+73, 11+42, 3+5, see `m[inspect/*].core_instance_entries_from_exports`). Wasmtime does not allocate a core instance for a `FromExports` bag: the real pool minimum is 38, 13 and 3. ENG-2 should count `Instantiate` entries only, and even then QJS needs 2 more than its static count (11 → 13). The bisected pool minimum is the ground truth; weighting with 111/53/8 would over-reserve by about 3–4×.
 - **The class-table assumption "3 for TS" holds for SM only.**
 - Today's default pool is `LanguageClass::Rust`: 1000 component instances × (3 core instances, 2 tables, 1 memory). That admits only ⌊3000/13⌋ = **230 live QJS instances**, or ⌊3000/38⌋ = 78 Python instances. Memories (1000 → 333 QJS) and tables (2000 → 666 QJS) are the next limits after core instances.
 
@@ -272,7 +273,7 @@ Estimate (not measured here):
 **D-P9-2 (asyncio timers): confirmed, durable mapping.** The prototype shows the mapping is small and deterministic on 3.12 and 3.14.0. It needs three implementation details: fired-timer tracking, a `TimerHandle` subclass slot, and `create_task(**kwargs)`.
 
 **Recommended amendments for 09-20 to fold into 09-DECISIONS (not edited here):**
-1. D-P9-17 / ENG-2: the class table entry "3 for TS" holds for SM only. QJS needs **13 core instances**, and each module also needs its **memories (3)** and **tables (3)** counted. Per-module weights should cover all three pool dimensions, or `total_memories` and `total_tables` must be sized at the largest per-module count. `LanguageClass::TypeScript::min_memory_bytes` (9,502,720, the SM figure) is 5.8× the QJS floor.
+1. D-P9-17 / ENG-2: count `Instantiate` entries, not `FromExports` bags (09-02's 111/53/8 vs a real pool minimum of 38/13/3), and keep a margin (QJS: 11 static → 13 needed). The class table entry "3 for TS" holds for SM only. QJS needs **13 core instances**, and each module also needs its **memories (3)** and **tables (3)** counted. Per-module weights should cover all three pool dimensions, or `total_memories` and `total_tables` must be sized at the largest per-module count. `LanguageClass::TypeScript::min_memory_bytes` (9,502,720, the SM figure) is 5.8× the QJS floor.
 2. D-P9-3: step 1 alone is not enough for Python (hash seed and adapter order). 09-17 should plan for step 2 from the start. The fork patch should also cover `stubwasi.rs` and the generated-file and tempdir mtimes.
 3. Add to the SDK rules (09-09/09-10): import everything at SDK import (no lazy imports in Python); JS export-boundary catch-all (Error → `failure`); the QJS globals gap.
 
