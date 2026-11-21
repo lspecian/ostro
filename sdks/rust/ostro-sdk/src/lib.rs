@@ -24,6 +24,7 @@
 #[allow(missing_docs, clippy::all)]
 pub mod bindings;
 
+pub mod children;
 pub mod ctx;
 pub mod effects;
 pub mod error;
@@ -31,6 +32,7 @@ pub mod ops;
 pub mod registry;
 pub mod step;
 
+pub use children::{CHILD_TERMINATED, ChildOptions, ChildRun};
 pub use ctx::{AwaitToken, Ctx, Header, HttpRequest, HttpResponse, Level, RunInfo, f64_from_u64};
 pub use effects::{
     HttpBuilder, HttpClient, ObjectClient, ObjectHead, ObjectPutInfo, SqlBuilder, SqlResult,
@@ -84,6 +86,7 @@ pub use step::{RetryPolicy, StepOptions, StepOptionsBuilder, run_step};
 
 /// Everything a workflow module usually needs: `use ostro_sdk::prelude::*;`.
 pub mod prelude {
+    pub use crate::children::{ChildOptions, ChildRun};
     pub use crate::ctx::{AwaitToken, Ctx, Level, RunInfo};
     pub use crate::error::{ContinueAsNew, StepError, WorkflowError};
     pub use crate::ops::{Completion, Op};

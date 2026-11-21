@@ -15,7 +15,9 @@ use crate::bindings::ostro::runtime::context;
 use crate::bindings::ostro::runtime::effects;
 use crate::bindings::ostro::runtime::log as wit_log;
 use crate::bindings::ostro::runtime::types::Datetime;
+use crate::children::{self, ChildOptions};
 use crate::effects::{HttpClient, ObjectClient, SqlBuilder};
+use crate::error::StepError;
 use crate::error::WorkflowError;
 use crate::ops::{self, Op};
 
@@ -336,6 +338,50 @@ impl Ctx {
         }
     }
 
+    /// Start a child workflow and return its op; the child's output is JSON-decoded into
+    /// `T` when the op is waited on. See [`crate::children`] for the outcome contract.
+    ///
+    /// `workflow` is an unqualified name resolved in this run's tenant; `input` is sent as
+    /// `application/json`. Child run ids derive from (parent run, op), so replay and
+    /// re-delivery never start a second child. With [`ChildOptions::detached`] use
+    /// `T = ChildRun`.
+    ///
+    /// ```ignore
+    /// let out: Receipt = ctx.start_child("charge", &order, ChildOptions::new()).wait()?;
+    /// let run: ChildRun = ctx.start_child("audit", &order, ChildOptions::new().detached()).wait()?;
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If `input` cannot be JSON-encoded (for example a map with non-string keys). Use
+    /// [`Ctx::try_start_child`] to get that as an error instead.
+    pub fn start_child<T: DeserializeOwned, I: Serialize + ?Sized>(
+        &self,
+        workflow: &str,
+        input: &I,
+        opts: ChildOptions,
+    ) -> Op<T> {
+        match self.try_start_child(workflow, input, opts) {
+            Ok(op) => op,
+            Err(e) => panic!("start_child({workflow:?}): input is not JSON-encodable: {e}"),
+        }
+    }
+
+    /// [`Ctx::start_child`] that returns a non-retryable `invalid_json` error (and starts
+    /// nothing) when `input` cannot be JSON-encoded.
+    pub fn try_start_child<T: DeserializeOwned, I: Serialize + ?Sized>(
+        &self,
+        workflow: &str,
+        input: &I,
+        opts: ChildOptions,
+    ) -> Result<Op<T>, StepError> {
+        let payload = crate::step::encode_value(input)?;
+        Ok(Op::new(
+            effects::start_child(workflow, &payload, &opts.to_wit()),
+            children::decode_child::<T>,
+        ))
+    }
+
     /// Op that completes once a graceful cancel of this run is journaled.
     ///
     /// Waiting on it directly (or passing it to `select!`/`join!`) handles cancellation
@@ -346,7 +392,8 @@ impl Ctx {
 
     /// Cancel a pending op; waiting on it then returns `Err(StepError::cancelled())`,
     /// unless it already completed earlier in journal order (the first completion wins).
-    /// Use it on `select!` losers that should not complete later.
+    /// Use it on `select!` losers that should not complete later. On a child op it also
+    /// requests a graceful cancel of the child run and its descendants.
     pub fn cancel<T>(&self, op: &Op<T>) {
         effects::cancel_op(op.id());
     }
