@@ -339,6 +339,15 @@ pub async fn inspect(c: &Client, out: Out, a: &InspectArgs) -> Result<Outcome, C
     for (k, v) in lines {
         println!("{k:<18} {v}");
     }
+    // 07-22: a paused run shows its pause mark (reason, detail).
+    if let Some(reason) = b["pause"]["reason"].as_str() {
+        let detail = b["pause"]["detail"].as_str().unwrap_or_default();
+        if detail.is_empty() {
+            println!("{:<18} {reason}", "paused");
+        } else {
+            println!("{:<18} {reason}: {detail}", "paused");
+        }
+    }
     if !b["published_status"].is_null() {
         println!(
             "{:<18} {}",

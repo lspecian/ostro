@@ -175,6 +175,9 @@ fn norm_run(r: &pb::RunInfo) -> Value {
         "attempt_failures": r.attempt_failures,
         "retention_ms": r.retention_ms,
         "schedule_to_start_ms": r.schedule_to_start_ms,
+        "pause": r.pause.as_ref().map(|p| json!({
+            "reason": p.reason, "detail": p.detail, "at_ms": p.at_ms,
+        })),
     })
 }
 
@@ -201,6 +204,7 @@ fn norm_run_rest(r: &Value) -> Value {
         "attempt_failures",
         "retention_ms",
         "schedule_to_start_ms",
+        "pause",
     ] {
         out.insert(k.to_owned(), r[k].clone());
     }

@@ -269,6 +269,16 @@ async fn phase7_pause_resume_queue_workflow_run() {
         .expect("pause run");
     assert!(s.paused && s.changed);
     assert_eq!(cp.run_pause(&run), Some(Some("maintenance".into())));
+    // 07-22: the run view carries the pause mark, over REST as `pause`.
+    let info = cp.get_run(run.clone()).await.expect("get run");
+    let mark = info.pause.clone().expect("pause mark");
+    assert_eq!(
+        (mark.reason.as_str(), mark.detail.as_str()),
+        ("operator", "maintenance")
+    );
+    let dto = serde_json::to_value(ostro_api::rest::RunDto::from(info)).expect("dto");
+    assert_eq!(dto["pause"]["reason"], "operator");
+    assert_eq!(dto["pause"]["detail"], "maintenance");
     assert!(
         !cp.pause_run(run.clone(), None)
             .await
@@ -277,6 +287,7 @@ async fn phase7_pause_resume_queue_workflow_run() {
     );
     let s = cp.resume_run(run.clone()).await.expect("resume run");
     assert!(!s.paused && s.changed);
+    assert_eq!(cp.get_run(run.clone()).await.expect("get run").pause, None);
     assert!(!cp.resume_run(run.clone()).await.expect("again").changed);
     assert_eq!(
         code(cp.pause_run("run-999999".into(), None).await),
@@ -852,6 +863,7 @@ fn phase7_openapi_paths() {
         "PauseState",
         "PauseRunRequest",
         "RunPauseState",
+        "RunPauseMark",
         "DemandSnapshot",
         "WorkerInfo",
         "WorkerList",

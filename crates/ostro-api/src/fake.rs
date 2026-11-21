@@ -728,6 +728,7 @@ impl ControlPlane for FakeControlPlane {
             attempt_failures: 0,
             retention_ms,
             schedule_to_start_ms,
+            pause: None,
         };
         let input = String::from_utf8_lossy(&req.input_json).into_owned();
         st.history.insert(
@@ -752,11 +753,22 @@ impl ControlPlane for FakeControlPlane {
     }
 
     async fn get_run(&self, run_id: String) -> Result<RunInfo, ApiError> {
-        self.lock()
+        let st = self.lock();
+        let mut run = st
             .runs
             .get(&run_id)
             .cloned()
-            .ok_or_else(|| ApiError::not_found(format!("run {run_id} not found")))
+            .ok_or_else(|| ApiError::not_found(format!("run {run_id} not found")))?;
+        // 07-22: the pause mark (the fake records operator pauses only, without a time).
+        run.pause = st
+            .paused_runs
+            .get(&run_id)
+            .map(|detail| crate::phase7::RunPauseMark {
+                reason: crate::phase7::RunPauseMark::reason_name(0),
+                detail: detail.clone().unwrap_or_default(),
+                at_ms: 0,
+            });
+        Ok(run)
     }
 
     async fn run_history(&self, req: HistoryRequest) -> Result<HistoryPage, ApiError> {

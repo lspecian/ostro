@@ -176,6 +176,11 @@ impl From<domain::RunInfo> for pb::RunInfo {
             attempt_failures: r.attempt_failures,
             retention_ms: r.retention_ms,
             schedule_to_start_ms: r.schedule_to_start_ms,
+            pause: r.pause.map(|p| pb::RunPauseMark {
+                reason: p.reason,
+                detail: p.detail,
+                at_ms: p.at_ms,
+            }),
         }
     }
 }

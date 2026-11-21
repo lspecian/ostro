@@ -12,6 +12,7 @@ expression: "redacted(&ins, &[])"
   "created_at_ms": "[ms]",
   "failure": null,
   "module_sha256": "[sha256]",
+  "pause": null,
   "priority": 0,
   "published_status": null,
   "queue": "default",

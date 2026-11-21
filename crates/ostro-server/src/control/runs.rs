@@ -519,6 +519,11 @@ pub(crate) async fn get_run(cp: &ServerControlPlane, run_id: String) -> Result<R
         attempt_failures: rec.attempt_failures,
         retention_ms: (rec.retention_ms > 0).then_some(rec.retention_ms),
         schedule_to_start_ms: (rec.schedule_to_start_ms > 0).then_some(rec.schedule_to_start_ms),
+        pause: rec.pause.map(|p| ostro_api::phase7::RunPauseMark {
+            reason: ostro_api::phase7::RunPauseMark::reason_name(p.reason),
+            detail: p.detail,
+            at_ms: p.at_ms,
+        }),
     })
 }
 

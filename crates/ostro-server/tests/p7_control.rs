@@ -406,6 +406,21 @@ async fn run_pause_resume_idempotent_and_terminal_rest_and_grpc() {
     let mark = rec.pause.expect("pause mark");
     assert_eq!(mark.reason, 0);
     assert_eq!(mark.detail, "maintenance");
+    // 07-22: the run view shows the pause mark (REST and gRPC).
+    let (st, v) = get(&s, &format!("/v1/runs/{id}")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        v["pause"],
+        json!({"reason": "operator", "detail": "maintenance", "at_ms": mark.at_ms}),
+        "{v}"
+    );
+    let info = RunsClient::new(s.channel().await)
+        .get(pb::GetRunRequest { run_id: id.clone() })
+        .await
+        .expect("get run")
+        .into_inner();
+    let p = info.pause.expect("gRPC pause mark");
+    assert_eq!((p.reason.as_str(), p.at_ms), ("operator", mark.at_ms));
     // Twice: idempotent.
     let (st, v) = post(&s, &path, json!({})).await;
     assert_eq!(st, StatusCode::OK);
@@ -428,6 +443,8 @@ async fn run_pause_resume_idempotent_and_terminal_rest_and_grpc() {
     assert!(!r.paused && r.changed, "{r:?}");
     wait_status(&s, &id, RunStatus::Completed).await;
     assert!(!paused(&s, &id));
+    let (_, v) = get(&s, &format!("/v1/runs/{id}")).await;
+    assert!(v["pause"].is_null(), "{v}");
 
     // Terminal: 409 run_terminal on both transports.
     let (st, v) = post(&s, &path, json!({})).await;

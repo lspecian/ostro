@@ -4678,6 +4678,17 @@ expression: pretty
             "type": "string",
             "description": "Implementing module."
           },
+          "pause": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RunPauseMark",
+                "description": "Pause mark while the run is paused (reason, detail, time); absent = not paused."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "priority": {
             "type": "integer",
             "format": "int32",
@@ -4836,6 +4847,31 @@ expression: pretty
           "run_id": {
             "type": "string",
             "description": "Run id."
+          }
+        }
+      },
+      "RunPauseMark": {
+        "type": "object",
+        "description": "The pause mark of a paused run, shown on `GET /v1/runs/{id}` (07-22, OPS-01).",
+        "required": [
+          "reason",
+          "detail",
+          "at_ms"
+        ],
+        "properties": {
+          "at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the pause took effect, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "detail": {
+            "type": "string",
+            "description": "Operator note or auto-pause detail (may be empty)."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the run is paused: `operator` (pause API/CLI) or `retries_exhausted`\n(auto-pause, `on_retries_exhausted = \"pause\"`); `reason_<n>` for an unknown code."
           }
         }
       },

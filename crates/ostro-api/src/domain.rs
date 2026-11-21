@@ -543,6 +543,8 @@ pub struct RunInfo {
     pub retention_ms: Option<u64>,
     /// Resolved schedule-to-start timeout, ms (`None` = none).
     pub schedule_to_start_ms: Option<u64>,
+    /// The pause mark while the run is paused (Phase 7, 07-22); `None` = not paused.
+    pub pause: Option<crate::phase7::RunPauseMark>,
 }
 
 /// History page request.

@@ -95,6 +95,18 @@ message RunInfo {
   optional uint64 retention_ms = 19;
   // Resolved schedule-to-start timeout (ms; unset = none). Phase 5 (05-13).
   optional uint64 schedule_to_start_ms = 20;
+  // The pause mark while the run is paused (unset = not paused). Phase 7 (07-22).
+  RunPauseMark pause = 21;
+}
+
+// Why and since when a run is paused. Phase 7 (07-22).
+message RunPauseMark {
+  // "operator" | "retries_exhausted" | "reason_<n>" (unknown code).
+  string reason = 1;
+  // Operator note or auto-pause detail (may be empty).
+  string detail = 2;
+  // When the pause took effect (ms since the Unix epoch).
+  uint64 at_ms = 3;
 }
 
 message RunHistoryRequest {

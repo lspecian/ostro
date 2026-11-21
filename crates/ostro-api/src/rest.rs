@@ -323,6 +323,9 @@ pub struct RunDto {
     /// Resolved schedule-to-start timeout, ms (absent = none).
     #[serde(default)]
     pub schedule_to_start_ms: Option<u64>,
+    /// Pause mark while the run is paused (reason, detail, time); absent = not paused.
+    #[serde(default)]
+    pub pause: Option<crate::phase7::RunPauseMark>,
 }
 
 /// History query.
@@ -728,6 +731,7 @@ impl From<domain::RunInfo> for RunDto {
             attempt_failures: r.attempt_failures,
             retention_ms: r.retention_ms,
             schedule_to_start_ms: r.schedule_to_start_ms,
+            pause: r.pause,
         }
     }
 }

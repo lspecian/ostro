@@ -298,6 +298,29 @@ pub struct RunPauseState {
     pub changed: bool,
 }
 
+/// The pause mark of a paused run, shown on `GET /v1/runs/{id}` (07-22, OPS-01).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunPauseMark {
+    /// Why the run is paused: `operator` (pause API/CLI) or `retries_exhausted`
+    /// (auto-pause, `on_retries_exhausted = "pause"`); `reason_<n>` for an unknown code.
+    pub reason: String,
+    /// Operator note or auto-pause detail (may be empty).
+    pub detail: String,
+    /// When the pause took effect, ms since the Unix epoch.
+    pub at_ms: u64,
+}
+
+impl RunPauseMark {
+    /// The `reason` string of a stored pause reason code (`PAUSE_REASON_*`).
+    pub fn reason_name(code: u8) -> String {
+        match code {
+            0 => "operator".to_owned(),
+            1 => "retries_exhausted".to_owned(),
+            n => format!("reason_{n}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------
 // Demand
 // ---------------------------------------------------------------------------------
