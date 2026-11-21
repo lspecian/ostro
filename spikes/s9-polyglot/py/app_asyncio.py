@@ -8,7 +8,10 @@ Workflows:
 - `hello`: one step returning a greeting, then completes (fuel/instantiate reference).
 - `classes`: reports which stdlib modules ended up in `sys.modules` (snapshot evidence).
 - `loop-check`: runs `loop_proto.selfcheck()` on the embedded CPython (only in the
-  `py-loop` build, where run.sh stages loop_proto.py next to this file).
+  `py-loop` build, where run.sh stages loop_proto.py next to this file). It must be
+  imported at module level: with `--stub-wasi` there is no filesystem at run time, so a
+  first import inside `run` traps (see `lazy-import`).
+- `lazy-import`: imports a stdlib module (`fractions`) for the first time inside `run`.
 """
 
 # --- SDK-IMPORTS BEGIN ---
@@ -34,6 +37,11 @@ _SDK_TOUCH = (
 
 import sys
 
+try:  # staged only in the py-loop build
+    import loop_proto
+except ImportError:
+    loop_proto = None
+
 import wit_world
 from componentize_py_types import Ok
 from wit_world.exports import workflows
@@ -52,6 +60,7 @@ class Workflows(wit_world.exports.Workflows):
             workflows.WorkflowMeta("hello", 1, None, None),
             workflows.WorkflowMeta("classes", 1, None, None),
             workflows.WorkflowMeta("loop-check", 1, None, None),
+            workflows.WorkflowMeta("lazy-import", 1, None, None),
         ]
 
     def run(self, name: str, input: types.Payload) -> workflows.RunResult:
@@ -63,13 +72,13 @@ class Workflows(wit_world.exports.Workflows):
             )
             return workflows.RunResult_Completed(_payload('{"modules":%s}' % _list(mods)))
         if name == "loop-check":
-            import json as _json
+            if loop_proto is None:
+                return workflows.RunResult_Completed(_payload('{"error":"loop_proto not staged"}'))
+            return workflows.RunResult_Completed(_payload(json.dumps(loop_proto.selfcheck())))
+        if name == "lazy-import":
+            import fractions
 
-            try:
-                import loop_proto
-            except ImportError as e:
-                return workflows.RunResult_Completed(_payload(_json.dumps({"error": str(e)})))
-            return workflows.RunResult_Completed(_payload(_json.dumps(loop_proto.selfcheck())))
+            return workflows.RunResult_Completed(_payload('"%s"' % fractions.Fraction(1, 3)))
         start = journal.begin_step("greet", types.StepOptions(None, None, None))
         if isinstance(start, journal.StepStart_Replayed):
             out = start.value.value

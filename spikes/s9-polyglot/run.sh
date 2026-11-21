@@ -200,7 +200,7 @@ do_probes() {
                 > "$d/build-$b.log" 2>&1 || rc=$?
             local left warn
             left="$(leftover_async "$d/bundle-$b.js" | head -5 | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))')"
-            warn="$(grep -oE '\[[A-Z_]+\][^│]*' "$d/build-$b.log" | sort -u | head -5 | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))')"
+            warn="$({ grep -oE '\[[A-Z_]+\][^│]*' "$d/build-$b.log" || test $? = 1; } | sort -u | head -5 | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read().splitlines()))')"
             note "lowering-$v" "$(if [ $b = qjs ]; then echo quickjs; else echo starlingmonkey; fi)" lowering \
                 --field variant="$v" --field build_exit="$rc" --json leftover_async_lines="$left" \
                 --json rolldown_diagnostics="$warn" --field bundle_bytes="$(stat -c %s "$d/bundle-$b.js")"
@@ -258,7 +258,7 @@ do_probes() {
     done
 
     log "Python OstroLoop prototype inside the embedded CPython"
-    "$H" fuel "$OUT/py-loop.wasm" --workflow loop-check --workflow classes --guest py-loop \
+    "$H" fuel "$OUT/py-loop.wasm" --workflow loop-check --workflow classes --workflow lazy-import --guest py-loop \
         --backend componentize-py --probe py_loop --out "$JSONL" >/dev/null
     "$H" fuel "$OUT/py-base.wasm" --workflow classes --guest py-base \
         --backend componentize-py --probe py_loop --out "$JSONL" >/dev/null
