@@ -249,7 +249,7 @@ Plans:
   3. Fencing chaos test: random executor, worker and node crashes run against a mock payment API across 10,000 runs. Result: exactly one call per idempotency key, with 0 duplicate charges and 0 lost effects.
   4. Per-queue concurrency, priority and rate limits apply. Keyed concurrency schedules fairly across keys. Throttle queues the excess while rate limit rejects it. Runs, workflows and queues can be paused and resumed, and a run auto-pauses when retries are exhausted.
   5. `ostro_queue_worker_demand{queue}` and the demand endpoint drive a KEDA ScaledObject so workers scale from 0 → N → 0.
-**Plans**: 22 plans (8 waves; 07-01 is the PHASE-7 GATE requiring Phase 6 complete (all 06-*-SUMMARY + 06-VERIFICATION passed, or human_needed with by-design items only) and the Phase 5 pre-freeze findings F1–F4, F7 (ReadyValue.first) and F8 (ApiToken.expires_at_ms) in code; revised after the plan check (7 blockers, 14 warnings); runs in parallel with Phase 8 under the 07-DECISIONS shared-file rules: dispatcher.rs 07-05 vs 08-16 (Phase 7 owns the demand gauge value), server/config/lib.rs only 07-02, control/mod.rs 07-02 (field) + 07-14 vs 08-10, ostro-api/proto 07-11 vs 08-10, main.rs 07-15 vs 08-12/08-18, Cargo files only 07-02)
+**Plans**: 23 plans (8 waves + gap closure 07-23; 07-01 is the PHASE-7 GATE requiring Phase 6 complete (all 06-*-SUMMARY + 06-VERIFICATION passed, or human_needed with by-design items only) and the Phase 5 pre-freeze findings F1–F4, F7 (ReadyValue.first) and F8 (ApiToken.expires_at_ms) in code; revised after the plan check (7 blockers, 14 warnings); runs in parallel with Phase 8 under the 07-DECISIONS shared-file rules: dispatcher.rs 07-05 vs 08-16 (Phase 7 owns the demand gauge value), server/config/lib.rs only 07-02, control/mod.rs 07-02 (field) + 07-14 vs 08-10, ostro-api/proto 07-11 vs 08-10, main.rs 07-15 vs 08-12/08-18, Cargo files only 07-02)
 
 Plans:
 - [x] 07-01-PLAN.md — PHASE-7 GATE (Phase 6 complete, Phase 5 F1–F4/F7/F8 landed, code vs RESERVATIONS.md) + Phase 7 ordinals/names reserved + decisions D-W1..D-W25 and coordination rules to STATE (W1)
@@ -274,6 +274,7 @@ Plans:
 - [x] 07-20-PLAN.md — SC5 e2e: KEDA metrics-api simulator drives real workers 0→N→0; real KEDA human_needed (WORK-05) (W7)
 - [x] 07-21-PLAN.md — SC3 fencing chaos: 10,000 runs, sharded/resumable, one charge per key, strict duplicate attribution, fenced_sends defined (QA-03) (W7)
 - [x] 07-22-PLAN.md — PHASE-7 GATE: full ci-local, CI sync + optional Pebble/KEDA dispatch jobs, RESERVATIONS flip, docs, VALIDATION + human_needed, STATE (W8)
+- [x] 07-23 — Gap closure (07-22 gate G1): a throttle on a first activation gates only the queue's (key's) first activations in FairQueues until until_ms or a flow changed() bump; re-activations behind it on the same partition are granted at once (DISP-05, D-W13)
 
 ### Phase 8: Triggers, Bottomless & Observability
 **Goal**: Workflows start from webhooks and cron. A single node has real disaster recovery from object storage, and operators can trace and measure everything.

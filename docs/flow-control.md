@@ -65,8 +65,11 @@ Each dispatcher selects the next ready entry with three levels (`leader/fair.rs`
    `(ready_at, run)`. A hot key gets one pick per round, so it cannot starve the others. Unkeyed
    work is one key, so a queue without keys behaves exactly like the Phase 4 FIFO.
 
-A key at its `key_concurrency` or throttle leaves the rotation until a release or its
-`until_ms`; the other keys keep being served. Weights and bands are per partition dispatcher,
+A key at its `key_concurrency` leaves the rotation until a release; the other keys keep
+being served. A throttle (`throttle` or `key_throttle`) holds back only **first activations**
+of its queue (or key) until its `until_ms` or the next flow-control change; re-activations of
+the same queue and key keep being granted in their usual fair order, even when they sit behind
+a throttled first activation (gap G1, fixed in 07-23). Weights and bands are per partition dispatcher,
 so cross-partition ordering is not strict (the e2e weight and priority legs use one partition).
 
 ## 4. Throttle versus rate limit (D-W21, D-W24)
@@ -79,7 +82,7 @@ conforms iff `now >= TAT - tau`, and then `TAT = max(TAT, now) + T`.
 |---|---|---|
 | Where | dispatcher, at grant time | StartRun admission, before the proposal |
 | Applies to | **first activations** only (a run's first grant, F7 `first_activation`); re-activations after sleeps, signals or effects are never throttled | run starts (REST, gRPC, CLI, and Phase 8 webhook and cron starts, which use the same path) |
-| Excess | the run waits in the ready queue until `until_ms` | rejected: HTTP 429 / gRPC `RESOURCE_EXHAUSTED`, `code = "rate_limited"`, `Retry-After` (ceil seconds) and `details.retry_after_ms`; nothing is enqueued |
+| Excess | the first activation waits in the ready queue until `until_ms`; re-activations queued behind it are still granted | rejected: HTTP 429 / gRPC `RESOURCE_EXHAUSTED`, `code = "rate_limited"`, `Retry-After` (ceil seconds) and `details.retry_after_ms`; nothing is enqueued |
 | Idempotent re-submits | - | a start whose idempotency key already has a dedupe row is not charged |
 
 The CLI prints `ostro: rate limited: retry after <s> s (Retry-After), <ms> ms` for any verb
