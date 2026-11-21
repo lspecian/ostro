@@ -911,6 +911,128 @@ async fn redrive_respects_resend_never_and_force_window() {
     assert_eq!(h.status, 200);
 }
 
+// ---- re-drive of a request still in progress at the provider (07-21 gap closure) ----
+
+/// A re-drive (no guest policy) that meets 409 in_progress while the original send is still
+/// running retries until the provider's final answer: the original's 200, one charge.
+#[tokio::test]
+async fn redrive_in_progress_409_is_retried_without_policy_until_final() {
+    let fx = fx(Opts::default()).await;
+    let c = ctx("run-redrive-inprog");
+    let url = format!("{}/pay?delay_ms=700", fx.mock.base_url());
+    let first = live(4, req("POST", &url, &[], None), None);
+    let again = redrive(first.clone(), 0);
+    let (a, b) = tokio::join!(run(&fx, &c, &first), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        run(&fx, &c, &again).await
+    });
+    let (a, b) = (ok(a), ok(b));
+    assert_eq!(
+        (a.status, b.status),
+        (200, 200),
+        "{:?}",
+        String::from_utf8_lossy(&b.body)
+    );
+    assert_eq!(echo_json(&a)["charge_id"], echo_json(&b)["charge_id"]);
+    assert_eq!(header(&b, "idempotent-replayed"), Some("true"));
+    let key = derive_key("run-redrive-inprog", 4);
+    assert_eq!(fx.mock.charges(&key), 1);
+    assert!(
+        fx.mock.requests(&key) >= 3,
+        "the re-drive saw at least one 409 and retried: {}",
+        fx.mock.requests(&key)
+    );
+}
+
+/// Unchanged: a first (live) attempt without a policy completes with the provider's 409.
+#[tokio::test]
+async fn first_attempt_409_in_progress_without_policy_is_the_outcome() {
+    let fx = fx(Opts::default()).await;
+    let c = ctx("run-live-inprog");
+    let url = format!("{}/pay?delay_ms=500", fx.mock.base_url());
+    let e = live(5, req("POST", &url, &[], None), None);
+    let (a, b) = tokio::join!(run(&fx, &c, &e), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        run(&fx, &c, &e).await
+    });
+    let (a, b) = (ok(a), ok(b));
+    assert_eq!((a.status, b.status), (200, 409));
+    assert_eq!(echo_json(&b)["error"], "in_progress");
+    let key = derive_key("run-live-inprog", 5);
+    assert_eq!(fx.mock.charges(&key), 1);
+    assert_eq!(fx.mock.requests(&key), 2);
+}
+
+/// A re-drive without a key header (suppressed by the target) is not retried on 409: the
+/// provider cannot be relying on a key it never saw.
+#[tokio::test]
+async fn redrive_409_without_key_header_is_not_retried() {
+    let fx = fx(Opts {
+        target: Some(r#"{"v":1,"idempotency_header":null}"#),
+        ..Opts::default()
+    })
+    .await;
+    let url = format!("{}/pay", fx.mock.base_url());
+    let key = "guest-key-1";
+    // The guest sends the provider key under another name, so the connector sees no key header.
+    let mut r = req("POST", &url, &[], None);
+    r.headers.push(Header {
+        name: "Idempotency-Key".into(),
+        value: key.into(),
+    });
+    // Hold the key in progress with a direct request, then re-drive.
+    let client = reqwest::Client::new();
+    let held = client
+        .post(format!("{url}?delay_ms=500"))
+        .header("Idempotency-Key", key)
+        .send();
+    let c = ctx("run-redrive-nokey");
+    let e = redrive(live(1, r, None), 0);
+    let (h, b) = tokio::join!(held, async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        run(&fx, &c, &e).await
+    });
+    assert_eq!(h.unwrap().status().as_u16(), 200);
+    assert_eq!(ok(b).status, 409);
+    assert_eq!(fx.mock.requests(key), 2);
+}
+
+/// A provider that keeps answering in_progress past the window ends the re-drive with
+/// effect_outcome_unknown (FX-03); it is never retried forever.
+#[tokio::test]
+async fn redrive_in_progress_past_the_window_is_unknown() {
+    let fx = fx(Opts {
+        target: Some(r#"{"v":1,"idempotency_window":"1500ms","safety_margin":"0s"}"#),
+        ..Opts::default()
+    })
+    .await;
+    let c = ctx("run-redrive-stuck");
+    let url = format!("{}/pay?delay_ms=4000", fx.mock.base_url());
+    let first = live(8, req("POST", &url, &[], None), None);
+    let again = redrive(first.clone(), 0);
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(run(&fx, &c, &first), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let r = run(&fx, &c, &again).await;
+        (r, started.elapsed())
+    });
+    assert_eq!(ok(a).status, 200);
+    let (b, took) = b;
+    let i = nr(b);
+    assert_eq!(i.kind, kinds::EFFECT_OUTCOME_UNKNOWN);
+    let key = derive_key("run-redrive-stuck", 8);
+    let d = details(&i);
+    assert_eq!(d["op"], 8);
+    assert_eq!(d["key"], key);
+    assert!(d["elapsed_ms"].as_u64().unwrap() < 1500, "{d}");
+    assert!(
+        took < Duration::from_millis(3500),
+        "gave up at the window: {took:?}"
+    );
+    assert_eq!(fx.mock.charges(&key), 1);
+    assert!(fx.mock.requests(&key) >= 3, "{}", fx.mock.requests(&key));
+}
+
 // ---- through the Bridge driver ----
 
 #[derive(Default)]

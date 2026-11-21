@@ -15,6 +15,22 @@
 //!
 //! A final status (even a 5xx after the budget runs out) is a **successful** completion: the
 //! guest decides what a status means.
+//!
+//! **Re-drive in progress (07-21 gap closure).** A re-driven effect (FX-03: replayed without a
+//! completion) whose idempotency key header was sent and whose response is a 409 the
+//! provider marks as "same key still in progress" ([`is_redrive_in_progress`]) is retried
+//! **with or without a guest policy**, outside the attempt budget, with the bounded backoff
+//! of [`in_progress_delay`] (200 ms, x2, max 5 s; `Retry-After` honoured up to 5 s). It stops
+//! at the provider's final answer or when the idempotency window closes
+//! ([`super::window::may_await_in_progress`]), which ends the effect
+//! `effect_outcome_unknown`. Such a 409 is not the provider's answer to the request: the
+//! original send (from a killed leader) is still running, and its result is what the run
+//! must see. A first (live) attempt keeps the rules above: no policy, no 409 retry.
+//!
+//! Detection is a heuristic: status 409 plus [`is_in_progress_conflict`] (a `Retry-After`
+//! header, or an "in progress"/"concurrent" marker in the first 4 KiB of the body: the
+//! MockProvider's `{"error":"in_progress"}`, Stripe's "executing concurrently"). A 409 with
+//! any other body (e.g. "duplicate order") stays final.
 
 use std::time::Duration;
 
@@ -93,6 +109,29 @@ pub fn classify_status(status: u16, headers: &HeaderMap, body: &[u8]) -> Class {
         409 if is_in_progress_conflict(headers, body) => Class::RetryStatus,
         _ => Class::Final,
     }
+}
+
+/// Whether a re-drive response says the original request (same key) is still being
+/// processed by the provider: 409 + [`is_in_progress_conflict`].
+pub fn is_redrive_in_progress(status: u16, headers: &HeaderMap, body: &[u8]) -> bool {
+    status == 409 && is_in_progress_conflict(headers, body)
+}
+
+/// First re-drive in-progress backoff.
+pub const IN_PROGRESS_INITIAL: Duration = Duration::from_millis(200);
+/// Re-drive in-progress backoff cap (also caps `Retry-After`).
+pub const IN_PROGRESS_MAX: Duration = Duration::from_secs(5);
+
+/// The delay before re-drive in-progress retry number `retry` (1-based): 200 ms doubling up to
+/// 5 s; `Retry-After` replaces it, capped at 5 s.
+pub fn in_progress_delay(retry: u32, retry_after: Option<Duration>) -> Duration {
+    if let Some(ra) = retry_after {
+        return ra.min(IN_PROGRESS_MAX);
+    }
+    let shift = retry.saturating_sub(1).min(16);
+    IN_PROGRESS_INITIAL
+        .saturating_mul(1u32 << shift)
+        .min(IN_PROGRESS_MAX)
 }
 
 /// `Retry-After` in delta seconds (HTTP dates are ignored).
@@ -216,6 +255,46 @@ mod tests {
             classify_status(409, &none, br#"{"error":"duplicate order"}"#),
             Class::Final
         );
+    }
+
+    #[test]
+    fn redrive_in_progress_detection_and_backoff() {
+        let none = HeaderMap::new();
+        assert!(is_redrive_in_progress(
+            409,
+            &none,
+            br#"{"error":"in_progress"}"#
+        ));
+        assert!(is_redrive_in_progress(
+            409,
+            &h(&[("retry-after", "1")]),
+            b""
+        ));
+        assert!(!is_redrive_in_progress(409, &none, b"{}"));
+        assert!(!is_redrive_in_progress(
+            409,
+            &none,
+            br#"{"error":"duplicate order"}"#
+        ));
+        // Only 409: a 503/429 saying "in progress" follows the normal policy rules.
+        assert!(!is_redrive_in_progress(503, &none, b"in progress"));
+        assert!(!is_redrive_in_progress(200, &none, b"in_progress"));
+
+        assert_eq!(in_progress_delay(1, None), Duration::from_millis(200));
+        assert_eq!(in_progress_delay(2, None), Duration::from_millis(400));
+        assert_eq!(in_progress_delay(5, None), Duration::from_millis(3200));
+        assert_eq!(in_progress_delay(6, None), IN_PROGRESS_MAX);
+        assert_eq!(in_progress_delay(u32::MAX, None), IN_PROGRESS_MAX);
+        assert_eq!(
+            in_progress_delay(1, Some(Duration::from_secs(2))),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            in_progress_delay(1, Some(Duration::from_secs(600))),
+            IN_PROGRESS_MAX
+        );
+        // The default schedule still does not retry a RetryStatus (first attempts).
+        assert!(!Schedule::new(None).should_retry(Class::RetryStatus, 1, true));
     }
 
     #[test]

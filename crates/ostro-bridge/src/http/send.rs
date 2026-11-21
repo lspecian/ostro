@@ -31,7 +31,10 @@
 //! 14. `OpOutput::Http`.
 //!
 //! Retries ([`super::retry`]) happen per hop, with the same headers (same key). The gate is
-//! re-checked before every retry. Only the origin, status and attempt number are logged;
+//! re-checked before every retry. A re-drive whose key header is on the hop retries a 409
+//! "in progress" without a policy and outside the budget until the provider's final answer,
+//! or ends `effect_outcome_unknown` once the window closes (07-21 gap closure, see
+//! [`super::retry`]). Only the origin, status and attempt number are logged;
 //! header values and bodies never are.
 //!
 //! Honest limit: resolved values are zeroized in Ostro-owned buffers; the copies inside
@@ -62,7 +65,10 @@ use crate::secrets::{ResolveCtx, Scrubber, SecretValue, check_grant, template};
 
 use super::HttpConnector;
 use super::key::{KeySource, effective_key};
-use super::retry::{Class, Schedule, Transport, classify_status, retry_after};
+use super::retry::{
+    Class, Schedule, Transport, classify_status, in_progress_delay, is_redrive_in_progress,
+    retry_after,
+};
 use super::target::HttpTarget;
 use super::window::{self, Decision};
 
@@ -202,6 +208,10 @@ struct Plan<'a> {
     timeout: Duration,
     /// A key header is sent.
     key_sent: bool,
+    /// The effective idempotency key (for `effect_outcome_unknown` details).
+    key: String,
+    /// The key header's name, when one is configured.
+    key_header: Option<HeaderName>,
 }
 
 impl Plan<'_> {
@@ -212,6 +222,17 @@ impl Plan<'_> {
         let elapsed = now_nanos().saturating_sub(self.effect.scheduled_ts_nanos);
         (self.key_sent || window::is_idempotent(m))
             && window::decide(m, elapsed, &self.target) == Decision::Resend
+    }
+
+    /// Whether `raw` is a provider "same key in progress" answer to a re-drive that carries
+    /// the key header on this hop (07-21 gap closure).
+    fn redrive_in_progress(&self, hop: &Hop, raw: &Raw) -> bool {
+        self.effect.redrive
+            && self
+                .key_header
+                .as_ref()
+                .is_some_and(|kh| hop.headers.contains_key(kh))
+            && is_redrive_in_progress(raw.status, &raw.headers, &raw.body)
     }
 
     async fn abandon_if_gated(&self) -> Result<(), Failure> {
@@ -326,6 +347,8 @@ impl Plan<'_> {
     /// Every attempt of one hop.
     async fn attempts(&self, hop: &Hop) -> Result<Raw, Failure> {
         let mut attempt: u32 = 1;
+        // Re-drive in-progress retries: they do not consume the attempt budget.
+        let mut in_progress: u32 = 0;
         loop {
             if attempt > 1 {
                 self.abandon_if_gated().await?;
@@ -354,11 +377,40 @@ impl Plan<'_> {
                     (t.class(), None, Err(retryable(HTTP_TRANSPORT, msg)))
                 }
             };
+            if let Ok(raw) = &result
+                && self.redrive_in_progress(hop, raw)
+            {
+                in_progress += 1;
+                let delay = in_progress_delay(in_progress, delay_hint);
+                let elapsed = now_nanos().saturating_sub(self.effect.scheduled_ts_nanos);
+                let at_next =
+                    elapsed.saturating_add(u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX));
+                if !window::may_await_in_progress(at_next, &self.target) {
+                    tracing::debug!(
+                        origin = %hop.origin,
+                        attempt,
+                        op = self.effect.op,
+                        "http re-drive still in progress at the provider; window closed"
+                    );
+                    return Err(window::unknown(self.effect.op, &self.key, elapsed));
+                }
+                tracing::debug!(
+                    origin = %hop.origin,
+                    attempt,
+                    op = self.effect.op,
+                    delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    "http re-drive in progress at the provider; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+            let budget = attempt - in_progress;
             let after_ok = class == Class::AfterSend && self.after_send_ok(&hop.method);
-            if !self.schedule.should_retry(class, attempt, after_ok) {
+            if !self.schedule.should_retry(class, budget, after_ok) {
                 return result;
             }
-            tokio::time::sleep(self.schedule.delay(attempt, delay_hint)).await;
+            tokio::time::sleep(self.schedule.delay(budget, delay_hint)).await;
             attempt += 1;
         }
     }
@@ -439,6 +491,8 @@ pub(crate) async fn execute(
         templated: ph.is_templated(),
         timeout,
         key_sent: false,
+        key: key.key.clone(),
+        key_header: None,
     };
 
     // 5. The gate, immediately before secret resolution.
@@ -512,6 +566,7 @@ pub(crate) async fn execute(
         }
         plan.key_sent = true;
     }
+    plan.key_header.clone_from(&key_header);
     let body = match (&ph.body_str, &req.body) {
         (Some(s), _) if !ph.body.is_empty() => {
             let expanded = template::expand(s, &values);
