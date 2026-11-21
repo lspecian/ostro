@@ -32,6 +32,8 @@ struct Shared {
     rt: Runtime,
     basic: Prepared,
     divergent: Prepared,
+    /// det-basic as committed in the replay corpus (fixed module bytes, see the golden test).
+    corpus_basic: Prepared,
 }
 
 fn shared() -> &'static Shared {
@@ -47,15 +49,23 @@ fn shared() -> &'static Shared {
         )
         .expect("runtime");
         let basic = rt
-            .prepare(&common::neutral_guest_wasm("det-basic"))
+            .prepare(&common::guest_wasm("det-basic"))
             .expect("prepare det-basic");
         let divergent = rt
-            .prepare(&common::neutral_guest_wasm("det-divergent"))
+            .prepare(&common::guest_wasm("det-divergent"))
             .expect("prepare det-divergent");
+        let corpus_wasm = common::repo_root().join("tests/replay-corpus/det-basic/module.wasm");
+        let corpus_basic = rt
+            .prepare(
+                &std::fs::read(&corpus_wasm)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", corpus_wasm.display())),
+            )
+            .expect("prepare corpus det-basic");
         Shared {
             rt,
             basic,
             divergent,
+            corpus_basic,
         }
     })
 }
@@ -82,8 +92,12 @@ fn spec(mode: &str, seed: [u8; 32]) -> RunSpec {
 }
 
 async fn record_seeded(mode: &str, seed: [u8; 32]) -> Drive {
+    record_with(&shared().basic, mode, seed).await
+}
+
+async fn record_with(module: &Prepared, mode: &str, seed: [u8; 32]) -> Drive {
     let s = shared();
-    let d = drive_to_completion(&s.rt, &s.basic, spec(mode, seed), Script::default()).await;
+    let d = drive_to_completion(&s.rt, module, spec(mode, seed), Script::default()).await;
     assert!(
         matches!(d.outcome, ActivationOutcome::Completed { .. }),
         "record({mode}): {:?}",
@@ -284,12 +298,20 @@ async fn thousand_replays() {
 /// versions and architectures. A change here means hashing, the journal codec, the
 /// RNG streams, the WASI shim or the guest toolchain changed: investigate, never
 /// blindly re-bless. If this snapshot differs between x86_64 and aarch64 in CI, that
-/// is a real determinism bug. det-basic is built path-neutrally (`neutral_guest_wasm`):
-/// `RunStarted.module_hash` is the module's sha256, and a plain build's bytes embed the
-/// build host's cargo-registry and toolchain paths.
+/// is a real determinism bug.
+///
+/// The pinned recording runs the committed corpus module
+/// (`tests/replay-corpus/det-basic/module.wasm`): `RunStarted.module_hash` is the module's
+/// sha256, and a fresh guest build is not byte-reproducible across build hosts (cargo
+/// mixes the host triple into the `-C metadata` of proc-macro / build-script dependencies,
+/// and so into every dependent crate's StableCrateId, and a plain build embeds the host's
+/// cargo / rustup paths). The freshly built det-basic must then journal the same events
+/// byte for byte except `RunStarted` (whose only build-dependent field is `module_hash`),
+/// so guest source or guest toolchain changes are still caught.
 #[tokio::test]
 async fn golden_det_basic_journal() {
-    let d = record("basic").await;
+    let s = shared();
+    let d = record_with(&s.corpus_basic, "basic", [1; 32]).await;
     // Logical time is monotonic over every journaled event, inputs included (03-11):
     // with the frozen clock, events after TimerFired are stamped at its fire time.
     let ts: Vec<u64> = d.journal.iter().map(|e| e.ts_nanos).collect();
@@ -297,8 +319,29 @@ async fn golden_det_basic_journal() {
         ts.windows(2).all(|w| w[0] <= w[1]),
         "journal ts decreased: {ts:?}"
     );
+    let text = golden_lines(&d.journal);
+    insta::assert_snapshot!("golden_det_basic_journal", text);
+
+    let fresh = record("basic").await;
+    let EventBody::RunStarted(rs) = &fresh.journal[0].body else {
+        panic!(
+            "fresh journal starts with {:?}",
+            fresh.journal[0].body.kind()
+        )
+    };
+    assert_eq!(rs.module_hash, s.basic.module_hash_hex);
+    let tail = |t: &str| t.lines().skip(1).map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(
+        tail(&golden_lines(&fresh.journal)),
+        tail(&text),
+        "freshly built det-basic journals differently from the committed module"
+    );
+}
+
+/// The golden snapshot's line format: seq, kind, command hash, ts, encoded length, digest.
+fn golden_lines(journal: &[Event]) -> String {
     let mut text = String::new();
-    for e in &d.journal {
+    for e in journal {
         let (_, bytes) = encode_event(e);
         let hash = e
             .body
@@ -315,5 +358,5 @@ async fn golden_det_basic_journal() {
             hex(&digest[..8])
         ));
     }
-    insta::assert_snapshot!("golden_det_basic_journal", text);
+    text
 }

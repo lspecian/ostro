@@ -2,15 +2,16 @@
 status: verifying
 trigger: "Fix the failures of the first remote GitHub CI run (44932519644, main 6ec19c2)"
 created: 2026-11-21T18:15:00Z
-updated: 2026-11-21T18:45:00Z
+updated: 2026-11-21T19:35:00Z
 ---
 
 ## Current Focus
 
-hypothesis: four independent root causes (below), all fixed locally; CI re-run pending
-test: push main, watch the new run
-expecting: all four test legs reach past the previously failing binaries
-next_action: push, `gh run watch`, triage any newly exposed failure
+hypothesis: golden_det must pin committed module bytes (fresh builds are host-triple dependent)
+test: run 3 (after run 44935982335) on all legs
+expecting: ostro-engine passes on every leg; remaining failures are sustained_overload
+  (x86_64-musl) and macOS ephemeral_under_1s, both reported for a decision
+next_action: push, watch, report
 
 ## Symptoms
 
@@ -74,6 +75,41 @@ started: first remote CI run (the repo had only run ci-local before)
     test database as the query expects.
   implication: not reproduced; left unchanged, watch CI.
 
+- timestamp: 2026-11-21T19:10Z
+  checked: run 44935982335 (fixes 1-4)
+  found: cli_bridge (macOS), sql_mysql 8/8 (gnu, real MySQL 8.4), paging (both musl legs) pass.
+    New: aarch64-musl golden_det RunStarted f7de433a73938b78 vs path-neutral x86 6b85acf4d2a49a7e;
+    gnu replay_corpus det_basic_entry_equals_golden_snapshot fails because the committed corpus
+    det-basic entry (module.wasm sha 193d6d48..., the plain local build) renders the ORIGINAL
+    snapshot line 0 (95042388e40780cf).
+  implication: path remapping is not enough. cargo hashes the `host:` line of `rustc -vV` into
+    the -C metadata of host units (proc macros, build scripts), and dependents mix their deps'
+    metadata in, so StableCrateIds and the wasm bytes differ per build host
+    (cargo src/compiler/build_runner/compilation_files.rs hash_rustc_version; reproduced locally:
+    a different __CARGO_DEFAULT_LIB_METADATA seed changes det_basic.wasm). Fix: the golden
+    recording runs the committed corpus module (snapshot restored to the original), and the
+    fresh build must match it on every line except RunStarted (module_hash). Neutral-build
+    helper dropped.
+- timestamp: 2026-11-21T19:10Z
+  checked: run 44935982335 x86_64-musl worker_failover sustained_overload
+  found: "more embedded runs than slots": 2 of 50 samples are (3, 1); every sample totals 4
+    (= embedded 2 + worker 2 slots). embedded is computed as running-list count minus
+    demand.running_on_workers, two separate requests.
+  implication: consistent with a non-atomic sample (a worker run leaving running_on_workers
+    between / before its status leaves `running`), but a real embedded over-admission while a
+    worker slot is free cannot be ruled out from the data. Not changed; reported for a decision.
+- timestamp: 2026-11-21T19:10Z
+  checked: run 44935982335 macos-aarch64 dev_startup ephemeral_under_1s
+  found: 5/5 samples 2.58-2.92 s to /readyz (ready line within ~10 ms of it); warm_restart_under_1s
+    passes on the same runner; Linux legs pass.
+  implication: macOS-specific cost of a fresh data dir (unmeasured here; suspect: F_FULLFSYNC,
+    which std's sync_all uses on macOS, on the init path). Needs a decision / a macOS profile.
+- timestamp: 2026-11-21T19:10Z
+  checked: tests/replay-corpus/det-basic/module.wasm strings
+  found: embeds /home/<user>/.cargo/... and /home/<user>/.rustup/... paths (recorded with a plain
+    build before corpus-guest-build.sh existed). Entries are "never edit or re-record".
+  implication: observation only; reported.
+
 ## Resolution
 
 root_cause: |
@@ -82,15 +118,15 @@ root_cause: |
      not allowed in the prepared-statement protocol (ER_UNSUPPORTED_PS 1295).
   3. paging: test raced the signal post against the run's steps; signal_payload position is
      timing-dependent, not an aarch64 difference.
-  4. golden_det: guest built without path remapping; module_hash in RunStarted depended on the
-     build host's cargo / rustup home.
-fix: test-side fixes for all four (see files_changed)
-verification: local: sql_mysql 8/8 vs MySQL 8.4.10; fx_sql_crash 4/4 (repeat); cli_bridge ok;
-  worker_e2e paging ok; ostro-engine determinism 10/10. CI pending.
+  4. golden_det: pinned a freshly built guest; its bytes (module_hash in RunStarted) depend on
+     the build host (paths and host triple in cargo's -C metadata).
+fix: test-side fixes; 4 now records the committed corpus module and compares the fresh build
+  on every line but RunStarted
+verification: local: sql_mysql 8/8 vs MySQL 8.4.10; fx_sql_crash 4/4 (repeat); cli_bridge ok
+  (Linux and the ps branch); paging ok; determinism 10/10; replay_corpus 5/5. CI: 1-3 green in
+  run 44935982335; 4 pending.
 files_changed:
   - crates/ostro/tests/cli_bridge.rs
   - crates/ostro-bridge/tests/sql_mysql.rs
   - crates/ostro/tests/worker_e2e.rs
-  - crates/ostro-engine/tests/common/mod.rs
   - crates/ostro-engine/tests/determinism.rs
-  - crates/ostro-engine/tests/snapshots/determinism__golden_det_basic_journal.snap
