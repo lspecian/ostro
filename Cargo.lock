@@ -3309,6 +3309,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ostro-conformance"
+version = "0.1.0"
+dependencies = [
+ "ostro-api",
+ "ostro-engine",
+ "ostro-meta",
+ "ostro-server",
+ "ostro-testkit",
+ "ostro-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "wasmparser",
+]
+
+[[package]]
 name = "ostro-crashtest"
 version = "0.1.0"
 dependencies = [
@@ -3355,6 +3375,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "wasmparser",
  "wasmtime",
 ]
 

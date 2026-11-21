@@ -7,6 +7,8 @@
 //! Every violation is collected (not first-fail) and returned in
 //! [`EngineError::Validation`], each message naming the offending interface.
 
+// 09-02 anchor; 09-07 replaces it with the export-shape check.
+use wasmparser as _;
 use wasmtime::Engine;
 use wasmtime::component::{Component, Linker};
 

@@ -71,6 +71,10 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "h
 # pulls (one copy in Cargo.lock). Bump only together with wasmtime (D17).
 wit-component = { version = "=0.261.0", default-features = false, features = ["semver-check"] }
 wit-parser = "=0.261.0"
+# Phase 9 (plan 09-02 declares every Phase 9 dependency once). Component inspection for the
+# conformance harness and deploy-time export-shape checks (09-07). Exact: the version wasmtime
+# 50.0.2 already pulls (one copy in Cargo.lock). Bump only together with wasmtime (D17).
+wasmparser = { version = "=0.261.0", default-features = false, features = ["std", "component-model"] }
 # Phase 8 triggers / bottomless / observability (plan 08-01 declares every Phase 8 dependency
 # once, P8-D21; versions verified 2026-11-19, 08-RESEARCH "Standard Stack").
 # OTel: all opentelemetry* crates share 0.33; otlp is gRPC (tonic) only and never zstd

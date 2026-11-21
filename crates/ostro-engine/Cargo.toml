@@ -25,6 +25,8 @@ fail = { workspace = true, optional = true }
 opentelemetry.workspace = true
 # 08-11: deterministic trace/span ids (P8-D14); already in the lock (ostro-partition)
 blake3.workspace = true
+# 09-02: component section inspection for deploy-time export-shape checks (09-07)
+wasmparser.workspace = true
 
 [features]
 # Exposes the in-memory fake ActivationSink and test helpers (plan 03-08).

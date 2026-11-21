@@ -1,0 +1,372 @@
+{
+  "entries": [
+    {
+      "id": "C-STEP-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "steps a, b, c run once each and the result holds their outputs (conf_steps)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts", "ts-sm"]
+    },
+    {
+      "id": "C-STEP-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a non-retryable step failure is caught by the workflow and returned as {caught: kind} (conf_step_fail)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-STEP-03",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "randomness drawn inside a step body comes from the step-local stream and is recorded (conf_step_rng)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-STEP-04",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "an async step body yields while a sibling task draws ctx randomness and starts a sleep; the sibling commands land after the step and strict replay holds (conf_step_sibling)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-NATIVE-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "native time, randomness and map iteration are replay-identical and differ across seeds (WF-07; per-language values) (conf_native)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-RETRY-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a flaky step retries with backoff and succeeds on attempt 3 (conf_retry)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-RETRY-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a step that always fails exhausts 2 attempts and the run fails (conf_retry_exhaust)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-TIMER-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a 1 h durable sleep fires and the run completes (conf_timer)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-TIMER-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a 1 h sleep races a signal; the signal wins (conf_timer_vs_signal)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-SIG-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "two signals, one buffered before start, are received in order (conf_signals)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts", "ts-sm"]
+    },
+    {
+      "id": "C-SIG-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a signal wait with a 10 s timeout returns {timeout: true} (conf_signal_timeout)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-RACE-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "gather of two sleeps and a signal completes when all three resolve (conf_gather)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts", "ts-sm"]
+    },
+    {
+      "id": "C-RACE-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "select of a sleep and a signal; the loser is cancelled and the winner reported (conf_race_cancel)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CANCEL-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "cancelling a sleeping run ends it Cancelled (conf_cancel_wait)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts", "ts-sm"]
+    },
+    {
+      "id": "C-CANCEL-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "on cancellation a shielded cleanup step runs, then the run ends Cancelled (conf_cancel_shielded)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CANCEL-03",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "cancel-op on an own timer completes its wait with Err(Cancelled) (conf_cancel_timer)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-PATCH-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a v1 journal replayed on v2 takes the old branch of patched(x) (conf_patch)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-PATCH-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a fresh run on v2 takes the new branch and records the patch marker (conf_patch)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-NDET-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a v1 journal replayed on a reordered v2 body is detected as non-determinism (conf_ndet)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-RAND-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "ctx random_u64 and uuid_v7 differ across seeds and replay reproduces them (conf_rand)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts", "ts-sm"]
+    },
+    {
+      "id": "C-RAND-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "random_bytes and random_f64 are replay-stable and differ per seed (conf_rand_native)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-VAL-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "random_u64, random_f64, uuid_v7 and idempotency_key(x) are equal across the three SDKs for one seed and run id (conf_values)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CAN-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "continue-as-new with n-1 until 0 returns the final generation (conf_can)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-TOKEN-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "an await token completed by the harness returns its payload (conf_token)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-STATUS-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "set_status twice publishes the latest status JSON (conf_status)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-SAGA-01",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a saga with three steps compensates in reverse order when the last step fails (conf_saga_three)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-SAGA-02",
+      "leg": "engine",
+      "kind": "scenario",
+      "title": "a saga cancelled mid-way runs its compensations shielded (conf_saga_cancel)",
+      "owner": "09-11",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-REBUILD-01",
+      "leg": "engine",
+      "kind": "rebuild",
+      "title": "journals recorded on one build replay with 0 appended events and no non-determinism on an independently rebuilt module",
+      "owner": "09-17",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-01",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a parent starts an attached child and its result contains the child output (conf_leaf_echo)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-02",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a failing child surfaces to the parent as a caught failure of kind boom (conf_leaf_fail)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-03",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a detached child start returns {run_id} to the parent immediately",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-04",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "cancel-op on a sleeping child gives the parent Err(Cancelled)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-05",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a parent returning with an attached sleeping child cancels it with reason parent_closed and its cleanup runs",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-06",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "terminating the child via the API makes the parent catch child_terminated",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-07",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a child that continues-as-new twice delivers its final result {done: true, generation: 2} (conf_leaf_can)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-09",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "cancelling the root of a 3-level chain ends every descendant Cancelled",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-10",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a terminated parent with an in-flight attached child is RetryRun-resumed and completes (B3)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-11",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "cancel cascade beats shielding: a shielded await on an in-flight child gets Err(Cancelled), a child started in shielded cleanup runs until parent close then is cancelled (W2)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-SIG-API-01",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a signal sent through the REST API resumes the waiting run (conf_sig_api)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-TOKEN-API-01",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "an await token completed through the REST API, read from the published status, resumes the run (conf_token_api)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CAN-02",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "the result long-poll follows a continue-as-new chain to its final result",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-FX-01",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "an HTTP effect with ctx.idempotency_key(pay) charges the MockProvider exactly once (conf_fx_http)",
+      "owner": "09-13",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CHILD-08",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a TS parent starts a Python child which starts a Rust grandchild; the nested result reaches the root",
+      "owner": "09-16",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-SAGA-03",
+      "leg": "server",
+      "kind": "scenario",
+      "title": "a saga with HTTP compensations against the MockProvider compensates in reverse order with one charge per key",
+      "owner": "09-16",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CRASH-01",
+      "leg": "crash",
+      "kind": "scenario",
+      "title": "a TS -> Python -> Rust child chain completes with the correct nested result under kill -9 and child failpoints",
+      "owner": "09-18",
+      "languages": ["rust", "py", "ts"]
+    },
+    {
+      "id": "C-CRASH-02",
+      "leg": "crash",
+      "kind": "scenario",
+      "title": "cancelling the TS root under kill -9 ends root, Python mid and Rust leaf Cancelled with the leaf cleanup run",
+      "owner": "09-18",
+      "languages": ["rust", "py", "ts"]
+    }
+  ]
+}

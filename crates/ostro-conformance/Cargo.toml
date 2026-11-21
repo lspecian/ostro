@@ -1,0 +1,40 @@
+[package]
+name = "ostro-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Phase 9 polyglot conformance harness: scenario catalogue, component inspector, polyglot guest builds"
+
+# Plan 09-02 declares every dependency the Phase 9 conformance plans need (no later Phase 9
+# plan edits a Cargo file). Deps that only later plans consume are anchored in src/lib.rs.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+wasmparser.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+reqwest.workspace = true
+ostro-types.workspace = true
+ostro-engine = { path = "../ostro-engine", features = ["testkit"] }
+ostro-server = { path = "../ostro-server" }
+ostro-api = { path = "../ostro-api" }
+ostro-meta = { path = "../ostro-meta" }
+# Phase 6 MockProvider (`/pay`, charges(key)) for the server leg (09-13)
+ostro-testkit = { workspace = true, features = ["mock-http"] }
+
+[features]
+default = []
+# Python/TypeScript legs: need uv 0.7.15 and Node 24 (D-P9-12). Off by default so
+# `cargo test --workspace` stays toolchain-free.
+polyglot = []
+
+[[bin]]
+name = "ostro-conf-inspect"
+path = "src/bin/ostro-conf-inspect.rs"
+
+[lints]
+workspace = true
