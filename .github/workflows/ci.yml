@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs also start the optional Phase 7 jobs (acme-pebble, keda-kind; 07-22).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -272,6 +274,16 @@ jobs:
           cargo test -p ostro --features failpoints --test fx_sql_crash --locked -- --test-threads=1
           cargo test -p ostro-worker --features failpoints --locked -- --test-threads=1
       - if: matrix.name == 'linux-x86_64-gnu'
+        name: Phase 7 failpoint legs + manifests
+        # keep in sync with check_phase7 in scripts/ci-local.sh (07-22): the SIGSTOP zombie
+        # and the 100-run QA-03 chaos smoke need the failpoint `ostro` binary; the other
+        # Phase 7 spawned suites run in the cargo test step above.
+        run: |
+          out="$(cargo test -p ostro --features failpoints --test worker_failover --test fencing_chaos --locked -- --test-threads=1 sigstop_zombie chaos_smoke 2>&1)" || { echo "$out"; exit 1; }
+          echo "$out"
+          test "$(grep -Ec 'test result: ok\. [1-9][0-9]* passed' <<<"$out")" -eq 2
+          bash deploy/check-manifests.sh
+      - if: matrix.name == 'linux-x86_64-gnu'
         name: Server campaign smoke (20 kills)
         # QA-01 whole-server kill campaign (plan 05-19) from a freshly wiped state dir; keep
         # in sync with check_campaign_smoke in scripts/ci-local.sh
@@ -289,3 +301,195 @@ jobs:
           info="$(target/release/ostro build-info)"
           echo "$info"
           grep -q 'allocator=mimalloc' <<<"$info"
+
+  # ---------------------------------------------------------------------------------
+  # Optional Phase 7 jobs (07-22): manual `workflow_dispatch` only, never on push/PR.
+  # ---------------------------------------------------------------------------------
+
+  acme-pebble:
+    # SEC-01 ACME leg against Pebble (D-W23), loopback only: the order flow with
+    # PEBBLE_VA_ALWAYS_VALID, then real HTTP-01 and TLS-ALPN-01 validation against the
+    # client listener. Same commands as 07-10-SUMMARY "Pebble outcome".
+    name: acme (Pebble)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    env:
+      PEBBLE_VERSION: v2.10.3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.26"
+          cache: false
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: acme-pebble
+      - name: Build and start Pebble (loopback)
+        run: |
+          GOBIN="$PWD/target/pebble/bin" go install "github.com/letsencrypt/pebble/v2/cmd/pebble@${PEBBLE_VERSION}"
+          P="$(go env GOMODCACHE)/github.com/letsencrypt/pebble/v2@${PEBBLE_VERSION}"
+          cat > target/pebble/pebble-config.json <<JSON
+          {"pebble": {"listenAddress": "127.0.0.1:34000", "managementListenAddress": "127.0.0.1:35000",
+            "certificate": "$P/test/certs/localhost/cert.pem", "privateKey": "$P/test/certs/localhost/key.pem",
+            "httpPort": 35002, "tlsPort": 35001, "ocspResponderURL": "", "externalAccountBindingRequired": false,
+            "retryAfter": {"authz": 1, "order": 1}}}
+          JSON
+          echo "PEBBLE_CA=$P/test/certs/pebble.minica.pem" >> "$GITHUB_ENV"
+          PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 nohup target/pebble/bin/pebble \
+            -config target/pebble/pebble-config.json -strict > target/pebble/pebble.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -s --cacert "$P/test/certs/pebble.minica.pem" -o /dev/null https://127.0.0.1:34000/dir && break
+            sleep 1
+          done
+          curl -sf --cacert "$P/test/certs/pebble.minica.pem" -o /dev/null https://127.0.0.1:34000/dir
+      - name: ACME tests against Pebble (real HTTP-01 + TLS-ALPN-01 validation)
+        env:
+          OSTRO_TEST_ACME_DIRECTORY: https://127.0.0.1:34000/dir
+          OSTRO_TEST_ACME_HTTP_PORT: "35002"
+          OSTRO_TEST_ACME_TLS_PORT: "35001"
+        run: |
+          out="$(OSTRO_TEST_ACME_CA="$PEBBLE_CA" cargo test -p ostro-server --test acme --locked -- pebble --test-threads=1 2>&1)" || { echo "$out"; cat target/pebble/pebble.log; exit 1; }
+          echo "$out"
+          grep -Eq 'test result: ok\. 2 passed' <<<"$out"
+          ! grep -q '^SKIP' <<<"$out"
+
+  keda-kind:
+    # WORK-05 real KEDA leg (D-W22): a throwaway kind cluster inside the GitHub runner, KEDA
+    # from its Helm chart, the musl `ostro` in a scratch image, deploy/k8s + deploy/keda
+    # applied with CI-only substitutions (image, small resource requests, a CI CA for the
+    # client listener), then a burst on queue `heavy` must scale the worker Deployment
+    # 0 -> N -> 0 and every run must complete. It never touches any other cluster.
+    name: keda (kind)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      T: x86_64-unknown-linux-musl
+      IMG: ostro-ci:local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml) + targets
+        run: |
+          rustup toolchain install
+          rustup target add "$T" wasm32-wasip2
+          rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: keda-kind
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+      - name: Build the musl ostro, the cpu-burn guest and the scratch image
+        run: |
+          cargo zigbuild --release --locked -p ostro --target "$T"
+          cargo build --release --target wasm32-wasip2 --manifest-path guests/Cargo.toml --target-dir target/guests -p cpu-burn
+          mkdir -p target/ci-tls target/img/etc/ssl/certs
+          # CI-only CA + client-listener certificate for ostro.ostro.svc (the cert-manager
+          # Secret of the manifests); the CA goes into the image trust store so the worker's
+          # platform verifier accepts the files-mode listener (D-W20).
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+            -subj /CN=ostro-ci-ca -keyout target/ci-tls/ca.key -out target/ci-tls/ca.crt
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=ostro.ostro.svc \
+            -keyout target/ci-tls/tls.key -out target/ci-tls/tls.csr
+          printf 'subjectAltName=DNS:ostro.ostro.svc,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' > target/ci-tls/ext.cnf
+          openssl x509 -req -in target/ci-tls/tls.csr -CA target/ci-tls/ca.crt -CAkey target/ci-tls/ca.key \
+            -CAcreateserial -days 2 -extfile target/ci-tls/ext.cnf -out target/ci-tls/tls.crt
+          cp target/ci-tls/ca.crt target/img/etc/ssl/certs/ca-certificates.crt
+          cp "target/$T/release/ostro" target/img/ostro
+          printf 'FROM scratch\nCOPY etc /etc\nCOPY ostro /ostro\nENTRYPOINT ["/ostro"]\n' > target/img/Dockerfile
+          docker build -t "$IMG" target/img
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          cluster_name: ostro-ci
+      - name: Install KEDA (Helm)
+        run: |
+          helm repo add kedacore https://kedacore.github.io/charts
+          helm install keda kedacore/keda -n keda --create-namespace --wait --timeout 10m
+          kind load docker-image "$IMG" --name ostro-ci
+      - name: Deploy the server (deploy/k8s, CI substitutions)
+        run: |
+          mkdir -p target/k8s
+          for f in deploy/k8s/*.yaml deploy/keda/*.yaml; do
+            sed -e "s#ghcr.io/ostro-dev/ostro:latest#$IMG#" \
+                -e 's#cpu: "2"#cpu: "100m"#; s#cpu: "8"#cpu: "1"#' \
+                -e 's#memory: 2Gi#memory: 256Mi#; s#storage: 20Gi#storage: 1Gi#' \
+                "$f" > "target/k8s/$(basename "$f")"
+          done
+          kubectl create namespace ostro
+          kubectl -n ostro create secret tls ostro-api-tls --cert target/ci-tls/tls.crt --key target/ci-tls/tls.key
+          kubectl apply -f target/k8s/server-statefulset.yaml
+          kubectl -n ostro rollout status statefulset/ostro --timeout 5m
+          kubectl -n ostro port-forward svc/ostro 7700:7700 > target/port-forward.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -sf --cacert target/ci-tls/ca.crt -o /dev/null https://localhost:7700/readyz && break
+            sleep 1
+          done
+          curl -sf --cacert target/ci-tls/ca.crt https://localhost:7700/readyz
+      - name: Join token, worker Deployment, KEDA ScaledObject
+        env:
+          OSTRO_SERVER: https://localhost:7700
+          OSTRO_CA_FILE: target/ci-tls/ca.crt
+        run: |
+          ostro="target/$T/release/ostro"
+          tok="$("$ostro" worker token create --ttl 2h --json)"
+          token="$(jq -r .token <<<"$tok")"
+          ca_hash="$(jq -r .join_command <<<"$tok" | sed -E 's/.*--ca-hash ([^ ]+).*/\1/')"
+          sed -i -e "s#sha256:REPLACE-WITH-THE-CA-HASH-FROM-ostro-worker-token-create#$ca_hash#" \
+                 -e "s#REPLACE-WITH-wkr_-JOIN-TOKEN#$token#" target/k8s/worker-deployment.yaml
+          kubectl apply -f target/k8s/worker-deployment.yaml
+          ca_pem="$(sed 's/^/    /' target/ci-tls/ca.crt)"
+          python3 - "$ca_pem" <<'PY'
+          import re, sys
+          p = "target/k8s/trigger-auth.yaml"
+          s = open(p).read()
+          s = re.sub(r"    -----BEGIN CERTIFICATE-----\n    REPLACE-WITH-THE-OSTRO-CLUSTER-CA-PEM\n    -----END CERTIFICATE-----", sys.argv[1], s)
+          open(p, "w").write(s)
+          PY
+          kubectl apply -f target/k8s/trigger-auth.yaml -f target/k8s/scaledobject-metrics-api.yaml
+          "$ostro" deploy target/guests/wasm32-wasip2/release/cpu_burn.wasm --activate
+          "$ostro" queue flow heavy --set placement=workers --set selector=pool=heavy
+          test "$(kubectl -n ostro get deploy ostro-worker-heavy -o jsonpath='{.spec.replicas}')" = 0
+      - name: Burst on queue heavy scales 0 -> N -> 0
+        env:
+          OSTRO_SERVER: https://localhost:7700
+          OSTRO_CA_FILE: target/ci-tls/ca.crt
+        run: |
+          ostro="target/$T/release/ostro"
+          : > target/runs.txt
+          for i in $(seq 1 40); do
+            "$ostro" run cpu-burn --queue heavy --input '{"ms": 2000}' --json | jq -r .run_id >> target/runs.txt
+          done
+          max=0
+          for _ in $(seq 1 60); do
+            r="$(kubectl -n ostro get deploy ostro-worker-heavy -o jsonpath='{.spec.replicas}')"
+            echo "replicas=$r demand=$(curl -s --cacert "$OSTRO_CA_FILE" https://localhost:7700/v1/queues/heavy/demand)"
+            [ "${r:-0}" -gt "$max" ] && max="$r"
+            [ "$max" -gt 0 ] && [ "${r:-0}" -eq 0 ] && break
+            sleep 10
+          done
+          echo "max replicas: $max"
+          test "$max" -ge 1
+          while read -r id; do
+            st="$("$ostro" inspect "$id" --json | jq -r .status)"
+            [ "$st" = completed ] || { echo "run $id: $st"; exit 1; }
+          done < target/runs.txt
+          for _ in $(seq 1 30); do
+            r="$(kubectl -n ostro get deploy ostro-worker-heavy -o jsonpath='{.spec.replicas}')"
+            [ "${r:-0}" -eq 0 ] && break
+            sleep 10
+          done
+          test "$(kubectl -n ostro get deploy ostro-worker-heavy -o jsonpath='{.spec.replicas}')" = 0
+      - if: failure()
+        name: Diagnostics
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n ostro logs statefulset/ostro --tail 200 || true
+          kubectl -n ostro logs deploy/ostro-worker-heavy --tail 200 || true
+          kubectl -n keda logs deploy/keda-operator --tail 200 || true

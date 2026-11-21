@@ -184,6 +184,22 @@ check_campaign_smoke() {
     cargo test --release -p ostro-crashtest --features failpoints --test server_campaign --locked -- --ignored --nocapture report
 }
 
+# Phase 7 (07-22): the spawned-binary suites worker_smoke, worker_e2e, worker_failover,
+# flow_e2e, keda_sim and cli_p7 are not #[ignore]d, so the "cargo test" step runs them
+# (each binary serialises its own tests). What it misses are the failpoint-only legs (the
+# SIGSTOP zombie and the 100-run QA-03 chaos smoke, both need the failpoint `ostro` binary)
+# and the offline manifest check. Keep in sync with the "Phase 7 failpoint legs +
+# manifests" step of .github/workflows/ci.yml. The 10,000-run QA-03 campaign is
+# `OSTRO_CHAOS_RUNS=10000 OSTRO_CHAOS_SHARDS=20 bash scripts/fencing-chaos.sh` (gate only).
+check_phase7() {
+  local out
+  out="$(cargo test -p ostro --features failpoints --test worker_failover --test fencing_chaos --locked -- --test-threads=1 sigstop_zombie chaos_smoke 2>&1)" || { echo "$out"; return 1; }
+  sed -n -E '/^test |test result/p' <<<"$out"
+  # Both targets must run their leg (a renamed test would otherwise pass vacuously).
+  [[ "$(grep -Ec 'test result: ok\. [1-9][0-9]* passed' <<<"$out")" -eq 2 ]] || { echo "a Phase 7 failpoint leg ran no test"; return 1; }
+  bash deploy/check-manifests.sh
+}
+
 check_failpoints() {
   local c crate cmd
   local -A linted=()
@@ -361,6 +377,7 @@ step "semantics sleepers (serial)" check_sleepers
 step "failpoint list sync (ci.yml)" check_failpoint_sync
 step "failpoint suites" check_failpoints
 step "server campaign smoke (20 kills)" check_campaign_smoke
+step "phase 7 failpoint legs + manifests" check_phase7
 step "cargo deny check" cargo deny check
 step "check-vendored.sh" bash scripts/check-vendored.sh
 step "check-deny-fixtures.sh" bash scripts/check-deny-fixtures.sh
