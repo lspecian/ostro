@@ -3,4 +3,21 @@
 // bundled node_modules alike, to generators driven by `new Promise(..)`, so the SDK's
 // promise (installed as globalThis.Promise) and its synchronously drained job queue run
 // them inside a sync `run` export (09-RESEARCH Pattern 2).
-export default { transform: { target: "es2016" } };
+//
+// `inject` replaces jco's own shims for these free globals (bound at module evaluation,
+// before the SDK installs its globals; on QuickJS `console` adds a `jco:node/console` WIT
+// import) with the SDK's deterministic versions (09-10). A bundle that never references
+// them gets no import of "ostro".
+export default {
+  transform: {
+    target: "es2016",
+    inject: {
+      console: ["ostro", "__ostroConsole"],
+      setTimeout: ["ostro", "__ostroSetTimeout"],
+      clearTimeout: ["ostro", "__ostroClearTimeout"],
+      setInterval: ["ostro", "__ostroSetInterval"],
+      clearInterval: ["ostro", "__ostroClearInterval"],
+      queueMicrotask: ["ostro", "__ostroQueueMicrotask"],
+    },
+  },
+};

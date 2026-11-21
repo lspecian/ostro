@@ -13,12 +13,13 @@
 // - `result<T, failure>` is `{ tag: "ok", val: T } | { tag: "err", val: Failure }`;
 // - WIT `datetime` is `{ seconds: bigint; nanoseconds: number }`.
 //
-// No `ostro:runtime/*` import specifiers here: those live in `src/bindings.ts` (09-09),
-// which only the guest entry imports. Erasable TypeScript only (no enums, namespaces or
+// No `ostro:runtime/*` import specifiers here: those live in `src/bindings.ts`, the only
+// module that touches the jco bindings. No bigint literals in SDK sources: the es2016
+// bundle target does not lower them (Rolldown tolerates them with a warning). Erasable TypeScript only (no enums, namespaces or
 // parameter properties), so Node 24 type stripping runs these sources directly.
 
 /** Op id of `effects.cancellation` (2^64-1); `u64::MAX-15..=u64::MAX` is host-reserved. */
-export const CANCELLATION_OP: bigint = 2n ** 64n - 1n;
+export const CANCELLATION_OP: bigint = BigInt("18446744073709551615");
 
 // --- types --------------------------------------------------------------------------
 
@@ -240,10 +241,15 @@ export function setHost(h: Host | undefined): Host | undefined {
   return previous;
 }
 
-/** The installed host. Throws if none is installed (the guest entry installs the bindings). */
+/** True if a host is installed. */
+export function hasHost(): boolean {
+  return current !== undefined;
+}
+
+/** The installed host. Throws if none is installed (`run` installs the bindings host). */
 export function host(): Host {
   if (current === undefined) {
-    throw new Error("ostro: no host installed (the guest entry installs the bindings host, 09-09)");
+    throw new Error("ostro: no host installed (the guest's run export installs the bindings host)");
   }
   return current;
 }

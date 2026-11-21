@@ -362,6 +362,12 @@ export class SdkPromise<T = unknown> {
   }
 }
 
+/** `queueMicrotask` on the SDK job queue (also the bundle's injected `queueMicrotask`). */
+export function sdkQueueMicrotask(callback: () => void): void {
+  if (typeof callback !== "function") throw new TypeError("queueMicrotask: callback is not a function");
+  enqueueJob(callback);
+}
+
 let nativePromise: unknown;
 let nativeQueueMicrotask: unknown;
 let globalsInstalled = false;
@@ -376,10 +382,7 @@ export function installGlobals(): void {
   nativePromise = g.Promise;
   nativeQueueMicrotask = g.queueMicrotask;
   g.Promise = SdkPromise;
-  g.queueMicrotask = (callback: () => void): void => {
-    if (typeof callback !== "function") throw new TypeError("queueMicrotask: callback is not a function");
-    enqueueJob(callback);
-  };
+  g.queueMicrotask = sdkQueueMicrotask;
   globalsInstalled = true;
 }
 
