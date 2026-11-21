@@ -543,3 +543,140 @@ async fn start_rejects_invalid_config() {
     let st = tls::init(&cfg, dir.path(), CLUSTER).expect("init");
     assert!(acme::start(st, CancellationToken::new()).is_err());
 }
+
+// ------------------------------------------------------------------------------------
+// Pebble (env-gated): OSTRO_TEST_ACME_DIRECTORY, OSTRO_TEST_ACME_CA (Pebble's minica
+// root PEM, trusted for the directory), OSTRO_TEST_ACME_HTTP_PORT (Pebble `httpPort`,
+// HTTP-01 leg), optional OSTRO_TEST_ACME_TLS_PORT (Pebble `tlsPort`: the TLS-ALPN-01 leg
+// binds the client listener there so a real validation can reach it; with
+// PEBBLE_VA_ALWAYS_VALID=1 any port works).
+// ------------------------------------------------------------------------------------
+
+struct PebbleEnv {
+    directory: String,
+    ca: std::path::PathBuf,
+}
+
+fn pebble_env(test: &str) -> Option<PebbleEnv> {
+    let Ok(directory) = std::env::var("OSTRO_TEST_ACME_DIRECTORY") else {
+        eprintln!(
+            "SKIP {test}: OSTRO_TEST_ACME_DIRECTORY is not set (human_needed: run Pebble, see \
+             07-10-SUMMARY.md)"
+        );
+        return None;
+    };
+    let ca = std::env::var("OSTRO_TEST_ACME_CA")
+        .expect("OSTRO_TEST_ACME_CA (Pebble minica root PEM) must be set with the directory");
+    assert!(
+        !directory.contains("letsencrypt.org"),
+        "tests never contact a public ACME directory"
+    );
+    Some(PebbleEnv {
+        directory,
+        ca: ca.into(),
+    })
+}
+
+/// Run a Pebble order through the real listener; returns after the issued cert is
+/// served, cached, and reused by a second `acme::start` on the same data dir.
+async fn pebble_order(env: PebbleEnv, challenge: AcmeChallenge, listen_port: u16) {
+    let dir = tempfile::tempdir().expect("tmp");
+    let mut cfg = acme_cfg("localhost", &env.directory);
+    cfg.api.tls.acme.directory_ca_file = Some(env.ca.clone());
+    cfg.api.tls.acme.challenge = challenge;
+    if challenge == AcmeChallenge::Http01 {
+        let port: u16 = std::env::var("OSTRO_TEST_ACME_HTTP_PORT")
+            .expect("OSTRO_TEST_ACME_HTTP_PORT")
+            .parse()
+            .expect("port");
+        cfg.api.tls.acme.http01_listen = SocketAddr::from(([127, 0, 0, 1], port));
+    }
+    let st = tls::init(&cfg, dir.path(), CLUSTER).expect("init");
+    let listener = TcpListener::bind(("127.0.0.1", listen_port))
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(tls::listener::serve(
+        Arc::clone(&st),
+        listener,
+        app(),
+        shutdown.clone(),
+    ));
+    let mut fp = None;
+    for _ in 0..1200 {
+        if let Some(f) = st.fingerprint() {
+            fp = Some(f);
+            break;
+        }
+        assert!(!task.is_finished(), "listener stopped early");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let fp = fp.expect("Pebble certificate installed within 120 s");
+    let (leaf, _) = handshake(addr, &[b"h2", b"http/1.1"], "localhost")
+        .await
+        .expect("handshake");
+    assert_eq!(
+        sha256_fingerprint(&leaf),
+        fp,
+        "a TLS client sees the new cert"
+    );
+    assert!(dns_sans(&leaf).iter().any(|d| d == "localhost"));
+    let (_, cert) = x509_parser::parse_x509_certificate(&leaf).expect("parse");
+    let issuer = cert.issuer().to_string();
+    assert!(issuer.to_lowercase().contains("pebble"), "issuer {issuer}");
+    let cache = dir.path().join("tls").join("acme");
+    assert!(acme::account_file(&cache, &env.directory).exists());
+    #[cfg(unix)]
+    {
+        assert_eq!(mode_of(&acme::account_file(&cache, &env.directory)), 0o600);
+        assert_eq!(mode_of(&cache.join(acme::CERT_FILE)), 0o600);
+        assert_eq!(mode_of(&cache.join(acme::KEY_FILE)), 0o600);
+    }
+    // No challenge material is left behind.
+    assert!(
+        handshake(addr, &[ACME_TLS_ALPN], "localhost")
+            .await
+            .is_err()
+    );
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .expect("stops")
+        .expect("join")
+        .expect("serve ok");
+
+    // Restart on the same data dir: the cached cert is installed at once.
+    let mut cfg2 = cfg.clone();
+    cfg2.api.tls.acme.challenge = AcmeChallenge::TlsAlpn01;
+    let st2 = tls::init(&cfg2, dir.path(), CLUSTER).expect("re-init");
+    let shutdown = CancellationToken::new();
+    let t = acme::start(Arc::clone(&st2), shutdown.clone()).expect("restart");
+    assert_eq!(st2.fingerprint().as_deref(), Some(fp.as_str()));
+    shutdown.cancel();
+    t.await.expect("join");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pebble_order_tls_alpn() {
+    let Some(env) = pebble_env("pebble_order_tls_alpn") else {
+        return;
+    };
+    let port = std::env::var("OSTRO_TEST_ACME_TLS_PORT")
+        .ok()
+        .map(|p| p.parse().expect("OSTRO_TEST_ACME_TLS_PORT"))
+        .unwrap_or(0);
+    pebble_order(env, AcmeChallenge::TlsAlpn01, port).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pebble_order_http01() {
+    let Some(env) = pebble_env("pebble_order_http01") else {
+        return;
+    };
+    if std::env::var("OSTRO_TEST_ACME_HTTP_PORT").is_err() {
+        eprintln!("SKIP pebble_order_http01: OSTRO_TEST_ACME_HTTP_PORT is not set");
+        return;
+    }
+    pebble_order(env, AcmeChallenge::Http01, 0).await;
+}
