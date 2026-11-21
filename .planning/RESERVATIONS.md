@@ -15,6 +15,7 @@
      **Phase 7 gate 2026-11-21 (07-22):** every Phase 7 ordinal in code was re-verified against this file (`07-22-rescheck`, the 07-01 script re-run; output in 07-22-SUMMARY). Used rows are flipped to `exists (P7, <plan>)`: Cmd 20 `PauseRun` / 21 `ResumeRun` and RejectReason 15 `RunPaused` (with the `ReservedP6_12..14` placeholders at 12–14). Keyspaces 17 `p7_a` / 18 `p7_b` and meta 19/20 stay **unused**; the other Phase 7 blocks (Cmd 22–26, StartRun 28–31, Intent 13–16, EventKind 80–87, TerminalStatus 6–9, RejectReason 16–17, InvalidCode 18–21 placeholders, Outbox 8–9, meta ext tags 32–47) stay `reserved P7`. The §11 Phase 7 names shipped as listed.
      **Phase 8 gate 2026-11-20 (08-22):** every Phase 8 ordinal in code was re-verified against this file (`08-22-rescheck.py`: every Cmd tag, keyspace and InvalidCode in code is `exists` or a placeholder; RESERVATIONS CHECK: PASS). The ordinal rows were flipped by 08-01 (Cmd 27 `ScheduleFire`, keyspace 16 `schedule_state`, InvalidCode 22 `BadScheduleFire` / 23 `ScheduleOwnerMismatch`) and are confirmed; the §11 Phase 8 names that shipped now read `exists (P8, <plan>)`. Unused Phase 8 slots stay `reserved P8`: Cmd 28–33, StartRun 32–35, Intent 17–18, EventKind 88–95, RejectReason 18–19, InvalidCode 24, Outbox kind 10, MetaKind 21, meta ext tags 48–63, and the `cron::` failpoint prefix.
      **Phase 7 gate 2026-11-21 (07-01):** the code was re-verified against this file before any Phase 7 code (`07-01-rescheck.py`, output in 07-01-SUMMARY: every Cmd tag, intent, outbox kind, TerminalStatus, StartRun field, journal kind, keyspace, RejectReason, InvalidCode and MetaRecord in code is `exists` or a canonical placeholder; every Phase 7 block is empty in code apart from the `ReservedP7_18..21` InvalidCode placeholders; RESERVATIONS CHECK: PASS). Phase 5 F1/F2/F3/F4/F7/F8 landed, so Phase 7 needs 0 keyspaces and 0 meta variants. Phase 7 allocations: Cmd 20/21, RejectReason 15 and the §11 Phase 7 names (D-W18).
+     **Phase 9 gate 2026-11-21 (09-01):** the code was re-verified against this file before any Phase 9 code (`09-01-rescheck.py`, output in 09-01-SUMMARY: every Cmd tag, intent, outbox kind, TerminalStatus, StartRun field, journal kind, keyspace, RejectReason, InvalidCode and MetaRecord in code is `exists` or a canonical placeholder; RESERVATIONS CHECK: PASS). PF-F1 (`CompleteRun.parent_event` 5, outbox `ChildCompleted.event` 6) and PF-F2 (`RunRecord.continued_to`, CancelRun forwarding) landed in Phase 5, so Phase 9 allocates **no ordinal** (D-P9-6): every P9 row (Cmd 34–40, StartRun 36–39, Intent 19–22, EventKind 98–105, TerminalStatus 10–11, keyspace 19 `p9_a`, RejectReason 20–22, InvalidCode 25–28, Outbox 11–12, MetaRecord 22–23, meta ext tags 64–79) is empty in code and stays reserved, unused (fallback only). Phase 9 names: §11 (D-P9-6 rows plus the D-P9-20 rows added by 09-01).
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -46,7 +47,7 @@ Sources:
 | 22–26 | spare | reserved P7 |
 | 27 | ScheduleFire | exists (P8, 08-01) |
 | 28–33 | spare | reserved P8 |
-| 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9 |
+| 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 41–42 | — (contingency, expected use 0) | reserved P12 |
 | 43 | RepinRun (`ostro migrate-runs`) | reserved P13 |
 | 44 | spare | reserved P13 |
@@ -68,7 +69,7 @@ Sources:
 | 24–27 | — (P6 declared 0 needs) | reserved P6 |
 | 28–31 | — | reserved P7 |
 | 32–35 | — (P8 declared 0 needs) | reserved P8 |
-| 36–39 | — | reserved P9 |
+| 36–39 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 40 | rerun_prefix (repeated JournalEvent) | reserved P11 |
 | 41 | rerun_from_seq (uint64) | reserved P11 |
 | 42–43 | spare | reserved P11 |
@@ -79,8 +80,8 @@ Other message fields: each new field on any other message is owned by the plan t
 | Message.field | Item | Status |
 |---|---|---|
 | CompleteRun.4 | resumable | exists (P5, 05-01) |
-| CompleteRun.5 | parent_event (submitter-encoded ChildCompleted event bytes, D21) | exists (P5, 05-01), Phase 9 PF-F1 |
-| outbox ChildCompleted.6 | event (same bytes, forwarded verbatim) | exists (P5, 05-01), Phase 9 PF-F1 |
+| CompleteRun.5 | parent_event (submitter-encoded ChildCompleted event bytes, D21) | exists (P5, 05-01), Phase 9 PF-F1; verified in code by 09-01 |
+| outbox ChildCompleted.6 | event (same bytes, forwarded verbatim) | exists (P5, 05-01), Phase 9 PF-F1; verified in code by 09-01 (`apply/run.rs` forwards `parent_event`) |
 | AttemptGranted.3 | after_failure (durable attempt_failures, F9) | exists (P5, 05-01) |
 | RegisterWait.5 | at_ms (D21) | exists (P5, 05-01) |
 | JournalEvent.4 | attempt (fixed64, submitter-set; 0 = apply-originated; PF-11-5 apply stamping was NOT adopted) | reserved P11 |
@@ -106,7 +107,7 @@ State value fields (positional postcard, pre-freeze only; listed for cross-phase
 | 11–12 | spare | reserved P6 |
 | 13–16 | — | reserved P7 |
 | 17–18 | — (P8 declared 0 needs) | reserved P8 |
-| 19–22 | — (P9 fallback intent slot) | reserved P9 |
+| 19–22 | — (P9 fallback intent slot) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 23+ | — | unallocated |
 
 ## 4. Journal `EventKind` codes (`ostro_types::journal`)
@@ -131,7 +132,7 @@ Rules:
 | 88–95 | — (P8 declared 0 needs) | reserved P8 |
 | 96 | SignalPayload `{name, payload}`: submitter-encoded, stored verbatim (D21) | exists (P5, 05-01; allocated under rule 2 from the unallocated range) |
 | 97 | SignalMatched `{op, payload_seq}`: apply-encoded, no user data (D21) | exists (P5, 05-01; rule 2) |
-| 98–105 | — | reserved P9 |
+| 98–105 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 106–127 | — | unallocated |
 | 128+ | — | reserved (codec) |
 
@@ -144,7 +145,7 @@ Rules:
 | 4 | TimedOut | exists (P5, 05-01) |
 | 5 | ContinuedAsNew | exists (P5, 05-01) |
 | 6–9 | — (P6, P8 declared 0) | reserved P7 |
-| 10–11 | — | reserved P9 |
+| 10–11 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 12+ | — | unallocated |
 
 ## 6. State keyspaces (`Table` / `TABLES`): declaration order = digest order; the on-disk keyspace name is fixed here
@@ -174,7 +175,7 @@ Rules:
 | 16 | schedule_state | exists (P8, 08-01; `Table::ScheduleState`, rows from 08-07) |
 | 17 | p7_a | reserved P7, **unused** (F1 landed in 05-02: `RunRecord.pause: Option<PauseMark>`; verified by 07-01). Never declared by Phase 7; a later phase landing keyspace 19+ declares it as an empty placeholder under the placeholder rule. |
 | 18 | p7_b | reserved P7, **unused** (F1 landed in 05-02; verified by 07-01). Never declared by Phase 7. |
-| 19 | p9_a | reserved P9 (placeholder rule applies) |
+| 19 | p9_a | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only). Never declared by Phase 9 (D-P9-6); a later phase landing keyspace 20+ declares it as an empty placeholder under the placeholder rule. |
 | (none) | `x_*` derived keyspaces (PF-11-2): outside TABLES, the digest, OSNP and blob GC; rebuilt from digest state. Reserved name: `x_run_index` (P11) | rule frozen in 05-20 |
 | 20+ | — | unallocated |
 
@@ -190,7 +191,7 @@ Rules:
 | 18–19 | — (P8 declared 0) | reserved P8 |
 
 RejectReason 12–14 are absent in code at the Phase 7 gate (07-01, 2026-11-21: code ends at 11 `RunCompleted`). 07-03 declares `#[doc(hidden)] ReservedP6_12`, `ReservedP6_13`, `ReservedP6_14` if still absent (P-15 convention; never emitted, so never in the state hash) before `RunPaused` at 15. Nothing sits at 15–17.
-| 20–22 | — | reserved P9 |
+| 20–22 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 23–24 | — (Phase 13 repin / version-gate rejects; names chosen by 13-01) | reserved P13 |
 | 25+ | — | unallocated |
 
@@ -208,7 +209,7 @@ RejectReason 12–14 are absent in code at the Phase 7 gate (07-01, 2026-11-21: 
 | 22 | BadScheduleFire (malformed `ScheduleFire`: kind/start/request_id mismatch; name chosen by 08-01) | exists (P8, 08-01) |
 | 23 | ScheduleOwnerMismatch (`ScheduleFire` applied on a partition that is not `schedule_owner(name, P)`; name chosen by 08-01) | exists (P8, 08-01) |
 | 24 | spare | reserved P8 |
-| 25–28 | — (P9 spare, incl. fallback) | reserved P9 |
+| 25–28 | — (P9 spare, incl. fallback) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 29 | BadRerunPrefix | reserved P11 |
 | 30 | BadDlqUpdate | reserved P11 |
 | 31 | spare | reserved P11 |
@@ -242,7 +243,7 @@ Indices 25+ follow the same pattern with their owner block (e.g. `ReservedP9_25`
 | 7 | — (P6 declared 0) | reserved P6 |
 | 8–9 | — | reserved P7 |
 | 10 | — (P8 declared 0) | reserved P8 |
-| 11–12 | — (11 = P9 fallback outbox kind if PF-F1 had not landed) | reserved P9 |
+| 11–12 | — (11 = P9 fallback outbox kind if PF-F1 had not landed) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 13+ | — | unallocated |
 
 ## 10. Meta: `MetaRecord` / `MetaKind` variant index and `MetaState` map order (postcard, positional)
@@ -261,7 +262,7 @@ Rules (D20):
 | 17–18 | — (P6 uses existing Secret/Grant/Connection/Egress by convention: 0 needed) | reserved P6 |
 | 19–20 | — (QueueFlow / WorkflowFlow only if F2 had been rejected) | reserved P7, **unused** (F2 landed in 05-07: SpillPolicy, RateSpec, key_rate_limit, key_concurrency, on_retries_exhausted, placement, selector, WorkflowPolicy.paused; F8 `ApiToken.expires_at_ms` landed too; verified by 07-01). No Phase 7 META_FORMAT bump. |
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
-| 22–23 | — | reserved P9 |
+| 22–23 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 24–25 | — (fallback only if Phase 14 F2/F3/F4 had not landed pre-freeze) | reserved P14 |
 | 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12 |
 | 27+ | — | unallocated |
@@ -359,6 +360,15 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Failpoint prefix | `child::` | P9 |
 | Error kinds (`error-info.kind`) | `child_terminated`, `sdk_protocol`, `invalid_string` | P9 (documented in WIT by P5 05-05) |
 | SDK dirs / packages | `sdks/python`, `sdks/ts`; package name `ostro` on PyPI and npm | P9 |
+| Cargo feature | `polyglot` (crate `ostro-conformance`; off by default, gates the Python/TS legs) | P9 (D-P9-12/D-P9-20) |
+| Binary | `ostro-conf-inspect` (crate `ostro-conformance`) | P9 (D-P9-14/D-P9-20) |
+| Dirs | `conformance/`, `sdks/scripts/` (incl. `sdks/scripts/toolchain/`), `target/polyglot-guests/`, `target/toolchains/` | P9 (D-P9-14/D-P9-20) |
+| Config keys | `[engine] class` (`rust`/`python`/`typescript`/`mixed`), `[engine] pool_total_core_instances` (flat keys in `[engine]`) | P9 (09-07, D-P9-17) |
+| Failpoints | `child::detached_after_flush`, `child::parent_event_before_flush`, `child::start_child_after_flush` (prefix `child::`) | P9 (09-05/09-08) |
+| Guest names | `conf-rust`, `conf-rust-v2`, `child-parent`, `child-leaf`, `sdk-saga`, `exports-shape-ok`, `exports-shape-bad` | P9 (09-06/09-07/09-11) |
+| Error kinds (`error-info.kind`) | `python_exception` (Python SDK, uncaught exceptions; 09-09), `js_exception` (TS SDK; 09-10); reuse of the existing SDK kind `unknown_workflow` for unresolvable child targets (D-P9-8) | P9 (D-P9-20) |
+| CancelRun reason strings | `parent_closed`, `parent_cancel_op`, `chain_done` (documented strings, not a registry space) | P9 (09-08) |
+| Env vars | `OSTRO_POLYGLOT_CACHE`, `OSTRO_CONF_LANGS`, `OSTRO_CRASH_CHAIN_ITERS` | P9 (D-P9-20) |
 | Name grammar (D23) | Qualified storage form `<tenant>/<name>`; resource names exclude `/`, `:` and a leading `__` (`__` is reserved for `__ostro/`, `__cron/`) | P5 (D23) / P14 |
 | Tenant ids | `_` is the default-tenant spelling: reserved, never creatable | P14 (grammar enforced from P5, 05-13) |
 | Config sections | `[auth]`, `[tenants]`, `[audit]`, `[security]` (incl. `[security.modules]`) | P14 |
