@@ -19,11 +19,22 @@
 //! Time is the injected clock's milliseconds (D-W26, Phase 10 F5): the controller only
 //! sees the `now_ms` it is given.
 
-use tokio::task::JoinHandle;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::config::SpillSection;
+use arc_swap::ArcSwap;
+use ostro_engine::limits::NodeMemoryBudget;
+use ostro_meta::records::PLACEMENT_AUTO;
+use ostro_meta::{MetaView, SpillPolicy};
+use ostro_partition::{Clock, QueueGauge, QueueGauges};
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
+use crate::config::{PlacementSetting, SpillSection};
 use crate::p7::P7Ctx;
-use ostro_meta::SpillPolicy;
 
 /// Spill thresholds of one queue (D-W9 defaults, `[workers.spill]`, `QueuePolicy.spill`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,10 +306,216 @@ impl SpillController {
     }
 }
 
-/// Spill state shared by placement and demand.
-#[derive(Debug, Default)]
+// ---------------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------------
+
+/// Where [`SpillService`] gets its samples from.
+pub trait LoadSampler: Send {
+    /// Called once per tick before the per-queue samples (refresh process-wide signals).
+    fn begin(&mut self) {}
+    /// The load of `queue` (`last_overflow_ms` is merged with [`SpillHandle`]'s by the
+    /// service).
+    fn sample(&mut self, queue: &str) -> LoadSample;
+}
+
+/// Process user + system CPU time (`getrusage(RUSAGE_SELF)`), `None` if the call fails.
+fn process_cpu_time() -> Option<Duration> {
+    // SAFETY: `getrusage` only writes a `struct rusage` through the pointer, which points
+    // at a zero-initialised, properly aligned `MaybeUninit<rusage>` owned by this frame;
+    // `RUSAGE_SELF` is always a valid `who`. On success (0) every field is written, and a
+    // zeroed `rusage` is a valid value anyway, so `assume_init` is sound.
+    let ru = unsafe {
+        let mut ru = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        (libc::getrusage(libc::RUSAGE_SELF, ru.as_mut_ptr()) == 0).then(|| ru.assume_init())
+    }?;
+    let tv = |t: libc::timeval| {
+        let s = u64::try_from(t.tv_sec).unwrap_or(0);
+        let us = u64::try_from(t.tv_usec).unwrap_or(0);
+        Duration::from_secs(s) + Duration::from_micros(us)
+    };
+    Some(tv(ru.ru_utime) + tv(ru.ru_stime))
+}
+
+/// Process CPU utilisation between two calls, as a fraction of `available_parallelism`.
+#[derive(Debug)]
+pub struct CpuMeter {
+    parallelism: f64,
+    last: Option<(std::time::Instant, Duration)>,
+}
+
+impl Default for CpuMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CpuMeter {
+    /// Starts measuring now (the first [`sample`](Self::sample) covers the time since).
+    pub fn new() -> Self {
+        let parallelism = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let mut m = Self {
+            parallelism: parallelism as f64,
+            last: None,
+        };
+        m.last = m.read();
+        m
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn read(&self) -> Option<(std::time::Instant, Duration)> {
+        // clock-exempt: process CPU-time delta (getrusage); the wall delta is its
+        // denominator, never used for spill windows.
+        let wall = std::time::Instant::now();
+        process_cpu_time().map(|cpu| (wall, cpu))
+    }
+
+    /// Δ(user + system CPU) / (Δwall × available_parallelism), clamped to 0..=1.
+    pub fn sample(&mut self) -> f64 {
+        let Some(now) = self.read() else { return 0.0 };
+        let Some(prev) = self.last.replace(now) else {
+            return 0.0;
+        };
+        let wall = now.0.saturating_duration_since(prev.0).as_secs_f64();
+        if wall <= 0.0 {
+            return 0.0;
+        }
+        let cpu = now.1.saturating_sub(prev.1).as_secs_f64();
+        (cpu / (wall * self.parallelism)).clamp(0.0, 1.0)
+    }
+}
+
+/// The node's real signals: getrusage CPU, embedded slot use, the engine's Wasm memory
+/// budget and the queue lag / backlog / worker leases from [`QueueGauges`].
+pub struct ProcessSampler {
+    clock: Arc<dyn Clock>,
+    gauges: Arc<QueueGauges>,
+    slots: Arc<Semaphore>,
+    slots_total: usize,
+    budget: Option<Arc<NodeMemoryBudget>>,
+    cpu_meter: CpuMeter,
+    // Per tick.
+    cpu: f64,
+    slot_use: f64,
+    mem: f64,
+    now_ms: u64,
+    snapshot: BTreeMap<String, QueueGauge>,
+}
+
+impl std::fmt::Debug for ProcessSampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProcessSampler")
+            .field("slots_total", &self.slots_total)
+            .field("cpu", &self.cpu)
+            .field("slots", &self.slot_use)
+            .field("mem", &self.mem)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProcessSampler {
+    /// `slots` is the embedded slot semaphore with `slots_total` permits (`[executor]
+    /// slots`); `budget` the engine's Wasm memory budget (`None` = signal 0).
+    pub fn new(
+        clock: Arc<dyn Clock>,
+        gauges: Arc<QueueGauges>,
+        slots: Arc<Semaphore>,
+        slots_total: usize,
+        budget: Option<Arc<NodeMemoryBudget>>,
+    ) -> Self {
+        Self {
+            clock,
+            gauges,
+            slots,
+            slots_total,
+            budget,
+            cpu_meter: CpuMeter::new(),
+            cpu: 0.0,
+            slot_use: 0.0,
+            mem: 0.0,
+            now_ms: 0,
+            snapshot: BTreeMap::new(),
+        }
+    }
+
+    fn ratio(used: u64, limit: u64) -> f64 {
+        if limit == 0 {
+            0.0
+        } else {
+            (used as f64 / limit as f64).clamp(0.0, 1.0)
+        }
+    }
+}
+
+impl LoadSampler for ProcessSampler {
+    fn begin(&mut self) {
+        self.cpu = self.cpu_meter.sample();
+        let total = self.slots_total;
+        let free = self.slots.available_permits().min(total);
+        self.slot_use = Self::ratio((total - free) as u64, total as u64);
+        self.mem = self
+            .budget
+            .as_ref()
+            .map_or(0.0, |b| Self::ratio(b.used(), b.limit()));
+        self.now_ms = self.clock.now_ms();
+        self.snapshot = self.gauges.snapshot();
+    }
+
+    fn sample(&mut self, queue: &str) -> LoadSample {
+        let g = self.snapshot.get(queue).copied().unwrap_or_default();
+        LoadSample {
+            cpu: self.cpu,
+            slots: self.slot_use,
+            mem: self.mem,
+            lag_ms: g
+                .oldest_ready_at_ms
+                .map_or(0, |t| self.now_ms.saturating_sub(t)),
+            backlog: g.ready_unblocked,
+            running_on_workers: g.running_on_workers,
+            last_overflow_ms: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Shared state
+// ---------------------------------------------------------------------------------
+
+/// Spill state shared by placement (07-12) and demand (07-16).
+///
+/// `spilling` is read on the dispatcher's reserve path: one atomic load plus a map
+/// lookup. Overflow attempts go through a small mutex. Every transition bumps
+/// [`changed`](Self::changed), which `NodePlacement` merges into `Placement::changed()`.
 pub struct SpillHandle {
-    _private: (),
+    spilling: ArcSwap<BTreeMap<String, bool>>,
+    /// Serialises writers of `spilling`.
+    write: Mutex<()>,
+    overflow: Mutex<BTreeMap<String, u64>>,
+    changed: watch::Sender<u64>,
+}
+
+impl std::fmt::Debug for SpillHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpillHandle")
+            .field("spilling", &self.spilling_queues())
+            .field("version", &*self.changed.borrow())
+            .finish()
+    }
+}
+
+impl Default for SpillHandle {
+    fn default() -> Self {
+        Self {
+            spilling: ArcSwap::from_pointee(BTreeMap::new()),
+            write: Mutex::new(()),
+            overflow: Mutex::new(BTreeMap::new()),
+            changed: watch::channel(0).0,
+        }
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl SpillHandle {
@@ -307,27 +524,265 @@ impl SpillHandle {
     }
 
     /// Whether `queue` currently spills to workers.
-    ///
-    /// Phase 7 stub (07-02): never.
     pub fn spilling(&self, queue: &str) -> bool {
-        let _ = queue;
-        false
+        self.spilling.load().get(queue).copied().unwrap_or(false)
     }
 
-    /// Placement found the embedded slots full for `queue` at `now_ms` (injected clock, B6).
-    ///
-    /// Phase 7 stub (07-02): no-op.
+    /// Placement found the embedded slots full for `queue` at `now_ms` and wanted a worker
+    /// (injected clock, B6), whether or not it found one.
     pub fn note_overflow(&self, queue: &str, now_ms: u64) {
-        let _ = (queue, now_ms);
+        let mut m = lock(&self.overflow);
+        match m.get_mut(queue) {
+            Some(t) => *t = (*t).max(now_ms),
+            None => {
+                m.insert(queue.to_owned(), now_ms);
+            }
+        }
+    }
+
+    /// The last overflow attempt of `queue`.
+    pub fn last_overflow(&self, queue: &str) -> Option<u64> {
+        lock(&self.overflow).get(queue).copied()
+    }
+
+    /// Bumped (a transition counter) on every spill transition.
+    pub fn changed(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    /// Queues currently spilling.
+    pub fn spilling_queues(&self) -> Vec<String> {
+        self.spilling
+            .load()
+            .iter()
+            .filter(|(_, s)| **s)
+            .map(|(q, _)| q.clone())
+            .collect()
+    }
+
+    /// Set `queue`'s state; bumps [`changed`](Self::changed) and returns `true` when it
+    /// changed. Used by the spill service (and tests forcing a state).
+    pub fn set(&self, queue: &str, spilling: bool) -> bool {
+        let _g = lock(&self.write);
+        let cur = self.spilling.load_full();
+        if cur.get(queue).copied().unwrap_or(false) == spilling {
+            return false;
+        }
+        let mut next = (*cur).clone();
+        if spilling {
+            next.insert(queue.to_owned(), true);
+        } else {
+            next.remove(queue);
+        }
+        self.spilling.store(Arc::new(next));
+        self.changed.send_modify(|v| *v = v.wrapping_add(1));
+        true
+    }
+
+    /// Forget `queue` (it left `auto`): not spilling, no overflow record.
+    pub fn remove(&self, queue: &str) -> bool {
+        lock(&self.overflow).remove(queue);
+        self.set(queue, false)
     }
 }
 
-/// Start the spill sampler; `None` when nothing runs.
-///
-/// Phase 7 stub (07-02): `None`.
+// ---------------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------------
+
+/// How often the spill service samples (D-W9).
+pub const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
+
+/// One controller per `auto` queue over a [`LoadSampler`].
+pub struct SpillService<S> {
+    sampler: S,
+    handle: Arc<SpillHandle>,
+    clock: Arc<dyn Clock>,
+    queues: BTreeMap<String, SpillController>,
+}
+
+impl<S> std::fmt::Debug for SpillService<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpillService")
+            .field("queues", &self.queues.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: LoadSampler> SpillService<S> {
+    pub fn new(sampler: S, handle: Arc<SpillHandle>, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            sampler,
+            handle,
+            clock,
+            queues: BTreeMap::new(),
+        }
+    }
+
+    /// Queues with a controller (the `auto` queues of the last tick).
+    pub fn queues(&self) -> Vec<String> {
+        self.queues.keys().cloned().collect()
+    }
+
+    /// One evaluation: `auto` maps every `auto` queue to its thresholds. Queues no longer
+    /// in it are dropped (and stop spilling). Returns the transitions applied.
+    pub fn tick(&mut self, auto: &BTreeMap<String, SpillThresholds>) -> Vec<(String, Transition)> {
+        let gone: Vec<String> = self
+            .queues
+            .keys()
+            .filter(|q| !auto.contains_key(*q))
+            .cloned()
+            .collect();
+        for q in gone {
+            self.queues.remove(&q);
+            if self.handle.remove(&q) {
+                info!(queue = %q, "queue left auto placement; spill cleared");
+                transition_metrics(&q, SpillState::Embedded, true);
+            }
+            metrics::gauge!("ostro_placement_spilling", "queue" => q).set(0.0);
+        }
+        if auto.is_empty() {
+            return Vec::new();
+        }
+        self.sampler.begin();
+        let now = self.clock.now_ms();
+        let mut out = Vec::new();
+        for (q, th) in auto {
+            let c = self
+                .queues
+                .entry(q.clone())
+                .or_insert_with(|| SpillController::new(*th));
+            if c.thresholds() != *th {
+                c.set_thresholds(*th);
+            }
+            let mut s = self.sampler.sample(q);
+            s.last_overflow_ms = s.last_overflow_ms.max(self.handle.last_overflow(q));
+            if let Some(t) = c.observe(s, now) {
+                let spilling = t.to == SpillState::Spilling;
+                self.handle.set(q, spilling);
+                info!(
+                    queue = %q,
+                    to = t.to.as_str(),
+                    signal = t.signal.as_str(),
+                    cpu = s.cpu,
+                    slots = s.slots,
+                    mem = s.mem,
+                    lag_ms = s.lag_ms,
+                    backlog = s.backlog,
+                    running_on_workers = s.running_on_workers,
+                    "placement spill transition"
+                );
+                transition_metrics(q, t.to, true);
+                out.push((q.clone(), t));
+            }
+        }
+        out
+    }
+}
+
+fn transition_metrics(queue: &str, to: SpillState, counted: bool) {
+    if counted {
+        metrics::counter!(
+            "ostro_placement_transitions_total",
+            "queue" => queue.to_owned(),
+            "to" => to.as_str()
+        )
+        .increment(1);
+    }
+    let v = if to == SpillState::Spilling { 1.0 } else { 0.0 };
+    metrics::gauge!("ostro_placement_spilling", "queue" => queue.to_owned()).set(v);
+}
+
+/// Run `svc` every `period` until `shutdown`: `auto(tracked)` returns the current `auto`
+/// queues (given the queues tracked so far). The deadline comes from `clock`; tokio
+/// only sleeps until it (no `interval`, F5).
+pub async fn run<S: LoadSampler>(
+    mut svc: SpillService<S>,
+    mut auto: impl FnMut(&[String]) -> BTreeMap<String, SpillThresholds> + Send,
+    clock: Arc<dyn Clock>,
+    shutdown: CancellationToken,
+    period: Duration,
+) {
+    let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX).max(1);
+    let mut next_ms = clock.now_ms();
+    loop {
+        let queues = auto(&svc.queues());
+        svc.tick(&queues);
+        next_ms = next_ms.saturating_add(period_ms);
+        let now = clock.now_ms();
+        if next_ms < now {
+            // Fell behind (or the clock jumped): skip the missed ticks.
+            next_ms = now;
+        }
+        let wait = Duration::from_millis((next_ms - now).max(1));
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+/// The `auto` queues among `names`, with their thresholds.
+pub fn auto_queues(
+    meta: &MetaView,
+    default_auto: bool,
+    defaults: SpillThresholds,
+    names: impl IntoIterator<Item = String>,
+) -> BTreeMap<String, SpillThresholds> {
+    let names: BTreeSet<String> = names.into_iter().collect();
+    meta.read(|s| {
+        names
+            .into_iter()
+            .filter_map(|q| {
+                let p = s.queue_policy(&q).map(|v| &v.value);
+                let auto = match p.and_then(|p| p.placement) {
+                    Some(pl) => pl == PLACEMENT_AUTO,
+                    None => default_auto,
+                };
+                auto.then(|| {
+                    let th = defaults.with_policy(p.and_then(|p| p.spill.as_ref()));
+                    (q, th)
+                })
+            })
+            .collect()
+    })
+}
+
+/// Start the spill sampler (every [`SAMPLE_PERIOD`]); `None` when `[workers] enabled =
+/// false` (nothing can spill). Candidate queues are those with dispatcher gauges plus the
+/// ones already tracked; `auto` comes from `QueuePolicy.placement` or `[workers]
+/// default_placement`.
 pub fn start(ctx: &P7Ctx) -> Option<JoinHandle<()>> {
-    let _ = ctx;
-    None
+    let workers = &ctx.config.workers;
+    if !workers.enabled {
+        return None;
+    }
+    let shared = &ctx.shared;
+    let slots_total = usize::try_from(ctx.config.executor.slots).unwrap_or(usize::MAX);
+    let sampler = ProcessSampler::new(
+        Arc::clone(&ctx.clock),
+        Arc::clone(&shared.gauges),
+        Arc::clone(&shared.embedded_slots),
+        slots_total,
+        Some(Arc::clone(ctx.runtime.parked().budget())),
+    );
+    let svc = SpillService::new(sampler, Arc::clone(&shared.spill), Arc::clone(&ctx.clock));
+    let meta = ctx.meta.clone();
+    let gauges = Arc::clone(&shared.gauges);
+    let default_auto = workers.default_placement == PlacementSetting::Auto;
+    let defaults = SpillThresholds::from_config(&workers.spill);
+    let auto = move |tracked: &[String]| {
+        let names = gauges.snapshot().into_keys().chain(tracked.iter().cloned());
+        auto_queues(&meta, default_auto, defaults, names)
+    };
+    Some(tokio::spawn(run(
+        svc,
+        auto,
+        Arc::clone(&ctx.clock),
+        ctx.shutdown.clone(),
+        SAMPLE_PERIOD,
+    )))
 }
 
 #[cfg(test)]
