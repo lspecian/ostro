@@ -509,6 +509,11 @@ impl MetaState {
         self.tokens.get(id)
     }
 
+    /// Every API token, by id (Phase 7 07-09: worker join tokens are listed through it).
+    pub fn tokens(&self) -> impl Iterator<Item = &Versioned<ApiToken>> {
+        self.tokens.values()
+    }
+
     pub fn schedule(&self, name: &str) -> Option<&Versioned<Schedule>> {
         self.schedules.get(name)
     }
