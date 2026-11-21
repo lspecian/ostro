@@ -570,7 +570,7 @@ async fn module_cache() {
     let mid = tampered.len() / 2;
     tampered[mid] ^= 0x5a;
     std::fs::write(&art, &tampered).expect("tamper");
-    let (ino_t, _, _) = identity(&art);
+    let (ino_t, mtime_t, _) = identity(&art);
     let mut w = start("cache-w1");
     let t3 = Instant::now();
     let r3 = sdk_basic(&c, "tampered", "wq").await;
@@ -582,9 +582,12 @@ async fn module_cache() {
         "no tamper rejection logged:\n{out}"
     );
     assert_eq!(artefacts(cache.path()), vec![art.clone()], "recompiled");
-    let (ino3, _, bytes3) = identity(&art);
+    let (ino3, mtime3, bytes3) = identity(&art);
+    // ext4 hands the inode freed by the delete straight to the recompiled tmp file, so the
+    // inode alone can repeat (07-22); the (inode, mtime) pair and the content cannot.
     assert_ne!(
-        ino3, ino_t,
+        (ino3, mtime3),
+        (ino_t, mtime_t),
         "the artefact was not rewritten after the tamper"
     );
     assert_ne!(bytes3, tampered);
