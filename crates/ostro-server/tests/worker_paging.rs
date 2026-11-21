@@ -25,6 +25,7 @@ use ostro_meta::{MetaCommand, MetaRecord, MetaResult, QueuePolicy};
 use ostro_partition::store::values::RunStatus;
 use ostro_server::workers::service::WireDir;
 use ostro_types::RunId;
+use ostro_types::journal::EventKind;
 use p7_workers::{ServerWorkers, journal_shape, wire_listener};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -84,6 +85,23 @@ async fn run_one(s: &TestServer, sha: &[u8; 32], queue: &str, big_input: &Value)
             move |st| st.queue = q,
         )
         .await;
+    // Signal only once the run waits for it. A signal posted earlier is buffered and its
+    // SignalPayload lands wherever the post races the run's steps (right after RunStarted
+    // when the worker has not picked the run up yet), so the embedded and remote journal
+    // shapes would differ by timing alone.
+    let deadline = tokio::time::Instant::now() + LIMIT;
+    while !s
+        .journal(&run)
+        .await
+        .iter()
+        .any(|e| e.body.kind() == EventKind::SignalWaitStarted)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{run}: no SignalWaitStarted within {LIMIT:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let (st, v) = s
         .post_json(
             &format!("/v1/runs/{run}/signals/input"),
