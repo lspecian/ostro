@@ -68,6 +68,7 @@ pub fn local_store(dir: &Path, conditional: bool) -> Arc<dyn ObjectStore> {
 pub fn up_cfg() -> UploaderConfig {
     UploaderConfig {
         seal_interval: Duration::from_millis(200),
+        upload_concurrency: 0,
         remote_snapshots_keep: 3,
         cluster_id: "test-cluster".into(),
         node_id: 1,

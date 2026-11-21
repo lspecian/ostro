@@ -1,6 +1,7 @@
 //! Bottomless uploader (plan 08-13, BACK-01) on LocalFs: below-cut uploads, closed barrier,
 //! keys and epoch split, blobs first, meta snapshot, upload floor vs trimming, remote
-//! retention, per-tick cut lag (W8, with the P=16 timing report) and the
+//! retention, per-tick cut lag (W8, with the P=16 timing report), the fixed round cadence
+//! and parallel partition uploads behind one consistent cut (08-23), and the
 //! `upload::before_manifest` failpoint.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
@@ -415,6 +416,95 @@ async fn cut_lag_per_tick_at_p16() {
     );
     let m = current_manifest(&store).await.expect("manifest");
     assert_eq!(m.cut.len(), P as usize);
+    drop(up);
+    shutdown(node).await;
+}
+
+/// 08-23: with every partition busy, a round at any upload concurrency (1, auto = min(P, 8),
+/// 16) writes one manifest whose entries all sit exactly at the single cut read in step 1,
+/// and the last manifest restores (chains walk, state hashes match) for every partition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn parallel_uploads_name_one_consistent_cut() {
+    const P: u16 = 16;
+    for conc in [1usize, 0, 16] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let remote = tempfile::tempdir().expect("remote");
+        let store = local_store(remote.path(), true);
+        let node = open(node_cfg(dir.path(), P)).await;
+        let mut cfg = up_cfg();
+        cfg.upload_concurrency = conc;
+        assert_eq!(cfg.concurrency(P), if conc == 0 { 8 } else { conc });
+        let up = uploader(&node, cfg);
+        for gen_no in 1..=3u64 {
+            for p in 0..P {
+                start_runs(&node, p, 3 + usize::from(p % 4)).await;
+            }
+            let r = up.round(&store).await.expect("round");
+            let m = r.manifest.expect("manifest");
+            assert_eq!(m.generation, gen_no);
+            assert_eq!(m.cut.len(), usize::from(P), "one entry per partition");
+            assert_eq!(m.cut_at_ms, r.cut_at_ms);
+            for e in &m.cut {
+                assert_eq!(
+                    e.cut_offset, r.cut[e.p as usize].0,
+                    "concurrency {conc}: p{} not at the round's cut",
+                    e.p
+                );
+            }
+            assert!(r.chunks >= usize::from(P));
+            if gen_no == 3 {
+                simulate_restore(&store, &m, P).await;
+            }
+        }
+        drop(up);
+        shutdown(node).await;
+    }
+}
+
+/// 08-23: `run` starts rounds on a fixed cadence of `seal_interval / 2` measured from round
+/// start. Each round is held 150 ms after its cut (the after-cut hook); the gap between cut
+/// reads stays near the 200 ms period instead of the old `seal_interval + round time`
+/// (400 + 150 ms).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_starts_rounds_on_a_fixed_cadence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let remote = tempfile::tempdir().expect("remote");
+    let store = local_store(remote.path(), true);
+    let node = open(node_cfg(dir.path(), 1)).await;
+    let mut cfg = up_cfg();
+    cfg.seal_interval = Duration::from_millis(400);
+    assert_eq!(cfg.round_interval(), Duration::from_millis(200));
+    let up = uploader(&node, cfg);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    up.set_after_cut_hook(Some(tx));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let runner = tokio::spawn(Arc::clone(&up).run(Arc::clone(&store), stop_rx));
+    let mut at = Vec::new();
+    for _ in 0..8 {
+        start_runs(&node, 0, 2).await;
+        let resume: tokio::sync::oneshot::Sender<()> =
+            tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("a round within 10 s")
+                .expect("hook");
+        at.push(std::time::Instant::now());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = resume.send(());
+    }
+    up.set_after_cut_hook(None);
+    drop(rx); // releases a round already waiting on the hook
+    let _ = stop_tx.send(true);
+    runner.await.expect("runner");
+    let mut gaps: Vec<Duration> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort();
+    let median = gaps[gaps.len() / 2];
+    println!("round cadence 200 ms, 150 ms rounds: cut gaps {gaps:?}");
+    assert!(
+        median < Duration::from_millis(350),
+        "median cut gap {median:?}: rounds are not on a fixed 200 ms cadence"
+    );
+    let m = current_manifest(&store).await.expect("manifest");
+    assert!(m.generation >= 7, "generation {}", m.generation);
     drop(up);
     shutdown(node).await;
 }

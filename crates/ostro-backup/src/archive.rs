@@ -178,6 +178,7 @@ impl Drop for Staging {
 fn one_off_cfg(cluster_id: &str, node_id: u64) -> UploaderConfig {
     UploaderConfig {
         seal_interval: Duration::from_secs(1),
+        upload_concurrency: 0,
         remote_snapshots_keep: 1,
         cluster_id: cluster_id.to_owned(),
         node_id,

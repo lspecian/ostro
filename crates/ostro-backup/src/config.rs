@@ -34,8 +34,11 @@ pub enum TlsRoots {
 pub struct BackupConfig {
     /// `s3://bucket/prefix` or `file:///path`; `None` = backup off.
     pub url: Option<String>,
-    /// Upload tick: each tick takes a consistent cut and seals chunks (default 1 s, P8-D3).
+    /// RPO target (default 1 s, P8-D3/P8-D23): bound on the end-to-end data-loss window.
+    /// The uploader takes a consistent cut and seals chunks every `seal_interval / 2`.
     pub seal_interval: Duration,
+    /// Partitions (and blobs) uploaded concurrently within a round; 0 = auto (`min(P, 8)`).
+    pub upload_concurrency: usize,
     /// S3 region.
     pub region: Option<String>,
     /// S3 endpoint override (SeaweedFS, R2, ...).
@@ -63,6 +66,7 @@ impl Default for BackupConfig {
         Self {
             url: None,
             seal_interval: Duration::from_secs(1),
+            upload_concurrency: 0,
             region: None,
             endpoint: None,
             url_style: UrlStyle::Path,
@@ -93,6 +97,7 @@ impl std::fmt::Debug for BackupConfig {
         f.debug_struct("BackupConfig")
             .field("url", &self.url)
             .field("seal_interval", &self.seal_interval)
+            .field("upload_concurrency", &self.upload_concurrency)
             .field("region", &self.region)
             .field("endpoint", &self.endpoint)
             .field("url_style", &self.url_style)
@@ -117,6 +122,7 @@ mod tests {
         assert!(!c.enabled());
         assert_eq!(c.seal_interval, Duration::from_secs(1));
         assert_eq!(c.remote_snapshots_keep, 3);
+        assert_eq!(c.upload_concurrency, 0, "auto = min(P, 8)");
         assert_eq!(c.url_style, UrlStyle::Path);
         assert_eq!(c.tls_roots, TlsRoots::Platform);
         assert!(!c.allow_http && !c.takeover);

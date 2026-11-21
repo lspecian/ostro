@@ -643,8 +643,11 @@ pub struct BackupSection {
     /// `s3://bucket/prefix` or `file:///path`; unset = backup off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Upload tick / seal interval (default `1s`).
+    /// RPO target (default `1s`): bound on the data-loss window; the uploader cuts every
+    /// half of it (P8-D23).
     pub seal_interval: FriendlyDuration,
+    /// Partitions uploaded concurrently per round; 0 = auto (`min(P, 8)`).
+    pub upload_concurrency: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -671,6 +674,7 @@ impl Default for BackupSection {
         Self {
             url: None,
             seal_interval: d.seal_interval.into(),
+            upload_concurrency: d.upload_concurrency,
             region: None,
             endpoint: None,
             url_style: UrlStyleSetting::Path,
@@ -697,6 +701,7 @@ impl BackupSection {
         BackupConfig {
             url: self.url.clone(),
             seal_interval: self.seal_interval.get(),
+            upload_concurrency: self.upload_concurrency,
             region: self.region.clone(),
             endpoint: self.endpoint.clone(),
             url_style: match self.url_style {

@@ -31,8 +31,21 @@
 //! `remote_snapshots_keep`, chunks not needed by them or not on the chain (forks), and gen
 //! manifests that reference deleted objects.
 //!
-//! [`Uploader::run`] ticks every `seal_interval`; idle partitions upload nothing, an idle
-//! round writes no manifest, and failures back off without ever blocking apply.
+//! Steps 3-5 run for all partitions concurrently (at most
+//! [`UploaderConfig::upload_concurrency`] at a time, default `min(P, 8)`), each on its own
+//! partition state, against the single cut read in step 1; the meta snapshot PUT overlaps
+//! them, and blob PUTs (step 2, still before any chunk) are bounded the same way. The
+//! manifest is built only after every partition finished, so it still names one consistent
+//! cut. A partition failure fails the whole round (no manifest; the session is re-read).
+//!
+//! [`Uploader::run`] starts rounds on a fixed cadence of [`UploaderConfig::round_interval`]
+//! (`seal_interval / 2`), measured from round start, not from the end of the previous
+//! round; a round that overruns its slot is followed immediately by the next one. With
+//! upload latency `U`, the data-loss window after a crash (newest lost ack − `cut_at_ms` of
+//! the newest durable manifest) is at most `seal_interval / 2 + U`, which stays within
+//! `seal_interval` (P8-D23, SC3/BACK-02) while `U <= seal_interval / 2`. Idle partitions
+//! upload nothing, an idle round writes no manifest, and failures back off without ever
+//! blocking apply.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -70,6 +83,11 @@ pub const METRIC_FLOOR_LAG: &str = "ostro_backup_upload_floor_lag";
 
 /// Longest back-off between failed rounds.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Shortest round period.
+const MIN_ROUND_INTERVAL: Duration = Duration::from_millis(10);
+/// Partitions uploaded concurrently within a round when
+/// [`UploaderConfig::upload_concurrency`] is 0 (auto: `min(P, 8)`).
+pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 8;
 
 /// Uploader failures.
 #[derive(Debug, thiserror::Error)]
@@ -124,8 +142,11 @@ impl UploadError {
 /// Uploader settings.
 #[derive(Clone, Debug)]
 pub struct UploaderConfig {
-    /// Tick period.
+    /// RPO target (P8-D23): the bound on the end-to-end data-loss window. Rounds start
+    /// every [`Self::round_interval`] = `seal_interval / 2`.
     pub seal_interval: Duration,
+    /// Partitions (and blobs) uploaded concurrently within a round; 0 = auto (`min(P, 8)`).
+    pub upload_concurrency: usize,
     /// Remote snapshots kept per partition.
     pub remote_snapshots_keep: usize,
     /// Cluster id (manifest + LOCK).
@@ -145,6 +166,7 @@ impl UploaderConfig {
     pub fn from_backup(cfg: &BackupConfig, cluster_id: impl Into<String>, node_id: u64) -> Self {
         Self {
             seal_interval: cfg.seal_interval,
+            upload_concurrency: cfg.upload_concurrency,
             remote_snapshots_keep: cfg.remote_snapshots_keep.max(1),
             cluster_id: cluster_id.into(),
             node_id,
@@ -152,6 +174,21 @@ impl UploaderConfig {
             publish_floor: true,
             retention: true,
         }
+    }
+
+    /// Round cadence: `seal_interval / 2` (at least 10 ms), so that cadence + upload
+    /// latency fits in `seal_interval` while uploads take at most half of it (P8-D23).
+    pub fn round_interval(&self) -> Duration {
+        (self.seal_interval / 2).max(MIN_ROUND_INTERVAL)
+    }
+
+    /// Concurrent partition uploads for `partitions` partitions (at least 1).
+    pub fn concurrency(&self, partitions: u16) -> usize {
+        let n = match self.upload_concurrency {
+            0 => DEFAULT_UPLOAD_CONCURRENCY,
+            n => n,
+        };
+        n.min(usize::from(partitions)).max(1)
     }
 }
 
@@ -397,29 +434,42 @@ impl Uploader {
         self.node.log_cut().len() as u16
     }
 
-    /// Run rounds every `seal_interval` until `shutdown` turns true. Stops for good when
-    /// fenced. Failures back off (doubling, up to 30 s) and never block apply.
+    /// Run rounds on a fixed cadence of [`UploaderConfig::round_interval`] until `shutdown`
+    /// turns true: each round starts one period after the previous round **started** (an
+    /// overrunning round is followed at once by the next). Stops for good when fenced.
+    /// Failures back off (doubling, up to 30 s) and never block apply.
     pub async fn run(
         self: Arc<Self>,
         store: Arc<dyn ObjectStore>,
         mut shutdown: watch::Receiver<bool>,
     ) {
-        let base = self.cfg.seal_interval.max(Duration::from_millis(10));
-        let mut wait = base;
+        let period = self.cfg.round_interval();
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut backoff = Duration::ZERO;
         loop {
             tokio::select! {
                 _ = shutdown.wait_for(|v| *v) => break,
-                () = tokio::time::sleep(wait) => {}
+                _ = ticker.tick() => {}
             }
             if *shutdown.borrow() {
                 break;
             }
             match self.round(&store).await {
-                Ok(_) => wait = base,
+                Ok(_) => backoff = Duration::ZERO,
                 Err(UploadError::Fenced(_)) => return,
                 Err(e) => {
-                    wait = (wait * 2).min(MAX_BACKOFF.max(base));
-                    warn!(error = %e, retry_in = ?wait, "bottomless upload round failed");
+                    backoff = if backoff.is_zero() {
+                        period
+                    } else {
+                        (backoff * 2).min(MAX_BACKOFF.max(period))
+                    };
+                    warn!(error = %e, retry_in = ?backoff, "bottomless upload round failed");
+                    tokio::select! {
+                        _ = shutdown.wait_for(|v| *v) => break,
+                        () = tokio::time::sleep(backoff) => {}
+                    }
+                    ticker.reset_immediately();
                 }
             }
         }
@@ -487,142 +537,60 @@ impl Uploader {
         // 2. Blobs put before the cut.
         report.blobs = self.upload_blobs(sess).await?;
 
-        // 3.-5. Partitions.
-        let mut changed = false;
-        let mut snapshot_changed = false;
-        let mut incomplete = false;
-        for p in 0..count {
-            let pid = PartitionId(p);
-            let Some(h) = self.node.handle(pid) else {
-                continue;
-            };
-            let log_start = h.log().log_start().0;
-            let cut_p = cut.get(p as usize).map_or(0, |o| o.0);
-            let part = &mut sess.parts[p as usize];
-
-            // 5a. Upload every new local snapshot now (held back from the manifest below).
-            for ls in self.node.local_snapshots(pid).await {
-                if part.snaps.contains_key(&ls.applied_offset.0) {
-                    continue;
-                }
-                match self.upload_snapshot(&sess.store, p, &ls.path).await {
-                    Ok(Some((s, bytes))) => {
-                        report.snapshots += 1;
-                        metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "snapshot")
-                            .increment(bytes);
-                        part.snaps.insert(s.offset, s);
-                    }
-                    Ok(None) => {}
-                    Err(UploadError::Io(e)) => {
-                        // Deleted by local retention before we got to it.
-                        debug!(partition = p, error = %e, "local snapshot vanished before upload");
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            // Remote ahead of the local cut (e.g. right after a restore): keep the entry.
-            if part.has_chain && part.uploaded_end > cut_p {
-                continue;
-            }
-
-            // 3. Chain start (B4).
-            if !part.has_chain || part.uploaded_end < log_start {
-                let start = if log_start <= cut_p {
-                    part.snaps
-                        .range(log_start..=cut_p)
-                        .next_back()
-                        .map(|(o, s)| (*o, s.clone()))
-                } else {
-                    None
-                };
-                match start {
-                    Some((o, _)) => {
-                        info!(
-                            partition = p,
-                            chain_start = o,
-                            log_start,
-                            "bottomless chain starts at a snapshot"
-                        );
-                        *part = PartState {
-                            has_chain: true,
-                            chain_start: o,
-                            uploaded_end: o,
-                            referenced: Some(o),
-                            snaps: std::mem::take(&mut part.snaps),
-                            last_entry: part.last_entry.take(),
-                            ..PartState::default()
-                        };
-                        changed = true;
-                        snapshot_changed = true;
-                    }
-                    None if log_start == 0 => {
-                        *part = PartState {
-                            has_chain: true,
-                            snaps: std::mem::take(&mut part.snaps),
-                            last_entry: part.last_entry.take(),
-                            ..PartState::default()
-                        };
-                        changed = true;
-                    }
-                    None => {
-                        warn!(
-                            partition = p,
-                            log_start, "no snapshot to start the bottomless chain; requesting one"
-                        );
-                        metrics::counter!(METRIC_FAILURES, "kind" => "no_snapshot").increment(1);
-                        report.skipped.push(p);
-                        incomplete = true;
-                        let node = Arc::clone(&self.node);
-                        tokio::spawn(async move {
-                            if let Err(e) = node.snapshot_now(pid).await {
-                                debug!(partition = pid.0, error = %e, "requested snapshot failed");
-                            }
-                        });
-                        continue;
-                    }
-                }
-            }
-
-            // 4. Chunks [uploaded_end, cut).
-            let (n, bytes) = self.upload_chunks(&sess.store, pid, part, cut_p).await?;
-            if n > 0 {
-                changed = true;
-                report.chunks += n;
-                report.chunk_bytes += bytes;
-                metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "chunk").increment(bytes);
-            }
-
-            // 5b. Reference the newest uploaded snapshot covered by this cut.
-            let newest = part
-                .snaps
-                .range(part.chain_start..=part.uploaded_end)
-                .next_back()
-                .map(|(o, _)| *o);
-            if let Some(o) = newest
-                && part.referenced.is_none_or(|r| r < o)
-            {
-                part.referenced = Some(o);
-                changed = true;
-                snapshot_changed = true;
-            }
-        }
-
-        // 6. Meta snapshot (captured after the cut).
-        if let Some(view) = &self.meta {
+        // 6. Meta snapshot, captured after the cut; its PUT overlaps the partition uploads.
+        let meta_snap = self.meta.as_ref().and_then(|view| {
             let (index, bytes) = view.read(|s| (view.applied(), ostro_meta::encode_snapshot(s)));
-            if sess.meta_index != Some(index) {
+            (sess.meta_index != Some(index)).then_some((index, bytes))
+        });
+        let meta_put = {
+            let store = Arc::clone(&sess.store);
+            async move {
+                let Some((index, bytes)) = meta_snap else {
+                    return Ok(None);
+                };
                 let sha: [u8; 32] = Sha256::digest(&bytes).into();
                 let key = meta_key(index);
                 let len = bytes.len() as u64;
-                put_immutable(&sess.store, &key, bytes, sha).await?;
+                put_immutable(&store, &key, bytes, sha).await?;
                 metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "meta").increment(len);
-                sess.meta_index = Some(index);
-                sess.meta_key = Some(key);
-                sess.meta_sha = Some(sha);
-                report.meta_snapshot = true;
-                changed = true;
+                Ok::<_, UploadError>(Some((index, key, sha)))
             }
+        };
+
+        // 3.-5. Partitions, concurrently (bounded), all against the step-1 cut.
+        let ctx = PartCtx {
+            node: Arc::clone(&self.node),
+            store: Arc::clone(&sess.store),
+            max_chunk_bytes: self.cfg.max_chunk_bytes,
+        };
+        let parts = std::mem::take(&mut sess.parts);
+        let (parts_res, meta_res) = tokio::join!(
+            upload_partitions(&ctx, parts, &cut, self.cfg.concurrency(count)),
+            meta_put
+        );
+        let (parts, outcomes) = parts_res?;
+        sess.parts = parts;
+        let mut changed = false;
+        let mut snapshot_changed = false;
+        let mut incomplete = false;
+        for o in &outcomes {
+            report.snapshots += o.snapshots;
+            report.chunks += o.chunks;
+            report.chunk_bytes += o.chunk_bytes;
+            changed |= o.changed;
+            snapshot_changed |= o.snapshot_changed;
+            if let Some(p) = o.skipped {
+                report.skipped.push(p);
+                incomplete = true;
+            }
+        }
+        report.skipped.sort_unstable();
+        if let Some((index, key, sha)) = meta_res? {
+            sess.meta_index = Some(index);
+            sess.meta_key = Some(key);
+            sess.meta_sha = Some(sha);
+            report.meta_snapshot = true;
+            changed = true;
         }
 
         if incomplete {
@@ -1050,160 +1018,48 @@ impl Uploader {
             sess.remote_blobs = remote;
             sess.blobs_reconciled = true;
         }
-        let mut n = 0;
+        // PUTs bounded like the partition uploads; all finish before any chunk is written.
+        let sem = Arc::new(tokio::sync::Semaphore::new(
+            self.cfg.concurrency(self.partitions()),
+        ));
+        let mut set = tokio::task::JoinSet::new();
         let pending: Vec<[u8; 32]> = sess.pending_blobs.iter().copied().collect();
         for sha in pending {
-            if !sess.remote_blobs.contains(&sha) {
-                let h = hex(&sha);
-                let path = dir.join(&h[..2]).join(&h);
+            if sess.remote_blobs.contains(&sha) {
+                sess.pending_blobs.remove(&sha);
+                continue;
+            }
+            let (store, sem) = (Arc::clone(&sess.store), Arc::clone(&sem));
+            let h = hex(&sha);
+            let path = dir.join(&h[..2]).join(&h);
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await;
                 let bytes = match tokio::fs::read(&path).await {
                     Ok(b) => b,
                     Err(e) => {
                         // Collected locally (GC) before upload: nothing references it any more.
                         warn!(blob = %h, error = %e, "blob vanished before upload");
-                        sess.pending_blobs.remove(&sha);
-                        continue;
+                        return (sha, Ok(false));
                     }
                 };
                 let len = bytes.len() as u64;
-                put_immutable(&sess.store, &blob_key(&sha), bytes, sha).await?;
-                metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "blob").increment(len);
+                let r = put_immutable(&store, &blob_key(&sha), bytes, sha).await;
+                if r.is_ok() {
+                    metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "blob").increment(len);
+                }
+                (sha, r.map(|_| true).map_err(UploadError::from))
+            });
+        }
+        let mut n = 0;
+        while let Some(joined) = set.join_next().await {
+            let (sha, r) = joined.map_err(|e| UploadError::Io(format!("blob upload task: {e}")))?;
+            if r? {
                 sess.remote_blobs.insert(sha);
                 n += 1;
             }
             sess.pending_blobs.remove(&sha);
         }
         Ok(n)
-    }
-
-    // ------------------------------------------------------------------ snapshots
-
-    /// Upload one local snapshot. `Ok(None)` if it is not a usable snapshot file.
-    async fn upload_snapshot(
-        &self,
-        store: &Arc<dyn ObjectStore>,
-        p: u16,
-        path: &std::path::Path,
-    ) -> Result<Option<(SnapRef, u64)>, UploadError> {
-        let bytes = tokio::fs::read(path)
-            .await
-            .map_err(|e| UploadError::Io(format!("{}: {e}", path.display())))?;
-        let checked = {
-            let b = bytes.clone();
-            tokio::task::spawn_blocking(move || {
-                ostro_partition::store::snapshot::verify_snapshot(std::io::Cursor::new(b))
-            })
-            .await
-            .map_err(|e| UploadError::Io(e.to_string()))?
-        };
-        let info = match checked {
-            Ok(i) => i,
-            Err(e) => {
-                warn!(partition = p, path = %path.display(), error = %e, "local snapshot failed verification; not uploaded");
-                return Ok(None);
-            }
-        };
-        let sha: [u8; 32] = Sha256::digest(&bytes).into();
-        let key = snap_key(p, info.applied_offset, &sha);
-        let len = bytes.len() as u64;
-        put_immutable(store, &key, bytes, sha).await?;
-        Ok(Some((
-            SnapRef {
-                offset: info.applied_offset,
-                key,
-                sha,
-                state_hash: Some(info.state_hash),
-            },
-            len,
-        )))
-    }
-
-    // ------------------------------------------------------------------ chunks
-
-    async fn upload_chunks(
-        &self,
-        store: &Arc<dyn ObjectStore>,
-        pid: PartitionId,
-        part: &mut PartState,
-        cut_p: u64,
-    ) -> Result<(usize, u64), UploadError> {
-        let (mut n, mut total) = (0usize, 0u64);
-        while part.uploaded_end < cut_p {
-            let batches = self
-                .node
-                .read_envelopes(pid, Offset(part.uploaded_end), self.cfg.max_chunk_bytes)
-                .await
-                .map_err(|e| UploadError::Log(e.to_string()))?;
-            let before = part.uploaded_end;
-            'batches: for b in batches {
-                // Envelopes below the cut, grouped into chunks of at most max_chunk_bytes.
-                let mut group: Vec<&[u8]> = Vec::new();
-                let mut group_bytes = 0usize;
-                for env in &b.envelopes {
-                    let h = ostro_types::envelope::peek_header(env)
-                        .map_err(|e| UploadError::Log(format!("stored envelope: {e}")))?;
-                    let end = h.base.0 + u64::from(h.cmd_count);
-                    if end > cut_p {
-                        break;
-                    }
-                    if !group.is_empty() && group_bytes + env.len() > self.cfg.max_chunk_bytes {
-                        let (c, t) = self.put_chunk(store, pid, part, b.epoch, &group).await?;
-                        n += c;
-                        total += t;
-                        group.clear();
-                        group_bytes = 0;
-                    }
-                    group.push(env);
-                    group_bytes += env.len();
-                }
-                if !group.is_empty() {
-                    let (c, t) = self.put_chunk(store, pid, part, b.epoch, &group).await?;
-                    n += c;
-                    total += t;
-                }
-                if part.uploaded_end >= cut_p {
-                    break 'batches;
-                }
-            }
-            if part.uploaded_end == before {
-                return Err(UploadError::Log(format!(
-                    "partition {}: no whole batch in [{before}, {cut_p})",
-                    pid.0
-                )));
-            }
-        }
-        Ok((n, total))
-    }
-
-    async fn put_chunk(
-        &self,
-        store: &Arc<dyn ObjectStore>,
-        pid: PartitionId,
-        part: &mut PartState,
-        epoch: u32,
-        envelopes: &[&[u8]],
-    ) -> Result<(usize, u64), UploadError> {
-        let prev = part.last_sha.unwrap_or([0; 32]);
-        let (h, bytes) = chunk::encode(pid.0, epoch, prev, envelopes)?;
-        if h.base != part.uploaded_end {
-            return Err(ChunkError::Chain(format!(
-                "partition {}: chunk base {} != uploaded end {}",
-                pid.0, h.base, part.uploaded_end
-            ))
-            .into());
-        }
-        let key = chunk::chunk_key(pid.0, epoch, h.base, h.end);
-        let sha = chunk::chunk_sha(&bytes);
-        let len = bytes.len() as u64;
-        let outcome = put_immutable(store, &key, bytes, sha).await?;
-        if outcome == Immutable::AlreadyPresent {
-            debug!(key, "chunk already present (idempotent retry)");
-        }
-        part.uploaded_end = h.end;
-        part.last_key = Some(key.clone());
-        part.last_sha = Some(sha);
-        part.chain.push(ChunkMeta { key, end: h.end });
-        Ok((1, len))
     }
 
     // ------------------------------------------------------------------ retention
@@ -1345,6 +1201,320 @@ impl Uploader {
                 0
             }
         }
+    }
+}
+
+/// What one partition's upload did (steps 3-5).
+#[derive(Debug, Default)]
+struct PartOutcome {
+    snapshots: usize,
+    chunks: usize,
+    chunk_bytes: u64,
+    changed: bool,
+    snapshot_changed: bool,
+    /// Skipped by the chain start rule (no usable snapshot): no manifest this round.
+    skipped: Option<u16>,
+}
+
+/// What a partition upload task needs (owned, so tasks run on any worker thread).
+#[derive(Clone)]
+struct PartCtx {
+    node: Arc<Node>,
+    store: Arc<dyn ObjectStore>,
+    max_chunk_bytes: usize,
+}
+
+/// Steps 3-5 for every started partition, at most `concurrency` at a time, each against
+/// `cut[p]`. Returns the partition states in partition order with the outcomes. On the first
+/// failure the remaining tasks are aborted and the error is returned (the caller drops the
+/// session, so the partial states are discarded).
+async fn upload_partitions(
+    ctx: &PartCtx,
+    parts: Vec<PartState>,
+    cut: &[Offset],
+    concurrency: usize,
+) -> Result<(Vec<PartState>, Vec<PartOutcome>), UploadError> {
+    let sem = Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
+    let mut slots: Vec<Option<PartState>> = Vec::with_capacity(parts.len());
+    let mut set = tokio::task::JoinSet::new();
+    for (p, part) in parts.into_iter().enumerate() {
+        let pid = PartitionId(p as u16);
+        if ctx.node.handle(pid).is_none() {
+            slots.push(Some(part));
+            continue;
+        }
+        slots.push(None);
+        let cut_p = cut.get(p).map_or(0, |o| o.0);
+        let (ctx, sem) = (ctx.clone(), Arc::clone(&sem));
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let mut part = part;
+            let r = ctx.upload_partition(pid, &mut part, cut_p).await;
+            (p, part, r)
+        });
+    }
+    let mut outcomes = Vec::with_capacity(set.len());
+    while let Some(joined) = set.join_next().await {
+        let (p, part, r) =
+            joined.map_err(|e| UploadError::Io(format!("partition upload task: {e}")))?;
+        outcomes.push(r?);
+        slots[p] = Some(part);
+    }
+    let parts = slots
+        .into_iter()
+        .enumerate()
+        .map(|(p, s)| s.ok_or_else(|| UploadError::Io(format!("partition {p}: state lost"))))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((parts, outcomes))
+}
+
+impl PartCtx {
+    /// Steps 3-5 of one partition.
+    async fn upload_partition(
+        &self,
+        pid: PartitionId,
+        part: &mut PartState,
+        cut_p: u64,
+    ) -> Result<PartOutcome, UploadError> {
+        let mut out = PartOutcome::default();
+        let p = pid.0;
+        let Some(h) = self.node.handle(pid) else {
+            return Ok(out);
+        };
+        let log_start = h.log().log_start().0;
+
+        // 5a. Upload every new local snapshot now (held back from the manifest below).
+        for ls in self.node.local_snapshots(pid).await {
+            if part.snaps.contains_key(&ls.applied_offset.0) {
+                continue;
+            }
+            match self.upload_snapshot(p, &ls.path).await {
+                Ok(Some((s, bytes))) => {
+                    out.snapshots += 1;
+                    metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "snapshot").increment(bytes);
+                    part.snaps.insert(s.offset, s);
+                }
+                Ok(None) => {}
+                Err(UploadError::Io(e)) => {
+                    // Deleted by local retention before we got to it.
+                    debug!(partition = p, error = %e, "local snapshot vanished before upload");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Remote ahead of the local cut (e.g. right after a restore): keep the entry.
+        if part.has_chain && part.uploaded_end > cut_p {
+            return Ok(out);
+        }
+
+        // 3. Chain start (B4).
+        if !part.has_chain || part.uploaded_end < log_start {
+            let start = if log_start <= cut_p {
+                part.snaps
+                    .range(log_start..=cut_p)
+                    .next_back()
+                    .map(|(o, _)| *o)
+            } else {
+                None
+            };
+            match start {
+                Some(o) => {
+                    info!(
+                        partition = p,
+                        chain_start = o,
+                        log_start,
+                        "bottomless chain starts at a snapshot"
+                    );
+                    *part = PartState {
+                        has_chain: true,
+                        chain_start: o,
+                        uploaded_end: o,
+                        referenced: Some(o),
+                        snaps: std::mem::take(&mut part.snaps),
+                        last_entry: part.last_entry.take(),
+                        ..PartState::default()
+                    };
+                    out.changed = true;
+                    out.snapshot_changed = true;
+                }
+                None if log_start == 0 => {
+                    *part = PartState {
+                        has_chain: true,
+                        snaps: std::mem::take(&mut part.snaps),
+                        last_entry: part.last_entry.take(),
+                        ..PartState::default()
+                    };
+                    out.changed = true;
+                }
+                None => {
+                    warn!(
+                        partition = p,
+                        log_start, "no snapshot to start the bottomless chain; requesting one"
+                    );
+                    metrics::counter!(METRIC_FAILURES, "kind" => "no_snapshot").increment(1);
+                    out.skipped = Some(p);
+                    let node = Arc::clone(&self.node);
+                    tokio::spawn(async move {
+                        if let Err(e) = node.snapshot_now(pid).await {
+                            debug!(partition = pid.0, error = %e, "requested snapshot failed");
+                        }
+                    });
+                    return Ok(out);
+                }
+            }
+        }
+
+        // 4. Chunks [uploaded_end, cut).
+        let (n, bytes) = self.upload_chunks(pid, part, cut_p).await?;
+        if n > 0 {
+            out.changed = true;
+            out.chunks += n;
+            out.chunk_bytes += bytes;
+            metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "chunk").increment(bytes);
+        }
+
+        // 5b. Reference the newest uploaded snapshot covered by this cut.
+        let newest = part
+            .snaps
+            .range(part.chain_start..=part.uploaded_end)
+            .next_back()
+            .map(|(o, _)| *o);
+        if let Some(o) = newest
+            && part.referenced.is_none_or(|r| r < o)
+        {
+            part.referenced = Some(o);
+            out.changed = true;
+            out.snapshot_changed = true;
+        }
+        Ok(out)
+    }
+
+    // ------------------------------------------------------------------ snapshots
+
+    /// Upload one local snapshot. `Ok(None)` if it is not a usable snapshot file.
+    async fn upload_snapshot(
+        &self,
+        p: u16,
+        path: &std::path::Path,
+    ) -> Result<Option<(SnapRef, u64)>, UploadError> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| UploadError::Io(format!("{}: {e}", path.display())))?;
+        let checked = {
+            let b = bytes.clone();
+            tokio::task::spawn_blocking(move || {
+                ostro_partition::store::snapshot::verify_snapshot(std::io::Cursor::new(b))
+            })
+            .await
+            .map_err(|e| UploadError::Io(e.to_string()))?
+        };
+        let info = match checked {
+            Ok(i) => i,
+            Err(e) => {
+                warn!(partition = p, path = %path.display(), error = %e, "local snapshot failed verification; not uploaded");
+                return Ok(None);
+            }
+        };
+        let sha: [u8; 32] = Sha256::digest(&bytes).into();
+        let key = snap_key(p, info.applied_offset, &sha);
+        let len = bytes.len() as u64;
+        put_immutable(&self.store, &key, bytes, sha).await?;
+        Ok(Some((
+            SnapRef {
+                offset: info.applied_offset,
+                key,
+                sha,
+                state_hash: Some(info.state_hash),
+            },
+            len,
+        )))
+    }
+
+    // ------------------------------------------------------------------ chunks
+
+    async fn upload_chunks(
+        &self,
+        pid: PartitionId,
+        part: &mut PartState,
+        cut_p: u64,
+    ) -> Result<(usize, u64), UploadError> {
+        let (mut n, mut total) = (0usize, 0u64);
+        while part.uploaded_end < cut_p {
+            let batches = self
+                .node
+                .read_envelopes(pid, Offset(part.uploaded_end), self.max_chunk_bytes)
+                .await
+                .map_err(|e| UploadError::Log(e.to_string()))?;
+            let before = part.uploaded_end;
+            'batches: for b in batches {
+                // Envelopes below the cut, grouped into chunks of at most max_chunk_bytes.
+                let mut group: Vec<&[u8]> = Vec::new();
+                let mut group_bytes = 0usize;
+                for env in &b.envelopes {
+                    let h = ostro_types::envelope::peek_header(env)
+                        .map_err(|e| UploadError::Log(format!("stored envelope: {e}")))?;
+                    let end = h.base.0 + u64::from(h.cmd_count);
+                    if end > cut_p {
+                        break;
+                    }
+                    if !group.is_empty() && group_bytes + env.len() > self.max_chunk_bytes {
+                        let (c, t) = self.put_chunk(pid, part, b.epoch, &group).await?;
+                        n += c;
+                        total += t;
+                        group.clear();
+                        group_bytes = 0;
+                    }
+                    group.push(env);
+                    group_bytes += env.len();
+                }
+                if !group.is_empty() {
+                    let (c, t) = self.put_chunk(pid, part, b.epoch, &group).await?;
+                    n += c;
+                    total += t;
+                }
+                if part.uploaded_end >= cut_p {
+                    break 'batches;
+                }
+            }
+            if part.uploaded_end == before {
+                return Err(UploadError::Log(format!(
+                    "partition {}: no whole batch in [{before}, {cut_p})",
+                    pid.0
+                )));
+            }
+        }
+        Ok((n, total))
+    }
+
+    async fn put_chunk(
+        &self,
+        pid: PartitionId,
+        part: &mut PartState,
+        epoch: u32,
+        envelopes: &[&[u8]],
+    ) -> Result<(usize, u64), UploadError> {
+        let prev = part.last_sha.unwrap_or([0; 32]);
+        let (h, bytes) = chunk::encode(pid.0, epoch, prev, envelopes)?;
+        if h.base != part.uploaded_end {
+            return Err(ChunkError::Chain(format!(
+                "partition {}: chunk base {} != uploaded end {}",
+                pid.0, h.base, part.uploaded_end
+            ))
+            .into());
+        }
+        let key = chunk::chunk_key(pid.0, epoch, h.base, h.end);
+        let sha = chunk::chunk_sha(&bytes);
+        let len = bytes.len() as u64;
+        let outcome = put_immutable(&self.store, &key, bytes, sha).await?;
+        if outcome == Immutable::AlreadyPresent {
+            debug!(key, "chunk already present (idempotent retry)");
+        }
+        part.uploaded_end = h.end;
+        part.last_key = Some(key.clone());
+        part.last_sha = Some(sha);
+        part.chain.push(ChunkMeta { key, end: h.end });
+        Ok((1, len))
     }
 }
 

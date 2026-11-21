@@ -3,8 +3,10 @@
 //! When `[backup] url` is set (08-04 then also set `NodeConfig.backup_enabled`, so the upload
 //! floors start at `Some(log_start)`): open the store with `ostro_objstore::open_url`, acquire
 //! the prefix `LOCK` (`takeover` from `[backup] takeover` / `--takeover`), and run
-//! [`ostro_backup::uploader::Uploader`] every `seal_interval` until shutdown, then one final
-//! round bounded at 10 s. The startup log names the URL (a prefix, never credentials: those
+//! [`ostro_backup::uploader::Uploader`] until shutdown, then one final round bounded at 10 s.
+//! Rounds start on a fixed cadence of `seal_interval / 2` (from round start) and upload up
+//! to `[backup] upload_concurrency` partitions at once (0 = `min(P, 8)`), so the data-loss
+//! window stays within `seal_interval` (P8-D23 as revised by 08-23). The startup log names the URL (a prefix, never credentials: those
 //! live in separate config fields and `open_url` rejects userinfo).
 //!
 //! A failed LOCK (another incarnation owns the prefix) or a fenced round stops uploading and
@@ -73,6 +75,8 @@ pub fn spawn(ctx: &ServiceCtx) -> Option<JoinHandle<()>> {
         info!(
             url = %url,
             seal_interval = ?cfg.seal_interval,
+            round_interval = ?up.config().round_interval(),
+            upload_concurrency = up.config().concurrency(ctx.node.log_cut().len() as u16),
             incarnation = %up.ident().incarnation,
             "bottomless uploader started"
         );

@@ -820,15 +820,36 @@ pub async fn restore(
         });
     }
     let mut work: BTreeMap<u16, PartWork> = BTreeMap::new();
+    let mut failed: Option<RestoreError> = None;
     while let Some(r) = set.join_next().await {
-        let w = r.map_err(|e| RestoreError::Io(e.to_string()))??;
-        work.insert(w.cut.p, w);
-        #[cfg(feature = "failpoints")]
-        if work.len() == 1 {
-            fail::fail_point!("restore::mid_partition", |_| Err(RestoreError::Injected(
-                "restore::mid_partition"
-            )));
+        match r
+            .map_err(|e| RestoreError::Io(e.to_string()))
+            .and_then(|w| w)
+        {
+            Ok(w) => {
+                work.insert(w.cut.p, w);
+            }
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
         }
+        #[cfg(feature = "failpoints")]
+        if work.len() == 1 && failed.is_none() {
+            let injected = (|| {
+                fail::fail_point!("restore::mid_partition", |_| Err(RestoreError::Injected(
+                    "restore::mid_partition"
+                )));
+                Ok(())
+            })();
+            if let Err(e) = injected {
+                failed = Some(e);
+            }
+        }
+    }
+    // Every task finished (none is still writing into the data dir) before an error returns,
+    // so the caller can delete the directory right away.
+    if let Some(e) = failed {
+        return Err(e);
     }
     let partitions_ms = ms(t.elapsed());
 
@@ -1039,10 +1060,22 @@ async fn restore_blobs(
             Ok(())
         });
     }
+    // Drain every task before returning an error (none may still write into the data dir).
     let mut n = 0;
+    let mut failed: Option<RestoreError> = None;
     while let Some(r) = set.join_next().await {
-        r.map_err(|e| RestoreError::Io(e.to_string()))??;
-        n += 1;
+        match r
+            .map_err(|e| RestoreError::Io(e.to_string()))
+            .and_then(|x| x)
+        {
+            Ok(()) => n += 1,
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
+        }
     }
-    Ok(n)
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(n),
+    }
 }
