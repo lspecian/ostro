@@ -1,0 +1,22 @@
+[package]
+name = "s9-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone spike crate (plan 09-04): not a member of the root Ostro workspace
+# (`spikes` is in the root `exclude`). Its Cargo.lock is never committed; run.sh seeds
+# it from the root Cargo.lock so shared crates resolve to the workspace's versions.
+[workspace]
+
+[dependencies]
+wasmtime = { version = "=50.0.2", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "pooling-allocator", "parallel-compilation", "std"] }
+wasmparser = "=0.261.0"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+ostro-engine = { path = "../../../crates/ostro-engine", features = ["testkit"] }
+ostro-types = { path = "../../../crates/ostro-types" }
+
+[profile.release]
+debug = false

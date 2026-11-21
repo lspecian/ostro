@@ -1,0 +1,9 @@
+{
+  "name": "ostro-spike-s9-ts",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bytecodealliance/componentize-js": "0.23.0",
+    "@bytecodealliance/jco": "1.42.0"
+  }
+}
