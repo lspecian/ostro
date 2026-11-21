@@ -243,3 +243,94 @@ export class FakeHost implements Host {
     this.logs.push([level, message, [...fields]]);
   }
 }
+
+// --- helpers for the SDK core tests (09-10) ------------------------------------------
+//
+// Kept as free functions: the scaffold test pins FakeHost's method set to the WIT.
+
+import { SdkPromise } from "../src/promise.ts";
+
+/** `application/json` payload of `v` (test-side encoder; the SDK has its own). */
+export function json(v: unknown): Payload {
+  return { contentType: "application/json", data: new TextEncoder().encode(JSON.stringify(v)) };
+}
+
+/** JSON value of a payload (empty data = null). */
+export function unjson(p: Payload): unknown {
+  return p.data.length === 0 ? null : JSON.parse(new TextDecoder().decode(p.data));
+}
+
+/** A successful completion of `op`. */
+export function done(op: bigint, val: import("../src/host.ts").OpOutput): Completion {
+  return { op, outcome: { tag: "ok", val } };
+}
+
+/** A timer completion. */
+export function timerFired(op: bigint): Completion {
+  return { op, outcome: { tag: "ok", val: { tag: "timer" } } };
+}
+
+/** A signal completion carrying JSON `v`. */
+export function signalReceived(op: bigint, v: unknown): Completion {
+  return { op, outcome: { tag: "ok", val: { tag: "signal", val: json(v) } } };
+}
+
+/** The cancellation completion. */
+export function cancelRequested(): Completion {
+  return { op: CANCELLATION_OP, outcome: { tag: "ok", val: { tag: "cancel-requested" } } };
+}
+
+/** Method names of the recorded calls, optionally without some methods. */
+export function methods(fake: FakeHost, ...without: string[]): string[] {
+  return fake.calls.map(([m]) => m).filter((m) => !without.includes(m));
+}
+
+/** The recorded `stepComplete` outcomes, in order. */
+export function stepOutcomes(fake: FakeHost): Outcome<Payload>[] {
+  return fake.calls.filter(([m]) => m === "stepComplete").map(([, a]) => a[1] as Outcome<Payload>);
+}
+
+/**
+ * A FakeHost that replays `live`: every step `live` completed with `recorded` replays with
+ * that outcome; wait results are scripted by the caller.
+ */
+export function replayOf(live: FakeHost): FakeHost {
+  const replay = new FakeHost();
+  replay.replaying = true;
+  replay.clock = live.clock;
+  for (const outcome of stepOutcomes(live)) replay.scriptBeginStep({ tag: "replayed", val: outcome });
+  return replay;
+}
+
+/**
+ * The async-to-generator lowering Rolldown emits for `target: "es2016"` (oxc runtime
+ * helper `asyncToGenerator`), bound to SdkPromise. Host tests write workflow bodies as
+ * `lowered(function* () { const x = yield step(...); ... })`, which runs exactly like the
+ * bundled `async function` would inside the guest (native async functions in Node use the
+ * engine's own promise and microtask queue, never the SDK's).
+ */
+export function lowered<A extends unknown[], R>(
+  gen: (...args: A) => Generator<unknown, R, any>,
+): (...args: A) => SdkPromise<R> {
+  return function (this: unknown, ...args: A): SdkPromise<R> {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    return new SdkPromise<R>((resolve, reject) => {
+      const it = gen.apply(self, args);
+      const advance = (key: "next" | "throw", arg: unknown): void => {
+        let info: IteratorResult<unknown, R>;
+        try {
+          info = it[key](arg as never);
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        if (info.done) resolve(info.value);
+        else SdkPromise.resolve(info.value).then(next, thrw);
+      };
+      const next = (v: unknown): void => advance("next", v);
+      const thrw = (e: unknown): void => advance("throw", e);
+      next(undefined);
+    });
+  };
+}
