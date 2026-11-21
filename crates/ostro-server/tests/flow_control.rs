@@ -31,6 +31,9 @@ use tokio::time::sleep;
 
 const LIMIT: Duration = Duration::from_secs(60);
 
+/// `ServerOpts::default().partitions` (the test server's partition count).
+const PARTITIONS: u16 = 4;
+
 async fn server_with(tweak: impl FnOnce(&mut ostro_server::config::ServerConfig)) -> TestServer {
     let s = TestServer::start_with(ServerOpts::default(), tweak).await;
     s.wait_ready(Duration::from_secs(10)).await;
@@ -161,6 +164,7 @@ fn sampler(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queue_concurrency_caps_leased_activations() {
+    assert_eq!(ServerOpts::default().partitions, PARTITIONS);
     let mut s = server().await;
     deploy(&s, "cpu-burn").await;
     queue_policy(
@@ -191,7 +195,18 @@ async fn queue_concurrency_caps_leased_activations() {
     let max = h.await.expect("sampler");
     let leases = h2.await.expect("sampler");
     assert_eq!(max, 2, "sampled queue concurrency (flow counters)");
-    assert!(leases <= 2, "sampled dispatcher leases {leases} > 2");
+    // `DispatcherStats.leases` is shared by the partition dispatchers, and each one
+    // publishes its own lease-count delta at the end of its loop turn. A partition whose
+    // release is not published yet still counts the lease while another partition's new
+    // grant is already counted, so the gauge can briefly exceed the cap (07-12 flake,
+    // `3 > 2` at load 35-60). Each partition's published share is at most the leases it
+    // held at its last publish (<= the cap), which bounds the gauge by cap x partitions.
+    // The flow counters above are the authoritative cap check (07-22).
+    let bound = 2 * u32::from(PARTITIONS);
+    assert!(
+        leases <= bound,
+        "sampled dispatcher leases {leases} > {bound} (cap 2 x {PARTITIONS} partitions)"
+    );
     assert_eq!(flow.running("cq"), 0, "every charge released");
     s.shutdown().await;
 }

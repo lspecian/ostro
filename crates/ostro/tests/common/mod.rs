@@ -348,9 +348,12 @@ pub fn sha_hex(b: &[u8]) -> String {
         .collect()
 }
 
-/// Terminal REST run statuses.
+/// Terminal REST run statuses (every terminal `RunStatusDto`, 07-22).
 pub fn is_terminal(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled")
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "timed_out" | "terminated" | "continued_as_new"
+    )
 }
 
 /// A REST + gRPC client pair for one server address.
