@@ -1,0 +1,140 @@
+# Single-node Ostro server (plan 07-16): client API on 7700 (REST + gRPC + the demand
+# endpoint KEDA polls), worker cluster listener on 7701 (mTLS, workers only).
+#
+# - The data directory is a PersistentVolumeClaim (accepted runs live there).
+# - [api.tls] mode = "files" serves a cert-manager certificate (Secret ostro-api-tls);
+#   the server reloads it when cert-manager renews it.
+# - [cluster] advertise is the Service name workers dial after joining.
+# - Readiness: GET /readyz; liveness: GET /healthz.
+#
+# Validated offline only (deploy/check-manifests.sh).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ostro-server-config
+  namespace: ostro
+data:
+  ostro.toml: |
+    [node]
+    data_dir = "/data"
+
+    [api]
+    listen = "0.0.0.0:7700"
+
+    [api.tls]
+    mode = "files"
+    cert_file = "/tls/tls.crt"
+    key_file = "/tls/tls.key"
+
+    [cluster]
+    listen = "0.0.0.0:7701"
+    advertise = ["ostro.ostro.svc:7701"]
+
+    [workers]
+    enabled = true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ostro
+  namespace: ostro
+spec:
+  selector:
+    app.kubernetes.io/name: ostro-server
+  ports:
+    - name: client
+      port: 7700
+      targetPort: 7700
+    - name: cluster
+      port: 7701
+      targetPort: 7701
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ostro
+  namespace: ostro
+  labels:
+    app.kubernetes.io/name: ostro-server
+spec:
+  serviceName: ostro
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ostro-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ostro-server
+    spec:
+      terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/ostro-dev/ostro:latest
+          args:
+            - server
+            - --config
+            - /etc/ostro/ostro.toml
+          ports:
+            - name: client
+              containerPort: 7700
+            - name: cluster
+              containerPort: 7701
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 7700
+              scheme: HTTPS
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 7700
+              scheme: HTTPS
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              memory: 8Gi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/ostro
+              readOnly: true
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: ostro-server-config
+        - name: tls
+          secret:
+            # Issued by cert-manager (Certificate for ostro.ostro.svc).
+            secretName: ostro-api-tls
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

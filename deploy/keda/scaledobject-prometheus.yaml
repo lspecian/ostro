@@ -1,0 +1,31 @@
+# KEDA ScaledObject for the `heavy` worker pool using the Prometheus scaler
+# (plan 07-16, D-W12). This is the cluster form: once several Ostro nodes lead
+# partitions (Phase 12+), each node exports its own share of the queue's demand as
+# ostro_queue_worker_demand{queue}, and the sum over the nodes is the cluster demand.
+# On a single node the metrics-api variant (scaledobject-metrics-api.yaml) is simpler
+# and needs no Prometheus.
+#
+# Same scaling semantics as the metrics-api variant: activation when the value is
+# strictly greater than activationThreshold, ceil(value / threshold) replicas, scale to
+# zero only after cooldownPeriod at 0. threshold ~ the workers' `--slots`.
+#
+# Validated offline only (deploy/check-manifests.sh).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ostro-worker-heavy-prometheus
+  namespace: ostro
+spec:
+  scaleTargetRef:
+    name: ostro-worker-heavy
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  pollingInterval: 15
+  cooldownPeriod: 120
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: "http://prometheus-operated.monitoring.svc:9090"
+        query: 'sum(ostro_queue_worker_demand{queue="heavy"})'
+        threshold: "8"
+        activationThreshold: "0"

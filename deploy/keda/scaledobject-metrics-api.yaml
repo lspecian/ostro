@@ -1,0 +1,45 @@
+# KEDA ScaledObject for the `heavy` worker pool, driven by Ostro's demand endpoint
+# (plan 07-16, D-W12, WORK-05).
+#
+# KEDA polls GET /v1/queues/heavy/demand every pollingInterval seconds and reads the
+# `demand` field:
+#
+#   demand = runs executing on workers + ready runs admissible for workers
+#
+# - Activation (0 -> 1): KEDA activates the Deployment when the value is strictly
+#   greater than activationTargetValue. With "0", the first ready run on the queue
+#   scales the pool up from zero.
+# - Scaling (1 -> N): desired replicas = ceil(demand / targetValue), clamped to
+#   [minReplicaCount, maxReplicaCount]. Set targetValue to the workers' `--slots`
+#   (8 in deploy/k8s/worker-deployment.yaml): one replica per 8 runs of demand.
+# - Scale-in to zero (N -> 0): only after the value has stayed at 0 for cooldownPeriod
+#   seconds. Demand includes runs still executing on workers, so the pool is never
+#   scaled to zero under load. N -> M (M > 0) follows the HPA's own stabilisation.
+#
+# Validated offline only (deploy/check-manifests.sh). Applying it is a human step on a
+# cluster you control; no Ostro test or plan touches a cluster.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ostro-worker-heavy
+  namespace: ostro
+spec:
+  scaleTargetRef:
+    name: ostro-worker-heavy
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  pollingInterval: 15
+  cooldownPeriod: 120
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: "https://ostro.ostro.svc:7700/v1/queues/heavy/demand"
+        valueLocation: "demand"
+        targetValue: "8"
+        activationTargetValue: "0"
+        # The Ostro client listener serves a certificate issued by the cluster CA
+        # (self-signed mode) or by cert-manager (files mode); the TriggerAuthentication
+        # carries that CA so KEDA verifies the listener.
+        authMode: "tls"
+      authenticationRef:
+        name: ostro-demand-auth

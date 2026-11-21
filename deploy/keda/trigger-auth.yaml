@@ -1,0 +1,41 @@
+# TLS material KEDA uses to reach the Ostro demand endpoint (plan 07-16).
+#
+# The Secret holds the CA that issued the Ostro client listener's certificate:
+# - self-signed mode: the cluster CA, <data_dir>/tls/ca.pem on the server (its sha256 is
+#   the `--ca-hash` printed by `ostro worker token create`);
+# - files mode: the issuing CA of the cert-manager certificate.
+#
+# PLACEHOLDERS ONLY: replace the values before applying. Never commit real key material.
+# Ostro does not require a client certificate on the client listener today (bearer-token
+# enforcement on the demand endpoint is Phase 14); KEDA's tls mode reads `cert`/`key`
+# when present, so they stay empty placeholders until client auth is enabled.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ostro-demand-tls
+  namespace: ostro
+type: Opaque
+stringData:
+  ca: |
+    -----BEGIN CERTIFICATE-----
+    REPLACE-WITH-THE-OSTRO-CLUSTER-CA-PEM
+    -----END CERTIFICATE-----
+  cert: ""
+  key: ""
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: ostro-demand-auth
+  namespace: ostro
+spec:
+  secretTargetRef:
+    - parameter: ca
+      name: ostro-demand-tls
+      key: ca
+    - parameter: cert
+      name: ostro-demand-tls
+      key: cert
+    - parameter: key
+      name: ostro-demand-tls
+      key: key

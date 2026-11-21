@@ -1,0 +1,115 @@
+# Ostro worker pool for the `heavy` queue (plan 07-16, WORK-01/05). Scaled by KEDA
+# (deploy/keda/scaledobject-metrics-api.yaml); replicas starts at 0.
+#
+# - The join token comes from a Secret (OSTRO_WORKER_TOKEN; never on the command line,
+#   argv is visible to other local users). Create it with
+#   `ostro worker token create --ttl 720h` and store the printed token.
+# - --ca-hash pins the cluster CA during the join (from the same command's output),
+#   read from a ConfigMap.
+# - SIGTERM drains: the worker stops taking work, finishes or hands back in-flight
+#   activations (bounded at 10 s) and exits 0. terminationGracePeriodSeconds leaves room
+#   for that drain plus the session close.
+# - --slots matches the ScaledObject's targetValue.
+#
+# Validated offline only (deploy/check-manifests.sh).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ostro-worker-join
+  namespace: ostro
+data:
+  join-url: "https://ostro.ostro.svc:7700"
+  ca-hash: "sha256:REPLACE-WITH-THE-CA-HASH-FROM-ostro-worker-token-create"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ostro-worker-token
+  namespace: ostro
+type: Opaque
+stringData:
+  token: "REPLACE-WITH-wkr_-JOIN-TOKEN"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ostro-worker-heavy
+  namespace: ostro
+  labels:
+    app.kubernetes.io/name: ostro-worker
+    app.kubernetes.io/component: worker
+    ostro.dev/pool: heavy
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ostro-worker
+      ostro.dev/pool: heavy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ostro-worker
+        app.kubernetes.io/component: worker
+        ostro.dev/pool: heavy
+    spec:
+      terminationGracePeriodSeconds: 60
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: ghcr.io/ostro-dev/ostro:latest
+          args:
+            - worker
+            - --join
+            - $(OSTRO_JOIN_URL)
+            - --ca-hash
+            - $(OSTRO_CA_HASH)
+            - --labels
+            - pool=heavy
+            - --slots
+            - "8"
+            - --cache-dir
+            - /cache
+          env:
+            - name: OSTRO_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ostro-worker-token
+                  key: token
+            - name: OSTRO_JOIN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: ostro-worker-join
+                  key: join-url
+            - name: OSTRO_CA_HASH
+              valueFrom:
+                configMapKeyRef:
+                  name: ostro-worker-join
+                  key: ca-hash
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              cpu: "8"
+              memory: 4Gi
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+      volumes:
+        # AOT-compiled module cache; rebuilt on demand, so an emptyDir is enough.
+        - name: cache
+          emptyDir:
+            sizeLimit: 2Gi
