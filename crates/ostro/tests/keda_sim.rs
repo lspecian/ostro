@@ -376,7 +376,9 @@ async fn zero_to_n_to_zero() {
 
     loop {
         // One KEDA poll: read the metric, decide, act.
-        let d = c.api.demand(QUEUE).await;
+        // The metrics-api trigger's URL, `valueLocation: "demand"`.
+        let (st, d) = c.api.get(&format!("/v1/queues/{QUEUE}/demand")).await;
+        assert_eq!(st, reqwest::StatusCode::OK, "demand endpoint: {d}");
         let demand = u(&d, "demand");
         let on_workers = u(&d, "running_on_workers");
         let now = Instant::now();
