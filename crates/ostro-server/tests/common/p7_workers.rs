@@ -766,3 +766,312 @@ impl OtherCa {
 pub fn external_ca_path(rig: &Rig) -> Option<PathBuf> {
     rig.cfg.cluster.tls.client_ca.clone()
 }
+
+// ----------------------------------------------------------------- full servers (07-12)
+
+/// A loopback `POST /v1/workers/join` over `join` (the 07-07 worker's join contract).
+pub async fn join_endpoint(join: Arc<JoinService>, shutdown: CancellationToken) -> String {
+    use axum::Json;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    let app = axum::Router::new().route(
+        "/v1/workers/join",
+        axum::routing::post(move |Json(req): Json<JoinRequest>| {
+            let join = Arc::clone(&join);
+            async move {
+                match join.join(req).await {
+                    Ok(r) => (StatusCode::OK, Json(serde_json::to_value(r).expect("json")))
+                        .into_response(),
+                    Err(e) => (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": { "message": e.message } })),
+                    )
+                        .into_response(),
+                }
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind join");
+    let url = format!("http://{}", l.local_addr().expect("addr"));
+    tokio::spawn(async move {
+        let _ = axum::serve(l, app)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await;
+    });
+    url
+}
+
+/// Workers of a full in-process server (`ServerHandle::p7()`): in-process `ostro_worker`s
+/// joined through a loopback join endpoint over the server's JoinService, and raw protocol
+/// clients on its cluster listener.
+pub struct ServerWorkers {
+    pub p7: Arc<ostro_server::p7::P7Shared>,
+    pub join_url: String,
+    pub shutdown: CancellationToken,
+}
+
+impl ServerWorkers {
+    pub async fn new(p7: Arc<ostro_server::p7::P7Shared>) -> Self {
+        let shutdown = CancellationToken::new();
+        let join_url = join_endpoint(Arc::clone(&p7.join), shutdown.clone()).await;
+        Self {
+            p7,
+            join_url,
+            shutdown,
+        }
+    }
+
+    /// The cluster endpoint workers connect to (the last `set_endpoints`).
+    pub fn cluster_addr(&self) -> SocketAddr {
+        self.p7.join.endpoints()[0]
+            .parse()
+            .expect("cluster endpoint")
+    }
+
+    async fn token(&self) -> WorkerTokenCreated {
+        self.p7
+            .join
+            .create_token(Some(Duration::from_secs(3600)), "http://127.0.0.1:1")
+            .await
+            .expect("create token")
+    }
+
+    /// Start an in-process worker with a fresh token.
+    pub async fn spawn(&self, worker_id: &str, slots: u32, labels: &[(&str, &str)]) -> WorkerProc {
+        let tok = self.token().await;
+        let cache = tempfile::tempdir().expect("cache dir");
+        let cfg = ostro_worker::WorkerConfig {
+            join: Some(self.join_url.clone()),
+            token: Some(ostro_worker::JoinToken::new(&tok.token)),
+            ca_hash: Some(self.p7.tls.ca_hash().expect("ca hash")),
+            labels: labels
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            slots,
+            cache_dir: cache.path().to_path_buf(),
+            worker_id: Some(worker_id.to_owned()),
+            reconnect_max_ms: 200,
+            rejoin_after_failures: 2,
+            ..ostro_worker::WorkerConfig::default()
+        };
+        let worker = Arc::new(ostro_worker::Worker::new(cfg).expect("worker config"));
+        let events = worker.subscribe();
+        let shutdown = CancellationToken::new();
+        let w = Arc::clone(&worker);
+        let sd = shutdown.clone();
+        let task = tokio::spawn(async move { w.run(sd).await });
+        let p = WorkerProc {
+            worker,
+            events,
+            shutdown,
+            task: Some(task),
+            _cache: cache,
+        };
+        let reg = Arc::clone(&self.p7.registry);
+        let id = worker_id.to_owned();
+        wait_for(T, "worker credit registered", move || {
+            reg.sessions()
+                .iter()
+                .any(|s| s.worker_id == id && s.free > 0)
+        })
+        .await;
+        p
+    }
+
+    /// Like [`spawn`](Self::spawn), but on a dedicated runtime: [`IsolatedWorker::kill`]
+    /// drops every task of the worker at once (session, connections and activations), as
+    /// a process kill does.
+    pub async fn spawn_isolated(
+        &self,
+        worker_id: &str,
+        slots: u32,
+        labels: &[(&str, &str)],
+    ) -> IsolatedWorker {
+        let tok = self.token().await;
+        let cache = tempfile::tempdir().expect("cache dir");
+        let cfg = ostro_worker::WorkerConfig {
+            join: Some(self.join_url.clone()),
+            token: Some(ostro_worker::JoinToken::new(&tok.token)),
+            ca_hash: Some(self.p7.tls.ca_hash().expect("ca hash")),
+            labels: labels
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            slots,
+            cache_dir: cache.path().to_path_buf(),
+            worker_id: Some(worker_id.to_owned()),
+            reconnect_max_ms: 200,
+            rejoin_after_failures: 2,
+            ..ostro_worker::WorkerConfig::default()
+        };
+        let worker = Arc::new(ostro_worker::Worker::new(cfg).expect("worker config"));
+        let events = worker.subscribe();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("isolated-worker")
+            .build()
+            .expect("worker runtime");
+        let w = Arc::clone(&worker);
+        rt.spawn(async move { w.run(CancellationToken::new()).await });
+        let reg = Arc::clone(&self.p7.registry);
+        let id = worker_id.to_owned();
+        wait_for(T, "worker credit registered", move || {
+            reg.sessions()
+                .iter()
+                .any(|s| s.worker_id == id && s.free > 0)
+        })
+        .await;
+        IsolatedWorker {
+            worker,
+            events,
+            rt: Some(rt),
+            _cache: cache,
+        }
+    }
+
+    /// A raw protocol client joined as `worker_id` with `Credit{slots}` sent.
+    pub async fn raw(&self, worker_id: &str, slots: u32) -> TestWorker {
+        let tok = self.token().await;
+        let (key_pem, csr_pem) = new_key_and_csr(worker_id);
+        let r = self
+            .p7
+            .join
+            .join(JoinRequest {
+                token: tok.token.clone(),
+                csr_pem,
+                worker_id: worker_id.to_owned(),
+                labels: BTreeMap::new(),
+            })
+            .await
+            .expect("join");
+        let id = TestIdentity {
+            cert_pem: r.client_cert_pem,
+            key_pem,
+            ca_pem: r.ca_cert_pem,
+        };
+        let mut w = TestWorker::open(self.cluster_addr(), &id, hello(worker_id, slots))
+            .await
+            .expect("session");
+        w.token_id = Some(tok.token_id);
+        w.send(v1::worker_msg::Msg::Credit(v1::Credit {
+            free_slots: slots,
+        }));
+        let reg = Arc::clone(&self.p7.registry);
+        let sid = w.session_id();
+        wait_for(T, "raw credit registered", move || {
+            reg.sessions()
+                .iter()
+                .any(|s| s.session_id == sid && s.free > 0)
+        })
+        .await;
+        w
+    }
+}
+
+impl Drop for ServerWorkers {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+/// A second cluster listener over a full server's registry and join service, recording
+/// the payload size of every bulk message ([`WireStats`]). Joins made afterwards
+/// advertise this listener (`JoinService::set_endpoints`).
+pub fn wire_listener(
+    cfg: Arc<ServerConfig>,
+    p7: &Arc<ostro_server::p7::P7Shared>,
+    meta: ostro_meta::MetaView,
+    clock: Arc<dyn ostro_partition::Clock>,
+    lease_ttl: Duration,
+    shutdown: CancellationToken,
+) -> (SocketAddr, Arc<WireStats>) {
+    let wire = Arc::new(WireStats::default());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let (addr, _task) = service::serve(
+        listener,
+        ClusterDeps {
+            config: cfg,
+            tls: Arc::clone(&p7.tls),
+            registry: Arc::clone(&p7.registry),
+            join: Arc::clone(&p7.join),
+            meta,
+            clock,
+            node_id: 1,
+            lease_ttl,
+            shutdown,
+            wire: Some(Arc::clone(&wire)),
+        },
+    )
+    .expect("wire listener");
+    (addr, wire)
+}
+
+/// Journal equality across executions (embedded vs remote): per event its kind, the
+/// command hash of command events, and the recorded outcome of steps and the run. Times,
+/// run ids, seeds and fuel are execution-specific and left out.
+pub fn journal_shape(journal: &[ostro_types::journal::Event]) -> Vec<String> {
+    use ostro_types::journal::EventBody;
+    journal
+        .iter()
+        .map(|e| {
+            let kind = e.body.kind();
+            match &e.body {
+                EventBody::StepCompleted(s) => {
+                    format!("{} {kind:?} {:?} {} {:?}", e.seq, s.meta, s.name, s.outcome)
+                }
+                EventBody::RunCompleted(r) => format!("{} {kind:?} {r:?}", e.seq),
+                EventBody::RunFailed(r) => format!("{} {kind:?} {r:?}", e.seq),
+                b => format!("{} {kind:?} {:?}", e.seq, b.command_meta()),
+            }
+        })
+        .collect()
+}
+
+/// An in-process worker on its own runtime ([`ServerWorkers::spawn_isolated`]).
+pub struct IsolatedWorker {
+    pub worker: Arc<ostro_worker::Worker>,
+    pub events: tokio::sync::broadcast::Receiver<ostro_worker::WorkerEvent>,
+    rt: Option<tokio::runtime::Runtime>,
+    _cache: TempDir,
+}
+
+impl IsolatedWorker {
+    /// Drop every task of the worker now (a process kill: its TCP connections close).
+    pub fn kill(mut self) {
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
+
+    /// The next event matching `f` within `limit`.
+    pub async fn wait_event(
+        &mut self,
+        limit: Duration,
+        f: impl Fn(&ostro_worker::WorkerEvent) -> bool,
+    ) -> ostro_worker::WorkerEvent {
+        timeout(limit, async {
+            loop {
+                match self.events.recv().await {
+                    Ok(e) if f(&e) => return e,
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(e) => panic!("worker events closed: {e}"),
+                }
+            }
+        })
+        .await
+        .expect("worker event in time")
+    }
+}
+
+impl Drop for IsolatedWorker {
+    fn drop(&mut self) {
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
+}

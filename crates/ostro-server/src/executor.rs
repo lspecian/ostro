@@ -275,6 +275,9 @@ pub struct ExecutorHooks {
     /// module instead of `RunRecord.module_sha` (a run "re-pinned" after a restart; there is
     /// no re-pin API before Phase 13). `None` = no override.
     pub module_override: ModuleOverrideSlot,
+    /// Remote execution (07-12): sinks built by [`EngineExecutor::sink_for`] and the remote
+    /// runner's message tap.
+    pub remote: crate::workers::remote_executor::RemoteHooks,
 }
 
 impl ExecutorHooks {
@@ -421,6 +424,37 @@ impl EngineExecutor {
 
     pub fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
+    }
+
+    /// The sink of one activation of `job`, built exactly as the embedded path builds it
+    /// (07-12, B3): continue-as-new resolvers, the guest log sink and the Phase 6 bridge
+    /// (06-14 B1: in-flight effects are re-driven by the same bridge). The embedded path
+    /// and the remote runner both build their sinks here (one construction site).
+    pub(crate) fn sink_for(
+        &self,
+        job: &Job,
+        inputs: Option<mpsc::UnboundedSender<Event>>,
+        on_renew: Option<RenewFn>,
+    ) -> PartitionSink {
+        let mut sink = PartitionSink::new(job.handle.clone(), job.run, job.token, inputs, on_renew)
+            .with_resolvers(Arc::clone(&self.modules), Arc::clone(&self.policy))
+            .with_guest_logs(Arc::clone(&self.guest_logs));
+        if let Some(b) = &self.bridge {
+            sink = sink.with_bridge(Arc::clone(b));
+        }
+        self.hooks
+            .remote
+            .note_sink(job.reservation_kind(), self.bridge.as_ref());
+        sink
+    }
+
+    /// The module the run executes: the WF-08 test override, else `RunRecord.module_sha`.
+    pub(crate) fn module_sha(
+        &self,
+        run: &RunId,
+        record: &ostro_partition::store::values::RunRecord,
+    ) -> Option<[u8; 32]> {
+        self.hooks.module_override.get(run).or(record.module_sha)
     }
 
     pub fn config(&self) -> &ExecutorConfig {
@@ -720,25 +754,15 @@ enum Prep {
 
 impl EngineExecutor {
     async fn run_job(&self, job: Job) -> ExecOutcome {
-        let Job {
-            run,
-            token,
-            record,
-            handle,
-            inputs: seqs,
-            revoked,
-            lease,
-            ..
-        } = job;
-        if record.status.is_terminal() {
-            self.lock_rearmed().remove(&run);
+        if job.record.status.is_terminal() {
+            self.lock_rearmed().remove(&job.run);
             return ExecOutcome::Released;
         }
         // F9: the durable count (not the dispatcher's memory).
-        let failures = record.attempt_failures;
+        let failures = job.record.attempt_failures;
         let cancel = CancellationToken::new();
         let st = Arc::new(LeaseState {
-            lease,
+            lease: job.lease.clone(),
             base: Instant::now(),
             last_renew_ms: AtomicU64::new(0),
             ttl: self.cfg.lease_ttl,
@@ -747,10 +771,10 @@ impl EngineExecutor {
         });
         let mut guard = TaskGuard(vec![tokio::spawn(watch_lease(
             Arc::clone(&st),
-            revoked.clone(),
+            job.revoked.clone(),
             cancel.clone(),
             self.cfg.heartbeat,
-            self.hooks.heartbeat_suppressed(token.n),
+            self.hooks.heartbeat_suppressed(job.token.n),
             Arc::clone(&self.hooks),
         ))]);
         let renew_st = Arc::clone(&st);
@@ -758,14 +782,16 @@ impl EngineExecutor {
             renew_st.renew();
         });
         let (sink_tx, sink_rx) = mpsc::unbounded_channel();
-        let mut sink =
-            PartitionSink::new(handle.clone(), run, token, Some(sink_tx), Some(on_renew))
-                .with_resolvers(Arc::clone(&self.modules), Arc::clone(&self.policy))
-                .with_guest_logs(Arc::clone(&self.guest_logs));
-        if let Some(b) = &self.bridge {
-            sink = sink.with_bridge(Arc::clone(b));
-        }
-        let sink = Arc::new(sink);
+        let sink = Arc::new(self.sink_for(&job, Some(sink_tx), Some(on_renew)));
+        let Job {
+            run,
+            token,
+            record,
+            handle,
+            inputs: seqs,
+            revoked,
+            ..
+        } = job;
         let rref = RunRef {
             partition: run.partition().0,
             run_id: run.to_string(),
@@ -833,54 +859,14 @@ impl EngineExecutor {
         if cancel.is_cancelled() {
             return (None, ExecOutcome::Released);
         }
-        // 2. RunStarted on the first activation.
-        if sink.next_seq() == 0 {
-            match self.run_started(handle, run, record, &sha).await {
-                Ok(evs) => match failpointed_append(sink, rref, token.n, evs).await {
-                    Ok(_) => {}
-                    Err(AppendError::Fenced) => return (None, ExecOutcome::Fenced),
-                    Err(AppendError::Conflict { .. }) => return (None, ExecOutcome::Reactivate),
-                    Err(AppendError::Unavailable(e)) => {
-                        warn!(%run, error = %e, "RunStarted append failed; re-activating");
-                        tokio::time::sleep(UNAVAILABLE_PAUSE).await;
-                        return (None, ExecOutcome::Reactivate);
-                    }
-                },
-                Err(StartErr::Fatal(msg)) => {
-                    let out = self
-                        .fail_run(sink, REASON_BAD_RECORD, REASON_BAD_RECORD, &msg, false)
-                        .await;
-                    return (None, out);
-                }
-                Err(StartErr::Transient(msg)) => {
-                    warn!(%run, error = %msg, "RunStarted input read failed; re-activating");
-                    tokio::time::sleep(UNAVAILABLE_PAUSE).await;
-                    return (None, ExecOutcome::Reactivate);
-                }
-            }
-        }
-        // 2b. Resume re-arm (B2), before the journal the activation sees is loaded.
-        if self.rearm_due(&run, record.resumed_count) {
-            if let Err(out) = self.rearm(handle, run, sink).await {
-                return (None, out);
-            }
-            self.lock_rearmed().insert(run, record.resumed_count);
-            if cancel.is_cancelled() {
-                return (None, ExecOutcome::Released);
-            }
-        }
-        // 3. Journal (+ repair of unsupported completions).
-        let journal = match self.load_journal(handle, run, sink).await {
+        // 2.-3. RunStarted, re-arm, journal (shared with the remote runner, 07-12).
+        let journal = match self
+            .prelude(handle, run, token, record, sink, rref, cancel, &sha)
+            .await
+        {
             Ok(j) => j,
-            Err(e) => {
-                warn!(%run, error = %e, "journal load failed");
-                tokio::time::sleep(UNAVAILABLE_PAUSE).await;
-                return (None, ExecOutcome::Reactivate);
-            }
+            Err(out) => return (None, out),
         };
-        if cancel.is_cancelled() {
-            return (None, ExecOutcome::Released);
-        }
         let end = journal.len() as u64;
         // 4. Ordered input bridge.
         let (eng_tx, eng_rx) = mpsc::unbounded_channel();
@@ -929,7 +915,71 @@ impl EngineExecutor {
         (Some(outcome), exec)
     }
 
-    async fn map_outcome(
+    /// Everything between the module and the activation, shared by the embedded path and
+    /// the remote runner (07-12): `RunStarted` on the first activation, the resume re-arm
+    /// (B2) and the journal load with `repair_unsupported`. `Err` is the job's outcome.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prelude(
+        &self,
+        handle: &PartitionHandle<ostro_log::Rf1Log>,
+        run: RunId,
+        token: AttemptToken,
+        record: &ostro_partition::store::values::RunRecord,
+        sink: &PartitionSink,
+        rref: &RunRef,
+        cancel: &CancellationToken,
+        sha: &[u8; 32],
+    ) -> Result<Vec<Event>, ExecOutcome> {
+        // 2. RunStarted on the first activation.
+        if sink.next_seq() == 0 {
+            match self.run_started(handle, run, record, sha).await {
+                Ok(evs) => match failpointed_append(sink, rref, token.n, evs).await {
+                    Ok(_) => {}
+                    Err(AppendError::Fenced) => return Err(ExecOutcome::Fenced),
+                    Err(AppendError::Conflict { .. }) => return Err(ExecOutcome::Reactivate),
+                    Err(AppendError::Unavailable(e)) => {
+                        warn!(%run, error = %e, "RunStarted append failed; re-activating");
+                        tokio::time::sleep(UNAVAILABLE_PAUSE).await;
+                        return Err(ExecOutcome::Reactivate);
+                    }
+                },
+                Err(StartErr::Fatal(msg)) => {
+                    let out = self
+                        .fail_run(sink, REASON_BAD_RECORD, REASON_BAD_RECORD, &msg, false)
+                        .await;
+                    return Err(out);
+                }
+                Err(StartErr::Transient(msg)) => {
+                    warn!(%run, error = %msg, "RunStarted input read failed; re-activating");
+                    tokio::time::sleep(UNAVAILABLE_PAUSE).await;
+                    return Err(ExecOutcome::Reactivate);
+                }
+            }
+        }
+        // 2b. Resume re-arm (B2), before the journal the activation sees is loaded.
+        if self.rearm_due(&run, record.resumed_count) {
+            self.rearm(handle, run, sink).await?;
+            self.lock_rearmed().insert(run, record.resumed_count);
+            if cancel.is_cancelled() {
+                return Err(ExecOutcome::Released);
+            }
+        }
+        // 3. Journal (+ repair of unsupported completions).
+        let journal = match self.load_journal(handle, run, sink).await {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(%run, error = %e, "journal load failed");
+                tokio::time::sleep(UNAVAILABLE_PAUSE).await;
+                return Err(ExecOutcome::Reactivate);
+            }
+        };
+        if cancel.is_cancelled() {
+            return Err(ExecOutcome::Released);
+        }
+        Ok(journal)
+    }
+
+    pub(crate) async fn map_outcome(
         &self,
         sink: &PartitionSink,
         outcome: &ActivationOutcome,
@@ -1093,7 +1143,7 @@ impl EngineExecutor {
     }
 
     /// Complete the run `Failed` with a JSON reason (no journal event).
-    async fn fail_run(
+    pub(crate) async fn fail_run(
         &self,
         sink: &PartitionSink,
         reason_code: &str,
