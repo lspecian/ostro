@@ -6,6 +6,9 @@
 //! - [`commands`]: clap verbs, embedded in the `ostro` clap tree with
 //!   `#[command(flatten)]`, and their dispatch. Phase 6 (06-16) adds the bridge admin
 //!   verbs `secret`, `grant`, `connection` and `egress` ([`commands::bridge`]).
+//!   Phase 7 (07-15) adds `queue`, `workflow pause|resume`, `run pause|resume`
+//!   ([`commands::queues`], [`commands::pause`]) and `worker token`
+//!   ([`commands::worker_tokens`]).
 
 pub mod client;
 pub mod commands;

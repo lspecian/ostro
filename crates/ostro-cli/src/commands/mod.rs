@@ -8,14 +8,22 @@
 //! [`backup`] holds the `ostro backup` / `ostro restore` arguments (08-18); the binary
 //! embeds them as its own subcommands because restore and offline backup need the storage
 //! crates.
+//!
+//! Phase 7 (07-15): [`queues`] (`ostro queue flow|pause|resume|demand`), [`pause`]
+//! (`ostro run pause|resume`, `ostro workflow pause|resume`) and [`worker_tokens`]
+//! (`ostro worker token create|list|revoke`, embedded under the binary's own `worker`
+//! command and run through [`worker_tokens::run`]).
 
 pub mod backup;
 pub mod bridge;
 pub mod deploy;
 pub mod lifecycle;
+pub mod pause;
+pub mod queues;
 pub mod runs;
 pub mod schedules;
 pub mod webhooks;
+pub mod worker_tokens;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -53,8 +61,8 @@ impl Conn {
 /// The client verbs.
 #[derive(Debug, Clone, Subcommand)]
 pub enum ClientCommand {
-    /// Start a run of a workflow (optionally wait for its result).
-    Run(runs::RunArgs),
+    /// Start a run of a workflow (optionally wait for its result), or pause / resume a run.
+    Run(pause::RunCommand),
     /// List runs.
     Ls(runs::LsArgs),
     /// Show one run.
@@ -109,10 +117,25 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: bridge::EgressCommand,
     },
+    /// Queue flow control, placement, pause/resume and worker demand.
+    Queue {
+        #[command(subcommand)]
+        command: queues::QueueCommand,
+    },
+    /// Pause or resume a workflow's runs.
+    Workflow {
+        #[command(subcommand)]
+        command: pause::WorkflowCommand,
+    },
 }
 
 /// Run a verb to completion on a current-thread runtime.
 pub fn run(cmd: ClientCommand) -> Outcome {
+    block_on(dispatch(cmd))
+}
+
+/// Drive `fut` on a fresh current-thread runtime (one per CLI invocation).
+pub(crate) fn block_on(fut: impl std::future::Future<Output = Outcome>) -> Outcome {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -123,13 +146,29 @@ pub fn run(cmd: ClientCommand) -> Outcome {
             return Outcome::Error;
         }
     };
-    rt.block_on(dispatch(cmd))
+    rt.block_on(fut)
+}
+
+/// Report a failed call ([`Out::error`]) and, for `rate_limited` (HTTP 429, D-W21), when
+/// to retry (the `Retry-After` value, from `details.retry_after_ms`).
+pub fn report(out: Out, e: &CallError) -> Outcome {
+    let o = out.error(e);
+    if let CallError::Api { body, .. } = e
+        && body["error"]["code"] == "rate_limited"
+        && let Some(ms) = body["error"]["details"]["retry_after_ms"].as_u64()
+    {
+        eprintln!(
+            "ostro: rate limited: retry after {} s (Retry-After), {ms} ms",
+            ms.div_ceil(1000)
+        );
+    }
+    o
 }
 
 /// Dispatch one verb.
 pub async fn dispatch(cmd: ClientCommand) -> Outcome {
     let conn = match &cmd {
-        ClientCommand::Run(a) => &a.conn,
+        ClientCommand::Run(a) => a.conn(),
         ClientCommand::Ls(a) => &a.conn,
         ClientCommand::Inspect(a) => &a.conn,
         ClientCommand::History(a) => &a.conn,
@@ -147,14 +186,16 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Grant { command } => command.conn(),
         ClientCommand::Connection { command } => command.conn(),
         ClientCommand::Egress { command } => command.conn(),
+        ClientCommand::Queue { command } => command.conn(),
+        ClientCommand::Workflow { command } => command.conn(),
     };
     let out = conn.out();
     let client = match conn.client() {
         Ok(c) => c,
-        Err(e) => return out.error(&e),
+        Err(e) => return report(out, &e),
     };
     let res = match &cmd {
-        ClientCommand::Run(a) => runs::run(&client, out, a).await,
+        ClientCommand::Run(a) => pause::run(&client, out, a).await,
         ClientCommand::Ls(a) => runs::ls(&client, out, a).await,
         ClientCommand::Inspect(a) => runs::inspect(&client, out, a).await,
         ClientCommand::History(a) => runs::history(&client, out, a).await,
@@ -175,10 +216,12 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
             bridge::run_connection(&client, out, command).await
         }
         ClientCommand::Egress { command } => bridge::run_egress(&client, out, command).await,
+        ClientCommand::Queue { command } => queues::run(&client, out, command).await,
+        ClientCommand::Workflow { command } => pause::workflow(&client, out, command).await,
     };
     match res {
         Ok(o) => o,
-        Err(e) => out.error(&e),
+        Err(e) => report(out, &e),
     }
 }
 
