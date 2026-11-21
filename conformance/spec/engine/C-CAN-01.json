@@ -1,0 +1,20 @@
+{
+  "id": "C-CAN-01",
+  "title": "continue-as-new with n-1 until 0 (n = 2) returns the final generation 2",
+  "leg": "engine",
+  "workflow": "conf_can",
+  "input": {
+    "n": 2
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "generation": 2
+    },
+    "projection": [
+      "terminal:continued_as_new",
+      "terminal:continued_as_new",
+      "terminal:completed"
+    ]
+  }
+}

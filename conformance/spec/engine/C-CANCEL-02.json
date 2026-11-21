@@ -1,0 +1,20 @@
+{
+  "id": "C-CANCEL-02",
+  "title": "on cancellation the shielded cleanup step runs, then the run ends Cancelled",
+  "leg": "engine",
+  "workflow": "conf_cancel_shielded",
+  "script": [
+    {
+      "input": "cancel"
+    }
+  ],
+  "expect": {
+    "status": "cancelled",
+    "failure_kind": "cancelled",
+    "projection": [
+      "timer#1",
+      "step:cleanup",
+      "terminal:cancelled"
+    ]
+  }
+}

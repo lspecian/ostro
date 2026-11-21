@@ -1,0 +1,18 @@
+{
+  "id": "C-SAGA-01",
+  "title": "a saga books a and b, book_c fails; compensations cancel_b then cancel_a run and the run fails book_c_failed",
+  "leg": "engine",
+  "workflow": "conf_saga_three",
+  "expect": {
+    "status": "failed",
+    "failure_kind": "book_c_failed",
+    "projection": [
+      "step:book_a",
+      "step:book_b",
+      "step:book_c",
+      "step:cancel_b",
+      "step:cancel_a",
+      "terminal:failed"
+    ]
+  }
+}

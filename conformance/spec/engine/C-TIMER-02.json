@@ -1,0 +1,29 @@
+{
+  "id": "C-TIMER-02",
+  "title": "a 1 h sleep races signal go; the signal is delivered first and wins, the timer stays unfired",
+  "leg": "engine",
+  "workflow": "conf_timer_vs_signal",
+  "script": [
+    {
+      "input": "signal",
+      "name": "go",
+      "payload": {
+        "v": 1
+      }
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "winner": "signal",
+      "payload": {
+        "v": 1
+      }
+    },
+    "projection": [
+      "timer#1",
+      "signal:go#1",
+      "terminal:completed"
+    ]
+  }
+}

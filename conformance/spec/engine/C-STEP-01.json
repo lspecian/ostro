@@ -1,0 +1,20 @@
+{
+  "id": "C-STEP-01",
+  "title": "steps a, b, c run once each and the result holds their outputs",
+  "leg": "engine",
+  "workflow": "conf_steps",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "a": "a",
+      "b": "b",
+      "c": "c"
+    },
+    "projection": [
+      "step:a",
+      "step:b",
+      "step:c",
+      "terminal:completed"
+    ]
+  }
+}

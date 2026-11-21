@@ -1,0 +1,25 @@
+{
+  "id": "C-PATCH-01",
+  "title": "a v1 run parked in its 1 s sleep is swapped to v2: patched(x) takes the old branch, no marker",
+  "leg": "engine",
+  "workflow": "conf_patch",
+  "script": [
+    {
+      "input": "swap_module",
+      "variant": "v2"
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": [
+      "a",
+      "b"
+    ],
+    "projection": [
+      "step:a",
+      "timer#1",
+      "step:b",
+      "terminal:completed"
+    ]
+  }
+}

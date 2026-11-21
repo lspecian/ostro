@@ -1,0 +1,19 @@
+{
+  "id": "C-NDET-01",
+  "title": "a v1 journal (step a, sleep) replayed on v2 (step b first) is detected as non-determinism",
+  "leg": "engine",
+  "workflow": "conf_ndet",
+  "script": [
+    {
+      "input": "swap_module",
+      "variant": "v2"
+    }
+  ],
+  "expect": {
+    "status": "non_determinism",
+    "projection": [
+      "step:a",
+      "timer#1"
+    ]
+  }
+}

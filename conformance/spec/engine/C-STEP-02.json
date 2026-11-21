@@ -1,0 +1,16 @@
+{
+  "id": "C-STEP-02",
+  "title": "a non-retryable step failure is caught by the workflow and returned as {caught: kind}",
+  "leg": "engine",
+  "workflow": "conf_step_fail",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "caught": "boom"
+    },
+    "projection": [
+      "step:boom",
+      "terminal:completed"
+    ]
+  }
+}

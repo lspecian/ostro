@@ -1,0 +1,15 @@
+{
+  "id": "C-RETRY-02",
+  "title": "step always (retry 2) fails retryably on both attempts; the error propagates and the run fails transient",
+  "leg": "engine",
+  "workflow": "conf_retry_exhaust",
+  "expect": {
+    "status": "failed",
+    "failure_kind": "transient",
+    "projection": [
+      "retry:always#1",
+      "step:always",
+      "terminal:failed"
+    ]
+  }
+}

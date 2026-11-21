@@ -1,0 +1,17 @@
+{
+  "id": "C-STATUS-01",
+  "title": "set_status twice publishes both status documents, the latest last",
+  "leg": "engine",
+  "workflow": "conf_status",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "done": true
+    },
+    "projection": [
+      "status:{\"stage\":\"one\"}",
+      "status:{\"n\":2,\"stage\":\"two\"}",
+      "terminal:completed"
+    ]
+  }
+}

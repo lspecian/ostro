@@ -1,0 +1,19 @@
+{
+  "id": "C-CANCEL-01",
+  "title": "cancelling a run sleeping 1 h ends it Cancelled",
+  "leg": "engine",
+  "workflow": "conf_cancel_wait",
+  "script": [
+    {
+      "input": "cancel"
+    }
+  ],
+  "expect": {
+    "status": "cancelled",
+    "failure_kind": "cancelled",
+    "projection": [
+      "timer#1",
+      "terminal:cancelled"
+    ]
+  }
+}

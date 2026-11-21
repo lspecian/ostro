@@ -1,0 +1,16 @@
+{
+  "id": "C-SIG-02",
+  "title": "a wait on signal never with a 10 s timeout times out (WaitTimedOut) and returns {timeout: true}",
+  "leg": "engine",
+  "workflow": "conf_signal_timeout",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "timeout": true
+    },
+    "projection": [
+      "signal:never#1",
+      "terminal:completed"
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "C-RACE-01",
+  "title": "gather of a 1 s sleep, a 2 s sleep and signal go completes once all three resolved",
+  "leg": "engine",
+  "workflow": "conf_gather",
+  "script": [
+    {
+      "input": "signal",
+      "name": "go",
+      "payload": {
+        "v": 7
+      }
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "signal": {
+        "v": 7
+      }
+    },
+    "projection": [
+      "timer#1",
+      "timer#2",
+      "signal:go#1",
+      "terminal:completed"
+    ]
+  }
+}

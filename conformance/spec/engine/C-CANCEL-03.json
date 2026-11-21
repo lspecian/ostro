@@ -1,0 +1,17 @@
+{
+  "id": "C-CANCEL-03",
+  "title": "cancel-op on an own 1 h timer completes its wait with Err(Cancelled) without firing it",
+  "leg": "engine",
+  "workflow": "conf_cancel_timer",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "cancelled_op": true
+    },
+    "projection": [
+      "timer#1",
+      "cancel-op#1",
+      "terminal:completed"
+    ]
+  }
+}

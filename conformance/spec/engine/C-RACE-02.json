@@ -1,0 +1,28 @@
+{
+  "id": "C-RACE-02",
+  "title": "select of a 1 h sleep and signal go; the signal wins and the losing timer is cancelled with cancel-op",
+  "leg": "engine",
+  "workflow": "conf_race_cancel",
+  "script": [
+    {
+      "input": "signal",
+      "name": "go",
+      "payload": {
+        "v": 1
+      }
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "winner": "signal",
+      "loser_cancelled": true
+    },
+    "projection": [
+      "timer#1",
+      "signal:go#1",
+      "cancel-op#1",
+      "terminal:completed"
+    ]
+  }
+}

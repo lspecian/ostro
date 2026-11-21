@@ -1,0 +1,16 @@
+{
+  "id": "C-STEP-03",
+  "title": "random_u64 drawn inside the body of step draw comes from the step-local stream (not the ctx stream) and is recorded in the step outcome",
+  "leg": "engine",
+  "workflow": "conf_step_rng",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "value": "1860221302321022825"
+    },
+    "projection": [
+      "step:draw",
+      "terminal:completed"
+    ]
+  }
+}

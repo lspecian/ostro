@@ -1,0 +1,14 @@
+{
+  "id": "C-NATIVE-01",
+  "title": "native time, randomness and map iteration are replay-identical and differ across seeds (WF-07; per-language values)",
+  "leg": "engine",
+  "workflow": "conf_native",
+  "expect": {
+    "status": "completed",
+    "projection": [
+      "step:observe",
+      "terminal:completed"
+    ],
+    "differs_across_seeds": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "id": "C-RAND-02",
+  "title": "random_bytes(8) and random_f64 are replay-stable and differ per seed",
+  "leg": "engine",
+  "workflow": "conf_rand_native",
+  "expect": {
+    "status": "completed",
+    "projection": [
+      "terminal:completed"
+    ],
+    "differs_across_seeds": true
+  }
+}

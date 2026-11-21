@@ -1,0 +1,41 @@
+{
+  "id": "C-SIG-01",
+  "title": "two signals, one buffered before start, are received in order",
+  "leg": "engine",
+  "workflow": "conf_signals",
+  "script": [
+    {
+      "input": "signal",
+      "name": "go",
+      "payload": {
+        "v": 1
+      },
+      "before_start": true
+    },
+    {
+      "input": "signal",
+      "name": "go",
+      "payload": {
+        "v": 2
+      }
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "got": [
+        {
+          "v": 1
+        },
+        {
+          "v": 2
+        }
+      ]
+    },
+    "projection": [
+      "signal:go#1",
+      "signal:go#2",
+      "terminal:completed"
+    ]
+  }
+}

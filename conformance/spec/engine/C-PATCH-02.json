@@ -1,0 +1,21 @@
+{
+  "id": "C-PATCH-02",
+  "title": "a fresh run on v2 records the patch marker for x and takes the new branch",
+  "leg": "engine",
+  "workflow": "conf_patch",
+  "variant": "v2",
+  "expect": {
+    "status": "completed",
+    "result": [
+      "a2",
+      "b"
+    ],
+    "projection": [
+      "patch:x",
+      "step:a2",
+      "timer#1",
+      "step:b",
+      "terminal:completed"
+    ]
+  }
+}

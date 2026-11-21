@@ -1,0 +1,20 @@
+{
+  "id": "C-VAL-01",
+  "title": "random_u64, random_f64, uuid_v7 and idempotency_key(x), drawn in that order, equal the Rust reference values for seed 42 and the fixed run id",
+  "leg": "engine",
+  "workflow": "conf_values",
+  "seed": "42",
+  "run_id": "01890000-0000-7000-8000-000000000001",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "random_u64": "16357943517170225811",
+      "random_f64": 0.8693496500947742,
+      "uuid_v7": "018bcfe5-6800-7e6d-b89c-fc7a01337ce6",
+      "idempotency_key": "ostro-43ff999e924f58fa3b089b017dab68df"
+    },
+    "projection": [
+      "terminal:completed"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "C-STEP-04",
+  "title": "the sibling of an async step body (ctx random_u64 + 1 s sleep) lands after the step; strict replay holds",
+  "leg": "engine",
+  "workflow": "conf_step_sibling",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "step": "s",
+      "sibling_rand": "16357943517170225811"
+    },
+    "projection": [
+      "step:s",
+      "timer#1",
+      "terminal:completed"
+    ]
+  }
+}

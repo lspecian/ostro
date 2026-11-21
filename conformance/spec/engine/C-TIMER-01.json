@@ -1,0 +1,16 @@
+{
+  "id": "C-TIMER-01",
+  "title": "a 1 h durable sleep fires (harness fires the earliest pending timer) and the run completes",
+  "leg": "engine",
+  "workflow": "conf_timer",
+  "expect": {
+    "status": "completed",
+    "result": {
+      "slept": true
+    },
+    "projection": [
+      "timer#1",
+      "terminal:completed"
+    ]
+  }
+}

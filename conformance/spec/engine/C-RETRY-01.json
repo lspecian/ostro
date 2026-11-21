@@ -1,0 +1,21 @@
+{
+  "id": "C-RETRY-01",
+  "title": "step flaky (retry 3 / 1 s / x2) fails while less than 2.5 s of workflow time passed; attempts see 0, 1, 3 s and attempt 3 succeeds",
+  "leg": "engine",
+  "workflow": "conf_retry",
+  "input": {
+    "succeed_after_ms": 2500
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "elapsed_ms": 3000
+    },
+    "projection": [
+      "retry:flaky#1",
+      "retry:flaky#2",
+      "step:flaky",
+      "terminal:completed"
+    ]
+  }
+}

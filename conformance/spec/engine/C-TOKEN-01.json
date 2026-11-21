@@ -1,0 +1,28 @@
+{
+  "id": "C-TOKEN-01",
+  "title": "an await token completed by the harness returns its payload",
+  "leg": "engine",
+  "workflow": "conf_token",
+  "script": [
+    {
+      "input": "token",
+      "payload": {
+        "ok": true,
+        "n": 3
+      }
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "token_payload": {
+        "ok": true,
+        "n": 3
+      }
+    },
+    "projection": [
+      "token#1",
+      "terminal:completed"
+    ]
+  }
+}

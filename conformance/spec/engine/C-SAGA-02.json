@@ -1,0 +1,23 @@
+{
+  "id": "C-SAGA-02",
+  "title": "a saga cancelled during its 1 h sleep runs cancel_b then cancel_a shielded and ends Cancelled",
+  "leg": "engine",
+  "workflow": "conf_saga_cancel",
+  "script": [
+    {
+      "input": "cancel"
+    }
+  ],
+  "expect": {
+    "status": "cancelled",
+    "failure_kind": "cancelled",
+    "projection": [
+      "step:book_a",
+      "step:book_b",
+      "timer#1",
+      "step:cancel_b",
+      "step:cancel_a",
+      "terminal:cancelled"
+    ]
+  }
+}

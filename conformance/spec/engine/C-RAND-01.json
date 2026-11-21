@@ -1,0 +1,13 @@
+{
+  "id": "C-RAND-01",
+  "title": "ctx random_u64 x3 and uuid_v7 differ across seeds and replay reproduces them",
+  "leg": "engine",
+  "workflow": "conf_rand",
+  "expect": {
+    "status": "completed",
+    "projection": [
+      "terminal:completed"
+    ],
+    "differs_across_seeds": true
+  }
+}
