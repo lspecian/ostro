@@ -108,6 +108,11 @@ pub struct WorkerConfig {
     pub tls_key: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_ca: Option<PathBuf>,
+    /// Cluster listener endpoints (`host:port`) for the external-certificate path, which has
+    /// no join response to learn them from (07-07). Ignored with a join (the join response
+    /// lists the endpoints).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<String>,
     /// Stable worker id (`[A-Za-z0-9._-]{1,64}`); unset = generated at start.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
@@ -138,6 +143,7 @@ impl Default for WorkerConfig {
             tls_cert: None,
             tls_key: None,
             tls_ca: None,
+            endpoints: Vec::new(),
             worker_id: None,
             reconnect_max_ms: DEFAULT_RECONNECT_MAX_MS,
             rejoin_after_failures: DEFAULT_REJOIN_AFTER_FAILURES,
@@ -215,6 +221,14 @@ impl WorkerConfig {
                 "tls_cert" => self.tls_cert = Some(PathBuf::from(v)),
                 "tls_key" => self.tls_key = Some(PathBuf::from(v)),
                 "tls_ca" => self.tls_ca = Some(PathBuf::from(v)),
+                "endpoints" => {
+                    self.endpoints = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|e| !e.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
                 "worker_id" => self.worker_id = Some(v.clone()),
                 "reconnect_max_ms" => self.reconnect_max_ms = num("milliseconds")?,
                 "rejoin_after_failures" => {
@@ -254,6 +268,11 @@ impl WorkerConfig {
             if self.token.is_some() {
                 return Err(invalid(
                     "worker.token and the external certificate (tls_cert/tls_key/tls_ca) are mutually exclusive",
+                ));
+            }
+            if self.endpoints.is_empty() {
+                return Err(invalid(
+                    "worker.endpoints (cluster host:port list) is required with tls_cert/tls_key/tls_ca",
                 ));
             }
             return Ok(());
@@ -415,7 +434,15 @@ mod tests {
             tls_ca: Some("ca.pem".into()),
             ..WorkerConfig::default()
         };
+        assert!(ext.validate().is_err(), "external certs need endpoints");
+        let ext = WorkerConfig {
+            endpoints: vec!["h:7701".into()],
+            ..ext
+        };
         ext.validate().unwrap();
+        let env_eps =
+            WorkerConfig::load(None, &env(&[("OSTRO_WORKER_ENDPOINTS", "a:1, b:2,")])).unwrap();
+        assert_eq!(env_eps.endpoints, vec!["a:1".to_owned(), "b:2".to_owned()]);
         let half = WorkerConfig {
             tls_cert: Some("c.pem".into()),
             ..WorkerConfig::default()

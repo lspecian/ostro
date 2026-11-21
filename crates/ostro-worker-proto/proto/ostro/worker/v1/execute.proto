@@ -254,6 +254,10 @@ message AppendFrame {
   bytes chunk = 6;
   bool event_end = 7;
   bool last = 8;
+  // EventKind code of the event this chunk belongs to (07-07; set on every chunk). The
+  // event's seq is from_seq + event_index; its bytes are the concatenated chunks, i.e. the
+  // `ostro_types::journal::encode_event` output decoded with `decode_event(seq, kind, ..)`.
+  uint32 kind = 9;
 }
 
 message AppendResult {
