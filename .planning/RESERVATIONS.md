@@ -12,6 +12,7 @@
    - `planned` followed by the phase tag and owning plan (e.g. for Phase 5: "planned", then "P5", then the plan id): allocated to that phase's plan. 05-20 flips its rows to `exists`. **Done 2026-11-19 (05-20): every Phase 5 row was verified against the code at the freeze and now reads `exists (P5, <plan>)`.**
    - `reserved P6/P7/P8`: block held for that phase.
      **Phase 6 gate 2026-11-20 (06-20):** every Phase 6 ordinal in code was verified against this file. Used rows are flipped to `exists (P6)` (written `exists (P6, <plan>)`): Cmd 13 `CompleteEffect`, Intent 9 `RegisterEffect` / 10 `CancelEffect`, InvalidCode 15 `BadEffectCompletion` and the keyspace #12 `effects` rows. Unused spares (Cmd 14–19, StartRun 24–27, Intent 11–12, EventKind 72–79, RejectReason 12–14, InvalidCode 16–17, Outbox 7, MetaKind 17–18, ext tags 16–31) stay `reserved P6`.
+     **Phase 7 gate 2026-11-21 (07-22):** every Phase 7 ordinal in code was re-verified against this file (`07-22-rescheck`, the 07-01 script re-run; output in 07-22-SUMMARY). Used rows are flipped to `exists (P7, <plan>)`: Cmd 20 `PauseRun` / 21 `ResumeRun` and RejectReason 15 `RunPaused` (with the `ReservedP6_12..14` placeholders at 12–14). Keyspaces 17 `p7_a` / 18 `p7_b` and meta 19/20 stay **unused**; the other Phase 7 blocks (Cmd 22–26, StartRun 28–31, Intent 13–16, EventKind 80–87, TerminalStatus 6–9, RejectReason 16–17, InvalidCode 18–21 placeholders, Outbox 8–9, meta ext tags 32–47) stay `reserved P7`. The §11 Phase 7 names shipped as listed.
      **Phase 8 gate 2026-11-20 (08-22):** every Phase 8 ordinal in code was re-verified against this file (`08-22-rescheck.py`: every Cmd tag, keyspace and InvalidCode in code is `exists` or a placeholder; RESERVATIONS CHECK: PASS). The ordinal rows were flipped by 08-01 (Cmd 27 `ScheduleFire`, keyspace 16 `schedule_state`, InvalidCode 22 `BadScheduleFire` / 23 `ScheduleOwnerMismatch`) and are confirmed; the §11 Phase 8 names that shipped now read `exists (P8, <plan>)`. Unused Phase 8 slots stay `reserved P8`: Cmd 28–33, StartRun 32–35, Intent 17–18, EventKind 88–95, RejectReason 18–19, InvalidCode 24, Outbox kind 10, MetaKind 21, meta ext tags 48–63, and the `cron::` failpoint prefix.
      **Phase 7 gate 2026-11-21 (07-01):** the code was re-verified against this file before any Phase 7 code (`07-01-rescheck.py`, output in 07-01-SUMMARY: every Cmd tag, intent, outbox kind, TerminalStatus, StartRun field, journal kind, keyspace, RejectReason, InvalidCode and MetaRecord in code is `exists` or a canonical placeholder; every Phase 7 block is empty in code apart from the `ReservedP7_18..21` InvalidCode placeholders; RESERVATIONS CHECK: PASS). Phase 5 F1/F2/F3/F4/F7/F8 landed, so Phase 7 needs 0 keyspaces and 0 meta variants. Phase 7 allocations: Cmd 20/21, RejectReason 15 and the §11 Phase 7 names (D-W18).
    - `unallocated`: free for a later phase to claim per rule 2.
@@ -40,8 +41,8 @@ Sources:
 | 12 | CompleteToken | exists (P5, 05-01) |
 | 13 | CompleteEffect | exists (P6, 06-02) |
 | 14–19 | spare | reserved P6 |
-| 20 | PauseRun `{run_id 1, reason u32 2, detail string 3, token AttemptTokenMsg 4 (optional; present = executor auto-pause, fenced), requested_at_ms 5}` | planned P7 (07-03) |
-| 21 | ResumeRun `{run_id 1, requested_at_ms 2}` | planned P7 (07-03) |
+| 20 | PauseRun `{run_id 1, reason u32 2, detail string 3, token AttemptTokenMsg 4 (optional; present = executor auto-pause, fenced), requested_at_ms 5}` | exists (P7, 07-03; apply 07-04) |
+| 21 | ResumeRun `{run_id 1, requested_at_ms 2}` | exists (P7, 07-03; apply 07-04) |
 | 22–26 | spare | reserved P7 |
 | 27 | ScheduleFire | exists (P8, 08-01) |
 | 28–33 | spare | reserved P8 |
@@ -183,8 +184,8 @@ Rules:
 |-------|------|--------|
 | 0–10 | StaleEpoch, Fenced, SeqMismatch, SeqGap, RunNotFound, RunTerminal, RunExists, IdempotencyConflict, PayloadTooLarge, WrongPartition, Invalid | exists (P2) |
 | 11 | RunCompleted | exists (P5, 05-02) |
-| 12–14 | — (P6 declared 0 needs) | reserved P6 |
-| 15 | RunPaused (outcome code 31) | planned P7 (07-03) |
+| 12–14 | `#[doc(hidden)] ReservedP6_12..14` placeholders (declared by 07-03, never emitted) | reserved P6 |
+| 15 | RunPaused (outcome code 31) | exists (P7, 07-03) |
 | 16–17 | spare | reserved P7 |
 | 18–19 | — (P8 declared 0) | reserved P8 |
 
