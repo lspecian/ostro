@@ -261,7 +261,7 @@ Plans:
 - [x] 07-07-PLAN.md — Worker crate: join with CA-hash pinning, mTLS session, re-join fallback, self-fence, drain, runner + RemoteSink + verified fetch + EffectProxy + AOT cache; guests long-journal/pay-flow/cpu-burn (WORK-01/02/06) (W3)
 - [x] 07-11-PLAN.md — API surface: Queues/Workers services, pause RPCs, REST paths, ControlPlane defaults, FakeControlPlane, parity, OpenAPI semantic-superset check (OPS-01, WORK-05, DISP-03) (W3)
 - [x] 07-08-PLAN.md — Node flow control: concurrency, hand-rolled GCRA throttle on first activations, StartRun rate limit (429), pause, weights, auto-pause (DISP-03/04/05, OPS-01) (W4)
-- [ ] 07-09-PLAN.md — Worker service: join tokens with F8 expiry, mTLS cluster listener, sessions, registry, peer-identity-checked bulk RPCs, external-CA identity rule, revocation (WORK-01, SEC-01) (W4)
+- [x] 07-09-PLAN.md — Worker service: join tokens with F8 expiry, mTLS cluster listener, sessions, registry, peer-identity-checked bulk RPCs, external-CA identity rule, revocation (WORK-01, SEC-01) (W4)
 - [x] 07-10-PLAN.md — ACME with instant-acme (TLS-ALPN-01, HTTP-01, renewal, cache) + env-gated Pebble (SEC-01) (W4)
 - [x] 07-15-PLAN.md — CLI: worker token/queue/run/workflow verbs, `ostro worker` subcommand with drain, TLS-aware ready line (WORK-01, OPS-01) (W4)
 - [ ] 07-12-PLAN.md — RemoteRunner via EngineExecutor::sink_for + PlacementExecutor + NodePlacement (embedded-first overflow) + selectors; StartEffect verified, redacted values literal (WORK-01/02/04/06) (W5)
