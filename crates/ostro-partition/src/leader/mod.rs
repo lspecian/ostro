@@ -4,6 +4,10 @@
 //! floor and the bottomless upload floor reach retention through [`LeaderCtx::floors`]) and
 //! the cron driver (`cron`, 08-14).
 //!
+//! Phase 7 (07-02) adds the dispatcher contracts [`placement`] (`Placement`,
+//! `SemaphorePlacement`) and [`flow`] (`FlowControl`, `NoFlow`, `QueueGauges`), plus the
+//! `fair` selection stub (07-05).
+//!
 //! They are spawned by [`Node`](crate::node::Node) only after the partition's
 //! [`ReadyBarrier`] is open (state caught up, term started) and after every partition is
 //! registered in the router. Each service has a fixed `spawn(ctx, cfg) -> JoinHandle<()>`
@@ -11,6 +15,9 @@
 
 pub mod cron;
 pub mod dispatcher;
+pub mod fair;
+pub mod flow;
+pub mod placement;
 pub mod retention;
 pub mod shuffler;
 pub mod snapshot;

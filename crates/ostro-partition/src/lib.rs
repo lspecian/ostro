@@ -37,6 +37,11 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use leader::dispatcher::{
     DispatcherConfig, DispatcherStats, ExecOutcome, Executor, Job, LeaseRenewer,
 };
+// Phase 7 (07-02): dispatcher placement / flow-control contracts.
+pub use leader::flow::{Admit, FlowControl, FlowPermit, NoFlow, QueueGauge, QueueGauges};
+pub use leader::placement::{
+    EntryView, Placement, Reservation, ReservationKind, Reserve, SemaphorePlacement,
+};
 pub use leader::{LeaderConfig, LeaderCtx, LeaderTasks};
 pub use leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 pub use node::{Node, NodeConfig, NodeError, PartitionSlot, StartMode};
