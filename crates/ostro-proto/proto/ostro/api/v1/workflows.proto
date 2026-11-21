@@ -19,6 +19,10 @@ service Workflows {
   rpc SetQueuePolicy(SetQueuePolicyRequest) returns (RunPolicy);
   // A queue's run policy (unset fields = no override).
   rpc GetQueuePolicy(GetQueuePolicyRequest) returns (RunPolicy);
+  // Stop granting activations to the workflow's runs (Phase 7, 07-11; idempotent).
+  rpc PauseWorkflow(PauseWorkflowRequest) returns (WorkflowPauseState);
+  // Resume the workflow's runs (Phase 7, 07-11; idempotent).
+  rpc ResumeWorkflow(ResumeWorkflowRequest) returns (WorkflowPauseState);
 }
 
 message ListWorkflowsRequest {}
@@ -76,4 +80,21 @@ message SetQueuePolicyRequest {
 
 message GetQueuePolicyRequest {
   string name = 1;
+}
+
+// --- Phase 7 workflow pause / resume (07-11; REST POST /v1/workflows/{name}/pause|resume) ---
+
+message PauseWorkflowRequest {
+  string name = 1;
+}
+
+message ResumeWorkflowRequest {
+  string name = 1;
+}
+
+message WorkflowPauseState {
+  string workflow = 1;
+  bool paused = 2;
+  // False when the workflow already was in the requested state.
+  bool changed = 3;
 }

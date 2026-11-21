@@ -25,6 +25,10 @@ service Runs {
   // Long-poll a run's outcome (Phase 5, API-06). Not-terminal-yet is not an
   // error: the response has completed = false.
   rpc AwaitResult(AwaitResultRequest) returns (AwaitResultResponse);
+  // Pause a run: no new activations until resumed (Phase 7, 07-11; idempotent).
+  rpc PauseRun(PauseRunRequest) returns (RunPauseState);
+  // Resume a paused run (Phase 7, 07-11; idempotent).
+  rpc ResumeRun(ResumeRunRequest) returns (RunPauseState);
 }
 
 message StartRunRequest {
@@ -225,4 +229,23 @@ message AwaitResultResponse {
   optional bytes result_json = 4;
   // UTF-8 JSON failure of a failed run.
   optional bytes failure_json = 5;
+}
+
+// --- Phase 7 run pause / resume (07-11; REST POST /v1/runs/{id}/pause|resume) ---
+
+message PauseRunRequest {
+  string run_id = 1;
+  // Operator note stored with the pause mark.
+  optional string detail = 2;
+}
+
+message ResumeRunRequest {
+  string run_id = 1;
+}
+
+message RunPauseState {
+  string run_id = 1;
+  bool paused = 2;
+  // False when the run already was in the requested state.
+  bool changed = 3;
 }

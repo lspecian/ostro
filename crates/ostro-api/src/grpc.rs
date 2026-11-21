@@ -1,7 +1,7 @@
 //! gRPC adapter: `ostro.api.v1` services over [`ControlPlane`].
 //!
-//! [`GrpcModules`], [`GrpcWorkflows`], [`GrpcRuns`], [`GrpcTokens`], [`GrpcSecrets`] and
-//! [`GrpcConnectors`] are thin translators, like the
+//! [`GrpcModules`], [`GrpcWorkflows`], [`GrpcRuns`], [`GrpcTokens`], [`GrpcSecrets`],
+//! [`GrpcConnectors`], [`GrpcQueues`] and [`GrpcWorkers`] are thin translators, like the
 //! REST handlers: proto request -> domain request -> `ControlPlane` -> proto response.
 //! Errors go through [`to_status`], which takes the code from the shared
 //! [`ApiError::grpc_code`] table. Every proto <-> domain conversion lives in this file.
@@ -10,12 +10,14 @@ use std::sync::Arc;
 
 use ostro_proto::api::v1 as pb;
 use ostro_proto::api::v1::{
-    connectors_server, modules_server, runs_server, secrets_server, tokens_server, workflows_server,
+    connectors_server, modules_server, queues_server, runs_server, secrets_server, tokens_server,
+    workers_server, workflows_server,
 };
 use tonic::{Request, Response, Status};
 
 use crate::domain::{self, ControlPlane};
 use crate::error::ApiError;
+use crate::phase7;
 
 /// `ApiError` -> `tonic::Status`: code from the shared table, the message, and the
 /// structured details (if any) as JSON bytes in the status details.
@@ -530,6 +532,32 @@ impl workflows_server::Workflows for GrpcWorkflows {
             .map_err(to_status)?;
         Ok(Response::new(p.into()))
     }
+
+    // Phase 7 (07-11).
+
+    async fn pause_workflow(
+        &self,
+        request: Request<pb::PauseWorkflowRequest>,
+    ) -> Result<Response<pb::WorkflowPauseState>, Status> {
+        let st = self
+            .0
+            .pause_workflow(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(workflow_pause_state(st)))
+    }
+
+    async fn resume_workflow(
+        &self,
+        request: Request<pb::ResumeWorkflowRequest>,
+    ) -> Result<Response<pb::WorkflowPauseState>, Status> {
+        let st = self
+            .0
+            .resume_workflow(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(workflow_pause_state(st)))
+    }
 }
 
 #[tonic::async_trait]
@@ -673,6 +701,33 @@ impl runs_server::Runs for GrpcRuns {
             .await
             .map_err(to_status)?;
         Ok(Response::new(res.into()))
+    }
+
+    // Phase 7 (07-11).
+
+    async fn pause_run(
+        &self,
+        request: Request<pb::PauseRunRequest>,
+    ) -> Result<Response<pb::RunPauseState>, Status> {
+        let r = request.into_inner();
+        let st = self
+            .0
+            .pause_run(r.run_id, r.detail)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(st.into()))
+    }
+
+    async fn resume_run(
+        &self,
+        request: Request<pb::ResumeRunRequest>,
+    ) -> Result<Response<pb::RunPauseState>, Status> {
+        let st = self
+            .0
+            .resume_run(request.into_inner().run_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(st.into()))
     }
 }
 
@@ -955,6 +1010,401 @@ impl connectors_server::Connectors for GrpcConnectors {
             .await
             .map_err(to_status)?;
         Ok(Response::new(pb::DeleteEgressResponse {}))
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 7 (07-11): ostro.api.v1.{Queues, Workers}, run and workflow pause/resume
+// ---------------------------------------------------------------------------------
+
+/// Proto `Placement` -> `Option<Placement>` (`UNSPECIFIED` = default); unknown values
+/// are invalid.
+fn placement_from_proto(v: i32) -> Result<Option<phase7::Placement>, ApiError> {
+    match pb::Placement::try_from(v) {
+        Ok(pb::Placement::Unspecified) => Ok(None),
+        Ok(pb::Placement::Embedded) => Ok(Some(phase7::Placement::Embedded)),
+        Ok(pb::Placement::Workers) => Ok(Some(phase7::Placement::Workers)),
+        Ok(pb::Placement::Auto) => Ok(Some(phase7::Placement::Auto)),
+        Err(_) => Err(ApiError::invalid_argument(format!(
+            "placement: unknown value {v}"
+        ))),
+    }
+}
+
+fn placement_to_proto(p: Option<phase7::Placement>) -> i32 {
+    (match p {
+        None => pb::Placement::Unspecified,
+        Some(phase7::Placement::Embedded) => pb::Placement::Embedded,
+        Some(phase7::Placement::Workers) => pb::Placement::Workers,
+        Some(phase7::Placement::Auto) => pb::Placement::Auto,
+    }) as i32
+}
+
+fn exhaust_from_proto(v: i32) -> Result<Option<phase7::ExhaustAction>, ApiError> {
+    match pb::ExhaustAction::try_from(v) {
+        Ok(pb::ExhaustAction::Unspecified) => Ok(None),
+        Ok(pb::ExhaustAction::Fail) => Ok(Some(phase7::ExhaustAction::Fail)),
+        Ok(pb::ExhaustAction::Pause) => Ok(Some(phase7::ExhaustAction::Pause)),
+        Err(_) => Err(ApiError::invalid_argument(format!(
+            "on_retries_exhausted: unknown value {v}"
+        ))),
+    }
+}
+
+fn exhaust_to_proto(a: Option<phase7::ExhaustAction>) -> i32 {
+    (match a {
+        None => pb::ExhaustAction::Unspecified,
+        Some(phase7::ExhaustAction::Fail) => pb::ExhaustAction::Fail,
+        Some(phase7::ExhaustAction::Pause) => pb::ExhaustAction::Pause,
+    }) as i32
+}
+
+impl From<pb::RateSpec> for phase7::RateSpecDto {
+    fn from(r: pb::RateSpec) -> Self {
+        phase7::RateSpecDto {
+            limit: r.limit,
+            period_ms: r.period_ms,
+            burst: r.burst,
+        }
+    }
+}
+
+impl From<phase7::RateSpecDto> for pb::RateSpec {
+    fn from(r: phase7::RateSpecDto) -> Self {
+        pb::RateSpec {
+            limit: r.limit,
+            period_ms: r.period_ms,
+            burst: r.burst,
+        }
+    }
+}
+
+/// A proto percentage (`uint32`) -> `u8`; values above 255 are invalid here, values
+/// 101..=255 are rejected by [`phase7::QueueFlow::validate`] like on REST.
+fn pct(field: &str, v: u32) -> Result<u8, ApiError> {
+    u8::try_from(v)
+        .map_err(|_| ApiError::invalid_argument(format!("{field} = {v} is out of range (max 100)")))
+}
+
+impl TryFrom<pb::SpillPolicy> for phase7::SpillPolicyDto {
+    type Error = ApiError;
+
+    fn try_from(s: pb::SpillPolicy) -> Result<Self, ApiError> {
+        Ok(phase7::SpillPolicyDto {
+            cpu_pct: pct("spill.cpu_pct", s.cpu_pct)?,
+            slots_pct: pct("spill.slots_pct", s.slots_pct)?,
+            mem_pct: pct("spill.mem_pct", s.mem_pct)?,
+            lag_ms: s.lag_ms,
+            sustain_ms: s.sustain_ms,
+            cooldown_ms: s.cooldown_ms,
+            hysteresis_pct: pct("spill.hysteresis_pct", s.hysteresis_pct)?,
+        })
+    }
+}
+
+impl From<phase7::SpillPolicyDto> for pb::SpillPolicy {
+    fn from(s: phase7::SpillPolicyDto) -> Self {
+        pb::SpillPolicy {
+            cpu_pct: s.cpu_pct.into(),
+            slots_pct: s.slots_pct.into(),
+            mem_pct: s.mem_pct.into(),
+            lag_ms: s.lag_ms,
+            sustain_ms: s.sustain_ms,
+            cooldown_ms: s.cooldown_ms,
+            hysteresis_pct: s.hysteresis_pct.into(),
+        }
+    }
+}
+
+impl TryFrom<pb::QueueFlow> for phase7::QueueFlow {
+    type Error = ApiError;
+
+    fn try_from(f: pb::QueueFlow) -> Result<Self, ApiError> {
+        Ok(phase7::QueueFlow {
+            placement: placement_from_proto(f.placement)?,
+            selector: f.selector,
+            spill: f.spill.map(TryInto::try_into).transpose()?,
+            concurrency: f.concurrency,
+            weight: f.weight,
+            key_concurrency: f.key_concurrency,
+            throttle: f.throttle.map(Into::into),
+            key_throttle: f.key_throttle.map(Into::into),
+            rate_limit: f.rate_limit.map(Into::into),
+            key_rate_limit: f.key_rate_limit.map(Into::into),
+            on_retries_exhausted: exhaust_from_proto(f.on_retries_exhausted)?,
+            paused: f.paused,
+        })
+    }
+}
+
+impl From<phase7::QueueFlow> for pb::QueueFlow {
+    fn from(f: phase7::QueueFlow) -> Self {
+        pb::QueueFlow {
+            placement: placement_to_proto(f.placement),
+            selector: f.selector,
+            spill: f.spill.map(Into::into),
+            concurrency: f.concurrency,
+            weight: f.weight,
+            key_concurrency: f.key_concurrency,
+            throttle: f.throttle.map(Into::into),
+            key_throttle: f.key_throttle.map(Into::into),
+            rate_limit: f.rate_limit.map(Into::into),
+            key_rate_limit: f.key_rate_limit.map(Into::into),
+            on_retries_exhausted: exhaust_to_proto(f.on_retries_exhausted),
+            paused: f.paused,
+        }
+    }
+}
+
+impl From<phase7::QueueFlowInfo> for pb::QueueFlowInfo {
+    fn from(i: phase7::QueueFlowInfo) -> Self {
+        pb::QueueFlowInfo {
+            queue: i.queue,
+            version: i.version,
+            flow: Some(i.flow.into()),
+        }
+    }
+}
+
+impl From<phase7::DemandSnapshot> for pb::QueueDemand {
+    fn from(d: phase7::DemandSnapshot) -> Self {
+        pb::QueueDemand {
+            queue: d.queue,
+            demand: d.demand,
+            backlog: d.backlog,
+            running_on_workers: d.running_on_workers,
+            placement: placement_to_proto(Some(d.placement)),
+            spilling: d.spilling,
+            workers: d.workers,
+            worker_slots_free: d.worker_slots_free,
+        }
+    }
+}
+
+impl From<phase7::RunPauseState> for pb::RunPauseState {
+    fn from(s: phase7::RunPauseState) -> Self {
+        pb::RunPauseState {
+            run_id: s.run_id,
+            paused: s.paused,
+            changed: s.changed,
+        }
+    }
+}
+
+fn workflow_pause_state(s: phase7::PauseState) -> pb::WorkflowPauseState {
+    pb::WorkflowPauseState {
+        workflow: s.name,
+        paused: s.paused,
+        changed: s.changed,
+    }
+}
+
+fn queue_pause_state(s: phase7::PauseState) -> pb::QueuePauseState {
+    pb::QueuePauseState {
+        queue: s.name,
+        paused: s.paused,
+        changed: s.changed,
+    }
+}
+
+impl From<phase7::WorkerInfo> for pb::WorkerInfo {
+    fn from(w: phase7::WorkerInfo) -> Self {
+        pb::WorkerInfo {
+            worker_id: w.worker_id,
+            labels: w.labels.into_iter().collect(),
+            slots: w.slots,
+            free_slots: w.free_slots,
+            leases: w.leases,
+            connected_at_ms: w.connected_at_ms,
+            node_id: w.node_id,
+            draining: w.draining,
+        }
+    }
+}
+
+impl From<phase7::WorkerTokenInfo> for pb::WorkerTokenInfo {
+    fn from(t: phase7::WorkerTokenInfo) -> Self {
+        pb::WorkerTokenInfo {
+            token_id: t.token_id,
+            created_at_ms: t.created_at_ms,
+            expires_at_ms: t.expires_at_ms,
+        }
+    }
+}
+
+impl From<pb::JoinWorkerRequest> for phase7::JoinRequest {
+    fn from(r: pb::JoinWorkerRequest) -> Self {
+        phase7::JoinRequest {
+            token: r.token,
+            csr_pem: r.csr_pem,
+            worker_id: r.worker_id,
+            labels: r.labels.into_iter().collect(),
+        }
+    }
+}
+
+impl From<phase7::JoinResponse> for pb::JoinWorkerResponse {
+    fn from(r: phase7::JoinResponse) -> Self {
+        pb::JoinWorkerResponse {
+            client_cert_pem: r.client_cert_pem,
+            ca_cert_pem: r.ca_cert_pem,
+            endpoints: r.endpoints,
+            renew_after_ms: r.renew_after_ms,
+            cluster_id: r.cluster_id,
+        }
+    }
+}
+
+/// `ostro.api.v1.Queues` (flow, pause, demand) over a [`ControlPlane`].
+#[derive(Clone)]
+pub struct GrpcQueues(pub Arc<dyn ControlPlane>);
+
+/// `ostro.api.v1.Workers` (worker admin, join tokens, join) over a [`ControlPlane`].
+#[derive(Clone)]
+pub struct GrpcWorkers(pub Arc<dyn ControlPlane>);
+
+#[tonic::async_trait]
+impl queues_server::Queues for GrpcQueues {
+    async fn get_queue_flow(
+        &self,
+        request: Request<pb::GetQueueFlowRequest>,
+    ) -> Result<Response<pb::QueueFlowInfo>, Status> {
+        let info = self
+            .0
+            .get_queue_flow(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(info.into()))
+    }
+
+    async fn put_queue_flow(
+        &self,
+        request: Request<pb::PutQueueFlowRequest>,
+    ) -> Result<Response<pb::QueueFlowInfo>, Status> {
+        let r = request.into_inner();
+        let flow = phase7::QueueFlow::try_from(r.flow.unwrap_or_default()).map_err(to_status)?;
+        let info = self
+            .0
+            .put_queue_flow(r.name, flow, r.expected_version)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(info.into()))
+    }
+
+    async fn pause_queue(
+        &self,
+        request: Request<pb::PauseQueueRequest>,
+    ) -> Result<Response<pb::QueuePauseState>, Status> {
+        let st = self
+            .0
+            .pause_queue(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(queue_pause_state(st)))
+    }
+
+    async fn resume_queue(
+        &self,
+        request: Request<pb::ResumeQueueRequest>,
+    ) -> Result<Response<pb::QueuePauseState>, Status> {
+        let st = self
+            .0
+            .resume_queue(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(queue_pause_state(st)))
+    }
+
+    async fn get_queue_demand(
+        &self,
+        request: Request<pb::GetQueueDemandRequest>,
+    ) -> Result<Response<pb::QueueDemand>, Status> {
+        let d = self
+            .0
+            .queue_demand(request.into_inner().name)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(d.into()))
+    }
+}
+
+#[tonic::async_trait]
+impl workers_server::Workers for GrpcWorkers {
+    async fn list_workers(
+        &self,
+        _request: Request<pb::ListWorkersRequest>,
+    ) -> Result<Response<pb::ListWorkersResponse>, Status> {
+        let workers = self.0.list_workers().await.map_err(to_status)?;
+        Ok(Response::new(pb::ListWorkersResponse {
+            workers: workers.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    async fn drain_worker(
+        &self,
+        request: Request<pb::DrainWorkerRequest>,
+    ) -> Result<Response<pb::DrainWorkerResponse>, Status> {
+        let r = self
+            .0
+            .drain_worker(request.into_inner().worker_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::DrainWorkerResponse {
+            worker_id: r.worker_id,
+            already_draining: r.already_draining,
+        }))
+    }
+
+    async fn create_worker_token(
+        &self,
+        request: Request<pb::CreateWorkerTokenRequest>,
+    ) -> Result<Response<pb::WorkerTokenCreated>, Status> {
+        let c = self
+            .0
+            .create_worker_token(phase7::CreateWorkerTokenRequest {
+                ttl_ms: request.into_inner().ttl_ms,
+            })
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::WorkerTokenCreated {
+            token_id: c.token_id,
+            token: c.token,
+            join_command: c.join_command,
+            expires_at_ms: c.expires_at_ms,
+        }))
+    }
+
+    async fn list_worker_tokens(
+        &self,
+        _request: Request<pb::ListWorkerTokensRequest>,
+    ) -> Result<Response<pb::ListWorkerTokensResponse>, Status> {
+        let tokens = self.0.list_worker_tokens().await.map_err(to_status)?;
+        Ok(Response::new(pb::ListWorkerTokensResponse {
+            tokens: tokens.into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    async fn revoke_worker_token(
+        &self,
+        request: Request<pb::RevokeWorkerTokenRequest>,
+    ) -> Result<Response<pb::RevokeWorkerTokenResponse>, Status> {
+        self.0
+            .revoke_worker_token(request.into_inner().token_id)
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(pb::RevokeWorkerTokenResponse {}))
+    }
+
+    async fn join_worker(
+        &self,
+        request: Request<pb::JoinWorkerRequest>,
+    ) -> Result<Response<pb::JoinWorkerResponse>, Status> {
+        let r = self
+            .0
+            .join_worker(request.into_inner().into())
+            .await
+            .map_err(to_status)?;
+        Ok(Response::new(r.into()))
     }
 }
 

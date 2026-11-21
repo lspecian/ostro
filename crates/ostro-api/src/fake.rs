@@ -23,6 +23,11 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::*;
 use crate::error::ApiError;
+use crate::phase7::{
+    CreateWorkerTokenRequest, DemandSnapshot, DrainResult, JoinRequest, JoinResponse,
+    PauseRunRequest, PauseState, Placement, QueueFlow, QueueFlowInfo, REASON_JOIN_TOKEN_INVALID,
+    RunPauseState, WORKER_TOKEN_PREFIX, WorkerInfo, WorkerTokenCreated, WorkerTokenInfo,
+};
 
 /// In-memory Phase 8 traits (schedules, webhooks, hooks, run logs, backup), 08-10.
 pub use crate::phase8::fake::{FAKE_BACKUP, FakePhase8};
@@ -81,12 +86,84 @@ struct State {
     connections: BTreeMap<String, ConnectionInfo>,
     egress: BTreeMap<String, EgressInfo>,
     last_presign: Option<PresignedObjectRequest>,
+    /// Phase 7 (07-11): queue -> (record version, flow).
+    queue_flows: BTreeMap<String, (u64, QueueFlow)>,
+    paused_workflows: BTreeSet<String>,
+    /// run -> pause detail.
+    paused_runs: BTreeMap<String, Option<String>>,
+    workers: BTreeMap<String, WorkerInfo>,
+    next_worker_token: u64,
+    /// token id -> (info, secret).
+    worker_tokens: BTreeMap<String, (WorkerTokenInfo, String)>,
+    /// queue -> (rate-limit window index, starts in it).
+    rate_windows: BTreeMap<String, (u64, u64)>,
 }
 
 impl State {
     fn tick(&mut self) -> u64 {
         self.clock += 1;
         FAKE_EPOCH_MS + self.clock * FAKE_TICK_MS
+    }
+
+    /// The fake clock without advancing it.
+    fn now_ms(&self) -> u64 {
+        FAKE_EPOCH_MS + self.clock * FAKE_TICK_MS
+    }
+
+    fn flow_info(&self, queue: &str) -> QueueFlowInfo {
+        let (version, flow) = self.queue_flows.get(queue).cloned().unwrap_or_default();
+        QueueFlowInfo {
+            queue: queue.to_owned(),
+            version,
+            flow,
+        }
+    }
+
+    /// Set a queue's paused flag (bumps the version only on a change).
+    fn set_queue_paused(&mut self, queue: String, paused: bool) -> PauseState {
+        let entry = self.queue_flows.entry(queue.clone()).or_default();
+        let changed = entry.1.paused != paused;
+        if changed {
+            entry.0 += 1;
+            entry.1.paused = paused;
+            self.tick();
+        }
+        PauseState {
+            name: queue,
+            paused,
+            changed,
+        }
+    }
+
+    /// D-W21 in the fake: a queue `rate_limit` admits `limit + burst` starts per
+    /// fixed `period_ms` window of the fake clock; excess answers RateLimited.
+    fn charge_rate_limit(&mut self, queue: &str) -> Result<(), ApiError> {
+        let Some(r) = self
+            .queue_flows
+            .get(queue)
+            .and_then(|(_, f)| f.rate_limit.clone())
+        else {
+            return Ok(());
+        };
+        let now = self.now_ms();
+        let window = now / r.period_ms;
+        let allowed = u64::from(r.limit) + u64::from(r.burst);
+        let w = self
+            .rate_windows
+            .entry(queue.to_owned())
+            .or_insert((window, 0));
+        if w.0 != window {
+            *w = (window, 0);
+        }
+        if w.1 >= allowed {
+            let retry_after_ms = (window + 1) * r.period_ms - now;
+            return Err(ApiError::rate_limited(
+                format!("queue {queue} is rate limited"),
+                retry_after_ms,
+            ));
+        }
+        w.1 += 1;
+        Ok(())
     }
 
     fn run(&self, run_id: &str) -> Result<&RunInfo, ApiError> {
@@ -173,6 +250,21 @@ pub const FAKE_PRESIGN_VALID_SIG: &str = "valid";
 /// Body of a successful fake presigned GET.
 pub const FAKE_OBJECT_BODY: &[u8] = b"fake-object-body";
 
+/// PEM client certificate the fake's [`ControlPlane::join_worker`] returns.
+pub const FAKE_CLIENT_CERT_PEM: &str =
+    "-----BEGIN CERTIFICATE-----\nZmFrZS1jbGllbnQ=\n-----END CERTIFICATE-----\n";
+/// PEM CA certificate the fake's [`ControlPlane::join_worker`] returns.
+pub const FAKE_CA_CERT_PEM: &str =
+    "-----BEGIN CERTIFICATE-----\nZmFrZS1jYQ==\n-----END CERTIFICATE-----\n";
+/// Cluster id of the fake.
+pub const FAKE_CLUSTER_ID: &str = "fake-cluster";
+/// Cluster endpoint the fake's join answer lists.
+pub const FAKE_CLUSTER_ENDPOINT: &str = "127.0.0.1:7701";
+/// Default join-token lifetime of the fake (24 h, as `[workers] join_token_ttl`).
+pub const FAKE_JOIN_TOKEN_TTL_MS: u64 = 24 * 3_600_000;
+/// Renewal delay the fake's join answer carries (2/3 of 24 h).
+pub const FAKE_RENEW_AFTER_MS: u64 = 16 * 3_600_000;
+
 /// In-memory control plane.
 pub struct FakeControlPlane {
     state: Mutex<State>,
@@ -208,6 +300,26 @@ impl FakeControlPlane {
     /// Test helper: the last request [`ControlPlane::presigned_object`] received.
     pub fn last_presigned_object(&self) -> Option<PresignedObjectRequest> {
         self.lock().last_presign.clone()
+    }
+
+    /// Test helper (07-11): register a connected worker for `list_workers` /
+    /// `drain_worker` / `queue_demand`.
+    pub fn add_worker(&self, w: WorkerInfo) {
+        self.lock().workers.insert(w.worker_id.clone(), w);
+    }
+
+    /// Test helper (07-11): the stored secret of a join token (never returned by a
+    /// list).
+    pub fn worker_token_secret(&self, token_id: &str) -> Option<String> {
+        self.lock()
+            .worker_tokens
+            .get(token_id)
+            .map(|(_, s)| s.clone())
+    }
+
+    /// Test helper (07-11): whether a run is paused, and its pause detail.
+    pub fn run_pause(&self, run_id: &str) -> Option<Option<String>> {
+        self.lock().paused_runs.get(run_id).cloned()
     }
 
     /// Flip what [`ControlPlane::ready`] reports.
@@ -586,6 +698,7 @@ impl ControlPlane for FakeControlPlane {
             .or(wp.and_then(|p| p.schedule_to_start_ms))
             .or(qp.and_then(|p| p.schedule_to_start_ms))
             .filter(|v| *v > 0);
+        st.charge_rate_limit(&queue)?;
         let now = st.tick();
         st.next_run += 1;
         let run_id = format!("run-{:06}", st.next_run);
@@ -1110,6 +1223,273 @@ impl ControlPlane for FakeControlPlane {
                 body: Vec::new(),
                 content_type: None,
             },
+        })
+    }
+
+    // --- Phase 7 (07-11).
+
+    async fn get_queue_flow(&self, queue: String) -> Result<QueueFlowInfo, ApiError> {
+        crate::phase7::require_name("queue name", &queue)?;
+        Ok(self.lock().flow_info(&queue))
+    }
+
+    async fn put_queue_flow(
+        &self,
+        queue: String,
+        flow: QueueFlow,
+        expected_version: Option<u64>,
+    ) -> Result<QueueFlowInfo, ApiError> {
+        crate::phase7::require_name("queue name", &queue)?;
+        flow.validate()?;
+        let mut st = self.lock();
+        let current = st.queue_flows.get(&queue).map_or(0, |(v, _)| *v);
+        if let Some(expected) = expected_version
+            && expected != current
+        {
+            return Err(ApiError::precondition_failed(format!(
+                "queue {queue} flow is at version {current}, not {expected}"
+            ))
+            .with_details(serde_json::json!({ "current_version": current })));
+        }
+        st.tick();
+        st.queue_flows.insert(queue.clone(), (current + 1, flow));
+        Ok(st.flow_info(&queue))
+    }
+
+    async fn pause_queue(&self, queue: String) -> Result<PauseState, ApiError> {
+        crate::phase7::require_name("queue name", &queue)?;
+        Ok(self.lock().set_queue_paused(queue, true))
+    }
+
+    async fn resume_queue(&self, queue: String) -> Result<PauseState, ApiError> {
+        crate::phase7::require_name("queue name", &queue)?;
+        Ok(self.lock().set_queue_paused(queue, false))
+    }
+
+    async fn pause_workflow(&self, workflow: String) -> Result<PauseState, ApiError> {
+        let mut st = self.lock();
+        if !st.workflows.contains_key(&workflow) {
+            return Err(ApiError::not_found(format!(
+                "workflow {workflow} not found"
+            )));
+        }
+        let changed = st.paused_workflows.insert(workflow.clone());
+        if changed {
+            st.tick();
+        }
+        Ok(PauseState {
+            name: workflow,
+            paused: true,
+            changed,
+        })
+    }
+
+    async fn resume_workflow(&self, workflow: String) -> Result<PauseState, ApiError> {
+        let mut st = self.lock();
+        if !st.workflows.contains_key(&workflow) {
+            return Err(ApiError::not_found(format!(
+                "workflow {workflow} not found"
+            )));
+        }
+        let changed = st.paused_workflows.remove(&workflow);
+        if changed {
+            st.tick();
+        }
+        Ok(PauseState {
+            name: workflow,
+            paused: false,
+            changed,
+        })
+    }
+
+    async fn pause_run(
+        &self,
+        run_id: String,
+        detail: Option<String>,
+    ) -> Result<RunPauseState, ApiError> {
+        PauseRunRequest {
+            detail: detail.clone(),
+        }
+        .validate()?;
+        let mut st = self.lock();
+        let status = st.run(&run_id)?.status;
+        if status.is_terminal() {
+            return Err(ApiError::run_terminal(&run_id, status));
+        }
+        let changed = !st.paused_runs.contains_key(&run_id);
+        if changed {
+            let now = st.tick();
+            st.paused_runs.insert(run_id.clone(), detail.clone());
+            st.push_event(
+                &run_id,
+                now,
+                "RunPaused",
+                serde_json::json!({ "detail": detail }),
+            );
+        }
+        Ok(RunPauseState {
+            run_id,
+            paused: true,
+            changed,
+        })
+    }
+
+    async fn resume_run(&self, run_id: String) -> Result<RunPauseState, ApiError> {
+        let mut st = self.lock();
+        let status = st.run(&run_id)?.status;
+        if status.is_terminal() {
+            return Err(ApiError::run_terminal(&run_id, status));
+        }
+        let changed = st.paused_runs.remove(&run_id).is_some();
+        if changed {
+            let now = st.tick();
+            st.push_event(&run_id, now, "RunResumed", serde_json::json!({}));
+        }
+        Ok(RunPauseState {
+            run_id,
+            paused: false,
+            changed,
+        })
+    }
+
+    /// Demand from the fake's own state: backlog = Ready runs of the queue that are
+    /// not paused; `workers` placement demands the backlog, `embedded` and `auto`
+    /// (the fake never spills) demand 0. Nothing runs on fake workers.
+    async fn queue_demand(&self, queue: String) -> Result<DemandSnapshot, ApiError> {
+        crate::phase7::require_name("queue name", &queue)?;
+        let st = self.lock();
+        let flow = st.flow_info(&queue).flow;
+        let placement = flow.placement.unwrap_or(Placement::Embedded);
+        let backlog = if flow.paused {
+            0
+        } else {
+            st.runs
+                .values()
+                .filter(|r| {
+                    r.queue == queue
+                        && r.status == RunStatus::Ready
+                        && !st.paused_runs.contains_key(&r.run_id)
+                        && !st.paused_workflows.contains(&r.workflow)
+                })
+                .count() as u64
+        };
+        let demand = match placement {
+            Placement::Workers => backlog,
+            Placement::Embedded | Placement::Auto => 0,
+        };
+        let live = st.workers.values().filter(|w| !w.draining);
+        Ok(DemandSnapshot {
+            queue,
+            demand,
+            backlog,
+            running_on_workers: 0,
+            placement,
+            spilling: false,
+            workers: st.workers.len() as u64,
+            worker_slots_free: live.map(|w| u64::from(w.free_slots)).sum(),
+        })
+    }
+
+    async fn list_workers(&self) -> Result<Vec<WorkerInfo>, ApiError> {
+        Ok(self.lock().workers.values().cloned().collect())
+    }
+
+    async fn drain_worker(&self, worker_id: String) -> Result<DrainResult, ApiError> {
+        let mut st = self.lock();
+        let w = st
+            .workers
+            .get_mut(&worker_id)
+            .ok_or_else(|| ApiError::not_found(format!("worker {worker_id} not found")))?;
+        let already_draining = w.draining;
+        w.draining = true;
+        if !already_draining {
+            st.tick();
+        }
+        Ok(DrainResult {
+            worker_id,
+            already_draining,
+        })
+    }
+
+    /// Token `wkr_<nnnnnn>.<32 hex>` (deterministic); the fake stores the secret in
+    /// plaintext (the real server stores its sha256).
+    async fn create_worker_token(
+        &self,
+        req: CreateWorkerTokenRequest,
+    ) -> Result<WorkerTokenCreated, ApiError> {
+        req.validate()?;
+        let mut st = self.lock();
+        let now = st.tick();
+        st.next_worker_token += 1;
+        let token_id = format!("{WORKER_TOKEN_PREFIX}{:06}", st.next_worker_token);
+        let secret =
+            sha256_hex(format!("fake-worker-token-{token_id}").as_bytes())[..32].to_owned();
+        let token = format!("{token_id}.{secret}");
+        let expires_at_ms = now.saturating_add(req.ttl_ms.unwrap_or(FAKE_JOIN_TOKEN_TTL_MS));
+        st.worker_tokens.insert(
+            token_id.clone(),
+            (
+                WorkerTokenInfo {
+                    token_id: token_id.clone(),
+                    created_at_ms: now,
+                    expires_at_ms: Some(expires_at_ms),
+                },
+                secret,
+            ),
+        );
+        let join_command = format!(
+            "ostro worker --join http://127.0.0.1:7700 --token {token} --ca-hash sha256:{}",
+            sha256_hex(FAKE_CA_CERT_PEM.as_bytes())
+        );
+        Ok(WorkerTokenCreated {
+            token_id,
+            token,
+            join_command,
+            expires_at_ms,
+        })
+    }
+
+    async fn list_worker_tokens(&self) -> Result<Vec<WorkerTokenInfo>, ApiError> {
+        Ok(self
+            .lock()
+            .worker_tokens
+            .values()
+            .map(|(info, _)| info.clone())
+            .collect())
+    }
+
+    async fn revoke_worker_token(&self, token_id: String) -> Result<(), ApiError> {
+        let mut st = self.lock();
+        if st.worker_tokens.remove(&token_id).is_none() {
+            return Err(ApiError::not_found(format!(
+                "worker token {token_id} not found"
+            )));
+        }
+        st.tick();
+        Ok(())
+    }
+
+    /// Accepts a live token (fake clock before expiry) and answers fixed PEMs.
+    /// Unknown, revoked and expired tokens are one indistinguishable InvalidArgument
+    /// (`details.reason = join_token_invalid`); the message never echoes the token.
+    async fn join_worker(&self, req: JoinRequest) -> Result<JoinResponse, ApiError> {
+        req.validate()?;
+        let st = self.lock();
+        let invalid = || {
+            ApiError::invalid_argument("join token is invalid, revoked or expired")
+                .with_details(serde_json::json!({ "reason": REASON_JOIN_TOKEN_INVALID }))
+        };
+        let (id, secret) = req.token.split_once('.').ok_or_else(invalid)?;
+        let (info, stored) = st.worker_tokens.get(id).ok_or_else(invalid)?;
+        if stored != secret || info.expires_at_ms.is_some_and(|e| st.now_ms() >= e) {
+            return Err(invalid());
+        }
+        Ok(JoinResponse {
+            client_cert_pem: FAKE_CLIENT_CERT_PEM.to_owned(),
+            ca_cert_pem: FAKE_CA_CERT_PEM.to_owned(),
+            endpoints: vec![FAKE_CLUSTER_ENDPOINT.to_owned()],
+            renew_after_ms: FAKE_RENEW_AFTER_MS,
+            cluster_id: FAKE_CLUSTER_ID.to_owned(),
         })
     }
 }

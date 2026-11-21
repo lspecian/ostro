@@ -1,0 +1,103 @@
+// Worker administration and join (Phase 7, 07-11; WORK-01, WORK-05): service Workers.
+//
+// REST mirrors: GET /v1/workers, POST /v1/workers/{id}/drain,
+// POST|GET /v1/workers/tokens, DELETE /v1/workers/tokens/{id},
+// POST /v1/workers/join.
+//
+// Join-token secrets are returned exactly once (WorkerTokenCreated.token) and
+// never by a list; the worker's private key never leaves the worker (the join
+// request carries a CSR). These messages' Debug output redacts the secrets.
+syntax = "proto3";
+
+package ostro.api.v1;
+
+service Workers {
+  // Workers connected to this node.
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+  // Stop assigning work to a worker and let it finish (idempotent).
+  rpc DrainWorker(DrainWorkerRequest) returns (DrainWorkerResponse);
+  // Create a worker join token; the secret is in this response only.
+  rpc CreateWorkerToken(CreateWorkerTokenRequest) returns (WorkerTokenCreated);
+  // Join tokens without their secrets.
+  rpc ListWorkerTokens(ListWorkerTokensRequest) returns (ListWorkerTokensResponse);
+  // Delete a join token: join and renewal are refused, its sessions are closed.
+  rpc RevokeWorkerToken(RevokeWorkerTokenRequest) returns (RevokeWorkerTokenResponse);
+  // Exchange a join token and a CSR for a client certificate.
+  rpc JoinWorker(JoinWorkerRequest) returns (JoinWorkerResponse);
+}
+
+message WorkerInfo {
+  string worker_id = 1;
+  map<string, string> labels = 2;
+  uint32 slots = 3;
+  uint32 free_slots = 4;
+  uint32 leases = 5;
+  uint64 connected_at_ms = 6;
+  uint64 node_id = 7;
+  bool draining = 8;
+}
+
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated WorkerInfo workers = 1;
+}
+
+message DrainWorkerRequest {
+  string worker_id = 1;
+}
+
+message DrainWorkerResponse {
+  string worker_id = 1;
+  // True when the worker was already draining.
+  bool already_draining = 2;
+}
+
+message CreateWorkerTokenRequest {
+  // Token lifetime; unset = [workers] join_token_ttl.
+  optional uint64 ttl_ms = 1;
+}
+
+message WorkerTokenCreated {
+  string token_id = 1;
+  // `wkr_<id>.<secret>`: shown once, never stored in plaintext.
+  string token = 2;
+  // A ready-to-run `ostro worker --join ... --token ... --ca-hash ...` line.
+  string join_command = 3;
+  uint64 expires_at_ms = 4;
+}
+
+message ListWorkerTokensRequest {}
+
+message WorkerTokenInfo {
+  string token_id = 1;
+  uint64 created_at_ms = 2;
+  optional uint64 expires_at_ms = 3;
+}
+
+message ListWorkerTokensResponse {
+  repeated WorkerTokenInfo tokens = 1;
+}
+
+message RevokeWorkerTokenRequest {
+  string token_id = 1;
+}
+
+message RevokeWorkerTokenResponse {}
+
+message JoinWorkerRequest {
+  string token = 1;
+  // PEM PKCS#10 CSR of a key generated in the worker's memory.
+  string csr_pem = 2;
+  string worker_id = 3;
+  map<string, string> labels = 4;
+}
+
+message JoinWorkerResponse {
+  string client_cert_pem = 1;
+  string ca_cert_pem = 2;
+  // Cluster listener endpoints (host:port).
+  repeated string endpoints = 3;
+  uint64 renew_after_ms = 4;
+  string cluster_id = 5;
+}

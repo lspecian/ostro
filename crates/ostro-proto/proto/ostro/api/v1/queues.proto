@@ -1,0 +1,125 @@
+// Queue flow control, placement and pause (Phase 7, 07-11; OPS-01, DISP-03/04/05,
+// WORK-05): service Queues.
+//
+// REST mirrors: GET|PUT /v1/queues/{name}/flow, POST /v1/queues/{name}/pause,
+// POST /v1/queues/{name}/resume, GET /v1/queues/{name}/demand.
+//
+// The flow fields are stored in the queue's meta QueuePolicy (Phase 7 F2 fields);
+// the Phase 5 run-policy fields of the same record stay with
+// Workflows.SetQueuePolicy / GetQueuePolicy.
+syntax = "proto3";
+
+package ostro.api.v1;
+
+service Queues {
+  // A queue's flow configuration and its record version (0 = never stored).
+  rpc GetQueueFlow(GetQueueFlowRequest) returns (QueueFlowInfo);
+  // Replace a queue's flow configuration (CAS on expected_version when set).
+  rpc PutQueueFlow(PutQueueFlowRequest) returns (QueueFlowInfo);
+  // Stop granting new activations for the queue (idempotent).
+  rpc PauseQueue(PauseQueueRequest) returns (QueuePauseState);
+  // Resume granting activations for the queue (idempotent).
+  rpc ResumeQueue(ResumeQueueRequest) returns (QueuePauseState);
+  // Worker demand of the queue (KEDA scaling signal, D-W12).
+  rpc GetQueueDemand(GetQueueDemandRequest) returns (QueueDemand);
+}
+
+// Where a queue's runs execute. UNSPECIFIED = the server default.
+enum Placement {
+  PLACEMENT_UNSPECIFIED = 0;
+  PLACEMENT_EMBEDDED = 1;
+  PLACEMENT_WORKERS = 2;
+  PLACEMENT_AUTO = 3;
+}
+
+// What happens when a run exhausts its retries. UNSPECIFIED = the server default.
+enum ExhaustAction {
+  EXHAUST_ACTION_UNSPECIFIED = 0;
+  EXHAUST_ACTION_FAIL = 1;
+  EXHAUST_ACTION_PAUSE = 2;
+}
+
+// `limit` events per `period_ms` (> 0), with `burst` extra tokens.
+message RateSpec {
+  uint32 limit = 1;
+  uint64 period_ms = 2;
+  uint32 burst = 3;
+}
+
+// Auto-placement spill thresholds. Percentages are 0..=100.
+message SpillPolicy {
+  uint32 cpu_pct = 1;
+  uint32 slots_pct = 2;
+  uint32 mem_pct = 3;
+  uint64 lag_ms = 4;
+  uint64 sustain_ms = 5;
+  uint64 cooldown_ms = 6;
+  uint32 hysteresis_pct = 7;
+}
+
+// A queue's flow configuration. Absent fields = no limit / the server default.
+message QueueFlow {
+  Placement placement = 1;
+  // Worker label selector requirements (ANDed), at most 32 entries of at most
+  // 128 bytes: k=v, k==v, k!=v, k in (a,b), k notin (a,b), k, !k.
+  repeated string selector = 2;
+  SpillPolicy spill = 3;
+  optional uint32 concurrency = 4;
+  optional uint32 weight = 5;
+  optional uint32 key_concurrency = 6;
+  RateSpec throttle = 7;
+  RateSpec key_throttle = 8;
+  RateSpec rate_limit = 9;
+  RateSpec key_rate_limit = 10;
+  ExhaustAction on_retries_exhausted = 11;
+  bool paused = 12;
+}
+
+message QueueFlowInfo {
+  string queue = 1;
+  // Meta record version; 0 = no policy stored yet.
+  uint64 version = 2;
+  QueueFlow flow = 3;
+}
+
+message GetQueueFlowRequest {
+  string name = 1;
+}
+
+message PutQueueFlowRequest {
+  string name = 1;
+  QueueFlow flow = 2;
+  // CAS: the version the caller read (stale = FAILED_PRECONDITION).
+  optional uint64 expected_version = 3;
+}
+
+message PauseQueueRequest {
+  string name = 1;
+}
+
+message ResumeQueueRequest {
+  string name = 1;
+}
+
+message QueuePauseState {
+  string queue = 1;
+  bool paused = 2;
+  // False when the queue already was in the requested state.
+  bool changed = 3;
+}
+
+message GetQueueDemandRequest {
+  string name = 1;
+}
+
+// demand = running_on_workers + admissible backlog for workers (D-W12).
+message QueueDemand {
+  string queue = 1;
+  uint64 demand = 2;
+  uint64 backlog = 3;
+  uint64 running_on_workers = 4;
+  Placement placement = 5;
+  bool spilling = 6;
+  uint64 workers = 7;
+  uint64 worker_slots_free = 8;
+}

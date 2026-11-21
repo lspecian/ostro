@@ -10,6 +10,7 @@ pub mod error;
 pub mod fake;
 pub mod grpc;
 mod openapi;
+pub mod phase7;
 pub mod phase8;
 pub mod rest;
 

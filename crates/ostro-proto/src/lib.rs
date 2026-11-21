@@ -13,12 +13,36 @@ pub mod health {
 /// Services `Modules`, `Workflows`, `Runs` and `Tokens` (await-token
 /// completion, Phase 5) mirror the REST operations one-to-one, as do the Phase 8
 /// services `Schedules`, `RunLogs` (`schedules.proto`) and `Webhooks` (`webhooks.proto`)
-/// and the Phase 6 services `Secrets` and `Connectors` (`bridge.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
+/// and the Phase 6 services `Secrets` and `Connectors` (`bridge.proto`), and the Phase 7
+/// services `Queues` (`queues.proto`) and `Workers` (`workers.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
 /// `*_json`; timestamps are Unix milliseconds in `*_at_ms` fields.
 pub mod api {
     /// Version 1 of the control-plane API.
     pub mod v1 {
         tonic::include_proto!("ostro.api.v1");
+
+        // Phase 7 (07-11): join-token secrets never reach `Debug` output (D-W3).
+        impl std::fmt::Debug for WorkerTokenCreated {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("WorkerTokenCreated")
+                    .field("token_id", &self.token_id)
+                    .field("token", &"<redacted>")
+                    .field("join_command", &"<redacted>")
+                    .field("expires_at_ms", &self.expires_at_ms)
+                    .finish()
+            }
+        }
+
+        impl std::fmt::Debug for JoinWorkerRequest {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("JoinWorkerRequest")
+                    .field("token", &"<redacted>")
+                    .field("csr_pem", &self.csr_pem)
+                    .field("worker_id", &self.worker_id)
+                    .field("labels", &self.labels)
+                    .finish()
+            }
+        }
     }
 }
 
@@ -249,6 +273,81 @@ mod tests {
         assert!(name::<WebhooksServer<()>>().contains("WebhooksServer"));
         assert!(name::<RunLogsClient<tonic::transport::Channel>>().contains("RunLogsClient"));
         assert!(name::<RunLogsServer<()>>().contains("RunLogsServer"));
+    }
+
+    #[test]
+    fn phase7_messages_roundtrip_and_redaction() {
+        use super::api::v1::{
+            ExhaustAction, JoinWorkerRequest, PauseRunRequest, Placement, PutQueueFlowRequest,
+            QueueFlow, RateSpec, WorkerTokenCreated, queues_client::QueuesClient,
+            queues_server::QueuesServer, workers_client::WorkersClient,
+            workers_server::WorkersServer,
+        };
+        assert_eq!(Placement::Unspecified as i32, 0);
+        assert_eq!(Placement::Embedded as i32, 1);
+        assert_eq!(Placement::Workers as i32, 2);
+        assert_eq!(Placement::Auto as i32, 3);
+        assert_eq!(ExhaustAction::Unspecified as i32, 0);
+        assert_eq!(ExhaustAction::Fail as i32, 1);
+        assert_eq!(ExhaustAction::Pause as i32, 2);
+
+        let put = PutQueueFlowRequest {
+            name: "q".into(),
+            flow: Some(QueueFlow {
+                placement: Placement::Auto as i32,
+                selector: vec!["gpu=true".into()],
+                concurrency: Some(0),
+                throttle: Some(RateSpec {
+                    limit: 10,
+                    period_ms: 1_000,
+                    burst: 2,
+                }),
+                ..Default::default()
+            }),
+            expected_version: Some(0),
+        };
+        let back = PutQueueFlowRequest::decode(put.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(back, put);
+        assert_eq!(back.flow.as_ref().and_then(|f| f.concurrency), Some(0));
+        assert_eq!(back.expected_version, Some(0));
+        let p = PauseRunRequest {
+            run_id: "r".into(),
+            detail: Some(String::new()),
+        };
+        assert_eq!(
+            PauseRunRequest::decode(p.encode_to_vec().as_slice()).expect("decode"),
+            p
+        );
+
+        // Secrets are redacted from Debug.
+        let created = WorkerTokenCreated {
+            token_id: "wkr_abc".into(),
+            token: "wkr_abc.s3cr3t-canary".into(),
+            join_command: "ostro worker --token wkr_abc.s3cr3t-canary".into(),
+            expires_at_ms: 1,
+        };
+        let join = JoinWorkerRequest {
+            token: "wkr_abc.s3cr3t-canary".into(),
+            csr_pem: "csr".into(),
+            worker_id: "w1".into(),
+            labels: [("gpu".to_owned(), "true".to_owned())].into(),
+        };
+        for dbg in [format!("{created:?}"), format!("{join:?}")] {
+            assert!(!dbg.contains("s3cr3t-canary"), "{dbg}");
+            assert!(dbg.contains("<redacted>"), "{dbg}");
+        }
+        assert_eq!(
+            JoinWorkerRequest::decode(join.encode_to_vec().as_slice()).expect("decode"),
+            join
+        );
+
+        fn name<T: ?Sized>() -> &'static str {
+            std::any::type_name::<T>()
+        }
+        assert!(name::<QueuesClient<tonic::transport::Channel>>().contains("QueuesClient"));
+        assert!(name::<QueuesServer<()>>().contains("QueuesServer"));
+        assert!(name::<WorkersClient<tonic::transport::Channel>>().contains("WorkersClient"));
+        assert!(name::<WorkersServer<()>>().contains("WorkersServer"));
     }
 
     #[test]

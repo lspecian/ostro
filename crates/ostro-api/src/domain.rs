@@ -5,6 +5,11 @@
 //! or schema derives on purpose: wire DTOs live with their transport.
 
 use crate::error::ApiError;
+use crate::phase7::{
+    CreateWorkerTokenRequest, DemandSnapshot, DrainResult, JoinRequest, JoinResponse, P7_PENDING,
+    PauseState, QueueFlow, QueueFlowInfo, RunPauseState, WorkerInfo, WorkerTokenCreated,
+    WorkerTokenInfo,
+};
 
 /// The one interface every API adapter calls.
 #[async_trait::async_trait]
@@ -179,6 +184,101 @@ pub trait ControlPlane: Send + Sync + 'static {
     ) -> Result<PresignedObjectResponse, ApiError> {
         let _ = req;
         Err(ApiError::unimplemented("presigned_object"))
+    }
+
+    // --- Phase 7 (07-11): queue flow, pause/resume, demand, workers, join tokens, join.
+    // Default bodies answer Unavailable ([`P7_PENDING`], P-16) so a control plane
+    // compiles before it implements them (ostro-server: 07-14). The argument and result
+    // types are the [`crate::phase7`] wire types; implementations call
+    // [`QueueFlow::validate`], [`crate::phase7::PauseRunRequest::validate`],
+    // [`CreateWorkerTokenRequest::validate`] and [`JoinRequest::validate`].
+
+    /// A queue's flow configuration (defaults and version 0 when never stored).
+    async fn get_queue_flow(&self, queue: String) -> Result<QueueFlowInfo, ApiError> {
+        let _ = queue;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Replace a queue's flow fields (the Phase 5 run-policy fields are untouched).
+    /// `expected_version`: CAS on the record version; stale = PreconditionFailed.
+    async fn put_queue_flow(
+        &self,
+        queue: String,
+        flow: QueueFlow,
+        expected_version: Option<u64>,
+    ) -> Result<QueueFlowInfo, ApiError> {
+        let _ = (queue, flow, expected_version);
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Pause a queue (idempotent).
+    async fn pause_queue(&self, queue: String) -> Result<PauseState, ApiError> {
+        let _ = queue;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Resume a queue (idempotent).
+    async fn resume_queue(&self, queue: String) -> Result<PauseState, ApiError> {
+        let _ = queue;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Pause a workflow's runs (idempotent).
+    async fn pause_workflow(&self, workflow: String) -> Result<PauseState, ApiError> {
+        let _ = workflow;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Resume a workflow's runs (idempotent).
+    async fn resume_workflow(&self, workflow: String) -> Result<PauseState, ApiError> {
+        let _ = workflow;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Pause one run (idempotent): unknown = NotFound, terminal = Conflict
+    /// (`run_terminal`).
+    async fn pause_run(
+        &self,
+        run_id: String,
+        detail: Option<String>,
+    ) -> Result<RunPauseState, ApiError> {
+        let _ = (run_id, detail);
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Resume a paused run (idempotent).
+    async fn resume_run(&self, run_id: String) -> Result<RunPauseState, ApiError> {
+        let _ = run_id;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// A queue's worker demand (D-W12).
+    async fn queue_demand(&self, queue: String) -> Result<DemandSnapshot, ApiError> {
+        let _ = queue;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Connected workers, sorted by id.
+    async fn list_workers(&self) -> Result<Vec<WorkerInfo>, ApiError> {
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Drain a worker (idempotent); unknown = NotFound.
+    async fn drain_worker(&self, worker_id: String) -> Result<DrainResult, ApiError> {
+        let _ = worker_id;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Create a worker join token; the secret is returned here only.
+    async fn create_worker_token(
+        &self,
+        req: CreateWorkerTokenRequest,
+    ) -> Result<WorkerTokenCreated, ApiError> {
+        let _ = req;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Join tokens without secrets, sorted by id.
+    async fn list_worker_tokens(&self) -> Result<Vec<WorkerTokenInfo>, ApiError> {
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Delete a join token; unknown = NotFound.
+    async fn revoke_worker_token(&self, token_id: String) -> Result<(), ApiError> {
+        let _ = token_id;
+        Err(ApiError::unavailable(P7_PENDING))
+    }
+    /// Exchange a join token and a CSR for a client certificate.
+    async fn join_worker(&self, req: JoinRequest) -> Result<JoinResponse, ApiError> {
+        let _ = req;
+        Err(ApiError::unavailable(P7_PENDING))
     }
 }
 

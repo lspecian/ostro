@@ -13,12 +13,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/ostro/api/v1/webhooks.proto",
         // Phase 6 (06-08): Secrets + Connectors (bridge administration).
         "proto/ostro/api/v1/bridge.proto",
+        // Phase 7 (07-11): Queues (flow, pause, demand) + Workers (admin, join).
+        "proto/ostro/api/v1/queues.proto",
+        "proto/ostro/api/v1/workers.proto",
     ];
     for proto in PROTOS {
         println!("cargo:rerun-if-changed={proto}");
     }
     println!("cargo:rerun-if-changed=proto");
     let fds = protox::compile(PROTOS, ["proto/"])?;
-    tonic_prost_build::configure().compile_fds(fds)?;
+    // Phase 7 (07-11): messages carrying a join-token secret get a hand-written,
+    // redacting `Debug` in src/lib.rs (D-W3: secrets never reach logs).
+    tonic_prost_build::configure()
+        .skip_debug([
+            ".ostro.api.v1.WorkerTokenCreated",
+            ".ostro.api.v1.JoinWorkerRequest",
+        ])
+        .compile_fds(fds)?;
     Ok(())
 }
