@@ -12,6 +12,11 @@
 //!   more (exit).
 //! - `selectors`: a `gpu=true` queue runs only on the labelled worker; without it the
 //!   backlog shows up as demand and nothing runs anywhere else.
+//! - `kill_redispatch`: `kill -9` of a worker holding leases re-dispatches every affected
+//!   run on the other worker in well under `lease_ttl`; every run completes once.
+//! - `sigstop_zombie` (`--features failpoints`): a SIGSTOPped worker is revoked after
+//!   `lease_ttl`; its runs complete elsewhere as attempt n+1 with one charge per key; after
+//!   SIGCONT its late appends / StartEffects change nothing.
 //!
 //! # Signals and metric sources
 //!
@@ -42,6 +47,7 @@ mod p7;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use common::events_of;
 use p7::{P7_T, P7Api, P7Cluster, P7Opts, P7Proc, WorkerOpts};
 use serde_json::{Value, json};
 
@@ -102,7 +108,6 @@ struct Act {
     #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
     idx: usize,
     run: String,
-    #[allow(dead_code)]
     attempt: u32,
     worker: String,
 }
@@ -248,6 +253,11 @@ where
         assert!(Instant::now() < deadline, "timed out waiting for: {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn median(mut v: Vec<Duration>) -> Duration {
+    v.sort();
+    v.get(v.len() / 2).copied().unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------
@@ -759,4 +769,434 @@ async fn selectors() {
         t0.elapsed()
     );
     drop((gpu2, plain));
+}
+
+// ---------------------------------------------------------------------------------
+// kill_redispatch
+// ---------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn kill_redispatch() {
+    let _serial = SERIAL.lock().await;
+    let t0 = Instant::now();
+    let lease_ttl = Duration::from_secs(5);
+    let c = P7Cluster::start(P7Opts {
+        lease_ttl: Some(lease_ttl),
+        hot_wait: Some(Duration::from_secs(30)),
+        env: info_env(),
+        ..P7Opts::default()
+    })
+    .await;
+    // A joins alone and fills its 10 slots; B joins for the rest (and the failover).
+    let mut a = c.spawn_worker(WorkerOpts::new("kill-a", 10));
+    c.wait_workers(1).await;
+    c.api.deploy("timeouts").await;
+    c.api
+        .set_flow("long", json!({"placement": "workers"}))
+        .await;
+
+    let mut ids = Vec::new();
+    for _ in 0..20 {
+        ids.push(
+            c.api
+                .start(
+                    "timeouts",
+                    json!({"input": {"mode": "sleep_ms", "n": 8000}, "queue": "long"}),
+                )
+                .await,
+        );
+    }
+    let set: BTreeSet<String> = ids.iter().cloned().collect();
+    until(P7_T, "kill-a holds 10 runs", || async {
+        let on_a: BTreeSet<String> = activations(&lines(c.server()))
+            .into_iter()
+            .filter(|x| x.worker == "kill-a")
+            .map(|x| x.run)
+            .collect();
+        on_a.len() >= 10
+    })
+    .await;
+    let b = c.spawn_worker(WorkerOpts::new("kill-b", 30));
+    c.wait_workers(2).await;
+    // Every run activated, some on A (A holds leases).
+    let deadline = Instant::now() + P7_T;
+    loop {
+        let acts = activations(&lines(c.server()));
+        let runs: BTreeSet<&str> = acts.iter().map(|x| x.run.as_str()).collect();
+        if set.iter().all(|r| runs.contains(r.as_str()))
+            && acts.iter().any(|x| x.worker == "kill-a")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "not all 20 activated (some on kill-a): {} runs, {acts:?}\nworkers {:?}\ndemand {}\n{}",
+            runs.len(),
+            c.api.workers().await,
+            c.api.demand("long").await,
+            lines(c.server()).join("\n")
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let ws = c.api.workers().await;
+    let a_leases = ws
+        .iter()
+        .find(|w| w["worker_id"] == "kill-a")
+        .and_then(|w| w["leases"].as_u64())
+        .unwrap_or(0);
+    assert!(a_leases > 0, "kill-a holds no lease: {ws:?}");
+    // The runs whose latest activation is on A are the affected ones.
+    let before = activations(&lines(c.server()));
+    let mut last: BTreeMap<String, Act> = BTreeMap::new();
+    for x in &before {
+        last.insert(x.run.clone(), x.clone());
+    }
+    let affected: BTreeMap<String, u32> = last
+        .values()
+        .filter(|x| x.worker == "kill-a")
+        .map(|x| (x.run.clone(), x.attempt))
+        .collect();
+    assert!(!affected.is_empty());
+
+    let t_kill = Instant::now();
+    a.kill9();
+    // Watch for the re-dispatch of every affected run (10 ms polling).
+    let mut seen: BTreeMap<String, (Duration, u32, String)> = BTreeMap::new();
+    let deadline = t_kill + P7_T;
+    while seen.len() < affected.len() {
+        let now = t_kill.elapsed();
+        for x in activations(&lines(c.server())) {
+            if let Some(&n) = affected.get(&x.run)
+                && x.attempt > n
+            {
+                seen.entry(x.run.clone())
+                    .or_insert((now, x.attempt, x.worker.clone()));
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "not every affected run was re-dispatched: {} of {}",
+            seen.len(),
+            affected.len()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let lat: Vec<Duration> = seen.values().map(|v| v.0).collect();
+    let max = lat.iter().copied().max().unwrap_or_default();
+    let med = median(lat.clone());
+    for (run, (d, attempt, worker)) in &seen {
+        assert_eq!(worker, "kill-b", "{run} re-dispatched to {worker}");
+        assert!(*attempt == affected[run] + 1, "{run}: attempt {attempt}");
+        assert!(
+            *d < lease_ttl,
+            "{run} re-dispatched after {d:?} >= lease_ttl"
+        );
+    }
+
+    // Exactly once.
+    for id in &ids {
+        let r = c.api.wait_terminal(id, P7_T).await;
+        assert_eq!(r["status"], "completed", "{r}");
+        let h = c.api.history(id).await;
+        assert_eq!(events_of(&h, "run_completed").len(), 1, "{id}");
+        let terminal = h
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e["kind"].as_str(),
+                    Some("run_completed" | "run_failed" | "run_cancelled")
+                )
+            })
+            .count();
+        assert_eq!(terminal, 1, "{id}: one terminal event");
+        assert_eq!(
+            events_of(&h, "run_started").len(),
+            1,
+            "{id}: one RunStarted"
+        );
+    }
+    eprintln!(
+        "worker_failover::kill_redispatch: lease_ttl {lease_ttl:?}, kill-a held {a_leases} \
+         leases, {} affected runs re-dispatched to kill-b: max {max:?}, median {med:?}; \
+         20/20 completed once; total {:?}",
+        affected.len(),
+        t0.elapsed()
+    );
+    drop(b);
+}
+
+// ---------------------------------------------------------------------------------
+// sigstop_zombie
+// ---------------------------------------------------------------------------------
+
+/// SIGCONTs (and kills) a stopped worker however the test ends.
+#[cfg(feature = "failpoints")]
+struct ContGuard<'a>(&'a P7Proc);
+
+#[cfg(feature = "failpoints")]
+impl Drop for ContGuard<'_> {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill")
+            .arg("-CONT")
+            .arg(self.0.pid().to_string())
+            .status();
+    }
+}
+
+/// Event kinds of a history without per-attempt bookkeeping (`run_started` and lease /
+/// attempt markers), for the journal equality check.
+#[cfg(feature = "failpoints")]
+fn journal_kinds(h: &[Value]) -> Vec<String> {
+    h.iter()
+        .filter_map(|e| e["kind"].as_str())
+        .filter(|k| !matches!(*k, "run_started" | "attempt_failed" | "attempt_released"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigstop_zombie() {
+    use reqwest::StatusCode;
+
+    let _serial = SERIAL.lock().await;
+    let t0 = Instant::now();
+    let lease_ttl = Duration::from_secs(3);
+    let c = P7Cluster::start(P7Opts {
+        lease_ttl: Some(lease_ttl),
+        mock: true,
+        extra_toml: "[secrets]\nauto_sealing_key = true\n".into(),
+        env: vec![
+            ("RUST_LOG".into(), "info,ostro_server=debug".into()),
+            // The zombie keeps its stream up: no h2 keepalive drop while it is stopped.
+            ("OSTRO_WORKERS__KEEPALIVE".into(), "120s".into()),
+        ],
+        ..P7Opts::default()
+    })
+    .await;
+    let base = c.mock().base_url();
+
+    // pay-flow: secret, grant, egress.
+    let wasm = common::guest_wasm("pay-flow");
+    let sha = common::sha_hex(&wasm);
+    let r = c
+        .api
+        .http
+        .put(c.api.url(&format!("/v1/modules/{sha}?name=pay-flow")))
+        .header("content-type", "application/wasm")
+        .body(wasm)
+        .send()
+        .await
+        .expect("PUT module");
+    assert!(r.status().is_success(), "deploy pay-flow: {}", r.status());
+    for (path, body) in [
+        (
+            "/v1/secrets/pay_token".to_owned(),
+            json!({"value": "tok-07-18"}),
+        ),
+        (
+            "/v1/grants".to_owned(),
+            json!({"module": "pay-flow", "secret": "pay_token", "origins": [base], "body": false}),
+        ),
+        ("/v1/egress/pay-flow".to_owned(), json!({"allow": [base]})),
+    ] {
+        let (st, v) = c.api.put(&path, body).await;
+        assert_eq!(st, StatusCode::OK, "PUT {path}: {v}");
+    }
+    c.api.set_flow("pay", json!({"placement": "workers"})).await;
+
+    // Undisturbed baseline on a clean worker.
+    let mut clean = c.spawn_worker(WorkerOpts::new("zb-clean", 2));
+    c.wait_workers(1).await;
+    let baseline = c
+        .api
+        .start("pay-flow", json!({"input": {"url": base}, "queue": "pay"}))
+        .await;
+    let r = c.api.wait_terminal(&baseline, P7_T).await;
+    assert_eq!(r["status"], "completed", "baseline: {r}");
+    let baseline_kinds = journal_kinds(&c.api.history(&baseline).await);
+    let baseline_requests = c.mock().total_requests();
+    clean.sigterm();
+    assert!(clean.wait_exit(P7_T).success());
+    c.wait_workers(0).await;
+
+    // The zombie-to-be: the first append and every StartEffect pause 4 s (W4: a late
+    // append and a late StartEffect are forced once it is continued).
+    let fp_wait = 4_000;
+    let mut wa = WorkerOpts::new("z-a", 4);
+    wa.rust_log = Some("info,ostro_worker=debug".into());
+    wa.env.push((
+        "FAILPOINTS".into(),
+        format!(
+            "worker::before_append=1*return(wait:{fp_wait});\
+             worker::before_start_effect=return(wait:{fp_wait})"
+        ),
+    ));
+    let a = c.spawn_worker(wa);
+    c.wait_workers(1).await;
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        ids.push(
+            c.api
+                .start("pay-flow", json!({"input": {"url": base}, "queue": "pay"}))
+                .await,
+        );
+    }
+    let set: BTreeSet<String> = ids.iter().cloned().collect();
+    // All 4 on A; 3 got their EffectScheduled append applied (paused before StartEffect),
+    // one is paused before its first append.
+    until(
+        Duration::from_secs(30),
+        "4 activations on z-a, 3 applied",
+        || async {
+            let l = lines(c.server());
+            let on_a = activations(&l)
+                .iter()
+                .filter(|x| set.contains(&x.run) && x.worker == "z-a")
+                .count();
+            let ap: BTreeSet<String> = applied(&l)
+                .into_iter()
+                .filter(|(_, r, _)| set.contains(r))
+                .map(|(_, r, _)| r)
+                .collect();
+            on_a == 4 && ap.len() >= 3
+        },
+    )
+    .await;
+    let b = c.spawn_worker(WorkerOpts::new("z-b", 8));
+    c.wait_workers(2).await;
+    let t_stop = Instant::now();
+    a.sigstop();
+    let _cont = ContGuard(&a.proc);
+    assert_eq!(
+        c.mock().total_requests(),
+        baseline_requests,
+        "precondition: an effect was sent before SIGSTOP (raise fp_wait)"
+    );
+    let pre_l = lines(c.server());
+    let paused_before_append: BTreeSet<String> = {
+        let ap: BTreeSet<String> = applied(&pre_l).into_iter().map(|(_, r, _)| r).collect();
+        set.iter().filter(|r| !ap.contains(*r)).cloned().collect()
+    };
+
+    // Revoked after lease_ttl; re-granted n+1 on z-b; completed with one charge per key.
+    let mut regrant: BTreeMap<String, Duration> = BTreeMap::new();
+    let deadline = t_stop + P7_T;
+    while regrant.len() < ids.len() {
+        let now = t_stop.elapsed();
+        for x in activations(&lines(c.server())) {
+            if set.contains(&x.run) && x.attempt >= 2 {
+                assert_eq!(x.worker, "z-b", "re-granted to the zombie: {x:?}");
+                regrant.entry(x.run.clone()).or_insert(now);
+            }
+        }
+        assert!(Instant::now() < deadline, "not re-granted: {regrant:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut keys = BTreeMap::new();
+    for id in &ids {
+        let r = c.api.wait_terminal(id, P7_T).await;
+        assert_eq!(r["status"], "completed", "{r}");
+        assert_eq!(r["result"]["status"], 200, "{r}");
+        let key = r["result"]["idempotency_key"]
+            .as_str()
+            .expect("key")
+            .to_owned();
+        assert_eq!(c.mock().charges(&key), 1, "{id}: one charge");
+        keys.insert(key.clone(), c.mock().requests(&key));
+    }
+    let completed_at = t_stop.elapsed();
+
+    // Stay stopped until the failpoint waits have expired, so on SIGCONT the late append /
+    // StartEffects are due at once (racing the queued Cancel).
+    let cont_at = t_stop + Duration::from_millis(fp_wait + 1_000);
+    tokio::time::sleep(cont_at.saturating_duration_since(Instant::now())).await;
+    let stopped_for = t_stop.elapsed();
+    // SIGCONT: the expired failpoints release the late append / StartEffects.
+    let l_before_cont = lines(c.server()).len();
+    a.sigcont();
+    tokio::time::sleep(Duration::from_secs(fp_wait / 1000 + 2)).await;
+    let l = lines(c.server());
+    let acts = activations(&l);
+    for id in &ids {
+        let regrant_idx = acts
+            .iter()
+            .find(|x| &x.run == id && x.attempt >= 2)
+            .map(|x| x.idx)
+            .expect("re-grant line");
+        let late: Vec<_> = applied(&l)
+            .into_iter()
+            .filter(|(idx, r, n)| r == id && *n == 1 && *idx > regrant_idx)
+            .collect();
+        assert!(
+            late.is_empty(),
+            "{id}: attempt 1 applied after the revoke: {late:?}"
+        );
+    }
+    for r in &paused_before_append {
+        assert!(
+            applied(&l).iter().all(|(_, run, n)| !(run == r && *n == 1)),
+            "{r}: the zombie's late append was applied"
+        );
+    }
+    for (k, n) in &keys {
+        assert_eq!(
+            c.mock().requests(k),
+            *n,
+            "late StartEffect reached the provider"
+        );
+        assert_eq!(c.mock().charges(k), 1);
+    }
+    let a_lines = lines(&a.proc);
+    assert!(
+        !a_lines
+            .iter()
+            .any(|x| x.contains("effect started on the leader")),
+        "the zombie started an effect:\n{}",
+        a_lines.join("\n")
+    );
+    for id in &ids {
+        let h = c.api.history(id).await;
+        assert_eq!(events_of(&h, "run_completed").len(), 1, "{id}");
+        assert_eq!(
+            journal_kinds(&h),
+            baseline_kinds,
+            "{id}: journal differs from the undisturbed run"
+        );
+    }
+    // Which layer stopped the zombie (W4: either is acceptable).
+    let late_effect_rejected = a_lines
+        .iter()
+        .filter(|x| x.contains("StartEffect rejected") || x.contains("StartEffect failed"))
+        .count();
+    let server_rejected = l[l_before_cont.min(l.len())..]
+        .iter()
+        .filter(|x| x.contains("StartEffect rejected"))
+        .count();
+    let self_fenced = a_lines
+        .iter()
+        .filter(|x| x.contains("self-fence") || x.contains("cancelled"))
+        .count();
+    // W4: the late StartEffects were really sent (the failpoint waits expired while the
+    // worker was stopped) and the leader refused them; none reached the provider.
+    assert!(
+        late_effect_rejected >= 1,
+        "no late StartEffect was forced through:\n{}",
+        a_lines.join("\n")
+    );
+    let lat: Vec<Duration> = regrant.values().copied().collect();
+    eprintln!(
+        "worker_failover::sigstop_zombie: lease_ttl {lease_ttl:?}; re-granted n+1 on z-b \
+         after max {:?} / median {:?} from SIGSTOP; completed at {completed_at:?}; stopped \
+         for {stopped_for:?}; one \
+         charge per key {keys:?}; after SIGCONT: worker-side StartEffect rejected/failed \
+         lines {late_effect_rejected}, server StartEffect rejected lines {server_rejected}, \
+         worker cancel/self-fence lines {self_fenced}; paused-before-append runs {}; no \
+         attempt-1 append applied after the revoke; journals equal the baseline; total {:?}",
+        lat.iter().max().copied().unwrap_or_default(),
+        median(lat),
+        paused_before_append.len(),
+        t0.elapsed()
+    );
+    drop(b);
 }
