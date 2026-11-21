@@ -266,7 +266,7 @@ Plans:
 - [x] 07-15-PLAN.md — CLI: worker token/queue/run/workflow verbs, `ostro worker` subcommand with drain, TLS-aware ready line (WORK-01, OPS-01) (W4)
 - [ ] 07-12-PLAN.md — RemoteRunner via EngineExecutor::sink_for + PlacementExecutor + NodePlacement (embedded-first overflow) + selectors; StartEffect verified, redacted values literal (WORK-01/02/04/06) (W5)
 - [x] 07-13-PLAN.md — Spill controller: sampler, embedded-first exit rule (no runs on workers, or empty backlog + cool signals), sustained overload = 1 transition (WORK-03) (W5)
-- [ ] 07-14-PLAN.md — Control-plane implementation via the p7 field: flow config, queue/workflow/run pause+resume, /retry alias, worker admin, tokens, join, demand (OPS-01, WORK-01, WORK-05) (W5)
+- [x] 07-14-PLAN.md — Control-plane implementation via the p7 field: flow config, queue/workflow/run pause+resume, /retry alias, worker admin, tokens, join, demand (OPS-01, WORK-01, WORK-05) (W5)
 - [ ] 07-16-PLAN.md — Demand metric + endpoint (D-W12), KEDA/k8s manifests with offline checks, spawned harness with pinned ports + restart-resume smoke (WORK-05) (W6)
 - [ ] 07-17-PLAN.md — SC1 e2e: join/pinning/revocation, paging, module cache, secrets never on workers, listener TLS modes, Pebble env-gated (WORK-01/02/06, SEC-01) (W7)
 - [ ] 07-18-PLAN.md — SC2 e2e: auto spill/return, oscillation, sustained overload, selectors, kill -9 re-dispatch (log-timed), forced-late-append SIGSTOP zombie (WORK-03/04) (W7)
