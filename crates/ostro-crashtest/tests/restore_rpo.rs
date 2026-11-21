@@ -12,15 +12,17 @@
 //! - (b) every start acknowledged before the cut (`ack_ms + 50 ms < cut_at_ms`; the ack
 //!   arrives after the apply, the cut is read before `cut_at_ms`) is present in the restored
 //!   data dir (opened offline in Inspect mode);
-//! - (c) RPO per P8-D23: the restored manifest's **cut lag** `min(kill, start of the
+//! - (c) RPO per P8-D23 (as revised by 08-23): the **data-loss window** (ack time of the
+//!   newest acknowledged start missing after the restore - `cut_at_ms`; 0 when nothing is
+//!   missing) is at most `seal_interval` + [`LOSS_SLACK_MS`] (500 ms). This is the
+//!   end-to-end RPO of SC3/BACK-02. Also asserted: the restored manifest's **cut lag** `min(kill, start of the
 //!   in-flight round) - manifest write time` (= `kill - cut_at_ms - upload latency - the
 //!   in-flight round's time`) is at most `seal_interval` + 500 ms scheduling slack. The
 //!   manifest write time is the mtime of `manifest/current`; the in-flight round's start is
 //!   bounded by the first bucket object written after it (an over-estimate of the lag, so
 //!   the assertion is conservative). Reported separately: the **upload latency** (manifest
 //!   write time - `cut_at_ms`, plus every round's `ostro_backup_upload_seconds` sampled from
-//!   `/metrics`) and the **data-loss window** (ack time of the newest acknowledged start
-//!   missing after the restore - `cut_at_ms`);
+//!   `/metrics`);
 //! - (d) every partition's restored `cut_offset` is at most the killed source's recovered
 //!   applied offset (uploads only below HW); the live leader's metrics show chunk bytes
 //!   uploaded, and opening the killed data dir offline (Inspect mode, closed barriers)
@@ -54,6 +56,13 @@ use serde_json::{Value, json};
 const ITERS: usize = 10;
 const SEAL_MS: u64 = 1_000;
 const SLACK_MS: u64 = 500;
+/// Slack of the data-loss window on top of `SEAL_MS` (08-23). It covers what the uploader
+/// does not control: the ack is timestamped by the client after the HTTP response (after the
+/// apply, so later than the commit the cut can include), the scheduling of the uploader
+/// task and the fixed-cadence tick on a shared multi-thread runtime, and the fsyncs of the
+/// manifest PUT on a loaded machine. Do not widen it to make a loaded run pass: a failure
+/// caused only by load is recorded and re-run on a quiet machine (08-VALIDATION).
+const LOSS_SLACK_MS: u64 = 500;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -465,8 +474,21 @@ async fn restore_rpo() {
         pct(&mut rounds, 1.0)
     );
     println!(
-        "  data-loss window (newest lost ack - cut_at_ms): p50 {:.0} ms max {:.0} ms",
+        "  data-loss window (newest lost ack - cut_at_ms, asserted <= seal + {LOSS_SLACK_MS} ms): \
+         p50 {:.0} ms max {:.0} ms",
         pct(&mut loss, 0.5),
         pct(&mut loss, 1.0)
+    );
+    // The end-to-end RPO (P8-D23 as revised by 08-23), checked after every iteration ran so
+    // a failure still prints the full distribution above.
+    let over: Vec<(usize, i64)> = its
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x.loss_ms > (SEAL_MS + LOSS_SLACK_MS) as i64)
+        .map(|(i, x)| (i, x.loss_ms))
+        .collect();
+    assert!(
+        over.is_empty(),
+        "data-loss window above seal {SEAL_MS} ms + {LOSS_SLACK_MS} ms slack in (iteration, ms): {over:?}"
     );
 }
