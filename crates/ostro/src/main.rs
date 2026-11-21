@@ -8,10 +8,17 @@
 //! `GET /v1/admin/backup`; the offline backup (`--data-dir`) and restore run here on
 //! [`ostro_backup`] (see docs/bottomless.md, "Restore runbook").
 //!
+//! `ostro worker` (07-15) is the remote worker process ([`worker`]): it joins a cluster
+//! (or uses an external certificate), runs activations until SIGINT / SIGTERM, then
+//! drains. `ostro worker token create|list|revoke` are client verbs
+//! ([`ostro_cli::commands::worker_tokens`]).
+//!
 //! `dev` and `server` load the layered configuration (base profile < optional TOML file
 //! < `OSTRO_<SECTION>__<KEY>` env < flags), start [`ostro_server::Server`], print one
 //! ready line on stdout, then wait for SIGINT / SIGTERM (or the API server stopping) and
 //! shut down gracefully (an `--ephemeral` data directory is removed on the way out).
+
+mod worker;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -22,9 +29,6 @@ use clap::{Parser, Subcommand};
 use ostro_server::config::{EnvSource, Overrides, ServerConfig, load_layered};
 use ostro_server::logging::init_tracing;
 use ostro_server::{Server, ServerHandle};
-// Phase 7: `ostro worker` (07-15) runs `ostro_worker::run`; the dependency is declared by
-// 07-02 (D-W17) and anchored here until then.
-use ostro_worker as _;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -73,6 +77,10 @@ enum Command {
     Backup(ostro_cli::commands::backup::BackupArgs),
     /// Rebuild a data directory from a bucket (s3://, file://) or a backup file, verified.
     Restore(Box<ostro_cli::commands::backup::RestoreArgs>),
+    /// Remote worker: join a cluster and run activations (`worker token ...` manages
+    /// join tokens).
+    #[command(args_conflicts_with_subcommands = true)]
+    Worker(Box<worker::WorkerCli>),
     #[command(flatten)]
     Client(Box<ostro_cli::ClientCommand>),
 }
@@ -150,10 +158,19 @@ fn main() -> ExitCode {
                 print!("{}", cfg.to_toml_string());
                 return ExitCode::SUCCESS;
             }
+            // D-W8 / 07-06 follow-up: the server profile's `auto` rule applies even when
+            // `secrets.auto_sealing_key = true` (the flag tls::init reads as the dev
+            // marker), so a non-loopback `auto` listener is refused here as well.
+            if let Err(e) =
+                ostro_server::tls::effective_mode(&cfg, ostro_server::tls::TlsProfile::Server)
+            {
+                return fail(e);
+            }
             run_server("ostro server", cfg, started)
         }
         Some(Command::Backup(a)) => run_backup(&a),
         Some(Command::Restore(a)) => run_restore(&a),
+        Some(Command::Worker(w)) => worker::main(*w, started),
         Some(Command::Client(cmd)) => ostro_cli::run(*cmd).into(),
         None => {
             use clap::CommandFactory;
@@ -312,6 +329,11 @@ fn run_server(name: &str, cfg: ServerConfig, started: Instant) -> ExitCode {
 
 /// `NAME listening on http://ADDR (data: DIR[, ephemeral]) ready in N ms`, where N is
 /// the time since the process started (the spawned-binary tests parse this line).
+///
+/// A TLS client listener (07-06: `self-signed`, `files`, `acme`) prints
+/// `NAME listening on https://ADDR (sha256 fingerprint HEX) (data: ...) ready in N ms`,
+/// from [`ServerHandle::client_endpoint`]; `HEX` is the lowercase sha256 of the served
+/// leaf certificate (DER), absent while an ACME certificate is still pending.
 fn print_ready(name: &str, handle: &ServerHandle, started: Instant) {
     use std::io::Write as _;
 
@@ -320,10 +342,19 @@ fn print_ready(name: &str, handle: &ServerHandle, started: Instant) {
     } else {
         ""
     };
+    let ep = handle.client_endpoint();
+    let fingerprint = match &ep.fingerprint {
+        Some(f) => format!(
+            " (sha256 fingerprint {})",
+            f.strip_prefix("sha256:").unwrap_or(f)
+        ),
+        None => String::new(),
+    };
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,
-        "{name} listening on http://{} (data: {}{kind}) ready in {} ms",
+        "{name} listening on {}://{}{fingerprint} (data: {}{kind}) ready in {} ms",
+        ep.scheme,
         handle.local_addr(),
         handle.data_dir().display(),
         started.elapsed().as_millis(),
