@@ -14,7 +14,7 @@
 mod common;
 
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use common::{Api, SERIAL, Spawned, T, command, dev, free_addr, guest_wasm, http, run_to_end};
 use reqwest::StatusCode;
@@ -111,19 +111,35 @@ async fn bottomless_s3_restore_round_trip() {
     }
     // Several seal intervals after the last completion, then SIGKILL.
     tokio::time::sleep(Duration::from_millis(2_500)).await;
-    let text = api
-        .http
-        .get(api.url("/metrics"))
-        .send()
-        .await
-        .expect("GET /metrics")
-        .text()
-        .await
-        .expect("metrics text");
-    assert!(
-        text.contains("ostro_backup_upload_seconds"),
-        "the leader uploaded nothing: no ostro_backup_upload_seconds"
-    );
+    // The first upload can lag on a loaded runner: wait for it (bounded), and on failure
+    // show the server's warnings and backup series, so an upload error is visible.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let text = api
+            .http
+            .get(api.url("/metrics"))
+            .send()
+            .await
+            .expect("GET /metrics")
+            .text()
+            .await
+            .expect("metrics text");
+        if text.contains("ostro_backup_upload_seconds") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the leader uploaded nothing: no ostro_backup_upload_seconds\nbackup series:\n{}\n\
+             server stdout:\n{}\nserver stderr:\n{}",
+            text.lines()
+                .filter(|l| l.contains("backup"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            a.stdout_lines().join("\n"),
+            a.stderr()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     let kill_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
