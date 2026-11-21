@@ -463,7 +463,7 @@ jobs:
         run: |
           ostro="target/$T/release/ostro"
           : > target/runs.txt
-          for i in $(seq 1 40); do
+          for _ in $(seq 1 40); do
             "$ostro" run cpu-burn --queue heavy --input '{"ms": 2000}' --json | jq -r .run_id >> target/runs.txt
           done
           max=0
