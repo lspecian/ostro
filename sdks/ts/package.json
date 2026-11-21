@@ -1,0 +1,22 @@
+{
+  "name": "ostro",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Ostro durable workflows (WIT ostro:runtime@0.1.0)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "wit",
+    "rolldown.ostro.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
