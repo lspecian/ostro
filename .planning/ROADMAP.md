@@ -285,7 +285,7 @@ Plans:
   3. `ostro restore --from <bucket>` on a fresh machine reproduces the state hash with RPO ≤ the segment seal interval (target ≤ 1 s). `ostro backup`/`restore` to a local file also round-trips. Only the leader uploads, and only sealed segments below HW.
   4. One documented snapshot format serves restore and future follower install. Journal trimming never removes entries that no snapshot covers.
   5. A run produces run → activation → step/effect spans linked to the caller's `traceparent` and propagated on outbound HTTP, and replayed spans are not re-emitted. `/metrics` exposes queue, lag, step, replay, fuel, memory and DLQ series. Guest logs are structured, rate-limited and bounded per run.
-**Plans**: 22 plans (7 waves; 08-01 is the PHASE-8 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only; freeze + 05-07 Schedule fields/Webhook landed), checks code vs .planning/RESERVATIONS.md and allocates only from the Phase 8 block (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23); decisions P8-D1–D24 adopted in 08-DECISIONS.md, user may override; runs in parallel with Phases 6–7, shared files coordinated in 08-01; revised after plan check)
+**Plans**: 23 plans (7 waves + gap closure 08-23; 08-01 is the PHASE-8 GATE requiring Phase 5 complete (all 05-*-SUMMARY + 05-VERIFICATION passed, or human_needed with by-design items only; freeze + 05-07 Schedule fields/Webhook landed), checks code vs .planning/RESERVATIONS.md and allocates only from the Phase 8 block (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23); decisions P8-D1–D24 adopted in 08-DECISIONS.md, user may override; runs in parallel with Phases 6–7, shared files coordinated in 08-01; revised after plan check)
 
 Plans:
 - [x] 08-01-PLAN.md — PHASE-8 GATE (Phase 5 complete, code vs RESERVATIONS.md) + decisions to STATE + contract (Cmd 27 ScheduleFire, keyspace 16 schedule_state, InvalidCode 22/23, config/trait stubs) + every Phase 8 dependency + crate skeletons (ostro-objstore only if absent) + anchored forbidden-crate check (all)
@@ -310,6 +310,7 @@ Plans:
 - [x] 08-20-PLAN.md — End-to-end proofs SC1–SC4: Stripe round trip, cron kill loop, restore RPO loop, SeaweedFS leg, Phase 8 campaign faults (TRIG, BACK)
 - [x] 08-21-PLAN.md — SC5 observability e2e + outbound traceparent via ostro-bridge (B2) + OTLP canary (D-FX6) (OBS-01/02/03)
 - [x] 08-22-PLAN.md — PHASE GATE: full ci-local, >= 10,000-fault campaign, RESERVATIONS flip, docs, VALIDATION (all)
+- [x] 08-23 — Gap closure (08-VERIFICATION SC3 RPO bound): fixed seal_interval/2 round cadence + bounded parallel partition uploads (one consistent cut per manifest), restore_rpo asserts the data-loss window <= seal + 500 ms, P8-D23 = end-to-end loss window, [triggers] webhook_tolerance wired (BACK-02)
 **Research flag**: Snapshot format (designed once for restore + follower install)
 
 ### Phase 9: Polyglot SDKs & Conformance

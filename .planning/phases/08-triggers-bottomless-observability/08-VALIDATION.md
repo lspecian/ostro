@@ -104,6 +104,9 @@ created: 2026-11-19
 | 8-21-03 | 21 | 6 | FX-06 OTLP leg (D-FX6) | e2e | `cargo test -p ostro-server --test otlp_canary --locked` | ❌ W0 | ✅ green |
 | 8-22-01 | 22 | 7 | all | gate (full ci-local + campaign + loops at plan level) | `cargo deny check && bash scripts/forbidden-crates.sh --self-test` + RESERVATIONS flip grep + campaign report file | n/a | ✅ green (10k campaign ⚠ human_needed, resumable) |
 | 8-22-02 | 22 | 7 | all (docs; OBS-01 not green without B2 evidence) | check | grep checks on VALIDATION/DECISIONS/docs | n/a | ✅ green |
+| 8-23-01 | 23 | gap | BACK-02/SC3 (RPO = loss window <= seal; fixed seal/2 cadence, parallel uploads, one cut per manifest) | integration + failpoint | `cargo test -p ostro-backup --features failpoints -- --test-threads=1` (uploader incl. parallel_uploads_name_one_consistent_cut + run_starts_rounds_on_a_fixed_cadence, chain_start, cut_consistency, fencing, remote_gc, restore) | ✅ | ✅ green |
+| 8-23-02 | 23 | gap | BACK-02/SC3 (loss window asserted <= seal + 500 ms) | crash loop | `cargo nextest run -P crash -p ostro-crashtest --run-ignored only -E 'test(restore_rpo)'` | ✅ | ✅ green at load 19–33 (quiet-machine re-run ⚠ follow-up) |
+| 8-23-03 | 23 | gap | TRIG-01 (`[triggers] webhook_tolerance` fallback) | unit + integration | `cargo test -p ostro-server --lib -- webhooks && cargo test -p ostro-server --test webhooks --test config --test bottomless_service` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠ flaky / human_needed*
 
@@ -244,7 +247,8 @@ Phase 8 suites in this run, all green:
 
 ### Earlier measurements (from the plan SUMMARYs)
 
-- **RPO, from 08-20 `restore_rpo`:** cut lag p50 1,044 ms and max 1,203 ms at seal 1 s; every pre-cut ack was restored over 10 kill/restore iterations.
+- **RPO, from 08-20 `restore_rpo`:** cut lag p50 1,044 ms and max 1,203 ms at seal 1 s; every pre-cut ack was restored over 10 kill/restore iterations. The data-loss window (p50 1,680 ms / max 2,449 ms) did not meet SC3 (08-VERIFICATION gap).
+- **RPO after 08-23 (gap closure):** `restore_rpo` now asserts the loss window <= seal + 500 ms on every iteration. Measured at 1-minute load average 19–33: loss window p50 552 ms / max 1,049 ms, cut lag p50 280 ms / max 412 ms, restored-round upload p50 217 ms / max 576 ms (all 98 rounds p50 421 ms / max 1,958 ms), 18,276 acks; PASS in 291 s.
 - **Restore, from 08-18:** P=16 with about 10k runs takes 9.0 s in debug. Phase 8 smoke bucket restores take 9.7–14.9 s each.
 - **Snapshot/restore timings:** see docs/bottomless.md (measured values from 08-13, 08-18 and 08-20).
 
@@ -258,6 +262,7 @@ Each item below is ⚠ human_needed.
 4. **Fresh-machine `ostro restore --from s3://…` with timing (BACK-02/SC3).** Run a server with `[backup] url = s3://…` under load, kill -9 it, then run `ostro restore --from s3://… --data-dir /var/lib/ostro` on another machine. Record the report: hashes, cut_at, duration.
 5. **Jaeger/Tempo + Grafana visual check (OBS-01/02).** Set `[telemetry] otlp_endpoint` to a collector and scrape `/metrics`. Check that the run → activation → step tree, the `effect:<kind>` spans and the dashboards render.
 6. **TLS roots in a `FROM scratch` image (Phase 14 artefact).** Restore from HTTPS S3 with `tls_roots = "webpki"`.
+7. **Quiet-machine re-run of `restore_rpo` (08-23 follow-up, SC3).** 08-23 measured it at load 19–33, and it passed. Re-run `cargo nextest run -P crash -p ostro-crashtest --run-ignored only -E 'test(restore_rpo)'` on a quiet machine and record the loss window p50/max here. Expect it to be at most the loaded numbers.
 7. **The Phase 6 canary leg:** **not pending.** 08-21 ran it (`PHASE6_CANARY_LEG: run ... clean`), and `otlp_canary` passed again in this gate.
 8. **The outbound traceparent leg (B2, OBS-01):** **not pending.** 08-21 recorded `BRIDGE_TRACEPARENT_LEG: wired`, and `outbound_traceparent` passed in this gate. OBS-01 is complete.
 9. **User review** of P8-D3 (seal default and cost), P8-D9 (jiff 0.2 adapter), P8-D11 (Kafka out of scope), P8-D16 (in-memory log cap), P8-D21 (22 plans) and P8-D25 (SeaweedFS instead of MinIO). See 08-DECISIONS.md.

@@ -15,7 +15,8 @@ P8-D5, P8-D23 in `.planning/phases/08-triggers-bottomless-observability/08-DECIS
 ```toml
 [backup]
 url = "s3://my-bucket/ostro/prod-1"   # or "file:///var/backups/ostro"; unset = off
-seal_interval = "1s"                  # upload tick (default 1s); 5-10s is cheaper, see below
+seal_interval = "1s"                  # RPO target (default 1s); rounds every seal/2; 5-10s is cheaper
+upload_concurrency = 0                # partitions uploaded in parallel per round; 0 = min(P, 8)
 region = "eu-central-1"
 endpoint = "https://s3.eu-central-1.amazonaws.com"   # override for SeaweedFS, R2, GCS
 url_style = "path"                    # or "virtual"
@@ -181,25 +182,56 @@ Remote blob deletion is the delayed-deletion GC of plan 08-19.
 
 ## RPO measurement
 
-Per P8-D23 the RPO has two measured parts:
+Per P8-D23 (revised by 08-23) the RPO is the **end-to-end data-loss window**: after a crash,
+the newest lost acknowledgement minus `cut_at_ms` of the newest durable manifest. SC3/BACK-02
+require it to be at most `seal_interval`.
 
-1. **Cut lag**: per tick, the time between consecutive cut reads, and the cut age when the
-   manifest becomes durable minus that round's upload duration, are both at most
-   `seal_interval` (asserted in the 08-13 tests and in 08-20 `restore_rpo`).
-2. **Upload latency**: the round duration, `ostro_backup_upload_seconds`, reported
-   separately.
+How the uploader meets it:
 
-So RPO ≈ `seal_interval` + upload latency. After a crash, the data-loss window is the newest
-lost acknowledgement minus the manifest's `cut_at_ms`.
+- **Fixed cadence.** Rounds start every `seal_interval / 2`, measured from the start of the
+  previous round, not from its end. A round that overruns its slot is followed at once by
+  the next one.
+- **Parallel uploads.** Inside a round, partitions upload concurrently (at most
+  `upload_concurrency`, default `min(P, 8)`). Every partition uploads `[uploaded_end, cut_p)`
+  of the single cut read at the start of the round, and the manifest is written only after
+  all of them finished, so each manifest still names one consistent cut. Blob PUTs are
+  bounded the same way and still finish before any chunk. The metadata snapshot PUT
+  overlaps the partition uploads.
 
-Measured (08-20 `restore_rpo`, P=16, seal 1 s, 10 kill/restore iterations, release binary on a
-loaded WSL2 machine, `file://` bucket): cut lag p50 1,044 ms / max 1,203 ms (asserted ≤ seal +
-500 ms), upload latency p50 681 ms / max 849 ms for the restored rounds (all rounds: p50 733 ms,
-max 2,030 ms), data-loss window p50 1,680 ms / max 2,449 ms. Every acknowledgement older than
-the cut was restored (22,379 acks). Uploads are sequential across partitions inside a round
-(08-13); at P=16 under load the round is fsync-bound on LocalFs (08-13: p50 1.02 s, max 9.73 s
-at seal 250 ms). Parallel per-partition uploads are the next lever if a deployment needs a
-smaller window. Real S3/R2 numbers are a human_needed item of the Phase 8 gate.
+With upload latency `U`, the loss window is at most `seal_interval / 2 + U`. That is within
+`seal_interval` while `U <= seal_interval / 2`.
+
+Two other numbers are still reported. **Cut lag** is the time between consecutive cut reads,
+and the cut age at manifest time minus the round duration; it is asserted <= seal + 500 ms.
+**Upload latency** is the round duration, `ostro_backup_upload_seconds`.
+
+`restore_rpo` (08-20, assertion added by 08-23) asserts loss window <= `seal_interval` +
+500 ms on every kill/restore iteration. The 500 ms covers the parts the uploader does not
+control: the client timestamps the ack after the HTTP response, plus task scheduling and
+manifest fsyncs on a loaded machine.
+
+Measured:
+
+- Before 08-23 (08-20 `restore_rpo`): P=16, seal 1 s, 10 kill/restore iterations, release
+  binary, loaded WSL2 machine, `file://` bucket, sequential uploads with a "sleep after the
+  round" tick.
+  - Cut lag: p50 1,044 ms / max 1,203 ms.
+  - Upload latency: p50 681 ms / max 849 ms (all rounds p50 733 ms / max 2,030 ms).
+  - Data-loss window: p50 1,680 ms / max 2,449 ms. This did not meet the bound.
+- After 08-23 (`restore_rpo` with the loss-window assertion): same setup, P=16, seal 1 s,
+  10 iterations, 18,276 acks. The machine was loaded (1-minute load average 19–33: a 10k
+  crash campaign plus other builds).
+  - Data-loss window: p50 552 ms / max 1,049 ms. Asserted <= 1,500 ms on every iteration;
+    9 of 10 iterations were below 1,000 ms outright.
+  - Cut lag: p50 280 ms / max 412 ms.
+  - Upload latency of the restored round: p50 217 ms / max 576 ms. Across all 98 sampled
+    rounds: p50 421 ms / max 1,958 ms.
+  - PASS in 291 s. Every acknowledgement older than the cut was restored.
+  - The 08-13 P=16 LocalFs round at seal 250 ms dropped from p50 1.02 s / max 9.73 s
+    (sequential) to p50 225 ms / max 662 ms (parallel), under similar load.
+  - A quiet-machine re-run is still a follow-up (08-VALIDATION).
+
+Real S3/R2 numbers are a human_needed item of the Phase 8 gate.
 
 ## Cost
 
@@ -213,7 +245,9 @@ round writes no manifest.
 | 16 | 10 s | ~1.7 | ≈ 147k | ≈ $0.7 |
 | 1 | 1 s | ~2 | ≈ 173k | ≈ $0.9 |
 
-Snapshot, meta and blob objects are extra but rare. **Recommendation:** use 5–10 s when the
+Snapshot, meta and blob objects are extra but rare. Since 08-23 a busy partition can seal
+up to two chunks per `seal_interval` (the round cadence is `seal_interval / 2`), so the PUT
+rates above can double while every partition is busy. **Recommendation:** use 5–10 s when the
 RPO allows it.
 
 ## Alerting: stuck upload floor
@@ -358,8 +392,9 @@ The restored node has a new incarnation, so the source prefix's `LOCK` names ano
 
 ### RPO expectations
 
-RPO ≈ `seal_interval` + upload latency (see "RPO measurement"). With the default 1 s seal
-interval a crash loses at most the last couple of seconds of acknowledged work; the restore
+RPO = the data-loss window, bounded by `seal_interval` (see "RPO measurement"). With the
+default 1 s seal interval a crash loses at most about the last second of acknowledged work
+(when uploads take at most half the seal interval); the restore
 report's `cut_at_ms` says exactly where the restored history ends. Backup files have the RPO
 of the moment they were taken. Measured numbers: "RPO measurement" above. Restore time:
 P=16 with ~10k runs restores in about 9 s (debug build, LocalFs, `--parallelism 4`; partition
