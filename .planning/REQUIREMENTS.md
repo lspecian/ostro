@@ -79,9 +79,9 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 - [x] **DISP-01**: Per-partition leader dispatcher with in-memory ready queues rebuilt from state on leadership; no polling
 - [x] **DISP-02**: Ready-queue entries carry a concurrency key from day one
-- [ ] **DISP-03**: Operator can configure per-queue concurrency, priority and rate limits [FR-3.8]
-- [ ] **DISP-04**: Operator can configure keyed concurrency (e.g. per customer) with fair scheduling across keys
-- [ ] **DISP-05**: Throttle (queue the excess) and rate limit (reject the excess) are distinct policies
+- [x] **DISP-03**: Operator can configure per-queue concurrency, priority and rate limits [FR-3.8]
+- [x] **DISP-04**: Operator can configure keyed concurrency (e.g. per customer) with fair scheduling across keys
+- [x] **DISP-05**: Throttle (queue the excess) and rate limit (reject the excess) are distinct policies
 - [ ] **DISP-06**: Per-tenant concurrency, fuel/s, memory and event-rate quotas with weighted fair dispatch
 - [x] **DISP-07**: Soft leases with re-dispatch after `lease_ttl`; zombie executors are fenced by `(epoch, attempt)` and self-fence after losing their lease
 
@@ -117,12 +117,12 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Workers & Placement
 
-- [ ] **WORK-01**: `ostro worker --join` connects over an mTLS gRPC Execute stream with credits, heartbeats, blob fetch and per-(run, attempt) secret resolution
-- [ ] **WORK-02**: Journals are paged to workers (no single message exceeds gRPC limits)
-- [ ] **WORK-03**: Queue placement policies `embedded`, `workers`, `auto`; `auto` spills to workers on CPU/slots/memory/lag thresholds with hysteresis [FR-5.1/5.2]
-- [ ] **WORK-04**: Worker labels and queue selectors control placement [FR-5.3]
+- [x] **WORK-01**: `ostro worker --join` connects over an mTLS gRPC Execute stream with credits, heartbeats, blob fetch and per-(run, attempt) secret resolution
+- [x] **WORK-02**: Journals are paged to workers (no single message exceeds gRPC limits)
+- [x] **WORK-03**: Queue placement policies `embedded`, `workers`, `auto`; `auto` spills to workers on CPU/slots/memory/lag thresholds with hysteresis [FR-5.1/5.2]
+- [x] **WORK-04**: Worker labels and queue selectors control placement [FR-5.3]
 - [ ] **WORK-05**: Each node exposes `ostro_queue_worker_demand{queue}` and a demand endpoint usable by KEDA; workers scale to zero [FR-5.4]
-- [ ] **WORK-06**: Workers fetch modules by sha256 and cache AOT artefacts locally [FR-5.5]
+- [x] **WORK-06**: Workers fetch modules by sha256 and cache AOT artefacts locally [FR-5.5]
 
 ### Backup & Bottomless
 
@@ -133,7 +133,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Run Operations & Retention
 
-- [ ] **OPS-01**: Operator can pause and resume a run, a workflow or a queue; runs can auto-pause when retries are exhausted
+- [x] **OPS-01**: Operator can pause and resume a run, a workflow or a queue; runs can auto-pause when retries are exhausted
 - [ ] **OPS-02**: Operator can rerun a run from a chosen step (journal prefix copied into a new run)
 - [ ] **OPS-03**: Operator can bulk cancel/retry/rerun runs matching a filter, rate-spread
 - [ ] **OPS-04**: Failed runs land in a DLQ with reason; an optional `on_failure` workflow hook runs; DLQ entries can be requeued
@@ -202,7 +202,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 - [x] **QA-01**: Crash-injection harness (failpoints + `kill -9` + EIO/ENOSPC) proves 0 lost accepted runs and 0 duplicate journal entries over ≥ 10,000 injected faults per phase gate
 - [ ] **QA-02**: Replay corpus replayed in CI across Ostro versions and across x86_64/aarch64
-- [ ] **QA-03**: Fencing chaos test: external mock observes exactly one call per idempotency key despite zombie executors and failovers
+- [x] **QA-03**: Fencing chaos test: external mock observes exactly one call per idempotency key despite zombie executors and failovers
 - [ ] **QA-04**: Benchmarks verify acknowledged work and bytes on disk (not just rates); single node ≥ 10,000 steps/s, 3-node RF=3 ≥ 5,000 steps/s with p99 commit < 20 ms on LAN [NFR-2]
 - [ ] **QA-05**: Jepsen-style test (partitions, clock skew, kill -9, disk stalls) on 3 nodes: 0 lost acknowledged runs; 7-day soak at 70% rated load is stable
 
@@ -295,9 +295,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WF-10 | Phase 9 | Pending |
 | DISP-01 | Phase 4 | Complete |
 | DISP-02 | Phase 4 | Complete |
-| DISP-03 | Phase 7 | Pending |
-| DISP-04 | Phase 7 | Pending |
-| DISP-05 | Phase 7 | Pending |
+| DISP-03 | Phase 7 | Complete |
+| DISP-04 | Phase 7 | Complete |
+| DISP-05 | Phase 7 | Complete |
 | DISP-06 | Phase 14 | Pending |
 | DISP-07 | Phase 4 | Complete |
 | API-01 | Phase 4 | Complete |
@@ -321,17 +321,17 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | FX-08 | Phase 6 | Complete |
 | FX-09 | Phase 6 | Complete |
 | FX-10 | Phase 6 | Complete |
-| WORK-01 | Phase 7 | Pending |
-| WORK-02 | Phase 7 | Pending |
-| WORK-03 | Phase 7 | Pending |
-| WORK-04 | Phase 7 | Pending |
-| WORK-05 | Phase 7 | Pending |
-| WORK-06 | Phase 7 | Pending |
+| WORK-01 | Phase 7 | Complete |
+| WORK-02 | Phase 7 | Complete |
+| WORK-03 | Phase 7 | Complete |
+| WORK-04 | Phase 7 | Complete |
+| WORK-05 | Phase 7 | Partial (KEDA simulator 0→N→0 verified locally; real KEDA human_needed) |
+| WORK-06 | Phase 7 | Complete |
 | BACK-01 | Phase 8 | Pending |
 | BACK-02 | Phase 8 | Pending |
 | BACK-03 | Phase 8 | Pending |
 | BACK-04 | Phase 8 | Pending |
-| OPS-01 | Phase 7 | Pending |
+| OPS-01 | Phase 7 | Complete |
 | OPS-02 | Phase 11 | Pending |
 | OPS-03 | Phase 11 | Pending |
 | OPS-04 | Phase 11 | Pending |
@@ -359,7 +359,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | OBS-01 | Phase 8 | Pending |
 | OBS-02 | Phase 8 | Pending |
 | OBS-03 | Phase 8 | Pending |
-| SEC-01 | Phase 7 | Pending |
+| SEC-01 | Phase 7 | Partial (self-signed/files/ACME-Pebble verified locally; Let's Encrypt staging human_needed) |
 | SEC-02 | Phase 14 | Pending |
 | SEC-03 | Phase 14 | Pending |
 | SEC-04 | Phase 14 | Pending |
@@ -376,7 +376,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | DIST-03 | Phase 14 | Pending |
 | QA-01 | Phase 5 | Complete (05-20 gate: 10,000 kills, 0 violations; optional real-ENOSPC tmpfs leg human_needed) |
 | QA-02 | Phase 5 | Partial (30-entry corpus green on x86_64 gnu + musl locally; aarch64/macOS CI legs human_needed until first push) |
-| QA-03 | Phase 7 | Pending |
+| QA-03 | Phase 7 | Complete |
 | QA-04 | Phase 14 | Pending |
 | QA-05 | Phase 14 | Pending |
 
