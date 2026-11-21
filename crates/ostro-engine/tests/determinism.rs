@@ -47,10 +47,10 @@ fn shared() -> &'static Shared {
         )
         .expect("runtime");
         let basic = rt
-            .prepare(&common::guest_wasm("det-basic"))
+            .prepare(&common::neutral_guest_wasm("det-basic"))
             .expect("prepare det-basic");
         let divergent = rt
-            .prepare(&common::guest_wasm("det-divergent"))
+            .prepare(&common::neutral_guest_wasm("det-divergent"))
             .expect("prepare det-divergent");
         Shared {
             rt,
@@ -284,7 +284,9 @@ async fn thousand_replays() {
 /// versions and architectures. A change here means hashing, the journal codec, the
 /// RNG streams, the WASI shim or the guest toolchain changed: investigate, never
 /// blindly re-bless. If this snapshot differs between x86_64 and aarch64 in CI, that
-/// is a real determinism bug.
+/// is a real determinism bug. det-basic is built path-neutrally (`neutral_guest_wasm`):
+/// `RunStarted.module_hash` is the module's sha256, and a plain build's bytes embed the
+/// build host's cargo-registry and toolchain paths.
 #[tokio::test]
 async fn golden_det_basic_journal() {
     let d = record("basic").await;
