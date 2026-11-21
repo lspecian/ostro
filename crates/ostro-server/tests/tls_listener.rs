@@ -402,8 +402,8 @@ async fn auto_and_off_resolution() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acme_mode_delegates_to_acme_start() {
     let dir = tempfile::tempdir().expect("tmp");
-    let mut c = cfg("127.0.0.1:0", ApiTlsMode::Acme);
-    c.api.tls.acme.domains = vec!["ostro.example".into()];
+    // No domains: acme::start (07-10) rejects the config before any directory contact.
+    let c = cfg("127.0.0.1:0", ApiTlsMode::Acme);
     let st = tls::init(&c, dir.path(), CLUSTER).expect("init");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let e = tokio::time::timeout(
@@ -412,8 +412,8 @@ async fn acme_mode_delegates_to_acme_start() {
     )
     .await
     .expect("returns")
-    .expect_err("acme stub errors");
-    assert!(e.to_string().contains("07-10"), "{e}");
+    .expect_err("acme::start rejects the config");
+    assert!(e.to_string().contains("domains"), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
