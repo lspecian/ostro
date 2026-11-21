@@ -6,12 +6,13 @@
 //!
 //! # State (in memory only, rebuilt on leadership)
 //!
-//! - Ready queues: `queue -> {(Reverse(priority), ready_at, run)}`, plus a delay set for
-//!   entries whose `ready_at` is still in the future. Every entry carries the run's
-//!   concurrency key (DISP-02; not enforced until Phase 7), workflow, tenant and
-//!   first-activation flag (Phase 7 F3/F7; carried only, consumed in Phase 7). Queues are
-//!   served round-robin.
-//! - Leases: `run -> Lease{generation, token, deadline, revoked, inputs, slot permit}`.
+//! - Ready entries in [`FairQueues`](super::fair::FairQueues) (plan 07-05, D-W10: weighted
+//!   DRR across queues, strict priority bands, round robin across concurrency keys), plus a
+//!   delay set for entries whose `ready_at` is still in the future. Every entry carries the
+//!   run's concurrency key (DISP-02), workflow, tenant and first-activation flag (Phase 7
+//!   F3/F7), which admission and placement see as an [`EntryView`].
+//! - Leases: `run -> Lease{generation, token, deadline, revoked, inputs, flow permit,
+//!   reservation}`.
 //!
 //! Retryable attempt failures are counted durably, not here (F9, plan 05-11): on
 //! [`ExecOutcome::Retry`] the dispatcher keeps the lease (phase *Granting*), grants the next
@@ -26,6 +27,55 @@
 //! permits (`executor.slots = 0`) dispatches nothing: every run stays `Ready` and
 //! un-granted (schedule-to-start tests); `add_permits` later releases them.
 //!
+//! # Admission, placement and fair selection (plan 07-05)
+//!
+//! A dispatch round asks [`FairQueues::next_candidate`](super::fair::FairQueues) for the
+//! next due entry, then:
+//!
+//! 1. [`FlowControl::admit`] (`now_ms` from the injected clock): `Yes(permit)` continues;
+//!    `QueueBlocked{until}` and `Paused` skip the queue for the rest of the round (`until`
+//!    joins the loop's deadline); `KeyBlocked{until}` parks the key (other keys and queues
+//!    go on) until `until` or the next [`FlowControl::changed`] bump.
+//! 2. [`Placement::reserve`]: `Granted(r)` commits the flow permit (W2: the charge becomes
+//!    final only now), takes the entry and starts the grant with the permit and the
+//!    reservation in the lease; `Blocked` drops (rolls back) the permit and parks the queue
+//!    until [`Placement::changed`] moves, and the round **goes on with the other queues**
+//!    (B2: a worker-only queue without credit does not starve an embedded queue).
+//!
+//! The round ends when `next_candidate` returns `None`. Both happen before
+//! `AttemptGranted`, so a blocked entry never burns an attempt number. `first_activation`
+//! comes only from F7 (the ready row on rebuild, `Action::EnqueueReady` live); re-grants
+//! after a lease expiry or [`ExecOutcome::Abandoned`] and rebuilt `Running` runs are
+//! `false`, so first-activation throttles never hold a re-activation back (B1).
+//!
+//! Defaults: `placement: None` is a [`SemaphorePlacement`] over [`DispatcherConfig::slots`]
+//! (04-14 behaviour); `flow: None` is [`NoFlow`]. Because the default placement is built
+//! per dispatcher while the slot semaphore is node-wide, a dispatcher using it also waits
+//! on the semaphore itself while a queue is parked (a slot freed by another partition or
+//! by `add_permits` wakes it; the acquired permit is used for the next reservation), as in
+//! 04-14. A configured placement wakes the loop through `changed()` alone.
+//!
+//! **Reservation in the lease.** The lease owns the [`FlowPermit`] and the [`Reservation`]
+//! (behind an `Arc`); dropping the lease (release, requeue, revoke, expiry, pause,
+//! shutdown) releases both **before** `revoked` is signalled, so a revoked zombie holds no
+//! capacity. The [`Job`] carries a cheap view: a [`Reservation`] of the same kind whose
+//! inner value is a [`LeaseReservation`] (a weak handle). Executors reach the placement's
+//! guard with [`Job::with_reservation`] (e.g. 07-12's worker session), which yields `None`
+//! once the lease is gone.
+//!
+//! **Gauges.** With [`DispatcherConfig::gauges`] set, every loop turn (one batch of state
+//! changes, not per entry) publishes this partition's [`QueueGauge`] per queue when it
+//! changed: `ready` (due entries), `ready_unblocked` (minus entries of skipped queues and
+//! parked keys in the last round), `oldest_ready_at_ms`, and the leases by
+//! [`ReservationKind`]. Shutdown removes the partition's rows. The rebuild records
+//! `ostro_flow_rebuild_entries` (gauge) and `ostro_flow_rebuild_seconds` (histogram).
+//!
+//! **Pause (OPS-01).** `Action::RunPaused` revokes the run's lease and drops its queued or
+//! delayed entry; a grant read that finds the run paused is rejected `RunPaused` without
+//! logging, and a paused run is never re-queued after a rejected grant. `Action::RunResumed`
+//! needs no in-memory reset (retryable failures are durable since F9); the `EnqueueReady`
+//! that resume emits queues the run again.
+//!
 //! # Rebuild, wake-ups, no polling
 //!
 //! [`spawn`] subscribes to the apply machine's actions **before** scanning, then rebuilds
@@ -33,9 +83,10 @@
 //! After a leadership change every `Running` run holds a token of an older epoch, so it is
 //! re-granted and re-dispatched immediately (the old process is gone; no `lease_ttl` wait).
 //!
-//! The loop then wakes only on: actions (`EnqueueReady`, `InputAppended`, `RunCompleted`),
-//! the next deadline (earliest delayed `ready_at` or lease check), a free executor slot, a
-//! finished grant/job, and shutdown. There is no interval. A lagged action stream triggers a
+//! The loop then wakes only on: actions (`EnqueueReady`, `InputAppended`, `RunCompleted`,
+//! `RunPaused`), the next deadline (earliest delayed `ready_at`, lease check, flow-control
+//! `until`), a placement or flow-control `changed()` bump, a free executor slot (default
+//! placement), a finished grant/job, and shutdown. There is no interval. A lagged action stream triggers a
 //! full rescan ([`DispatcherStats::rescans`]); the startup rebuild is not counted.
 //!
 //! Delayed `ready_at` values are wall-clock ms from [`LeaderCtx::clock`]; the sleep is
@@ -97,8 +148,8 @@
 //!   or when its own renewal deadline ([`LeaseRenewer::expires_at`]) passes, because a fence
 //!   on the journal does not stop the zombie's other I/O.
 //!
-//! Slot permits belong to leases, not to executor futures: a revoked zombie does not keep a
-//! slot, so `slots` bounds the leased jobs. A future that keeps running after revocation
+//! Reservations (slot permits) belong to leases, not to executor futures: a revoked zombie
+//! does not keep a slot, so `slots` bounds the leased jobs. A future that keeps running after revocation
 //! (or after its run was requeued) briefly overlaps with its successor.
 //!
 //! Shutdown revokes every lease and waits for executor futures for at most
@@ -136,13 +187,12 @@
 //! - `ostro_queue_worker_demand{queue}` is only **described** here; Phase 7's
 //!   `workers/demand.rs` owns its value (07-DECISIONS).
 
-use std::cmp::Reverse;
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::ops::Bound;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use ostro_log::{ReplicatedLog, Rf1Log};
@@ -158,6 +208,11 @@ use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use super::LeaderCtx;
+use super::fair::{FairEntry, FairQueues};
+use super::flow::{Admit, FlowControl, FlowPermit, NoFlow, QueueGauge, QueueGauges};
+use super::placement::{
+    EntryView, Placement, Reservation, ReservationKind, Reserve, SemaphorePlacement,
+};
 use crate::apply::{Action, ApplyOutcome, RejectReason};
 use crate::handle::{PartitionError, PartitionHandle};
 use crate::query;
@@ -204,6 +259,41 @@ pub struct Job {
     pub lease: LeaseRenewer,
     /// Durable count of retryable attempt failures (`record.attempt_failures`, F9).
     pub failures: u32,
+    /// View of the lease's reservation (plan 07-05): same [`ReservationKind`], inner value a
+    /// [`LeaseReservation`]. Use [`Job::with_reservation`] to reach the placement's guard.
+    pub reservation: Reservation,
+}
+
+impl Job {
+    /// Where this job runs (the reservation's kind).
+    pub fn reservation_kind(&self) -> ReservationKind {
+        self.reservation.kind()
+    }
+
+    /// Run `f` on the placement's guard of this job's reservation, if the lease still holds
+    /// it and it is a `T`. `None` once the lease was dropped (revoked jobs hold nothing).
+    /// Do not keep the borrow across awaits: the lease owns the capacity.
+    pub fn with_reservation<T: Any, R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        self.reservation.downcast_ref::<LeaseReservation>()?.with(f)
+    }
+}
+
+/// The [`Job`]'s weak handle on its lease's [`Reservation`] (the lease owns the capacity;
+/// see the module docs).
+#[derive(Clone, Debug)]
+pub struct LeaseReservation(Weak<Reservation>);
+
+impl LeaseReservation {
+    /// Run `f` on the guard if the lease still holds the reservation and it is a `T`.
+    pub fn with<T: Any, R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        let r = self.0.upgrade()?;
+        r.downcast_ref::<T>().map(f)
+    }
+
+    /// Whether the lease still holds the reservation.
+    pub fn is_live(&self) -> bool {
+        self.0.strong_count() > 0
+    }
 }
 
 impl std::fmt::Debug for Job {
@@ -228,6 +318,10 @@ pub enum ExecOutcome {
     Retry { after_ms: u64 },
     /// A newer attempt owns the run.
     Fenced,
+    /// The job was lost without an outcome (its worker disconnected, plan 07-05): drop the
+    /// lease and re-grant `n + 1` at once. Not an attempt failure (no failure counted, no
+    /// delay).
+    Abandoned,
 }
 
 /// Runs jobs. Implemented by the server's engine executor (plan 04-16) and by test fakes.
@@ -276,19 +370,29 @@ impl LeaseRenewer {
 pub struct DispatcherConfig {
     pub executor: Arc<dyn Executor>,
     pub lease_ttl: Duration,
-    /// Node-wide executor slots (shared by every partition).
+    /// Node-wide embedded executor slots (shared by every partition). Used by the default
+    /// placement and by a node placement for its embedded capacity.
     pub slots: Arc<Semaphore>,
     pub stats: Option<Arc<DispatcherStats>>,
+    /// Capacity source (plan 07-05); `None` = [`SemaphorePlacement`] over `slots`.
+    pub placement: Option<Arc<dyn Placement>>,
+    /// Admission control (plan 07-05); `None` = [`NoFlow`].
+    pub flow: Option<Arc<dyn FlowControl>>,
+    /// Per-(partition, queue) gauges to publish (plan 07-05); `None` = not published.
+    pub gauges: Option<Arc<QueueGauges>>,
 }
 
 impl DispatcherConfig {
-    /// `lease_ttl` 30 s, 64 slots, no stats.
+    /// `lease_ttl` 30 s, 64 slots, no stats, default placement and flow, no gauges.
     pub fn new(executor: Arc<dyn Executor>) -> Self {
         Self {
             executor,
             lease_ttl: DEFAULT_LEASE_TTL,
             slots: Arc::new(Semaphore::new(DEFAULT_SLOTS)),
             stats: None,
+            placement: None,
+            flow: None,
+            gauges: None,
         }
     }
 }
@@ -299,6 +403,9 @@ impl std::fmt::Debug for DispatcherConfig {
             .field("lease_ttl", &self.lease_ttl)
             .field("slots_available", &self.slots.available_permits())
             .field("stats", &self.stats)
+            .field("placement", &self.placement.is_some())
+            .field("flow", &self.flow.is_some())
+            .field("gauges", &self.gauges.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -414,6 +521,37 @@ impl Entry {
             ..self.clone()
         }
     }
+
+    /// The entry of an immediate re-grant of a started run (lease expiry, `Abandoned`):
+    /// ready time 0 (ahead of same-priority work) and not a first activation (B1).
+    fn regrant(&self) -> Self {
+        Self {
+            ready_at_ms: 0,
+            first_activation: false,
+            ..self.clone()
+        }
+    }
+
+    fn view(&self) -> EntryView<'_> {
+        EntryView {
+            queue: &self.queue,
+            workflow: &self.workflow,
+            tenant: self.tenant.as_deref(),
+            concurrency_key: &self.concurrency_key,
+            priority: self.priority,
+            first_activation: self.first_activation,
+        }
+    }
+
+    fn fair(&self, run: RunId) -> FairEntry {
+        FairEntry {
+            queue: self.queue.clone(),
+            priority: self.priority,
+            key: self.concurrency_key.clone(),
+            ready_at_ms: self.ready_at_ms,
+            run,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,7 +576,19 @@ struct Lease {
     inputs: mpsc::UnboundedSender<u64>,
     /// Receiver for the next job (taken when the job is built).
     pending_inputs: Option<mpsc::UnboundedReceiver<u64>>,
-    _permit: OwnedSemaphorePermit,
+    /// Committed flow charge (released when the lease ends).
+    flow: Option<FlowPermit>,
+    /// The capacity of this job (the job sees a weak view).
+    reservation: Option<Arc<Reservation>>,
+    kind: ReservationKind,
+}
+
+impl Lease {
+    /// Give the flow charge and the capacity back (idempotent).
+    fn release_capacity(&mut self) {
+        drop(self.flow.take());
+        drop(self.reservation.take());
+    }
 }
 
 /// Result of a full scan (startup rebuild or lagged rescan).
@@ -451,7 +601,8 @@ struct Scan {
 /// The dispatcher's in-memory state, separated from I/O so the action handling is
 /// unit-testable.
 struct State {
-    queues: BTreeMap<String, BTreeSet<(Reverse<i32>, u64, RunId)>>,
+    /// Due entries, selected fairly (D-W10).
+    fair: FairQueues,
     /// Every queued or delayed entry.
     entries: BTreeMap<RunId, Entry>,
     /// Entries with a future `ready_at`: `(ready_at_ms, run)`.
@@ -460,8 +611,6 @@ struct State {
     /// Lease checks `(deadline ms since base, run)`.
     checks: BTreeSet<(u64, RunId)>,
     next_generation: u64,
-    /// Last queue served (round-robin cursor).
-    last_queue: Option<String>,
     base: Instant,
     ttl: Duration,
 }
@@ -469,13 +618,12 @@ struct State {
 impl State {
     fn new(ttl: Duration) -> Self {
         Self {
-            queues: BTreeMap::new(),
+            fair: FairQueues::new(),
             entries: BTreeMap::new(),
             delayed: BTreeSet::new(),
             leases: BTreeMap::new(),
             checks: BTreeSet::new(),
             next_generation: 0,
-            last_queue: None,
             base: Instant::now(),
             ttl,
         }
@@ -490,7 +638,7 @@ impl State {
     }
 
     fn has_ready(&self) -> bool {
-        !self.queues.is_empty()
+        !self.fair.is_empty()
     }
 
     /// Queue `run` (replacing any previous entry): due entries go to their queue, future
@@ -500,24 +648,15 @@ impl State {
         if e.ready_at_ms > now_ms {
             self.delayed.insert((e.ready_at_ms, run));
         } else {
-            self.queues.entry(e.queue.clone()).or_default().insert((
-                Reverse(e.priority),
-                e.ready_at_ms,
-                run,
-            ));
+            self.fair.insert(e.fair(run));
         }
         self.entries.insert(run, e);
     }
 
     fn unqueue(&mut self, run: &RunId) -> Option<Entry> {
         let e = self.entries.remove(run)?;
-        if !self.delayed.remove(&(e.ready_at_ms, *run))
-            && let Some(set) = self.queues.get_mut(&e.queue)
-        {
-            set.remove(&(Reverse(e.priority), e.ready_at_ms, *run));
-            if set.is_empty() {
-                self.queues.remove(&e.queue);
-            }
+        if !self.delayed.remove(&(e.ready_at_ms, *run)) {
+            self.fair.remove(run);
         }
         Some(e)
     }
@@ -530,41 +669,26 @@ impl State {
             }
             self.delayed.pop_first();
             if let Some(e) = self.entries.get(&run) {
-                self.queues.entry(e.queue.clone()).or_default().insert((
-                    Reverse(e.priority),
-                    e.ready_at_ms,
-                    run,
-                ));
+                self.fair.insert(e.fair(run));
             }
         }
     }
 
-    /// Next run to dispatch: queues round-robin, per queue highest priority, then earliest
-    /// ready time, then run id.
+    /// Next run in fair order, ignoring admission and placement (unit tests).
+    #[cfg(test)]
     fn pop_next(&mut self) -> Option<(RunId, Entry)> {
-        let q = match &self.last_queue {
-            Some(last) => self
-                .queues
-                .range::<String, _>((Bound::Excluded(last), Bound::Unbounded))
-                .next()
-                .or_else(|| self.queues.iter().next()),
-            None => self.queues.iter().next(),
-        }
-        .map(|(k, _)| k.clone())?;
-        let set = self.queues.get_mut(&q)?;
-        let (_, _, run) = set.pop_first()?;
-        if set.is_empty() {
-            self.queues.remove(&q);
-        }
-        self.last_queue = Some(q);
-        let e = self.entries.remove(&run)?;
-        Some((run, e))
+        let c = self.fair.next_candidate(u64::MAX)?;
+        self.fair.take(&c)?;
+        let e = self.entries.remove(&c.run)?;
+        Some((c.run, e))
     }
 
-    /// Remove `run`'s lease, signalling `revoked` (harmless when the job already ended).
+    /// Remove `run`'s lease: release its flow charge and capacity, then signal `revoked`
+    /// (harmless when the job already ended).
     fn drop_lease(&mut self, run: &RunId) -> Option<Lease> {
-        let l = self.leases.remove(run)?;
+        let mut l = self.leases.remove(run)?;
         self.checks.remove(&(l.check_at, *run));
+        l.release_capacity();
         l.revoked.send_replace(true);
         Some(l)
     }
@@ -576,8 +700,15 @@ impl State {
         }
     }
 
-    /// Record a new lease in phase Granting; returns its generation.
-    fn new_lease(&mut self, run: RunId, entry: Entry, permit: OwnedSemaphorePermit) -> u64 {
+    /// Record a new lease in phase Granting, owning the committed flow charge and the
+    /// reservation; returns its generation.
+    fn new_lease(
+        &mut self,
+        run: RunId,
+        entry: Entry,
+        flow: FlowPermit,
+        reservation: Reservation,
+    ) -> u64 {
         self.next_generation += 1;
         let generation = self.next_generation;
         let at = self.now_rel().saturating_add(self.ttl_ms());
@@ -592,7 +723,9 @@ impl State {
             revoked: watch::channel(false).0,
             inputs: tx,
             pending_inputs: Some(rx),
-            _permit: permit,
+            flow: Some(flow),
+            kind: reservation.kind(),
+            reservation: Some(Arc::new(reservation)),
         };
         self.checks.insert((at, run));
         self.leases.insert(run, lease);
@@ -640,8 +773,9 @@ impl State {
                 }
                 None => {
                     if let Some(l) = self.drop_lease(&run) {
-                        // Ready time 0: re-dispatch ahead of same-priority work.
-                        self.enqueue(run, l.entry.at(0), now_ms);
+                        // Ready time 0: re-dispatch ahead of same-priority work; a started
+                        // run is never a first activation (B1).
+                        self.enqueue(run, l.entry.regrant(), now_ms);
                         expired.push(run);
                     }
                 }
@@ -717,6 +851,14 @@ impl State {
                     self.drop_lease(run);
                     self.unqueue(run);
                 }
+                Action::RunPaused { run } => {
+                    // OPS-01: stop the live activation, forget queued / delayed work.
+                    self.drop_lease(run);
+                    self.unqueue(run);
+                }
+                // Nothing in memory to reset (failures are durable, F9); the EnqueueReady
+                // emitted with the resume queues the run.
+                Action::RunResumed { .. } => {}
                 _ => {}
             }
         }
@@ -734,7 +876,7 @@ impl State {
         let running: BTreeMap<RunId, Option<Entry>> = scan.running.into_iter().collect();
         // Keep only pending re-grants (retry backoff) of runs that are still Running.
         let old: Vec<(RunId, Entry)> = std::mem::take(&mut self.entries).into_iter().collect();
-        self.queues.clear();
+        self.fair.clear();
         self.delayed.clear();
         for (run, e) in old {
             if running.contains_key(&run) && !self.leases.contains_key(&run) {
@@ -816,6 +958,24 @@ struct Dispatcher {
     m_expired: metrics::Counter,
     /// This dispatcher's share of `ostro_queue_ready{queue}`: queue -> (gauge, reported).
     ready_gauges: BTreeMap<String, (metrics::Gauge, usize)>,
+    /// Capacity source (configured, or the default [`SemaphorePlacement`] over `slots`).
+    placement: Arc<dyn Placement>,
+    /// Admission control (configured, or [`NoFlow`]).
+    flow: Arc<dyn FlowControl>,
+    /// `true` = `placement` is the default one: also wait on the slot semaphore itself.
+    default_placement: bool,
+    /// A slot permit taken by the semaphore arm (default placement), used by the next
+    /// reservation of the round.
+    held_slot: Option<OwnedSemaphorePermit>,
+    place_rx: watch::Receiver<u64>,
+    flow_rx: watch::Receiver<u64>,
+    /// The watch senders are alive (a closed channel disables its arm).
+    place_live: bool,
+    flow_live: bool,
+    /// Earliest `QueueBlocked{until}` of the last round (clock ms).
+    queue_until: Option<u64>,
+    /// Last published gauges per queue.
+    published: BTreeMap<String, QueueGauge>,
 }
 
 /// Loop control after handling an event.
@@ -828,7 +988,26 @@ impl Dispatcher {
     fn new(ctx: LeaderCtx, cfg: DispatcherConfig) -> Self {
         let label = ctx.partition.0.to_string();
         describe_queue_metrics();
+        let default_placement = cfg.placement.is_none();
+        let placement: Arc<dyn Placement> = match &cfg.placement {
+            Some(p) => Arc::clone(p),
+            None => Arc::new(SemaphorePlacement::new(Arc::clone(&cfg.slots))),
+        };
+        let flow: Arc<dyn FlowControl> = match &cfg.flow {
+            Some(f) => Arc::clone(f),
+            None => Arc::new(NoFlow::new()),
+        };
         Self {
+            place_rx: placement.changed(),
+            flow_rx: flow.changed(),
+            placement,
+            flow,
+            default_placement,
+            held_slot: None,
+            place_live: true,
+            flow_live: true,
+            queue_until: None,
+            published: BTreeMap::new(),
             st: State::new(cfg.lease_ttl),
             stats: cfg.stats.clone().unwrap_or_default(),
             joins: JoinSet::new(),
@@ -862,7 +1041,12 @@ impl Dispatcher {
                 .into_iter()
                 .map(|(run, _)| {
                     let rec = query::run_record(&reader, &run)?;
-                    Ok((run, rec.map(|r| Entry::from_record(&r, 0))))
+                    // A paused Running run is not re-granted (OPS-01): no entry.
+                    Ok((
+                        run,
+                        rec.filter(|r| r.pause.is_none())
+                            .map(|r| Entry::from_record(&r, 0)),
+                    ))
                 })
                 .collect::<Result<Vec<_>, crate::store::StoreError>>()
                 .map_err(|e| e.to_string())?;
@@ -924,14 +1108,66 @@ impl Dispatcher {
         self.rescan().await
     }
 
-    /// Start grants while there is ready work and a free slot.
+    /// One dispatch round (module docs): fair candidate -> admission -> reservation ->
+    /// grant, until no candidate is left (every queue skipped, parked or empty).
     fn dispatch_available(&mut self) {
-        while self.st.has_ready() {
-            let Ok(permit) = Arc::clone(&self.cfg.slots).try_acquire_owned() else {
-                return;
-            };
-            self.dispatch(permit);
+        self.queue_until = None;
+        self.st.fair.begin_round();
+        if !self.st.has_ready() {
+            drop(self.held_slot.take());
+            return;
         }
+        for q in self.st.fair.queue_names() {
+            let w = self.flow.queue_weight(&q);
+            self.st.fair.set_weight(&q, w);
+        }
+        let now = self.now_ms();
+        while let Some(c) = self.st.fair.next_candidate(now) {
+            let Some(e) = self.st.entries.get(&c.run) else {
+                // Not reachable (fair holds only queued entries); never spin on it.
+                self.st.fair.remove(&c.run);
+                continue;
+            };
+            let view = e.view();
+            let mut permit = match self.flow.admit(&view, now) {
+                Admit::Yes(p) => p,
+                Admit::QueueBlocked { until_ms } => {
+                    self.st.fair.skip_queue(&c.queue);
+                    self.queue_until = match (self.queue_until, until_ms) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                    continue;
+                }
+                Admit::KeyBlocked { until_ms } => {
+                    self.st.fair.park_key(&c.queue, &c.key, until_ms);
+                    continue;
+                }
+                Admit::Paused => {
+                    self.st.fair.skip_queue(&c.queue);
+                    continue;
+                }
+            };
+            let reserved = match self.held_slot.take() {
+                Some(slot) => Reserve::Granted(Reservation::new(ReservationKind::Embedded, slot)),
+                None => self.placement.reserve(&view),
+            };
+            let reservation = match reserved {
+                Reserve::Granted(r) => r,
+                Reserve::Blocked => {
+                    drop(permit); // rolls the tentative charge back
+                    self.st.fair.park_queue(&c.queue);
+                    continue;
+                }
+            };
+            permit.commit();
+            self.st.fair.take(&c);
+            if let Some(entry) = self.st.entries.remove(&c.run) {
+                self.dispatch(c.run, entry, permit, reservation);
+            }
+        }
+        // An unused semaphore permit goes back (another partition may need it).
+        drop(self.held_slot.take());
     }
 
     /// Move the shared lease gauge by this dispatcher's change since the last report.
@@ -950,18 +1186,19 @@ impl Dispatcher {
     }
 
     /// Move `ostro_queue_ready{queue}` by this dispatcher's change since the last report
-    /// (one O(1) length read per queue; no lock).
+    /// (one count per queue; no lock).
     fn report_queues(&mut self) {
+        let counts = self.st.fair.per_queue_counts();
         for (q, (g, reported)) in &mut self.ready_gauges {
-            let now = self.st.queues.get(q).map_or(0, BTreeSet::len);
+            let now = counts.get(q).copied().unwrap_or(0);
             move_gauge(g, reported, now);
         }
-        for (q, set) in &self.st.queues {
-            if !self.ready_gauges.contains_key(q) {
-                let g = ready_gauge(q);
+        for (q, n) in counts {
+            if let std::collections::btree_map::Entry::Vacant(v) = self.ready_gauges.entry(q) {
+                let g = ready_gauge(v.key());
                 let mut reported = 0;
-                move_gauge(&g, &mut reported, set.len());
-                self.ready_gauges.insert(q.clone(), (g, reported));
+                move_gauge(&g, &mut reported, n);
+                v.insert((g, reported));
             }
         }
     }
@@ -1001,11 +1238,8 @@ impl Dispatcher {
             .on_actions(b, now, &mut |r, t| requeued_after_grant(h, r, t));
     }
 
-    fn dispatch(&mut self, permit: OwnedSemaphorePermit) {
-        let Some((run, entry)) = self.st.pop_next() else {
-            return; // the permit drops
-        };
-        let generation = self.st.new_lease(run, entry, permit);
+    fn dispatch(&mut self, run: RunId, entry: Entry, flow: FlowPermit, res: Reservation) {
+        let generation = self.st.new_lease(run, entry, flow, res);
         let h = self.ctx.handle.clone();
         let after = self.unacked.get(&run).copied();
         let floor = self.rejected.get(&run).copied();
@@ -1045,6 +1279,11 @@ impl Dispatcher {
             }
         };
         let revoked = l.revoked.subscribe();
+        let view = LeaseReservation(
+            l.reservation
+                .as_ref()
+                .map_or_else(Weak::new, Arc::downgrade),
+        );
         let job = Job {
             partition: self.ctx.partition,
             run,
@@ -1060,6 +1299,7 @@ impl Dispatcher {
                 revoked,
             },
             failures,
+            reservation: Reservation::new(l.kind, view),
         };
         let generation = l.generation;
         let fut = self.cfg.executor.execute(job);
@@ -1257,6 +1497,10 @@ impl Dispatcher {
             return Flow::Continue; // a newer lease or a queued entry owns the run
         }
         match self.ctx.handle.read_run(&run) {
+            Ok(Some(rec)) if rec.pause.is_some() && !rec.status.is_terminal() => {
+                // Paused (OPS-01): the resume's EnqueueReady queues it again.
+                debug!(partition = self.p(), %run, "grant rejected for a paused run; not re-queued");
+            }
             Ok(Some(rec)) if !rec.status.is_terminal() => {
                 // Still live: re-grant (above the rejected token) after a short delay.
                 let now = self.now_ms();
@@ -1288,6 +1532,14 @@ impl Dispatcher {
         match outcome {
             ExecOutcome::Released | ExecOutcome::Fenced => {
                 self.st.drop_lease(&run);
+            }
+            ExecOutcome::Abandoned => {
+                // Worker lost (07-05): re-grant n + 1 now; not an attempt failure.
+                debug!(partition = self.p(), %run, "job abandoned; re-granting");
+                if let Some(l) = self.st.drop_lease(&run) {
+                    let now = self.now_ms();
+                    self.st.enqueue(run, l.entry.regrant(), now);
+                }
             }
             ExecOutcome::Retry { after_ms } => self.regrant_after_failure(run, after_ms),
             ExecOutcome::Reactivate => match self.ctx.handle.read_run(&run) {
@@ -1384,11 +1636,21 @@ impl Dispatcher {
         }
     }
 
-    /// Earliest wake-up: next delayed ready time or next lease check.
+    /// Earliest wake-up: next delayed ready time, next lease check, or the earliest
+    /// flow-control `until` (a `QueueBlocked` of the last round or a parked key).
     fn next_deadline(&self) -> Option<Instant> {
-        let ready = self.st.delayed.first().map(|&(at, _)| {
-            Instant::now() + Duration::from_millis(at.saturating_sub(self.now_ms()))
-        });
+        let at_clock = [
+            self.st.delayed.first().map(|&(at, _)| at),
+            self.queue_until,
+            self.st.fair.next_unpark_at(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        // Clock ms -> a tokio deadline (the sleep waits for a deadline computed from the
+        // injected clock).
+        let ready = at_clock
+            .map(|at| Instant::now() + Duration::from_millis(at.saturating_sub(self.now_ms())));
         let lease = self
             .st
             .checks
@@ -1400,11 +1662,54 @@ impl Dispatcher {
         }
     }
 
+    /// Publish this partition's per-queue gauges (when configured and changed).
+    fn publish_gauges(&mut self) {
+        let Some(gauges) = self.cfg.gauges.clone() else {
+            return;
+        };
+        let mut now: BTreeMap<String, QueueGauge> = BTreeMap::new();
+        let unblocked = self.st.fair.per_queue_unblocked();
+        let oldest = self.st.fair.per_queue_oldest();
+        for (q, n) in self.st.fair.per_queue_counts() {
+            let g = now.entry(q.clone()).or_default();
+            g.ready = n as u64;
+            g.ready_unblocked = unblocked.get(&q).copied().unwrap_or(0) as u64;
+            g.oldest_ready_at_ms = oldest.get(&q).copied();
+        }
+        for l in self.st.leases.values() {
+            let g = now.entry(l.entry.queue.clone()).or_default();
+            match l.kind {
+                ReservationKind::Embedded => g.running_embedded += 1,
+                ReservationKind::Worker => g.running_on_workers += 1,
+            }
+        }
+        let p = self.ctx.partition;
+        for (q, g) in &now {
+            if self.published.get(q) != Some(g) {
+                gauges.set(p, q, *g);
+            }
+        }
+        // Queues that went idle: publish zeros once, then forget them.
+        for q in self.published.keys() {
+            if !now.contains_key(q) {
+                gauges.set(p, q, QueueGauge::default());
+            }
+        }
+        self.published = now;
+    }
+
     async fn run(mut self, mut actions: broadcast::Receiver<Arc<Vec<Action>>>) {
         let mut shutdown = self.ctx.shutdown.clone();
+        #[allow(clippy::disallowed_methods)]
+        let started = std::time::Instant::now(); // clock-exempt: rebuild duration metric only
         if self.rescan().await.is_err() {
             return;
         }
+        let label = self.p().to_string();
+        metrics::gauge!("ostro_flow_rebuild_entries", "partition" => label.clone())
+            .set((self.st.entries.len() + self.st.leases.len()) as f64);
+        metrics::histogram!("ostro_flow_rebuild_seconds", "partition" => label)
+            .record(started.elapsed().as_secs_f64());
         info!(
             partition = self.p(),
             queued = self.st.entries.len(),
@@ -1418,13 +1723,17 @@ impl Dispatcher {
             let now = self.now_ms();
             self.on_expired();
             self.st.promote_due(now);
+            self.st.fair.unpark_due(now);
             self.dispatch_available();
             self.report_leases();
             self.report_queues();
+            self.publish_gauges();
 
             let deadline = self.next_deadline();
-            let want_slot = self.st.has_ready();
+            // Default placement: a parked queue waits for a node-wide slot (module docs).
+            let want_slot = self.default_placement && self.st.fair.has_parked_queues();
             let slots = Arc::clone(&self.cfg.slots);
+            let (place_live, flow_live) = (self.place_live, self.flow_live);
             let flow = tokio::select! {
                 biased;
                 r = shutdown.changed() => match r {
@@ -1462,9 +1771,24 @@ impl Dispatcher {
                         },
                     }
                 },
+                r = self.place_rx.changed(), if place_live => {
+                    match r {
+                        Ok(()) => self.st.fair.unpark_queues(),
+                        Err(_) => self.place_live = false,
+                    }
+                    Flow::Continue
+                },
+                r = self.flow_rx.changed(), if flow_live => {
+                    match r {
+                        Ok(()) => self.st.fair.unpark_keys(),
+                        Err(_) => self.flow_live = false,
+                    }
+                    Flow::Continue
+                },
                 p = slots.acquire_owned(), if want_slot => {
                     if let Ok(p) = p {
-                        self.dispatch(p);
+                        self.held_slot = Some(p);
+                        self.st.fair.unpark_queues();
                     }
                     Flow::Continue
                 },
@@ -1484,6 +1808,9 @@ impl Dispatcher {
         // Leadership ends: remove this dispatcher's share of the ready gauges.
         for (g, reported) in self.ready_gauges.values_mut() {
             move_gauge(g, reported, 0);
+        }
+        if let Some(g) = &self.cfg.gauges {
+            g.remove_partition(self.ctx.partition);
         }
         let grace = self.cfg.lease_ttl.min(SHUTDOWN_GRACE);
         let drained = tokio::time::timeout(grace, async {
@@ -1522,6 +1849,15 @@ fn move_gauge(g: &metrics::Gauge, reported: &mut usize, now: usize) {
 /// Help text of the queue series (idempotent). `ostro_queue_worker_demand` is described
 /// only: Phase 7 (`workers/demand.rs`) owns its value.
 fn describe_queue_metrics() {
+    metrics::describe_gauge!(
+        "ostro_flow_rebuild_entries",
+        "Entries (queued, delayed and leased) after a dispatcher rebuild, per partition."
+    );
+    metrics::describe_histogram!(
+        "ostro_flow_rebuild_seconds",
+        metrics::Unit::Seconds,
+        "Duration of a dispatcher rebuild scan, per partition."
+    );
     metrics::describe_gauge!(
         "ostro_queue_ready",
         "Ready (due) runs waiting for an executor slot, per queue."
@@ -1563,6 +1899,10 @@ async fn pipelined_grant(
         .ok_or(PartitionError::Rejected(RejectReason::RunNotFound))?;
     if rec.status.is_terminal() {
         return Err(PartitionError::Rejected(RejectReason::RunTerminal));
+    }
+    if rec.pause.is_some() {
+        // Apply would reject it `RunPaused`; log nothing (OPS-01).
+        return Err(PartitionError::Rejected(RejectReason::RunPaused));
     }
     let epoch = h.epoch();
     let n = match rec.current_attempt {
@@ -1676,10 +2016,8 @@ mod tests {
         false
     }
 
-    fn permit() -> OwnedSemaphorePermit {
-        Arc::new(Semaphore::new(1))
-            .try_acquire_owned()
-            .expect("permit")
+    fn res() -> Reservation {
+        Reservation::new(ReservationKind::Embedded, ())
     }
 
     fn entry(q: &str, priority: i32, at: u64, ck: &str) -> Entry {
@@ -1709,7 +2047,7 @@ mod tests {
 
     /// A lease in phase Executing; returns the job's inputs receiver.
     fn leased(st: &mut State, r: RunId) -> mpsc::UnboundedReceiver<u64> {
-        st.new_lease(r, entry("q", 0, 0, ""), permit());
+        st.new_lease(r, entry("q", 0, 0, ""), FlowPermit::none(), res());
         let l = st.leases.get_mut(&r).expect("lease");
         l.phase = Phase::Executing(AttemptToken {
             epoch: ostro_types::Epoch(1),
@@ -1765,7 +2103,7 @@ mod tests {
     async fn enqueue_ready_while_granting_is_stale_while_executing_requeues() {
         let mut st = State::new(Duration::from_secs(30));
         let (a, b) = (run(), run());
-        st.new_lease(a, entry("q", 0, 0, ""), permit());
+        st.new_lease(a, entry("q", 0, 0, ""), FlowPermit::none(), res());
         st.on_actions(&[enqueue_action(a, "q", 0, 1, "")], 10, &mut never);
         assert!(st.leases.contains_key(&a), "granting lease kept");
         assert!(st.entries.is_empty());

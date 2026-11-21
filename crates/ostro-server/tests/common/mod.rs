@@ -194,6 +194,9 @@ impl TestNode {
             lease_ttl: opts.dispatcher_lease_ttl,
             slots: Arc::new(Semaphore::new(opts.slots)),
             stats: Some(Arc::clone(&stats)),
+            placement: None,
+            flow: None,
+            gauges: None,
         });
         let node = timeout(OPEN_T, Node::open(cfg))
             .await

@@ -111,6 +111,8 @@ impl Band {
 struct Queue {
     bands: BTreeMap<Reverse<i32>, Band>,
     len: usize,
+    /// Every entry of the queue by `(ready_at, run)` (oldest ready time for the gauges).
+    ats: BTreeSet<(u64, RunId)>,
 }
 
 /// Where a run is filed: `(queue, priority, key, ready_at)`.
@@ -158,12 +160,27 @@ impl FairQueues {
             .collect()
     }
 
-    /// Entries per non-empty queue that are not in a skipped or parked queue or a parked
-    /// key (the gauges' `ready_unblocked`).
+    /// Names of the non-empty queues.
+    pub fn queue_names(&self) -> Vec<String> {
+        self.queues.keys().cloned().collect()
+    }
+
+    /// Oldest `ready_at_ms` per non-empty queue.
+    pub fn per_queue_oldest(&self) -> BTreeMap<String, u64> {
+        self.queues
+            .iter()
+            .filter_map(|(q, s)| s.ats.first().map(|(at, _)| (q.clone(), *at)))
+            .collect()
+    }
+
+    /// Entries per non-empty queue that flow control did not hold back in the last round:
+    /// not in a skipped queue (`QueueBlocked` / `Paused`) and not in a parked key
+    /// (`KeyBlocked`). A placement-parked queue still counts (admissible, no capacity: the
+    /// gauges' `ready_unblocked`, input of worker demand).
     pub fn per_queue_unblocked(&self) -> BTreeMap<String, usize> {
         let mut out = BTreeMap::new();
         for (q, s) in &self.queues {
-            let n = if self.skipped.contains(q) || self.parked_queues.contains(q) {
+            let n = if self.skipped.contains(q) {
                 0
             } else {
                 let lo = (q.clone(), String::new());
@@ -214,6 +231,7 @@ impl FairQueues {
         let ks = band.keys.entry(e.key.clone()).or_default();
         ks.items.insert((e.ready_at_ms, e.run));
         q.len += 1;
+        q.ats.insert((e.ready_at_ms, e.run));
         if parked {
             band.refile(&e.key, true);
         } else {
@@ -241,6 +259,7 @@ impl FairQueues {
                 }
             }
             q.len = q.len.saturating_sub(1);
+            q.ats.remove(&(at, *run));
             if q.len == 0 {
                 self.queues.remove(&queue);
                 // A parked key of an emptied queue has nothing left to hold back.
@@ -279,10 +298,7 @@ impl FairQueues {
 
     /// Forget a key park (no refile).
     fn unpark_key_record(&mut self, queue: &str, key: &str) {
-        if let Some(Some(until)) = self
-            .parked_keys
-            .remove(&(queue.to_owned(), key.to_owned()))
-        {
+        if let Some(Some(until)) = self.parked_keys.remove(&(queue.to_owned(), key.to_owned())) {
             self.park_until
                 .remove(&(until, queue.to_owned(), key.to_owned()));
         }
@@ -320,18 +336,15 @@ impl FairQueues {
     }
 
     /// The next entry to try (due at `now_ms`), or `None` once every non-empty queue is
-    /// skipped, parked or has nothing servable. Does not remove it: call [`Self::take`]
-    /// after admission and placement, or skip / park its queue or key.
+    /// skipped, parked or has nothing servable. Does not remove it and does not move the
+    /// turn: call [`Self::take`] after admission and placement, or skip / park its queue
+    /// or key.
     pub fn next_candidate(&mut self, now_ms: u64) -> Option<Candidate> {
         for q in self.turn_order() {
             if self.skipped.contains(&q) || self.parked_queues.contains(&q) {
                 continue;
             }
             if let Some(c) = self.queue_candidate(&q, now_ms) {
-                if self.turn.as_ref().is_none_or(|(t, _)| *t != q) {
-                    let w = self.weight(&q);
-                    self.turn = Some((q, w));
-                }
                 return Some(c);
             }
         }
@@ -352,12 +365,17 @@ impl FairQueues {
             ks.rank = ks.rank.saturating_add(1);
         }
         let e = self.remove(&c.run)?;
+        // Served out of turn (the turn's queue was skipped or parked): the turn moves here.
+        if self.turn.as_ref().is_none_or(|(t, _)| *t != queue) {
+            let w = self.weight(&queue);
+            self.turn = Some((queue.clone(), w));
+        }
         let pass = match &mut self.turn {
-            Some((t, left)) if *t == queue => {
+            Some((_, left)) => {
                 *left = left.saturating_sub(1);
                 *left == 0 || !self.queues.contains_key(&queue)
             }
-            _ => false,
+            None => false,
         };
         if pass {
             self.pass_turn(&queue);
@@ -384,22 +402,16 @@ impl FairQueues {
         self.skipped.clear();
     }
 
-    /// Skip `queue` for the rest of the round (`QueueBlocked`, `Paused`).
+    /// Skip `queue` for the rest of the round (`QueueBlocked`, `Paused`). The turn only
+    /// moves when another queue's entry is taken, so probing a blocked queue costs it
+    /// nothing.
     pub fn skip_queue(&mut self, queue: &str) {
         self.skipped.insert(queue.to_owned());
-        self.lose_turn(queue);
     }
 
     /// Skip `queue` until [`Self::unpark_queues`] (placement had no capacity).
     pub fn park_queue(&mut self, queue: &str) {
         self.parked_queues.insert(queue.to_owned());
-        self.lose_turn(queue);
-    }
-
-    fn lose_turn(&mut self, queue: &str) {
-        if self.turn.as_ref().is_some_and(|(t, _)| t == queue) {
-            self.pass_turn(queue);
-        }
     }
 
     /// Park `key` of `queue` until `until_ms` (clock ms; `None` = until
@@ -460,6 +472,11 @@ impl FairQueues {
     pub fn unpark_all(&mut self) {
         self.unpark_queues();
         self.unpark_keys();
+    }
+
+    /// Whether any queue is parked (placement had no capacity).
+    pub fn has_parked_queues(&self) -> bool {
+        !self.parked_queues.is_empty()
     }
 
     /// Whether any queue or key is parked.
@@ -527,6 +544,31 @@ mod tests {
         for w in picks.chunks(4) {
             assert_eq!(w.iter().filter(|q| *q == "a").count(), 3, "{w:?}");
         }
+    }
+
+    /// Capacity for one pick at a time (the turn's queue is parked after every pick until
+    /// capacity returns): shares still follow the weights.
+    #[test]
+    fn weights_hold_under_one_pick_per_round() {
+        let mut f = FairQueues::new();
+        f.set_weight("a", 3);
+        for i in 0..200 {
+            f.insert(e(i, "a", 0, "", i));
+            f.insert(e(10_000 + i, "b", 0, "", i));
+        }
+        let mut picks = Vec::new();
+        for _ in 0..200 {
+            f.unpark_queues();
+            f.begin_round();
+            let c = f.next_candidate(u64::MAX).expect("backlogged");
+            picks.push(f.take(&c).expect("present").queue);
+            // No capacity left: every further candidate is parked.
+            while let Some(c) = f.next_candidate(u64::MAX) {
+                f.park_queue(&c.queue);
+            }
+        }
+        let a = picks.iter().filter(|q| *q == "a").count();
+        assert_eq!(a, 150, "{picks:?}");
     }
 
     #[test]
@@ -627,7 +669,11 @@ mod tests {
         assert_eq!(c.queue, "b");
         f.skip_queue("b");
         assert!(f.next_candidate(10).is_none());
-        assert_eq!(f.per_queue_unblocked().values().sum::<usize>(), 0);
+        // The placement-parked queue is still admissible work; the skipped one is not.
+        assert_eq!(f.per_queue_unblocked()["a"], 1);
+        assert_eq!(f.per_queue_unblocked()["b"], 0);
+        assert!(f.has_parked_queues());
+        assert_eq!(f.per_queue_oldest()["a"], 1);
         f.begin_round();
         assert_eq!(f.next_candidate(10).map(|c| c.queue), Some("b".into()));
         f.unpark_queues();

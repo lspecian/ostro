@@ -153,6 +153,9 @@ async fn open(dir: &Path, opts: Option<&Opts>) -> Node {
                 .clone()
                 .unwrap_or_else(|| Arc::new(Semaphore::new(o.slots))),
             stats: Some(Arc::clone(&o.stats)),
+            placement: None,
+            flow: None,
+            gauges: None,
         });
     }
     timeout(OPEN_T, Node::open(cfg))

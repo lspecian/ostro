@@ -120,6 +120,9 @@ async fn open(dir: &Path, fake: Arc<Fake>, stats: &Arc<DispatcherStats>) -> Node
         lease_ttl: Duration::from_secs(30),
         slots: Arc::new(Semaphore::new(16)),
         stats: Some(Arc::clone(stats)),
+        placement: None,
+        flow: None,
+        gauges: None,
     });
     timeout(OPEN_T, Node::open(cfg))
         .await
