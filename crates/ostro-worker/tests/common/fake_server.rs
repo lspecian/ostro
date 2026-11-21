@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener as StdListener};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -684,6 +684,8 @@ pub struct FakeJoin {
     pub cert_lifetime_s: Arc<AtomicU64>,
     /// Replace the CA certificate in the response (CA-hash mismatch test).
     pub ca_override: Arc<Mutex<Option<String>>>,
+    /// Refuse every join with 400 `join_token_invalid` (revoked token, 07-22).
+    pub refuse: Arc<AtomicBool>,
 }
 
 impl FakeJoin {
@@ -698,19 +700,21 @@ impl FakeJoin {
             renew_after_ms: Arc::new(AtomicU64::new(0)),
             cert_lifetime_s: Arc::new(AtomicU64::new(0)),
             ca_override: Arc::new(Mutex::new(None)),
+            refuse: Arc::new(AtomicBool::new(false)),
         };
         let server_cfg = ca.rustls_server();
-        let (reqs, eps, renew, life, ovr) = (
+        let (reqs, eps, renew, life, ovr, refuse) = (
             Arc::clone(&me.requests),
             Arc::clone(&me.endpoints),
             Arc::clone(&me.renew_after_ms),
             Arc::clone(&me.cert_lifetime_s),
             Arc::clone(&me.ca_override),
+            Arc::clone(&me.refuse),
         );
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { continue };
-                let (ca, cfg, reqs, eps, renew, life, ovr) = (
+                let (ca, cfg, reqs, eps, renew, life, ovr, refuse) = (
                     Arc::clone(&ca),
                     Arc::clone(&server_cfg),
                     Arc::clone(&reqs),
@@ -718,6 +722,7 @@ impl FakeJoin {
                     Arc::clone(&renew),
                     Arc::clone(&life),
                     Arc::clone(&ovr),
+                    Arc::clone(&refuse),
                 );
                 std::thread::spawn(move || {
                     let handler = |stream: &mut dyn ReadWrite| {
@@ -725,6 +730,21 @@ impl FakeJoin {
                             return;
                         };
                         reqs.lock().unwrap().push(body.clone());
+                        if refuse.load(Ordering::Relaxed) {
+                            let resp = serde_json::json!({"error": {
+                                "code": "invalid_argument",
+                                "message": "join token revoked",
+                                "reason": "join_token_invalid",
+                            }})
+                            .to_string();
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{resp}",
+                                resp.len()
+                            );
+                            let _ = stream.flush();
+                            return;
+                        }
                         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
                         let csr = v["csr_pem"].as_str().unwrap();
                         let l = life.load(Ordering::Relaxed);

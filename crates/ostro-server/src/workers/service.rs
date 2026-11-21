@@ -66,10 +66,9 @@ use crate::workers::registry::{
 
 /// `Hello.ostro_version` this server accepts (`require_same_version`).
 pub const OSTRO_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// `Hello.wasmtime_version` this server accepts: the workspace Wasmtime pin. ostro-engine
-/// keeps its copy private (`cache.rs`); `tests/worker_session.rs` asserts this equals
-/// `ostro_worker::WASMTIME_VERSION` so the two cannot drift silently.
-pub const WASMTIME_VERSION: &str = "50.0.2";
+/// `Hello.wasmtime_version` this server accepts: the engine's Wasmtime pin (the same
+/// constant the worker announces, 07-22).
+pub const WASMTIME_VERSION: &str = ostro_engine::cache::WASMTIME_VERSION;
 /// tonic encode/decode limit (D-W2).
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// `FetchBlob` chunk size.
@@ -1031,7 +1030,24 @@ impl Execute for ExecuteSvc {
         let r = req.into_inner();
         let access = self
             .st
-            .authorize(&peer, &r.session_id, r.run.as_ref(), r.token.as_ref())?;
+            .authorize(&peer, &r.session_id, r.run.as_ref(), r.token.as_ref())
+            .inspect_err(|status| {
+                // A fenced (zombie or revoked) session tried to start an effect: refused
+                // before any journal read, nothing is sent. Logged so operators see zombie
+                // traffic on the leader (07-18 observation, 07-22).
+                let run = r
+                    .run
+                    .as_ref()
+                    .and_then(|x| ostro_types::RunId::from_bytes(&x.run_id).ok());
+                warn!(
+                    worker = %peer.worker_id,
+                    run = ?run,
+                    token = ?r.token.as_ref().map(|t| (t.epoch, t.n)),
+                    op = r.op,
+                    error = %status.message(),
+                    "refused StartEffect from a session without the lease"
+                );
+            })?;
         let handler = self.st.registry.rpc_handler(access.job_id).ok_or_else(|| {
             Status::unimplemented("no remote job handler is attached to this lease (07-12)")
         })?;

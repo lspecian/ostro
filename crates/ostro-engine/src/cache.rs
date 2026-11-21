@@ -32,8 +32,13 @@ const TAG_LEN: usize = 32;
 const KEY_FILE: &str = "aot.key";
 /// Subdirectory holding `<key>.cwasm` artefacts.
 const AOT_DIR: &str = "aot";
-/// Wasmtime version baked into the cache key (must match the exact workspace pin).
-const WASMTIME_VERSION: &str = "wasmtime=50.0.2";
+/// The Wasmtime version this engine is built with: the exact workspace pin (`Cargo.toml`
+/// `wasmtime = "=50.0.2"`). Baked into the AOT cache key and announced by workers in
+/// `Hello.wasmtime_version` (the one copy; ostro-worker and ostro-server re-export it).
+pub const WASMTIME_VERSION: &str = "50.0.2";
+/// The cache-key part for [`WASMTIME_VERSION`] (byte-identical to the key before 07-22,
+/// so existing artefacts stay valid).
+const WASMTIME_KEY_PREFIX: &str = "wasmtime=";
 
 /// `std::hash::Hasher` adapter that feeds a SHA-256 digest.
 ///
@@ -69,8 +74,11 @@ pub fn compat_digest(engine: &wasmtime::Engine) -> [u8; 32] {
     let mut h = Sha256Hasher(Sha256::new());
     engine.precompile_compatibility_hash().hash(&mut h);
     let mut d = h.0;
+    // The `wasmtime=<version>` part, length-prefixed like the others.
+    d.update(((WASMTIME_KEY_PREFIX.len() + WASMTIME_VERSION.len()) as u64).to_le_bytes());
+    d.update(WASMTIME_KEY_PREFIX.as_bytes());
+    d.update(WASMTIME_VERSION.as_bytes());
     for part in [
-        WASMTIME_VERSION,
         concat!("ostro=", env!("CARGO_PKG_VERSION")),
         std::env::consts::ARCH,
         std::env::consts::OS,

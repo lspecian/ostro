@@ -236,6 +236,23 @@ where
     }
 }
 
+/// The stdout fmt layer: ANSI colours only when stdout is a terminal (07-22: a piped or
+/// redirected `ostro server` / `ostro worker` writes plain text).
+fn stdout_layer<S>(format: LogFormat) -> Box<dyn Layer<S> + Send + Sync>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    use std::io::IsTerminal as _;
+    let base = fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_ansi(std::io::stdout().is_terminal());
+    match format {
+        LogFormat::Pretty => base.pretty().boxed(),
+        LogFormat::Compact => base.compact().boxed(),
+        LogFormat::Json => base.json().boxed(),
+    }
+}
+
 /// Install the global subscriber: `RUST_LOG` wins over `cfg.level`; pretty, compact or
 /// JSON output per `cfg.format`; the OTel slot is wired for a later
 /// [`crate::telemetry::Telemetry::init`]. Idempotent: a second call (or one after another
@@ -246,7 +263,7 @@ pub fn init_tracing(cfg: &LogSection) -> bool {
         .unwrap_or_else(|_| EnvFilter::new("info"));
     let installed = tracing_subscriber::registry()
         .with(OtelSlotLayer)
-        .with(fmt_layer(cfg.format, std::io::stdout))
+        .with(stdout_layer(cfg.format))
         .with(filter)
         .try_init()
         .is_ok();

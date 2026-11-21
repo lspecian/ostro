@@ -44,9 +44,9 @@ use tokio_util::sync::CancellationToken;
 
 /// `Hello.ostro_version`: this build's ostro version.
 pub const OSTRO_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// `Hello.wasmtime_version`: the Wasmtime pinned in the workspace (`Cargo.toml`; the engine
-/// keeps the same string private in its AOT cache key).
-pub const WASMTIME_VERSION: &str = "50.0.2";
+/// `Hello.wasmtime_version`: the Wasmtime pinned in the workspace, the engine's own
+/// constant (one copy, 07-22).
+pub const WASMTIME_VERSION: &str = ostro_engine::cache::WASMTIME_VERSION;
 /// `Hello.wit_packages`: the WIT worlds this engine implements.
 pub const WIT_PACKAGES: &[&str] = &["ostro:runtime@0.1.0"];
 /// tonic encode/decode limit on both sides (D-W2).

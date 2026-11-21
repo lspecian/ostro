@@ -229,6 +229,42 @@ async fn rejoins_after_every_endpoint_failed() {
 }
 
 #[tokio::test]
+async fn refused_rejoin_ends_the_worker() {
+    // 07-22: a revoked token makes the re-join fail with 400 join_token_invalid; the worker
+    // exits with that refusal instead of retrying forever.
+    let h = Harness::new(FakeConfig::default()).await;
+    let mut w = spawn_worker(h.cfg());
+    w.wait_event(T, "connected", is_connected).await;
+    h.join
+        .refuse
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let Harness {
+        fake,
+        join,
+        dir: _dir,
+        ca: _ca,
+    } = h;
+    fake.stop().await;
+    let res = tokio::time::timeout(T, w.handle)
+        .await
+        .expect("the worker exits after the refused re-join")
+        .expect("worker task");
+    match res {
+        Err(WorkerError::Join(JoinError::Refused { status, message })) => {
+            assert_eq!(status, 400);
+            assert!(message.contains("revoked"), "{message}");
+            assert!(!message.contains("s3cr3t"), "token leaked: {message}");
+        }
+        other => panic!("expected a refused join, got {other:?}"),
+    }
+    assert_eq!(
+        join.requests.lock().unwrap().len(),
+        2,
+        "one join, one refused re-join"
+    );
+}
+
+#[tokio::test]
 async fn stream_loss_self_fences_and_reconnects() {
     let h = Harness::new(FakeConfig::default()).await;
     let id = run_id(2);

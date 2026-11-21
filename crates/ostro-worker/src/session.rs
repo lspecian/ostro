@@ -16,7 +16,9 @@
 //!   endpoint with jittered exponential backoff capped at `reconnect_max_ms`.
 //! - **Re-join (B5):** when every known endpoint has failed `rejoin_after_failures` times
 //!   in a row and the identity came from a join, the worker joins again (new key,
-//!   certificate and endpoints). External (cert-manager) identities keep retrying.
+//!   certificate and endpoints). External (cert-manager) identities keep retrying. A
+//!   re-join the server refuses with a 4xx (revoked or expired token) ends the worker
+//!   with that error (07-22); the binary exits non-zero.
 //! - **Renewal (Pitfall 10):** at `renew_after`, `Renew{csr}` over the current channel, a
 //!   new channel + session with the new identity; in-flight activations move to the new
 //!   session (their leases are listed in its first heartbeat), then `Drain` is sent on the
@@ -32,7 +34,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::codegen::tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::join::{self, Identity};
 use crate::{Link, MAX_MESSAGE_BYTES, Shared, WorkerError, WorkerEvent, runner};
@@ -462,6 +464,13 @@ pub(crate) async fn run_loop(
                     continue;
                 }
                 Ok(_) => warn!("re-join returned no endpoints"),
+                // A refused re-join (revoked or expired token, 07-22) is final: the token
+                // will not become valid again, so the worker exits with the refusal
+                // instead of retrying forever. Transport errors and 408/429/5xx retry.
+                Err(e) if refused_permanently(&e) => {
+                    error!(error = %e, "re-join refused: the join token is no longer valid; exiting");
+                    return Err(WorkerError::Join(e));
+                }
                 Err(e) => {
                     warn!(error = %e, "re-join failed");
                     failures.clear();
@@ -476,6 +485,13 @@ pub(crate) async fn run_loop(
             _ = tokio::time::sleep(delay) => {}
         }
     }
+}
+
+/// Whether a join refusal is final: a 4xx answer other than 408 (timeout) and 429 (rate
+/// limited). A revoked or expired token is refused with 400 `join_token_invalid`.
+fn refused_permanently(e: &join::JoinError) -> bool {
+    matches!(e, join::JoinError::Refused { status, .. }
+        if (400..500).contains(status) && *status != 408 && *status != 429)
 }
 
 /// Renew over the current channel, open a new session with the new identity, move the

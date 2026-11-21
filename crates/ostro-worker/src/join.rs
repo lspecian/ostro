@@ -11,7 +11,10 @@
 //!   and the leaf verifies (webpki: signature chain, validity, server name) against that
 //!   certificate as the only root. The handshake fails before any request byte (the token
 //!   included) is sent. Without `--ca-hash` the platform verifier is used (`files` / `acme`
-//!   client listeners).
+//!   client listeners). With `--ca-hash` against a `files` / `acme` listener (its chain
+//!   does not carry the cluster CA), the pinned handshake fails before any request byte and
+//!   the join is retried once with the platform verifier (D-W20: those modes are verified
+//!   with platform roots; 07-22 fix, the pin is then checked on the response below).
 //! - In every case, with `--ca-hash`, `sha256(DER(ca_cert))` from the response must equal
 //!   the pin before the CA is trusted for the cluster listener.
 //! - Plain `http://` is accepted only for loopback hosts (logged warning).
@@ -215,6 +218,9 @@ fn renew_after(ms: u64, cert_pem: &str) -> Option<Duration> {
     }
 }
 
+/// The handshake error of [`PinnedCaVerifier`] when no chain certificate matches the pin.
+const PIN_NOT_IN_CHAIN: &str = "no certificate in the server chain matches --ca-hash";
+
 /// Bootstrap verifier: trust the presented chain only through the certificate whose
 /// sha256 equals the pin.
 #[derive(Debug)]
@@ -247,9 +253,7 @@ impl ServerCertVerifier for PinnedCaVerifier {
             .chain(intermediates.iter())
             .find(|c| matches(c))
         else {
-            return Err(rustls::Error::General(
-                "no certificate in the server chain matches --ca-hash".into(),
-            ));
+            return Err(rustls::Error::General(PIN_NOT_IN_CHAIN.into()));
         };
         let mut roots = RootCertStore::empty();
         roots
@@ -370,7 +374,6 @@ pub async fn join(cfg: &WorkerConfig, worker_id: &str) -> Result<Identity, JoinE
     if https && pin.is_none() {
         warn!("joining without --ca-hash: the client listener is verified with platform roots");
     }
-    let client = http_client(https, pin)?;
     let (key_pem, csr_pem) = new_key_and_csr(worker_id)?;
     let endpoint = format!("{}{JOIN_PATH}", join.trim_end_matches('/'));
     let body = JoinRequest {
@@ -379,22 +382,42 @@ pub async fn join(cfg: &WorkerConfig, worker_id: &str) -> Result<Identity, JoinE
         worker_id,
         labels: &cfg.labels,
     };
-    let resp = client
-        .post(&endpoint)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            use std::error::Error as _;
-            let mut msg = e.to_string();
-            let mut src = e.source();
-            while let Some(s) = src {
-                msg.push_str(": ");
-                msg.push_str(&s.to_string());
-                src = s.source();
-            }
-            JoinError::Http(scrub(&msg, token.expose()))
-        })?;
+    let send = |client: reqwest::Client| {
+        let req = client.post(&endpoint).json(&body);
+        async move {
+            req.send().await.map_err(|e| {
+                use std::error::Error as _;
+                let mut msg = e.to_string();
+                let mut src = e.source();
+                while let Some(s) = src {
+                    msg.push_str(": ");
+                    msg.push_str(&s.to_string());
+                    src = s.source();
+                }
+                JoinError::Http(scrub(&msg, token.expose()))
+            })
+        }
+    };
+    let resp = match send(http_client(https, pin)?).await {
+        // The listener's chain has no certificate matching the pin: a `files` / `acme`
+        // listener (D-W20). The handshake failed before the request (and its token) was
+        // sent; verify it with the platform roots instead. The response's CA must still
+        // match the pin (below).
+        Err(JoinError::Http(msg)) if pin.is_some() && msg.contains(PIN_NOT_IN_CHAIN) => {
+            info!(
+                "the client listener does not present the cluster CA (files / acme mode): \
+                 verifying it with platform roots; the CA in the join response must match \
+                 --ca-hash"
+            );
+            send(http_client(https, None)?).await.map_err(|e| match e {
+                JoinError::Http(m) => JoinError::Http(format!(
+                    "{PIN_NOT_IN_CHAIN}, and the platform verifier refused the listener: {m}"
+                )),
+                other => other,
+            })?
+        }
+        other => other?,
+    };
     let status = resp.status();
     let text = resp
         .text()
