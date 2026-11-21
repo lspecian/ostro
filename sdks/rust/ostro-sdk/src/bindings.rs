@@ -4,8 +4,10 @@
 //! the `workflows` interface through [`crate::export!`]. Not part of the stable SDK API.
 
 wit_bindgen::generate!({
-    // Relative to CARGO_MANIFEST_DIR (sdks/rust/ostro-sdk).
-    path: "../../../wit/ostro-runtime-0.1.0",
+    // Relative to CARGO_MANIFEST_DIR (sdks/rust/ostro-sdk): a byte-identical vendored copy
+    // of the frozen wit/ostro-runtime-0.1.0/runtime.wit (D-P9-29, guarded by
+    // tests/wit_copy.rs), so the crate is self-contained and publishable.
+    path: "wit",
     world: "workflow",
     pub_export_macro: true,
     export_macro_name: "__export_world",

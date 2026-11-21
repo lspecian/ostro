@@ -1,0 +1,312 @@
+{
+  "version": 1,
+  "description": "Canonical JSON payload encoding (application/json): compact separators, non-ASCII kept as UTF-8, NaN/+-inf serialised as null, empty data decodes as null, no BOM. 'hex' is authoritative; 'text' is informative.",
+  "cases": [
+    {
+      "input": {
+        "op": "encode",
+        "value": null,
+        "note": "null"
+      },
+      "expected": {
+        "hex": "6e756c6c",
+        "text": "null"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": true,
+        "note": "bool"
+      },
+      "expected": {
+        "hex": "74727565",
+        "text": "true"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": 0,
+        "note": "zero"
+      },
+      "expected": {
+        "hex": "30",
+        "text": "0"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": -1,
+        "note": "negative int"
+      },
+      "expected": {
+        "hex": "2d31",
+        "text": "-1"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": 9007199254740991,
+        "note": "2^53-1 (largest JS-safe int)"
+      },
+      "expected": {
+        "hex": "39303037313939323534373430393931",
+        "text": "9007199254740991"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": 1.5,
+        "note": "float"
+      },
+      "expected": {
+        "hex": "312e35",
+        "text": "1.5"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": 0.1,
+        "note": "shortest round-trip float"
+      },
+      "expected": {
+        "hex": "302e31",
+        "text": "0.1"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": "",
+        "note": "empty string"
+      },
+      "expected": {
+        "hex": "2222",
+        "text": "\"\""
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": "über/€ 😀",
+        "note": "non-ASCII kept as UTF-8, '/' not escaped"
+      },
+      "expected": {
+        "hex": "22c3bc6265722fe282ac20f09f988022",
+        "text": "\"über/€ 😀\""
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": "line\nbreak\t\"q\"\\",
+        "note": "short escapes"
+      },
+      "expected": {
+        "hex": "226c696e655c6e627265616b5c745c22715c225c5c22",
+        "text": "\"line\\nbreak\\t\\\"q\\\"\\\\\""
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": "\u0001\u001f",
+        "note": "control chars as lowercase \\u00XX"
+      },
+      "expected": {
+        "hex": "225c75303030315c753030316622",
+        "text": "\"\\u0001\\u001f\""
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": " ",
+        "note": "DEL and U+2028 kept raw"
+      },
+      "expected": {
+        "hex": "227fe280a822",
+        "text": "\" \""
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": [],
+        "note": "empty array"
+      },
+      "expected": {
+        "hex": "5b5d",
+        "text": "[]"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": {},
+        "note": "empty object"
+      },
+      "expected": {
+        "hex": "7b7d",
+        "text": "{}"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": [
+          1,
+          "a",
+          null,
+          [
+            true
+          ]
+        ],
+        "note": "nested array"
+      },
+      "expected": {
+        "hex": "5b312c2261222c6e756c6c2c5b747275655d5d",
+        "text": "[1,\"a\",null,[true]]"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": {
+          "a": 1,
+          "b": [
+            1,
+            2
+          ],
+          "c": {
+            "d": "e"
+          }
+        },
+        "note": "object (keys already sorted; no whitespace)"
+      },
+      "expected": {
+        "hex": "7b2261223a312c2262223a5b312c325d2c2263223a7b2264223a2265227d7d",
+        "text": "{\"a\":1,\"b\":[1,2],\"c\":{\"d\":\"e\"}}"
+      }
+    },
+    {
+      "input": {
+        "op": "encode",
+        "value": {
+          "echo": {
+            "n": 1
+          }
+        },
+        "note": "child output shape"
+      },
+      "expected": {
+        "hex": "7b226563686f223a7b226e223a317d7d",
+        "text": "{\"echo\":{\"n\":1}}"
+      }
+    },
+    {
+      "input": {
+        "op": "encode_f64",
+        "f64_bits_hex": "7ff8000000000000",
+        "note": "NaN -> null"
+      },
+      "expected": {
+        "hex": "6e756c6c",
+        "text": "null"
+      }
+    },
+    {
+      "input": {
+        "op": "encode_f64",
+        "f64_bits_hex": "7ff0000000000000",
+        "note": "+inf -> null"
+      },
+      "expected": {
+        "hex": "6e756c6c",
+        "text": "null"
+      }
+    },
+    {
+      "input": {
+        "op": "encode_f64",
+        "f64_bits_hex": "fff0000000000000",
+        "note": "-inf -> null"
+      },
+      "expected": {
+        "hex": "6e756c6c",
+        "text": "null"
+      }
+    },
+    {
+      "input": {
+        "op": "encode_f64",
+        "f64_bits_hex": "3ff8000000000000",
+        "note": "1.5 stays a number"
+      },
+      "expected": {
+        "hex": "312e35",
+        "text": "1.5"
+      }
+    },
+    {
+      "input": {
+        "op": "decode",
+        "hex": "",
+        "note": "empty data decodes as null"
+      },
+      "expected": {
+        "value": null
+      }
+    },
+    {
+      "input": {
+        "op": "decode",
+        "hex": "6e756c6c",
+        "note": "null"
+      },
+      "expected": {
+        "value": null
+      }
+    },
+    {
+      "input": {
+        "op": "decode",
+        "hex": "7b20226122203a2031202c0a202262223a205b2074727565205d207d",
+        "note": "whitespace is accepted on decode"
+      },
+      "expected": {
+        "value": {
+          "a": 1,
+          "b": [
+            true
+          ]
+        }
+      }
+    },
+    {
+      "input": {
+        "op": "decode",
+        "hex": "22c3bc62657222",
+        "note": "UTF-8 string"
+      },
+      "expected": {
+        "value": "über"
+      }
+    },
+    {
+      "input": {
+        "op": "decode",
+        "hex": "225c75303066635c75643833645c756465303022",
+        "note": "\\u escapes incl. a surrogate pair"
+      },
+      "expected": {
+        "value": "ü😀"
+      }
+    }
+  ]
+}

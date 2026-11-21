@@ -130,6 +130,13 @@ impl<T> AwaitToken<T> {
     }
 }
 
+/// Map a random `u64` to an `f64` in `[0, 1)`: the top 53 bits scaled by `2^-53`
+/// (`(u >> 11) as f64 * 2^-53`). Exact (no rounding), so every SDK gets the same bits;
+/// pinned by `conformance/vectors/random_f64.json`.
+pub fn f64_from_u64(u: u64) -> f64 {
+    (u >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+}
+
 /// The deterministic run context, handed to [`Workflow::run`](crate::Workflow::run).
 ///
 /// Zero-sized; constructed only by the SDK runtime.
@@ -167,6 +174,12 @@ impl Ctx {
     /// Deterministic random `u64` from the run's journaled seed.
     pub fn random_u64(&self) -> u64 {
         context::random_u64()
+    }
+
+    /// Deterministic random `f64` in `[0, 1)`: [`f64_from_u64`] of [`Ctx::random_u64`]
+    /// (`(u >> 11) * 2^-53`), identical on every replay and in every SDK.
+    pub fn random_f64(&self) -> f64 {
+        f64_from_u64(context::random_u64())
     }
 
     /// `n` deterministic random bytes from the run's journaled seed.
@@ -294,7 +307,7 @@ impl Ctx {
     /// Pass it to [`HttpBuilder::idempotency_key`](crate::effects::HttpBuilder::idempotency_key)
     /// and embed it in the body for providers that read it from there.
     pub fn idempotency_key(&self, name: &str) -> String {
-        crate::effects::idempotency_key(&context::info().run_id, name)
+        crate::effects::idempotency_key_for(&context::info().run_id, name)
     }
 
     /// Wait for a named signal whose payload is JSON-decoded into `T`.

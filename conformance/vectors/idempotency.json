@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "description": "P-11 semantic idempotency key: \"ostro-\" + hex(sha256(\"ostro/idem/v1/name\" || utf8(run_id) || 0x00 || utf8(name)))[..32]",
+  "cases": [
+    {
+      "input": {
+        "run_id": "000036mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": "charge"
+      },
+      "expected": "ostro-41a98386c31463ed6a4b2deaac64fe55"
+    },
+    {
+      "input": {
+        "run_id": "002g36mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": "charge"
+      },
+      "expected": "ostro-d5c30798b8171d4bb1fd23263fca754d"
+    },
+    {
+      "input": {
+        "run_id": "0fzg36mfdsy2pz9yhw8a3cp3tkjze",
+        "name": "charge"
+      },
+      "expected": "ostro-a2aa55858af5b63d3dc3fd8ec339270d"
+    },
+    {
+      "input": {
+        "run_id": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzy",
+        "name": "charge"
+      },
+      "expected": "ostro-8b4981e1ca83c99b09857f3df979761d"
+    },
+    {
+      "input": {
+        "run_id": "002g36mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": ""
+      },
+      "expected": "ostro-5ec375773eb3ce2b413c28a3cdebcfe8"
+    },
+    {
+      "input": {
+        "run_id": "002g36mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": "über/€"
+      },
+      "expected": "ostro-80cc48655174822f1eb3a4f6a207d128"
+    },
+    {
+      "input": {
+        "run_id": "002g36mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": "😀 emoji"
+      },
+      "expected": "ostro-30b3c49541262789a1fd0e13bc2d6ea8"
+    },
+    {
+      "input": {
+        "run_id": "002g36mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": "abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnop"
+      },
+      "expected": "ostro-b56493bcbb3b29e630a17c807dd70f65"
+    },
+    {
+      "input": {
+        "run_id": "002g36mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": "charge-1"
+      },
+      "expected": "ostro-277a2e91401e9bd03eb8012a4b9dce86"
+    },
+    {
+      "input": {
+        "run_id": "002g36mfdsy2pz9yhw8a3cp3tkjzc",
+        "name": "a\u0000b"
+      },
+      "expected": "ostro-fd35138b3cb5e3af90ac17b3546f2984"
+    },
+    {
+      "input": {
+        "run_id": "run-sdk-cancel-1",
+        "name": "charge"
+      },
+      "expected": "ostro-60c9ae285b9265725d71798aa8e17497"
+    },
+    {
+      "input": {
+        "run_id": "",
+        "name": "charge"
+      },
+      "expected": "ostro-b8085b267d725798ec37a5cf114b007f"
+    }
+  ]
+}

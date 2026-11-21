@@ -31,13 +31,37 @@ pub mod ops;
 pub mod registry;
 pub mod step;
 
-pub use ctx::{AwaitToken, Ctx, Header, HttpRequest, HttpResponse, Level, RunInfo};
+pub use ctx::{AwaitToken, Ctx, Header, HttpRequest, HttpResponse, Level, RunInfo, f64_from_u64};
 pub use effects::{
     HttpBuilder, HttpClient, ObjectClient, ObjectHead, ObjectPutInfo, SqlBuilder, SqlResult,
-    SqlValue,
+    SqlValue, idempotency_key_for,
 };
 pub use error::{ContinueAsNew, StepError, WorkflowError};
 pub use ops::{CANCELLATION, Completion, Op, OpId, is_cancellation};
+
+/// The canonical JSON payload codec every SDK shares (pinned by
+/// `conformance/vectors/json.json`): compact separators, non-ASCII kept as UTF-8,
+/// non-finite floats serialised as `null`, no BOM; empty data decodes as `null`.
+pub mod codec {
+    use serde::Serialize;
+    use serde::de::DeserializeOwned;
+
+    use crate::bindings::ostro::runtime::types::Payload;
+    use crate::error::StepError;
+
+    /// Encode `v` as canonical `application/json` payload bytes.
+    pub fn encode_json<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, StepError> {
+        crate::step::encode_value(v).map(|p| p.data)
+    }
+
+    /// Decode `application/json` payload bytes; empty data decodes as JSON `null`.
+    pub fn decode_json<T: DeserializeOwned>(data: &[u8]) -> Result<T, StepError> {
+        crate::step::decode_payload(&Payload {
+            content_type: crate::step::JSON.to_string(),
+            data: data.to_vec(),
+        })
+    }
+}
 
 #[doc(hidden)]
 pub use serde as __serde;

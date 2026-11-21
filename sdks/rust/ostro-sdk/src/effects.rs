@@ -64,7 +64,11 @@ pub const IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"ostro/idem/v1/name";
 /// 38 characters, deterministic per (run, name), stable across replay and attempts, and
 /// different for every run (a retry-as-new or continue-as-new run gets new keys). Inside a
 /// workflow use [`Ctx::idempotency_key`](crate::Ctx::idempotency_key).
-pub fn idempotency_key(run_id: &str, name: &str) -> String {
+///
+/// Pure (no host call), so it runs anywhere. The cross-SDK vectors in
+/// `conformance/vectors/idempotency.json` pin its output; the Python and TypeScript SDKs
+/// must produce the same 38 characters.
+pub fn idempotency_key_for(run_id: &str, name: &str) -> String {
     let mut h = Sha256::new();
     h.update(IDEMPOTENCY_KEY_DOMAIN);
     h.update(run_id.as_bytes());
@@ -75,6 +79,11 @@ pub fn idempotency_key(run_id: &str, name: &str) -> String {
     out.push_str("ostro-");
     out.push_str(&hex(&digest[..16]));
     out
+}
+
+/// Alias of [`idempotency_key_for`] (the 06-09 name).
+pub fn idempotency_key(run_id: &str, name: &str) -> String {
+    idempotency_key_for(run_id, name)
 }
 
 fn hex(bytes: &[u8]) -> String {
