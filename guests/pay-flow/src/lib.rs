@@ -5,7 +5,7 @@
 //! `POST {url}/pay` with
 //! - `Idempotency-Key: <ctx.idempotency_key("pay")>` (run-derived, stable across replays,
 //!   attempts and workers; also the host-level idempotency key),
-//! - `Authorization: Bearer {{secret:PAY_TOKEN}}` (a template expanded on the leader only;
+//! - `Authorization: Bearer {{secret:pay_token}}` (a template expanded on the leader only;
 //!   the header is redacted in the journal),
 //! - JSON body `{"idempotency_key": key, "amount": 100}`.
 //!
@@ -34,7 +34,7 @@ pub fn pay_flow(ctx: &Ctx, input: Input) -> Result<Output, WorkflowError> {
         .http()
         .post(url)
         .header("Idempotency-Key", key.as_str())
-        .secret_header("Authorization", "Bearer {{secret:PAY_TOKEN}}")
+        .secret_header("Authorization", "Bearer {{secret:pay_token}}")
         .redact(["Authorization"])
         .json(&json!({ "idempotency_key": key, "amount": 100 }))?
         .idempotency_key(key.as_str())

@@ -561,7 +561,7 @@ async fn pay_flow_bridges_effect_without_secret_values() {
         .collect();
     assert_eq!(names, vec!["Authorization"]);
     // The template travels as written: the worker never resolves a secret.
-    assert_eq!(req.redacted_values[0].value, "Bearer {{secret:PAY_TOKEN}}");
+    assert_eq!(req.redacted_values[0].value, "Bearer {{secret:pay_token}}");
     // The op is the journaled EffectScheduled's seq, and the journal copy is redacted.
     let sched = h
         .st()
