@@ -18,6 +18,8 @@
 //! - [`p7_flow`] / [`p7_pause`] (07-14): the Phase 7 control plane: queue flow (meta
 //!   `QueuePolicy` F2 fields), queue / workflow / run pause and resume, and the paused-run
 //!   `/retry` alias.
+//! - [`p7_workers`] (07-14): worker list / drain, join tokens, join and the demand
+//!   endpoint over `P7Shared` (registry, join service, demand snapshot).
 //!
 //! Phase 8 (08-10): the controllers behind `ostro_api::phase8`, each holding the one
 //! [`ControlCtx`] built in `server.rs` and installed through [`phase8_extensions`]:
@@ -45,7 +47,11 @@ use ostro_api::domain::{
     SecretInfo, SignalRequest, SignalResponse, StartRunRequest, StartRunResult, TerminateRequest,
     TerminateResponse, UploadModule, UploadModuleResult, WorkflowInfo,
 };
-use ostro_api::phase7::{PauseState, QueueFlow, QueueFlowInfo, RunPauseState};
+use ostro_api::phase7::{
+    CreateWorkerTokenRequest, DemandSnapshot, DrainResult, JoinRequest, JoinResponse, PauseState,
+    QueueFlow, QueueFlowInfo, RunPauseState, WorkerInfo as P7WorkerInfo, WorkerTokenCreated,
+    WorkerTokenInfo,
+};
 use ostro_api::{ApiError, ApiExtensions};
 use ostro_blob::BlobStore;
 use ostro_engine::runtime::Runtime;
@@ -70,6 +76,7 @@ pub mod modules;
 pub mod names;
 pub mod p7_flow;
 pub mod p7_pause;
+pub mod p7_workers;
 pub mod policy;
 pub mod run_logs;
 pub mod runs;
@@ -402,6 +409,39 @@ impl ControlPlane for ServerControlPlane {
 
     async fn resume_run(&self, run_id: String) -> Result<RunPauseState, ApiError> {
         p7_pause::resume_run(self, run_id).await
+    }
+
+    // --- Phase 7 workers (07-14): see [`p7_workers`] ---
+
+    async fn queue_demand(&self, queue: String) -> Result<DemandSnapshot, ApiError> {
+        p7_workers::queue_demand(self, queue).await
+    }
+
+    async fn list_workers(&self) -> Result<Vec<P7WorkerInfo>, ApiError> {
+        p7_workers::list_workers(self).await
+    }
+
+    async fn drain_worker(&self, worker_id: String) -> Result<DrainResult, ApiError> {
+        p7_workers::drain_worker(self, worker_id).await
+    }
+
+    async fn create_worker_token(
+        &self,
+        req: CreateWorkerTokenRequest,
+    ) -> Result<WorkerTokenCreated, ApiError> {
+        p7_workers::create_worker_token(self, req).await
+    }
+
+    async fn list_worker_tokens(&self) -> Result<Vec<WorkerTokenInfo>, ApiError> {
+        p7_workers::list_worker_tokens(self).await
+    }
+
+    async fn revoke_worker_token(&self, token_id: String) -> Result<(), ApiError> {
+        p7_workers::revoke_worker_token(self, token_id).await
+    }
+
+    async fn join_worker(&self, req: JoinRequest) -> Result<JoinResponse, ApiError> {
+        p7_workers::join_worker(self, req).await
     }
 
     /// Serving, meta has a leader, and every partition slot is `Ready` and not failed.

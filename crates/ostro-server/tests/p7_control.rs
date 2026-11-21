@@ -645,3 +645,319 @@ async fn run_pause_of_a_running_activation_stops_progress() {
     eprintln!("run_pause_running: {:?}", t0.elapsed());
     s.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------------
+// Workers: tokens, join, list, drain, demand
+// ---------------------------------------------------------------------------------
+
+/// An ECDSA P-256 key and a PKCS#10 CSR (PEM).
+fn key_and_csr(worker_id: &str) -> (String, String) {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
+    let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+    p.distinguished_name
+        .push(rcgen::DnType::CommonName, worker_id);
+    let csr = p.serialize_request(&key).expect("csr").pem().expect("pem");
+    (key.serialize_pem(), csr)
+}
+
+fn identity_of(cert_pem: &str) -> ostro_server::tls::ca::WorkerIdentity {
+    let der = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes())
+        .expect("pem")
+        .1
+        .contents;
+    ostro_server::tls::ca::WorkerIdentity::from_der(&der).expect("worker identity")
+}
+
+async fn create_token(s: &TestServer, ttl_ms: Option<u64>) -> Value {
+    let body = match ttl_ms {
+        Some(t) => json!({"ttl_ms": t}),
+        None => json!({}),
+    };
+    let r = s
+        .http
+        .post(s.url("/v1/workers/tokens"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST token");
+    assert_eq!(r.status(), StatusCode::CREATED);
+    assert_eq!(
+        r.headers()
+            .get("cache-control")
+            .map(|v| v.to_str().expect("ascii")),
+        Some("no-store")
+    );
+    r.json().await.expect("json")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worker_tokens_join_and_revoke_rest_and_grpc() {
+    use ostro_proto::api::v1::workers_client::WorkersClient;
+    let t0 = Instant::now();
+    let mut s = server().await;
+
+    // Create: the secret is shown once, with a join command.
+    let created = create_token(&s, Some(3_600_000)).await;
+    let token_id = created["token_id"].as_str().expect("id").to_owned();
+    let token = created["token"].as_str().expect("token").to_owned();
+    assert!(token_id.starts_with("wkr_"), "{created}");
+    assert!(token.starts_with(&format!("{token_id}.")));
+    let cmd = created["join_command"].as_str().expect("cmd");
+    assert!(
+        cmd.starts_with("ostro worker --join http://127.0.0.1:"),
+        "{cmd}"
+    );
+    assert!(cmd.contains(&format!("--token {token}")), "{cmd}");
+    assert!(cmd.contains("--ca-hash sha256:"), "{cmd}");
+    let secret = token.split_once('.').expect("dot").1.to_owned();
+
+    // List: ids and times, never the secret.
+    let (st, v) = get(&s, "/v1/workers/tokens").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let ids: Vec<&str> = v["tokens"]
+        .as_array()
+        .expect("tokens")
+        .iter()
+        .map(|t| t["token_id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, vec![token_id.as_str()]);
+    assert!(!v.to_string().contains(&secret), "list leaks the secret");
+    let mut w = WorkersClient::new(s.channel().await);
+    let listed = w
+        .list_worker_tokens(pb::ListWorkerTokensRequest {})
+        .await
+        .expect("grpc list")
+        .into_inner();
+    assert_eq!(listed.tokens.len(), 1);
+    assert!(!format!("{listed:?}").contains(&secret));
+
+    // Join over REST with a CSR: a client certificate naming the token.
+    let (_key, csr) = key_and_csr("w-rest");
+    let (st, v) = post(
+        &s,
+        "/v1/workers/join",
+        json!({"token": token, "csr_pem": csr, "worker_id": "w-rest", "labels": {"zone": "a"}}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = identity_of(v["client_cert_pem"].as_str().expect("cert"));
+    assert_eq!(id.token_id, token_id);
+    assert_eq!(id.worker_id, "w-rest");
+    assert!(
+        !v["endpoints"].as_array().expect("endpoints").is_empty(),
+        "{v}"
+    );
+    assert!(
+        v["ca_cert_pem"]
+            .as_str()
+            .expect("ca")
+            .contains("BEGIN CERTIFICATE")
+    );
+
+    // A wrong secret: 400 join_token_invalid, never echoing the token.
+    let bad = format!("{token_id}.{}", "A".repeat(secret.len()));
+    let (st, v) = post(
+        &s,
+        "/v1/workers/join",
+        json!({"token": bad, "csr_pem": csr, "worker_id": "w-rest"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(reason(&v), "join_token_invalid");
+    assert!(!v.to_string().contains(&bad));
+
+    // gRPC join works too.
+    let (_key, csr2) = key_and_csr("w-grpc");
+    let r = w
+        .join_worker(pb::JoinWorkerRequest {
+            token: token.clone(),
+            csr_pem: csr2.clone(),
+            worker_id: "w-grpc".into(),
+            labels: Default::default(),
+        })
+        .await
+        .expect("grpc join")
+        .into_inner();
+    assert_eq!(identity_of(&r.client_cert_pem).worker_id, "w-grpc");
+
+    // Revoke (gRPC): REST and gRPC joins are refused; revoking again is 404.
+    w.revoke_worker_token(pb::RevokeWorkerTokenRequest {
+        token_id: token_id.clone(),
+    })
+    .await
+    .expect("revoke");
+    let (st, v) = post(
+        &s,
+        "/v1/workers/join",
+        json!({"token": token, "csr_pem": csr, "worker_id": "w-rest"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(reason(&v), "join_token_invalid");
+    let e = w
+        .join_worker(pb::JoinWorkerRequest {
+            token: token.clone(),
+            csr_pem: csr2,
+            worker_id: "w-grpc".into(),
+            labels: Default::default(),
+        })
+        .await
+        .expect_err("revoked");
+    assert_eq!(e.code(), tonic::Code::InvalidArgument, "{e:?}");
+    let (st, v) = send(
+        &s,
+        reqwest::Method::DELETE,
+        &format!("/v1/workers/tokens/{token_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    let (_, v) = get(&s, "/v1/workers/tokens").await;
+    assert_eq!(v["tokens"], json!([]));
+
+    // REST revoke: 204.
+    let t2 = create_token(&s, None).await;
+    let id2 = t2["token_id"].as_str().expect("id");
+    let (st, _) = send(
+        &s,
+        reqwest::Method::DELETE,
+        &format!("/v1/workers/tokens/{id2}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    // ttl_ms = 0 is invalid.
+    let (st, v) = post(&s, "/v1/workers/tokens", json!({"ttl_ms": 0})).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    eprintln!("worker_tokens: {:?}", t0.elapsed());
+    s.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workers_list_drain_and_demand_with_a_connected_worker() {
+    use ostro_proto::api::v1::workers_client::WorkersClient;
+    let t0 = Instant::now();
+    let mut s = server().await;
+    // No workers yet.
+    let (st, v) = get(&s, "/v1/workers").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["workers"], json!([]));
+    let (st, v) = post(&s, "/v1/workers/nobody/drain", json!({})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+
+    // An in-process worker joins through this server's REST join route.
+    let created = create_token(&s, None).await;
+    let ca_hash = created["join_command"]
+        .as_str()
+        .expect("cmd")
+        .split("--ca-hash ")
+        .nth(1)
+        .expect("ca hash")
+        .to_owned();
+    let cache = tempfile::tempdir().expect("cache");
+    let cfg = ostro_worker::WorkerConfig {
+        join: Some(s.url("")),
+        token: Some(ostro_worker::JoinToken::new(
+            created["token"].as_str().expect("token"),
+        )),
+        ca_hash: Some(ca_hash),
+        labels: [("zone".to_owned(), "eu-1".to_owned())]
+            .into_iter()
+            .collect(),
+        slots: 3,
+        cache_dir: cache.path().to_path_buf(),
+        worker_id: Some("w1".into()),
+        reconnect_max_ms: 200,
+        ..ostro_worker::WorkerConfig::default()
+    };
+    let worker = std::sync::Arc::new(ostro_worker::Worker::new(cfg).expect("worker config"));
+    let mut events = worker.subscribe();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn({
+        let w = std::sync::Arc::clone(&worker);
+        let sd = shutdown.clone();
+        async move { w.run(sd).await }
+    });
+    tokio::time::timeout(LIMIT, async {
+        loop {
+            match events.recv().await {
+                Ok(ostro_worker::WorkerEvent::Connected { .. }) => return,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => panic!("worker events closed: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("worker connected");
+
+    // Listed with its labels and slots, on this node.
+    let t = Instant::now();
+    let w1 = loop {
+        let (_, v) = get(&s, "/v1/workers").await;
+        if let Some(w) = v["workers"].as_array().and_then(|a| a.first()).cloned() {
+            break w;
+        }
+        assert!(t.elapsed() < LIMIT, "worker not listed");
+        sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(w1["worker_id"], "w1");
+    assert_eq!(w1["labels"], json!({"zone": "eu-1"}));
+    assert_eq!(w1["slots"], 3);
+    assert_eq!(w1["node_id"], s.cfg.node.node_id);
+    assert_eq!(w1["draining"], false);
+    let mut grpc = WorkersClient::new(s.channel().await);
+    let listed = grpc
+        .list_workers(pb::ListWorkersRequest {})
+        .await
+        .expect("grpc list")
+        .into_inner();
+    assert_eq!(listed.workers.len(), 1);
+    assert_eq!(listed.workers[0].worker_id, "w1");
+
+    // Drain: the registry stops assigning (draining, no free slots); idempotent.
+    let (st, v) = post(&s, "/v1/workers/w1/drain", json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({"worker_id": "w1", "already_draining": false}));
+    let r = grpc
+        .drain_worker(pb::DrainWorkerRequest {
+            worker_id: "w1".into(),
+        })
+        .await
+        .expect("grpc drain")
+        .into_inner();
+    assert!(r.already_draining);
+    let (_, v) = get(&s, "/v1/workers").await;
+    assert_eq!(v["workers"][0]["draining"], true, "{v}");
+    assert_eq!(v["workers"][0]["free_slots"], 0, "{v}");
+
+    // Demand: the D-W12 shape (zeros until 07-16), over both transports.
+    let (st, v) = get(&s, "/v1/queues/default/demand").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    for k in [
+        "queue",
+        "demand",
+        "backlog",
+        "running_on_workers",
+        "placement",
+        "spilling",
+        "workers",
+        "worker_slots_free",
+    ] {
+        assert!(v.get(k).is_some(), "demand lacks {k}: {v}");
+    }
+    assert_eq!(v["queue"], "default");
+    let mut q = QueuesClient::new(s.channel().await);
+    let d = q
+        .get_queue_demand(pb::GetQueueDemandRequest {
+            name: "default".into(),
+        })
+        .await
+        .expect("grpc demand")
+        .into_inner();
+    assert_eq!(d.queue, "default");
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+    eprintln!("workers_list_drain: {:?}", t0.elapsed());
+    s.shutdown().await;
+}
