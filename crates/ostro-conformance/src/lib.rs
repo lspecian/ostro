@@ -5,12 +5,19 @@
 //! - [`inspect`]: component import/export/core-instance inspection (wasmparser).
 //! - [`polyglot`]: Python/TypeScript guest builds via `sdks/scripts/build-guest.sh`, cached
 //!   by source hash under `target/polyglot-guests`.
+//! - [`langs`]: language selection (`OSTRO_CONF_LANGS`), workflow naming, module builds.
+//! - [`canon`], [`projection`], [`compare`]: canonical JSON, the normalised journal
+//!   projection and the comparators of D-P9-21.
 //!
 //! The Python/TypeScript legs live behind the `polyglot` feature (D-P9-12); everything
 //! else runs without guest toolchains.
 
+pub mod canon;
+pub mod compare;
 pub mod inspect;
+pub mod langs;
 pub mod polyglot;
+pub mod projection;
 pub mod spec;
 
 pub use inspect::{ComponentInfo, inspect};
