@@ -16,10 +16,12 @@ use std::time::Duration;
 use bytes::Bytes;
 use common::gen_effects::EffectOp;
 use common::gen_lifecycle::LifecycleOp;
+use common::gen_pause::PauseOp;
 use common::gen_waits::WaitOp;
 use common::{GenRun, OPEN_T, T, copy_dir, run_on, start_run};
 use ostro_log::ReplicatedLog;
-use ostro_partition::store::keys::decode_effect_key;
+use ostro_partition::store::keys::{decode_effect_key, decode_ready_key};
+use ostro_partition::store::values::{self, RunRecord};
 use ostro_partition::{
     ApplyOutcome, MachineConfig, Node, NodeConfig, PartitionSlot, StartMode, Table, query,
 };
@@ -112,6 +114,9 @@ enum Op {
     /// Plan 06-03: effect commands from `common::gen_effects` (RegisterEffect/CancelEffect,
     /// CompleteEffect, terminal cleanup, stale LeaderAnnounced).
     Effects(Option<EffectOp>),
+    /// Plan 07-04: pause/resume commands from `common::gen_pause` (with inputs, timeouts,
+    /// terminate and RetryRun around them).
+    Pause(Option<PauseOp>),
 }
 
 fn cfg_strategy() -> impl Strategy<Value = Cfg> {
@@ -166,6 +171,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         2 => common::gen_lifecycle::strategy().prop_map(Op::Lifecycle),
         // Plan 06-03 generator hook.
         2 => common::gen_effects::strategy().prop_map(Op::Effects),
+        // Plan 07-04 generator hook.
+        2 => common::gen_pause::strategy().prop_map(Op::Pause),
     ]
 }
 
@@ -530,6 +537,12 @@ async fn drive(dir: &Path, sc: &Scenario) {
                     submit_all(&node, common::gen_effects::commands(e, &view, n)).await;
                 }
             }
+            Op::Pause(o) => {
+                if let Some(o) = o {
+                    let view = gen_view(&node, &runs);
+                    submit_all(&node, common::gen_pause::commands(o, &view, n)).await;
+                }
+            }
         }
     }
     settle(&node).await;
@@ -640,6 +653,7 @@ async fn check(sc: Scenario) -> Result<(), String> {
         }
     }
     effects_invariant(&live)?;
+    pause_invariant(&live)?;
     live.shutdown().await.expect("shutdown");
     nb.shutdown().await.expect("shutdown");
     nc.shutdown().await.expect("shutdown");
@@ -665,6 +679,46 @@ fn effects_invariant(node: &Node) -> Result<(), String> {
                     "p{p}: effects row {run:?}/{op} survived non-resumable {:?}",
                     rec.status
                 ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 07-04: no run is both paused and holding a ready row (the `enqueue_ready` gate), and no
+/// terminal run is paused (the terminal hook clears the mark, B7).
+fn pause_invariant(node: &Node) -> Result<(), String> {
+    for p in 0..P {
+        let h = node.handle(PartitionId(p)).expect("ready");
+        let reader = h.store().reader();
+        for (k, v) in reader
+            .prefix(Table::Runs, &[], usize::MAX)
+            .expect("runs scan")
+        {
+            let rec: RunRecord = values::decode(&v).map_err(|e| e.to_string())?;
+            if rec.pause.is_none() {
+                continue;
+            }
+            if rec.status.is_terminal() {
+                return Err(format!(
+                    "p{p}: terminal run {k:?} is paused ({:?})",
+                    rec.status
+                ));
+            }
+            if rec.ready.is_some() {
+                return Err(format!("p{p}: paused run {k:?} has a ready slot"));
+            }
+        }
+        for (k, _) in reader
+            .prefix(Table::Ready, &[], usize::MAX)
+            .expect("ready scan")
+        {
+            let (_, _, _, run) = decode_ready_key(&k).ok_or("malformed ready key")?;
+            let rec = query::run_record(&reader, &run)
+                .expect("run record")
+                .ok_or_else(|| format!("p{p}: ready row {run:?} without a run"))?;
+            if rec.pause.is_some() {
+                return Err(format!("p{p}: paused run {run:?} has a ready row"));
             }
         }
     }
@@ -861,6 +915,74 @@ fn fixed_scenario_effects() {
             ops.push(Op::Effects(Some(EffectOp::Announce { run: i })));
         }
         if i == 15 {
+            ops.push(Op::Restart(tiny.clone()));
+        }
+    }
+    let sc = Scenario {
+        initial: tiny,
+        ops,
+        rebuild_chunks: (1, 1024),
+    };
+    rt().block_on(check(sc)).expect("live == rebuilt");
+}
+
+/// Plan 07-04: a fixed pause/resume scenario: own runs paused (operator, auto, stale auto)
+/// around run timeouts, inputs, rejected executor writes, resume, terminate and RetryRun, plus
+/// pauses, resumes and executor writes on driver runs, with a restart; rebuilt with chunk 1
+/// and 1024.
+#[test]
+fn fixed_scenario_pause() {
+    use common::gen_pause::PauseKind;
+    let tiny = Cfg {
+        max_chunk_cmds: 1,
+        checkpoint_batches: 1,
+        checkpoint_every: Duration::from_millis(1),
+    };
+    let kinds = [PauseKind::Operator, PauseKind::Auto, PauseKind::StaleAuto];
+    let mut ops = Vec::new();
+    for i in 0..24usize {
+        let p = (i % 2) as u16;
+        ops.push(Op::Start {
+            p,
+            key: None,
+            oversize: false,
+            delayed: i % 7 == 6,
+        });
+        ops.push(Op::Grant { p, i });
+        ops.push(Op::Pause(Some(PauseOp::Own {
+            p,
+            run_timeout: [0, 5, u64::MAX / 8][i % 3],
+            grant: i % 4 != 0,
+            pause: kinds[i % 3],
+            fire_timeout: i % 2 == 1,
+            inputs: i % 3 != 2,
+            write: i % 2 == 0,
+            resume: i % 4 == 1,
+            terminate: i % 5 == 2,
+            retry: i % 3 == 1 || i % 5 == 2,
+            pause_after_retry: i % 6 == 4,
+        })));
+        ops.push(Op::Pause(Some(PauseOp::Pause {
+            i,
+            kind: kinds[(i + 1) % 3],
+        })));
+        ops.push(Op::Pause(Some(PauseOp::Events {
+            i,
+            intent: (i % 3) as u8,
+        })));
+        ops.push(Op::Pause(Some(PauseOp::Grant { i })));
+        ops.push(Op::Pause(Some(PauseOp::Signal { i })));
+        if i % 3 == 0 {
+            ops.push(Op::Pause(Some(PauseOp::Resume { i })));
+        }
+        if i % 5 == 4 {
+            ops.push(Op::Pause(Some(PauseOp::Terminate { i })));
+            ops.push(Op::Pause(Some(PauseOp::Retry { i })));
+        }
+        if i % 4 == 2 {
+            ops.push(Op::Pause(Some(PauseOp::Cancel { i })));
+        }
+        if i == 12 {
             ops.push(Op::Restart(tiny.clone()));
         }
     }

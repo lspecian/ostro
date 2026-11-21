@@ -5,6 +5,7 @@
 pub mod flaky_router;
 pub mod gen_effects;
 pub mod gen_lifecycle;
+pub mod gen_pause;
 pub mod gen_schedule;
 pub mod gen_waits;
 pub mod manual_hw;
