@@ -1,8 +1,7 @@
 //! Phase 7 format contract (plan 07-03; OPS-01, D-W18): `RejectReason::RunPaused` at
 //! declaration index 15 (outcome code 31) with the `ReservedP6_12..14` placeholders, the
 //! in-memory `Action::RunPaused` / `Action::RunResumed`, and apply routing of `Cmd::PauseRun`
-//! (20) / `Cmd::ResumeRun` (21) to the `apply/pause.rs` stubs, which reject with
-//! `Invalid(NotImplemented)` until 07-04.
+//! (20) / `Cmd::ResumeRun` (21) to `apply/pause.rs` (stubs in 07-03, implemented by 07-04).
 
 use bytes::Bytes;
 use ostro_partition::apply::{
@@ -193,7 +192,10 @@ fn pause_actions_exist() {
 }
 
 #[test]
-fn pause_and_resume_route_to_not_implemented_stubs() {
+fn pause_and_resume_route_to_pause_rs() {
+    // 07-04 replaced the NotImplemented stubs: both commands reach `apply/pause.rs`, read the
+    // run record once and are folded into the hash with their real outcome code. The full
+    // semantics are in tests/pause.rs.
     let mut h = H::new();
     let r = rid(1);
     assert_eq!(h.apply(&start(&r)).out, ApplyOutcome::Accepted);
@@ -203,30 +205,47 @@ fn pause_and_resume_route_to_not_implemented_stubs() {
         after_failure: false,
     });
     assert_eq!(h.apply(&grant).out, ApplyOutcome::Accepted);
-    let before = h.run_row(&r).expect("run row");
 
-    for c in [operator_pause(&r), auto_pause(&r), resume(&r)] {
+    for (c, action) in [
+        (operator_pause(&r), Action::RunPaused { run: r }),
+        (resume(&r), Action::RunResumed { run: r }),
+        (auto_pause(&r), Action::RunPaused { run: r }),
+    ] {
         let kind = c.kind_name();
         let prev_hash = h.cur.hash;
         let off = h.cur.next;
         let a = h.apply(&c);
-        assert_eq!(a.out, NOT_IMPLEMENTED, "{kind}");
-        assert!(a.actions.is_empty(), "{kind}: no actions");
-        assert_eq!(a.reads, 0, "{kind}: stub reads nothing");
-        assert_eq!(a.writes, 0, "{kind}: stub writes nothing");
-        // A rejection still consumes its offset and folds code 26 into the hash.
+        assert_eq!(a.out, ApplyOutcome::Accepted, "{kind}");
+        assert!(a.actions.contains(&action), "{kind}");
+        assert_eq!(a.reads, 1, "{kind}: one run-record read");
+        assert!(a.writes > 0, "{kind}");
         assert_eq!(h.cur.next, off.next(), "{kind}");
         assert_eq!(
             h.cur.hash,
-            fold_hash(&prev_hash, off, 26, &encode_command(&c)),
+            fold_hash(
+                &prev_hash,
+                off,
+                ApplyOutcome::Accepted.code(),
+                &encode_command(&c)
+            ),
             "{kind}"
         );
     }
-    assert_eq!(h.run_row(&r).expect("run row"), before, "record untouched");
+    assert!(h.run_row(&r).is_some());
 
-    // Unknown runs route the same way (the stub validates nothing yet).
-    assert_eq!(h.apply(&operator_pause(&rid(9))).out, NOT_IMPLEMENTED);
-    assert_eq!(h.apply(&resume(&rid(9))).out, NOT_IMPLEMENTED);
+    assert_eq!(
+        h.apply(&operator_pause(&rid(9))).out,
+        ApplyOutcome::Rejected(RejectReason::RunNotFound)
+    );
+    assert_eq!(
+        h.apply(&resume(&rid(9))).out,
+        ApplyOutcome::Rejected(RejectReason::RunNotFound)
+    );
+    assert_ne!(
+        h.apply(&resume(&rid(9))).out,
+        NOT_IMPLEMENTED,
+        "the stubs are gone"
+    );
 }
 
 #[test]

@@ -157,6 +157,12 @@ pub(crate) fn enqueue_ready(
     let first = rec.current_attempt.is_none();
     leave_running(b, run, rec);
     remove_ready(b, run, rec);
+    if rec.pause.is_some() {
+        // Phase 7 (07-04) pause gate, the single choke point: a paused run may become Ready,
+        // but gets no ready row and no EnqueueReady until ResumeRun re-enqueues it.
+        rec.status = RunStatus::Ready;
+        return;
+    }
     b.insert(
         Table::Ready,
         ready_key(&rec.queue, rec.priority, ready_at_ms, run),
@@ -427,6 +433,10 @@ pub(crate) fn apply_attempt_granted(
     if Some(t) <= current {
         return reject(RejectReason::Fenced { current });
     }
+    if rec.pause.is_some() {
+        // Phase 7 (07-04): no grant for a paused run.
+        return reject(RejectReason::RunPaused);
+    }
     rec.current_attempt = Some((t.epoch.0, t.n));
     rec.status = RunStatus::Running;
     if g.after_failure {
@@ -562,6 +572,11 @@ pub(crate) fn apply_events_appended(
     let current = rec.current_attempt.map(token_of);
     if Some(t) != current {
         return reject(RejectReason::Fenced { current });
+    }
+    if rec.pause.is_some() {
+        // Phase 7 (07-04): after fencing (a stale zombie still sees Fenced), before anything
+        // else: nothing in the batch is applied while the run is paused.
+        return reject(RejectReason::RunPaused);
     }
     if e.from_seq != rec.next_seq {
         return reject(RejectReason::SeqMismatch {

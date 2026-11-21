@@ -333,6 +333,8 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             | RejectReason::RunNotFound
             // Suspend on a run that is no longer Running (04-12): treat like Fenced.
             | RejectReason::Invalid(InvalidCode::NotRunning) => AppendError::Fenced,
+            // 07-04 (W13): the run was paused; the dispatcher already revoked it, so stop.
+            RejectReason::RunPaused => AppendError::Fenced,
             RejectReason::SeqMismatch { expected } => {
                 self.next_seq.store(expected, Ordering::Release);
                 AppendError::Conflict { expected }

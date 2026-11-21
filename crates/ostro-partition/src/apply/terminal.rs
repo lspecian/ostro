@@ -17,6 +17,8 @@
 //! calls `schedule::on_run_terminal`, which deletes the run's `schedule_state` reverse row and
 //! starts a buffered `BufferOne` fire in the same batch. Other runs pay nothing for it.
 //!
+//! Phase 7 (07-04): last, the hook clears `RunRecord.pause` (no read).
+//!
 //! **Read budget:** the two `waits` prefix scans (2 reads) run only when
 //! `RunRecord.open_waits > 0`; otherwise the hook reads nothing (asserted in
 //! `tests/apply_seams.rs`). Documented exception, docs/storage-format.md §13. Non-resumable
@@ -54,6 +56,9 @@ pub(crate) fn on_terminal(
     if rec.idempotency_key.starts_with(schedule::CRON_KEY_PREFIX) {
         schedule::on_run_terminal(b, cur, run, rec.status, actions)?;
     }
+    // 07-04 (B7): a terminal run is never paused, so a resumed (RetryRun) run is not stuck
+    // behind the enqueue_ready gate. Callers store the record after the hook.
+    rec.pause = None;
     Ok(())
 }
 
