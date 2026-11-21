@@ -802,3 +802,441 @@ async fn secret_never_on_worker() {
     );
     drop(w);
 }
+
+// ---------------------------------------------------------------------------------
+// listener: the client listener's TLS modes through the binary (SEC-01, D-W7/D-W8)
+// ---------------------------------------------------------------------------------
+
+/// - `self_signed`: `mode = "self-signed"`; the ready line prints `https://` and the leaf
+///   fingerprint; REST and gRPC (health) are served on the one port to clients trusting
+///   the cluster CA; a client trusting another CA is refused.
+/// - `files_reload`: `mode = "files"` with rcgen-issued cert A, overwritten with cert B,
+///   SIGHUP: the next handshake presents B, same process (the mtime poll is set to 1 h,
+///   so only the signal can explain the swap).
+/// - `auto_non_loopback_dev`: `ostro dev --listen 0.0.0.0:0` serves https; `ostro server`
+///   with `mode = auto` on 0.0.0.0 and no files/acme exits with the D-W8 error.
+/// - `acme_pebble`: env-gated on `OSTRO_TEST_ACME_DIRECTORY` (+ `OSTRO_TEST_ACME_CA`, the
+///   Pebble minica root; optional `OSTRO_TEST_ACME_TLS_PORT` for real TLS-ALPN-01
+///   validation): the served certificate is issued by Pebble. Without the env it prints
+///   a loud SKIP (human_needed, see 07-10-SUMMARY.md).
+mod listener {
+    use super::*;
+    use ostro_proto::health::v1::{CheckRequest, health_client::HealthClient};
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose,
+    };
+
+    /// A client trusting only `ca_pem`, reporting the peer leaf, never reusing a
+    /// connection (each request is a new handshake; a TLS session of the same client
+    /// may still be resumed).
+    fn tls_client(ca_pem: &[u8]) -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(0)
+            .tls_certs_only([reqwest::Certificate::from_pem(ca_pem).expect("CA pem")])
+            .tls_info(true)
+            .build()
+            .expect("reqwest client")
+    }
+
+    /// `GET url` -> (status, sha256 hex of the served leaf).
+    async fn served(client: &reqwest::Client, url: &str) -> Result<(StatusCode, String), String> {
+        let r = client.get(url).send().await.map_err(|e| {
+            use std::error::Error as _;
+            let mut m = e.to_string();
+            let mut s = e.source();
+            while let Some(x) = s {
+                m.push_str(": ");
+                m.push_str(&x.to_string());
+                s = x.source();
+            }
+            m
+        })?;
+        let leaf = r
+            .extensions()
+            .get::<reqwest::tls::TlsInfo>()
+            .and_then(|t| t.peer_certificate())
+            .map(sha_hex)
+            .ok_or("no TLS peer certificate")?;
+        Ok((r.status(), leaf))
+    }
+
+    /// Poll `GET url` until it answers 200; returns the served leaf fingerprint.
+    async fn wait_ok(client: &reqwest::Client, url: &str) -> String {
+        let deadline = Instant::now() + P7_T;
+        loop {
+            let last = match served(client, url).await {
+                Ok((StatusCode::OK, fp)) => return fp,
+                Ok((st, _)) => st.to_string(),
+                Err(e) => e,
+            };
+            assert!(Instant::now() < deadline, "{url} not 200: {last}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A test CA (rcgen).
+    fn test_ca(cn: &str) -> (String, Issuer<'static, KeyPair>) {
+        let key = KeyPair::generate().expect("CA key");
+        let mut p = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        p.distinguished_name.push(DnType::CommonName, cn);
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        p.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        let cert = p.self_signed(&key).expect("CA cert");
+        (cert.pem(), Issuer::new(p, key))
+    }
+
+    /// A serverAuth leaf for `localhost` / `127.0.0.1`: (chain PEM [leaf, CA], key PEM,
+    /// leaf sha256 hex).
+    fn leaf(issuer: &Issuer<'static, KeyPair>, ca_pem: &str, cn: &str) -> (String, String, String) {
+        let key = KeyPair::generate().expect("leaf key");
+        let mut p = CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+            .expect("leaf params");
+        p.distinguished_name.push(DnType::CommonName, cn);
+        p.is_ca = IsCa::ExplicitNoCa;
+        p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let cert = p.signed_by(&key, issuer).expect("leaf cert");
+        (
+            format!("{}{ca_pem}", cert.pem()),
+            key.serialize_pem(),
+            sha_hex(cert.der()),
+        )
+    }
+
+    /// Write `bytes` to `path` atomically (tmp + rename).
+    fn replace(path: &Path, bytes: &str) {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, bytes).expect("write tmp");
+        std::fs::rename(&tmp, path).expect("rename");
+    }
+
+    /// `ostro server --config <dir>/ostro.toml` with `toml` (+ the `[node]` data dir);
+    /// waits for the TLS ready line.
+    fn server_with(dir: &Path, toml: &str, cluster_port: u16) -> (Proc, p7::TlsReady) {
+        let cfg = dir.join("ostro.toml");
+        let data = dir.join("data");
+        std::fs::write(
+            &cfg,
+            format!("[node]\ndata_dir = {data:?}\npartitions = 2\n\n{toml}"),
+        )
+        .expect("config");
+        let mut cmd = common::command();
+        cmd.current_dir(dir)
+            .arg("server")
+            .arg("--config")
+            .arg(&cfg)
+            .env("OSTRO_CLUSTER__LISTEN", format!("127.0.0.1:{cluster_port}"))
+            .env("RUST_LOG", "info");
+        let mut p = Proc::spawn(cmd);
+        let ready = tokio::task::block_in_place(|| p.wait_stdout(P7_T, p7::TlsReady::parse));
+        (p, ready)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn self_signed() {
+        let _serial = SERIAL.lock().await;
+        let t0 = Instant::now();
+        let c = P7Cluster::start(P7Opts::default()).await;
+        let line = c
+            .server()
+            .stdout()
+            .into_iter()
+            .find(|l| p7::TlsReady::parse(l).is_some())
+            .expect("ready line");
+        assert!(
+            line.contains(&format!("https://127.0.0.1:{}", c.api_port))
+                && line.contains(&format!("(sha256 fingerprint {})", c.ready.fingerprint)),
+            "{line}"
+        );
+
+        // REST: the served leaf is the printed one.
+        let client = tls_client(&c.ca_pem);
+        let base = format!("https://127.0.0.1:{}", c.api_port);
+        let fp = wait_ok(&client, &format!("{base}/readyz")).await;
+        assert_eq!(
+            fp, c.ready.fingerprint,
+            "served leaf == ready-line fingerprint"
+        );
+        let (st, fp) = served(&client, &format!("{base}/v1/workers"))
+            .await
+            .expect("REST over TLS");
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(fp, c.ready.fingerprint);
+
+        // gRPC on the same port (ALPN h2), trusting the cluster CA.
+        let tls = tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(tonic::transport::Certificate::from_pem(&c.ca_pem))
+            .domain_name("localhost");
+        let ch = tonic::transport::Channel::from_shared(base.clone())
+            .expect("uri")
+            .tls_config(tls)
+            .expect("tls config")
+            .connect()
+            .await
+            .expect("gRPC over TLS connect");
+        let status = HealthClient::new(ch)
+            .check(CheckRequest::default())
+            .await
+            .expect("gRPC health over TLS")
+            .into_inner()
+            .status;
+        assert_eq!(status, "SERVING");
+
+        // A client trusting a different CA is refused in the handshake.
+        let (other_ca, _) = test_ca("07-17 foreign CA");
+        let foreign = tls_client(other_ca.as_bytes());
+        let e = served(&foreign, &format!("{base}/readyz"))
+            .await
+            .expect_err("a foreign CA must not verify the listener");
+        assert!(e.to_ascii_lowercase().contains("certificate"), "{e}");
+        eprintln!(
+            "worker_e2e::listener::self_signed: server ready in {} ms, total {:?}",
+            c.ready.ms,
+            t0.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn files_reload() {
+        let _serial = SERIAL.lock().await;
+        let t0 = Instant::now();
+        let dir = tempfile::Builder::new()
+            .prefix("ostro-p7-files-")
+            .tempdir()
+            .expect("tmp");
+        let (ca_pem, issuer) = test_ca("07-17 files CA");
+        let (chain_a, key_a, fp_a) = leaf(&issuer, &ca_pem, "cert A");
+        let (chain_b, key_b, fp_b) = leaf(&issuer, &ca_pem, "cert B");
+        assert_ne!(fp_a, fp_b);
+        let (crt, key) = (dir.path().join("server.crt"), dir.path().join("server.key"));
+        replace(&crt, &chain_a);
+        replace(&key, &key_a);
+        let api_port = p7::reserve_port();
+        let toml = format!(
+            "[api]\nlisten = \"127.0.0.1:{api_port}\"\n\n\
+             [api.tls]\nmode = \"files\"\ncert_file = {crt:?}\nkey_file = {key:?}\n\
+             reload_poll = \"3600s\"\n"
+        );
+        let (mut srv, ready) = server_with(dir.path(), &toml, p7::reserve_port());
+        assert_eq!(ready.fingerprint, fp_a, "ready line prints cert A");
+        let pid = srv.pid();
+        let client = tls_client(ca_pem.as_bytes());
+        let url = format!("https://127.0.0.1:{api_port}/readyz");
+        assert_eq!(wait_ok(&client, &url).await, fp_a, "serves cert A");
+
+        // Overwrite with B: nothing changes until SIGHUP (mtime poll = 1 h).
+        replace(&crt, &chain_b);
+        replace(&key, &key_b);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            served(&tls_client(ca_pem.as_bytes()), &url)
+                .await
+                .expect("handshake")
+                .1,
+            fp_a,
+            "swapped before SIGHUP"
+        );
+        let t_hup = Instant::now();
+        srv.signal("HUP");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            // A fresh client per probe: a client's TLS session cache would resume the
+            // old session, and a resumed handshake carries no certificate (rustls then
+            // reports the original session's leaf).
+            if let Ok((_, fp)) = served(&tls_client(ca_pem.as_bytes()), &url).await
+                && fp == fp_b
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cert B not served 10 s after SIGHUP:\n{}",
+                srv.output()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let swapped = t_hup.elapsed();
+        assert!(
+            srv.try_exit().is_none(),
+            "the server exited:\n{}",
+            srv.output()
+        );
+        assert_eq!(srv.pid(), pid, "no restart");
+        assert!(
+            srv.output()
+                .contains("SIGHUP: reloading the certificate files"),
+            "{}",
+            srv.output()
+        );
+        assert_eq!(wait_ok(&tls_client(ca_pem.as_bytes()), &url).await, fp_b);
+        srv.stop();
+        eprintln!(
+            "worker_e2e::listener::files_reload: B served {swapped:?} after SIGHUP, total {:?}",
+            t0.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn auto_non_loopback_dev() {
+        let _serial = SERIAL.lock().await;
+        let t0 = Instant::now();
+        let dir = tempfile::Builder::new()
+            .prefix("ostro-p7-auto-")
+            .tempdir()
+            .expect("tmp");
+
+        // `ostro dev` on 0.0.0.0: auto = self-signed (dev profile).
+        let data = dir.path().join("dev-data");
+        let mut cmd = common::command();
+        cmd.current_dir(dir.path())
+            .arg("dev")
+            .arg("--listen")
+            .arg("0.0.0.0:0")
+            .arg("--data-dir")
+            .arg(&data)
+            .env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0");
+        let mut dev = Proc::spawn(cmd);
+        let ready = tokio::task::block_in_place(|| dev.wait_stdout(P7_T, p7::TlsReady::parse));
+        assert!(ready.addr.ip().is_unspecified(), "{:?}", ready.addr);
+        let ca = std::fs::read(data.join("tls/ca.crt")).expect("dev cluster CA");
+        let client = tls_client(&ca);
+        let url = format!("https://127.0.0.1:{}/readyz", ready.addr.port());
+        assert_eq!(wait_ok(&client, &url).await, ready.fingerprint);
+        dev.stop();
+
+        // `ostro server` on 0.0.0.0 with auto and no files/acme: refused (D-W8).
+        let mut srv = Proc::spawn(common::server(
+            dir.path(),
+            &[
+                "--listen",
+                "0.0.0.0:0",
+                "--data-dir",
+                &dir.path().join("server-data").display().to_string(),
+            ],
+        ));
+        let st = tokio::task::block_in_place(|| srv.wait_exit(P7_T));
+        assert!(!st.success(), "server started:\n{}", srv.output());
+        let out = srv.output();
+        assert!(
+            out.contains(ostro_server::tls::AUTO_NON_LOOPBACK_ERROR),
+            "no D-W8 error:\n{out}"
+        );
+        assert!(!out.contains(" listening on "), "{out}");
+        eprintln!(
+            "worker_e2e::listener::auto_non_loopback_dev: dev https ready in {} ms, total {:?}",
+            ready.ms,
+            t0.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acme_pebble() {
+        let Ok(directory) = std::env::var("OSTRO_TEST_ACME_DIRECTORY") else {
+            eprintln!(
+                "SKIP worker_e2e::listener::acme_pebble: OSTRO_TEST_ACME_DIRECTORY is not set \
+                 (human_needed: run Pebble, see 07-10-SUMMARY.md)"
+            );
+            return;
+        };
+        assert!(
+            !directory.contains("letsencrypt.org"),
+            "tests never contact a public ACME directory"
+        );
+        let ca = std::env::var("OSTRO_TEST_ACME_CA")
+            .expect("OSTRO_TEST_ACME_CA (Pebble minica root PEM) must be set with the directory");
+        let _serial = SERIAL.lock().await;
+        let t0 = Instant::now();
+        let dir = tempfile::Builder::new()
+            .prefix("ostro-p7-acme-")
+            .tempdir()
+            .expect("tmp");
+        let api_port = std::env::var("OSTRO_TEST_ACME_TLS_PORT")
+            .ok()
+            .map(|p| p.parse::<u16>().expect("OSTRO_TEST_ACME_TLS_PORT"))
+            .unwrap_or_else(p7::reserve_port);
+        let toml = format!(
+            "[api]\nlisten = \"127.0.0.1:{api_port}\"\n\n\
+             [api.tls]\nmode = \"acme\"\n\n\
+             [api.tls.acme]\ndomains = [\"localhost\"]\ndirectory = {directory:?}\n\
+             directory_ca_file = {ca:?}\nchallenge = \"tls-alpn-01\"\n"
+        );
+        let cfg = dir.path().join("ostro.toml");
+        let data = dir.path().join("data");
+        std::fs::write(
+            &cfg,
+            format!("[node]\ndata_dir = {data:?}\npartitions = 2\n\n{toml}"),
+        )
+        .expect("config");
+        let mut cmd = common::command();
+        cmd.current_dir(dir.path())
+            .arg("server")
+            .arg("--config")
+            .arg(&cfg)
+            .env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0")
+            .env("RUST_LOG", "info");
+        let mut srv = Proc::spawn(cmd);
+        // In acme mode the ready line may come before a certificate is installed (no
+        // fingerprint yet): wait for any https ready line.
+        tokio::task::block_in_place(|| {
+            srv.wait_stdout(P7_T, |l| l.contains(" listening on https://").then_some(()))
+        });
+        // Pebble's issuer is not a trust root here: read the served leaf without
+        // verification and check who issued it.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(0)
+            .tls_danger_accept_invalid_certs(true)
+            .tls_info(true)
+            .build()
+            .expect("client");
+        let url = format!("https://localhost:{api_port}/readyz");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let (issuer, sans) = loop {
+            if let Ok(r) = client.get(&url).send().await
+                && let Some(der) = r
+                    .extensions()
+                    .get::<reqwest::tls::TlsInfo>()
+                    .and_then(|t| t.peer_certificate())
+            {
+                let (_, x) = x509_parser::parse_x509_certificate(der).expect("leaf");
+                let issuer = x.issuer().to_string();
+                if issuer.contains("Pebble") {
+                    let sans: Vec<String> = x
+                        .subject_alternative_name()
+                        .ok()
+                        .flatten()
+                        .map(|s| {
+                            s.value
+                                .general_names
+                                .iter()
+                                .map(|g| g.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    break (issuer, sans);
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no Pebble-issued certificate served within 120 s:\n{}",
+                srv.output()
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        assert!(issuer.contains("Pebble Intermediate CA"), "{issuer}");
+        assert!(sans.iter().any(|s| s.contains("localhost")), "{sans:?}");
+        srv.stop();
+        eprintln!(
+            "worker_e2e::listener::acme_pebble: issuer {issuer}, total {:?}",
+            t0.elapsed()
+        );
+    }
+}
