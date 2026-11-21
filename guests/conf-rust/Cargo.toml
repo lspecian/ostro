@@ -1,0 +1,15 @@
+[package]
+name = "conf-rust"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+# Rust conformance reference workflows (plan 09-11), exported as rs_<base> (D-P9-23).
+# Built with the Rust SDK; serde/serde_json pinned exactly, matching ostro-sdk.
+[dependencies]
+ostro-sdk = { path = "../../sdks/rust/ostro-sdk" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
