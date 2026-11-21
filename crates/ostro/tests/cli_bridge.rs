@@ -69,9 +69,7 @@ impl Dev {
         // argv): poll until the process shows the CLI's arguments.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let argv = loop {
-            let a = std::fs::read(format!("/proc/{}/cmdline", child.id()))
-                .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
-                .unwrap_or_default();
+            let a = process_argv(child.id());
             if a.contains(args[0]) || std::time::Instant::now() > deadline {
                 break a;
             }
@@ -88,6 +86,28 @@ impl Dev {
             String::from_utf8_lossy(&out.stderr).into_owned(),
             argv,
         )
+    }
+}
+
+/// The live argv of `pid` as other local users would see it. Linux: `/proc/<pid>/cmdline`.
+/// Elsewhere (macOS has no procfs): `ps -ww -o args=`, which reads the same kernel argv
+/// (`KERN_PROCARGS2`). Empty when the process is gone or not yet visible.
+fn process_argv(pid: u32) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("ps")
+            .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
     }
 }
 
