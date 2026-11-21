@@ -252,7 +252,7 @@ Plans:
 **Plans**: 22 plans (8 waves; 07-01 is the PHASE-7 GATE requiring Phase 6 complete (all 06-*-SUMMARY + 06-VERIFICATION passed, or human_needed with by-design items only) and the Phase 5 pre-freeze findings F1–F4, F7 (ReadyValue.first) and F8 (ApiToken.expires_at_ms) in code; revised after the plan check (7 blockers, 14 warnings); runs in parallel with Phase 8 under the 07-DECISIONS shared-file rules: dispatcher.rs 07-05 vs 08-16 (Phase 7 owns the demand gauge value), server/config/lib.rs only 07-02, control/mod.rs 07-02 (field) + 07-14 vs 08-10, ostro-api/proto 07-11 vs 08-10, main.rs 07-15 vs 08-12/08-18, Cargo files only 07-02)
 
 Plans:
-- [ ] 07-01-PLAN.md — PHASE-7 GATE (Phase 6 complete, Phase 5 F1–F4/F7/F8 landed, code vs RESERVATIONS.md) + Phase 7 ordinals/names reserved + decisions D-W1..D-W25 and coordination rules to STATE (W1)
+- [x] 07-01-PLAN.md — PHASE-7 GATE (Phase 6 complete, Phase 5 F1–F4/F7/F8 landed, code vs RESERVATIONS.md) + Phase 7 ordinals/names reserved + decisions D-W1..D-W25 and coordination rules to STATE (W1)
 - [ ] 07-02-PLAN.md — Every Phase 7 dependency (no governor), ostro-worker-proto + ostro-worker skeleton, partition Placement/FlowControl/QueueGauges contracts, p7.rs seam (P7Shared with engine/bridge/join, attach_node, DispatcherHooks), ControlPlane p7 field, config sections, ErrorCode::RateLimited (W2)
 - [ ] 07-03-PLAN.md — Format contract: Cmd 20 PauseRun / 21 ResumeRun, RejectReason 15 RunPaused, Action::RunPaused/RunResumed, apply routing stubs (OPS-01) (W2)
 - [ ] 07-04-PLAN.md — Run pause/resume apply: enqueue_ready gate, RunPaused rejects, pause cleared on every terminal transition, sink RunPaused → Fenced, rebuild_digest gen_pause with RetryRun (OPS-01) (W3)
