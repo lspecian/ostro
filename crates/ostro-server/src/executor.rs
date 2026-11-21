@@ -70,6 +70,7 @@
 //! | `Evicted{External}` without revoke (flush `Unavailable`) | short pause | `Reactivate` |
 //! | `AttemptFailed(f)`, `f.retryable()` and `attempt_failures + 1 < max_attempt_failures` | - | `Retry{after_ms}` |
 //! | `AttemptFailed(f)` otherwise (incl. NonDeterminism / ProtocolViolation) | `CompleteRun{Failed, failure JSON, resumable}` | `Released` |
+//! | the same, `f.retryable()` and the [`ExhaustPolicy`] says `Pause` (07-08, OPS-01) | `PauseRun{retries_exhausted, failure JSON, token}` | `Released`; `Fenced` / `StaleEpoch` -> `Fenced` |
 //! | `Fenced` | - | `Fenced` |
 //!
 //! The CAS `from_seq` is the journal end as the **engine** saw it (initially the loaded
@@ -125,6 +126,7 @@ use ostro_engine::sink::{
 };
 use ostro_partition::{ExecOutcome, Executor, Job, LeaseRenewer, PartitionHandle, query};
 use ostro_types::command::{CompleteRun, Derived, EnqueueReady, TerminalStatus, derived::Intent};
+use ostro_types::command::{MAX_PAUSE_DETAIL_LEN, PAUSE_REASON_RETRIES_EXHAUSTED, PauseRun};
 use ostro_types::journal::{Event, EventBody};
 use ostro_types::{AttemptToken, RunId};
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -301,6 +303,21 @@ impl ExecutorHooks {
     }
 }
 
+/// What to do when a run's retryable attempt failures are exhausted (07-08, OPS-01).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExhaustAction {
+    /// Complete the run `Failed` (resumable; the Phase 5 behaviour and the default).
+    Fail,
+    /// Auto-pause the run (`PauseRun{reason: retries_exhausted}`, fenced by the token).
+    Pause,
+}
+
+/// Decides [`ExhaustAction`] per run (the server installs `flow::NodeFlow`:
+/// `on_retries_exhausted`, workflow policy over queue policy).
+pub trait ExhaustPolicy: Send + Sync {
+    fn on_exhausted(&self, record: &ostro_partition::store::values::RunRecord) -> ExhaustAction;
+}
+
 /// The engine-backed dispatcher executor.
 #[derive(Clone)]
 pub struct EngineExecutor {
@@ -315,6 +332,8 @@ pub struct EngineExecutor {
     guest_logs: Arc<GuestLogSink>,
     /// The effects bridge (06-14): every job's sink hands its driver to the engine.
     bridge: Option<Arc<BridgeServices>>,
+    /// Retries-exhausted policy (07-08); `None` = always fail.
+    exhaust: Option<Arc<dyn ExhaustPolicy>>,
 }
 
 impl std::fmt::Debug for EngineExecutor {
@@ -336,7 +355,15 @@ impl EngineExecutor {
             rearmed: Arc::new(Mutex::new(HashMap::new())),
             guest_logs: Arc::new(GuestLogSink::new(&GuestLogsSection::default())),
             bridge: None,
+            exhaust: None,
         }
+    }
+
+    /// Auto-pause instead of failing when `policy` says so for an exhausted retryable
+    /// attempt failure (07-08). Without it every exhausted run fails (Phase 5).
+    pub fn with_exhaust_policy(mut self, policy: Arc<dyn ExhaustPolicy>) -> Self {
+        self.exhaust = Some(policy);
+        self
     }
 
     /// Route every job's effects through the bridge (06-14, [`PartitionSink::with_bridge`]).
@@ -615,6 +642,27 @@ impl ActivationSink for EngineSink {
     }
 }
 
+/// The failure JSON `CompleteRun{Failed}` would carry, as a `PauseRun.detail` (at most
+/// [`MAX_PAUSE_DETAIL_LEN`] bytes: the message is shortened until it fits).
+fn pause_detail(reason_code: &str, message: &str) -> String {
+    let mut msg = message;
+    loop {
+        let json = String::from_utf8(derive::failure_json(reason_code, reason_code, msg))
+            .unwrap_or_default();
+        if json.len() <= MAX_PAUSE_DETAIL_LEN || msg.is_empty() {
+            return json;
+        }
+        let mut cut = msg
+            .len()
+            .saturating_sub(json.len() - MAX_PAUSE_DETAIL_LEN)
+            .min(msg.len() - 1);
+        while !msg.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        msg = &msg[..cut];
+    }
+}
+
 // ------------------------------------------------------------------- failpoints
 
 /// An executor failpoint (module docs): `Ok` unless it is configured with `return`, which
@@ -875,7 +923,9 @@ impl EngineExecutor {
             return (Some(outcome), ExecOutcome::Released);
         }
         let engine_end = esink.engine_end.load(Ordering::Acquire);
-        let exec = self.map_outcome(sink, &outcome, engine_end, failures).await;
+        let exec = self
+            .map_outcome(sink, &outcome, engine_end, failures, record)
+            .await;
         (Some(outcome), exec)
     }
 
@@ -885,6 +935,7 @@ impl EngineExecutor {
         outcome: &ActivationOutcome,
         engine_end: u64,
         failures: u32,
+        record: &ostro_partition::store::values::RunRecord,
     ) -> ExecOutcome {
         match outcome {
             // The terminal append went through the sink; is_terminal() is checked first, so
@@ -913,7 +964,9 @@ impl EngineExecutor {
                     ExecOutcome::Reactivate
                 }
             },
-            ActivationOutcome::AttemptFailed(f) => self.attempt_failed(sink, f, failures).await,
+            ActivationOutcome::AttemptFailed(f) => {
+                self.attempt_failed(sink, f, failures, record).await
+            }
         }
     }
 
@@ -940,12 +993,24 @@ impl EngineExecutor {
         sink: &PartitionSink,
         f: &AttemptFailure,
         failures: u32,
+        record: &ostro_partition::store::values::RunRecord,
     ) -> ExecOutcome {
         if f.retryable() && failures.saturating_add(1) < self.cfg.max_attempt_failures {
             let after = self.cfg.retry_delay(failures);
             return ExecOutcome::Retry {
                 after_ms: u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
             };
+        }
+        // 07-08 (OPS-01): retryable exhaustion may auto-pause instead (never NonDeterminism,
+        // ProtocolViolation or other non-retryable failures).
+        if f.retryable()
+            && self
+                .exhaust
+                .as_ref()
+                .is_some_and(|p| p.on_exhausted(record) == ExhaustAction::Pause)
+            && let Some(out) = self.auto_pause(sink, f).await
+        {
+            return out;
         }
         // D1: executor-level failures are resumed in place by RetryRun.
         self.fail_run(
@@ -956,6 +1021,42 @@ impl EngineExecutor {
             true,
         )
         .await
+    }
+
+    /// Auto-pause (07-08): `PauseRun{retries_exhausted, failure JSON, token}`. `None` when
+    /// apply refused it as invalid (the caller then fails the run).
+    async fn auto_pause(&self, sink: &PartitionSink, f: &AttemptFailure) -> Option<ExecOutcome> {
+        let cmd = ostro_types::Command::pause_run(PauseRun {
+            run_id: sink.run().as_bytes().to_vec(),
+            reason: PAUSE_REASON_RETRIES_EXHAUSTED,
+            detail: pause_detail(f.reason_code(), &f.dlq_reason()),
+            token: Some(sink.token().into()),
+            requested_at_ms: derive::ceil_ms(self.runtime.clock().now_unix_nanos()),
+        });
+        match sink.handle().submit_one(cmd).await {
+            // Paused now (or already): the dispatcher revokes the lease on RunPaused.
+            Ok(ostro_partition::ApplyOutcome::Accepted) => Some(ExecOutcome::Released),
+            Ok(ostro_partition::ApplyOutcome::Rejected(r)) => match r {
+                ostro_partition::RejectReason::Fenced { .. }
+                | ostro_partition::RejectReason::StaleEpoch { .. }
+                | ostro_partition::RejectReason::RunTerminal
+                | ostro_partition::RejectReason::RunNotFound => Some(ExecOutcome::Fenced),
+                other => {
+                    warn!(run = %sink.run(), reject = ?other, "auto-pause rejected; failing the run");
+                    None
+                }
+            },
+            Ok(other) => {
+                warn!(run = %sink.run(), outcome = ?other, "auto-pause: unexpected outcome; re-activating");
+                tokio::time::sleep(UNAVAILABLE_PAUSE).await;
+                Some(ExecOutcome::Reactivate)
+            }
+            Err(e) => {
+                warn!(run = %sink.run(), error = %e, "auto-pause submit failed; re-activating");
+                tokio::time::sleep(UNAVAILABLE_PAUSE).await;
+                Some(ExecOutcome::Reactivate)
+            }
+        }
     }
 
     /// Re-arm the unresolved ops of a resumed run (B2): one zero-event `EventsAppended` at

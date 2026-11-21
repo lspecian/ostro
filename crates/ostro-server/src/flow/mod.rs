@@ -41,6 +41,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use ostro_meta::MetaView;
+use ostro_meta::records::ON_EXHAUSTED_PAUSE;
+use ostro_partition::store::values::RunRecord;
 use ostro_partition::{
     Admit, Clock, DispatcherConfig, EntryView, FlowControl, FlowPermit, QueueGauges,
 };
@@ -48,6 +50,7 @@ use tokio::sync::watch;
 use tracing::warn;
 
 use crate::config::FlowSection;
+use crate::executor::{ExhaustAction, ExhaustPolicy};
 use crate::p7::P7Ctx;
 use limits::{AdmitReq, Block, Charge, Counters, Gcra, KeyBounds, RateCells, ns_to_ms_ceil};
 use policy_view::PolicyView;
@@ -332,6 +335,26 @@ impl FlowControl for NodeFlow {
     }
 }
 
+impl ExhaustPolicy for NodeFlow {
+    fn on_exhausted(&self, record: &RunRecord) -> ExhaustAction {
+        self.refresh_policies();
+        let wf = self
+            .policies
+            .workflow(&record.workflow)
+            .and_then(|w| w.on_retries_exhausted);
+        let action = wf.or_else(|| {
+            self.policies
+                .queue(&record.queue)
+                .and_then(|q| q.on_retries_exhausted)
+        });
+        if action == Some(ON_EXHAUSTED_PAUSE) {
+            ExhaustAction::Pause
+        } else {
+            ExhaustAction::Fail
+        }
+    }
+}
+
 /// Install the node's flow control into the dispatcher configuration: the `[flow]` section
 /// and the injected clock, the meta watcher, `cfg.flow` and `cfg.gauges`.
 pub fn install(ctx: &P7Ctx, cfg: &mut DispatcherConfig) {
@@ -520,6 +543,39 @@ mod tests {
             .expect("open");
         drop(yes(flow.admit(&entry("pq", "w", "", true), 2)));
         stop.cancel();
+        meta.stop().await;
+    }
+
+    #[tokio::test]
+    async fn exhaust_policy_workflow_wins_over_queue() {
+        let (_d, meta) = meta().await;
+        let flow = NodeFlow::new(meta.view().clone(), Arc::new(QueueGauges::new()));
+        let rec = RunRecord {
+            workflow: "w".into(),
+            queue: "q".into(),
+            ..RunRecord::default()
+        };
+        assert_eq!(flow.on_exhausted(&rec), ExhaustAction::Fail);
+        put(
+            &meta,
+            MetaRecord::QueuePolicy(QueuePolicy {
+                queue: "q".into(),
+                on_retries_exhausted: Some(ON_EXHAUSTED_PAUSE),
+                ..QueuePolicy::default()
+            }),
+        )
+        .await;
+        assert_eq!(flow.on_exhausted(&rec), ExhaustAction::Pause);
+        put(
+            &meta,
+            MetaRecord::WorkflowPolicy(WorkflowPolicy {
+                workflow: "w".into(),
+                on_retries_exhausted: Some(ostro_meta::records::ON_EXHAUSTED_FAIL),
+                ..WorkflowPolicy::default()
+            }),
+        )
+        .await;
+        assert_eq!(flow.on_exhausted(&rec), ExhaustAction::Fail);
         meta.stop().await;
     }
 }

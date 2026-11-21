@@ -217,7 +217,9 @@ pub async fn init(i: P7Init) -> Result<P7Ctx, P7Error> {
 /// The dispatcher's executor: keeps the `EngineExecutor` in [`P7Shared::engine`] and
 /// returns it as the node's executor (07-08 adds the exhaust policy here).
 pub fn executor(engine: EngineExecutor, ctx: &P7Ctx) -> Arc<dyn Executor> {
-    let engine = Arc::new(engine);
+    // 07-08 (OPS-01): the flow's `on_retries_exhausted` decides fail vs auto-pause.
+    let policy: Arc<dyn crate::executor::ExhaustPolicy> = ctx.shared.flow.clone();
+    let engine = Arc::new(engine.with_exhaust_policy(policy));
     if ctx.shared.engine.set(Arc::clone(&engine)).is_err() {
         warn!("p7::executor called twice; keeping the first executor");
     }
