@@ -15,7 +15,12 @@
 //! machine `Failed` exactly once: `acks.fail_all`, then the thread exits. There is no retry;
 //! reopening replays the log from the state's own `applied_offset`.
 //!
-//! Tokio is used only through `rt.block_on` for log I/O and waits.
+//! Tokio is used only through `block_on`: log reads run on the server runtime (`rt`); the
+//! idle wait runs on a private, time-only current-thread runtime owned by the apply thread.
+//! The wait's checkpoint deadline is a tokio timer, and a timer registered on the server
+//! runtime panics when polled after that runtime starts shutting down (the runtime dropped,
+//! or `shutdown_background`, while the thread is alive), which turned an orderly stop into
+//! `Failed("apply thread panicked")`. The channels it waits on are runtime-agnostic.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -161,7 +166,19 @@ impl MachineHandle {
         let join = std::thread::Builder::new()
             .name(format!("ostro-apply-p{}", partition.0))
             .spawn(move || {
-                let r = std::panic::catch_unwind(AssertUnwindSafe(move || machine.run()));
+                // Built (and dropped) on this thread, outside any async context.
+                let wait_rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let reason = format!("cannot build the apply wait runtime: {e}");
+                        set_failed(&health_tx, &acks, &reason);
+                        return;
+                    }
+                };
+                let r = std::panic::catch_unwind(AssertUnwindSafe(move || machine.run(&wait_rt)));
                 if r.is_err() {
                     let reason = "apply thread panicked".to_string();
                     error!(partition = partition.0, "{reason}");
@@ -339,9 +356,10 @@ struct Machine<L: ReplicatedLog> {
 }
 
 impl<L: ReplicatedLog> Machine<L> {
-    fn run(mut self) {
+    /// `wait_rt`: the thread's private time-only runtime for [`Machine::wait`].
+    fn run(mut self, wait_rt: &tokio::runtime::Runtime) {
         let pid = self.cur.partition.0;
-        match self.run_inner() {
+        match self.run_inner(wait_rt) {
             Ok(()) => info!(partition = pid, applied = %self.cur.next, "apply machine stopped"),
             Err(reason) => self.fail(&reason),
         }
@@ -363,7 +381,7 @@ impl<L: ReplicatedLog> Machine<L> {
         }
     }
 
-    fn run_inner(&mut self) -> Result<(), String> {
+    fn run_inner(&mut self, wait_rt: &tokio::runtime::Runtime) -> Result<(), String> {
         loop {
             while let Ok(c) = self.ctl_rx.try_recv() {
                 self.on_ctl(Some(c))?;
@@ -386,7 +404,7 @@ impl<L: ReplicatedLog> Machine<L> {
             self.mark_healthy();
             self.maybe_checkpoint()?;
 
-            match self.wait() {
+            match self.wait(wait_rt) {
                 Wake::Hw | Wake::LogHealth | Wake::Timer => {}
                 Wake::HwClosed => return Err("log high-watermark channel closed".into()),
                 Wake::Ctl(c) => self.on_ctl(c)?,
@@ -448,8 +466,9 @@ impl<L: ReplicatedLog> Machine<L> {
         }
     }
 
-    /// Block until something may have changed.
-    fn wait(&mut self) -> Wake {
+    /// Block until something may have changed. Runs on the thread's private `wait_rt`, not
+    /// the server runtime, so the deadline timer cannot panic during a runtime shutdown.
+    fn wait(&mut self, wait_rt: &tokio::runtime::Runtime) -> Wake {
         let dirty = self.cur.next > self.durable;
         let deadline = tokio::time::Instant::from_std(if dirty {
             self.last_ckpt + self.cfg.checkpoint_every
@@ -460,7 +479,7 @@ impl<L: ReplicatedLog> Machine<L> {
         let hw_rx = &mut self.hw_rx;
         let ctl_rx = &mut self.ctl_rx;
         let log_health = &mut self.log_health;
-        self.rt.block_on(async move {
+        wait_rt.block_on(async move {
             tokio::select! {
                 r = hw_rx.changed() => if r.is_ok() { Wake::Hw } else { Wake::HwClosed },
                 c = ctl_rx.recv() => Wake::Ctl(c),
