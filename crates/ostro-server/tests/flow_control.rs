@@ -7,7 +7,9 @@
 //!   throttled;
 //! - queue and workflow pauses hold entries and a resume CAS wakes the dispatchers through
 //!   `changed()` (there is no polling interval);
-//! - weights 3:1 show in grant order.
+//! - weights 3:1 show in grant order;
+//! - the StartRun rate limit (`rate_limit` tests) answers 429 / RESOURCE_EXHAUSTED with
+//!   Retry-After, charges nothing for an idempotent re-submit, and isolates keys.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod common;
@@ -19,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use common::{ServerOpts, TestServer, guest_wasm};
 use ostro_meta::{MetaCommand, MetaRecord, MetaResult, QueuePolicy, RateSpec, WorkflowPolicy};
+use ostro_proto::api::v1 as pb;
+use ostro_proto::api::v1::runs_client::RunsClient;
 use ostro_types::RunId;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
@@ -440,5 +444,150 @@ async fn weights_three_to_one_in_grant_order() {
         (26..=34).contains(&first),
         "weight 3:1 expected ~30 of the first 40 grants for `wa`, got {first}: {order:?}"
     );
+    s.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------------
+// StartRun rate limit (D-W21)
+// ---------------------------------------------------------------------------------
+
+fn rate(limit: u32, burst: u32) -> Option<RateSpec> {
+    // One minute periods: the test never waits for a refill, so a slow machine cannot let
+    // an extra start conform.
+    Some(RateSpec {
+        limit,
+        period_ms: 60_000,
+        burst,
+    })
+}
+
+async fn run_count(s: &TestServer, queue: &str) -> usize {
+    let r = s
+        .http
+        .get(s.url(&format!("/v1/runs?limit=1000&queue={queue}")))
+        .send()
+        .await
+        .expect("list");
+    assert_eq!(r.status(), StatusCode::OK);
+    let b: Value = r.json().await.expect("json");
+    b["runs"].as_array().expect("runs").len()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rate_limit_rejects_excess_starts_with_429() {
+    let mut s = server().await;
+    deploy(&s, "smoke").await;
+    queue_policy(
+        &s,
+        QueuePolicy {
+            queue: "lq".into(),
+            rate_limit: rate(3, 3),
+            ..QueuePolicy::default()
+        },
+    )
+    .await;
+    for _ in 0..3 {
+        start(&s, "smoke", json!({"input": {}, "queue": "lq"})).await;
+    }
+    let (st, ra, b) = start_raw(&s, "smoke", json!({"input": {}, "queue": "lq"})).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{b}");
+    assert_eq!(b["error"]["code"], "rate_limited", "{b}");
+    let retry_after: u64 = ra.expect("Retry-After").parse().expect("seconds");
+    assert!(retry_after >= 1, "Retry-After {retry_after}");
+    assert!(
+        b["error"]["details"]["retry_after_ms"]
+            .as_u64()
+            .expect("retry_after_ms")
+            > 0,
+        "{b}"
+    );
+    assert_eq!(
+        run_count(&s, "lq").await,
+        3,
+        "the rejected start created a run"
+    );
+    // Other queues are not limited.
+    start(&s, "smoke", json!({"input": {}, "queue": "free"})).await;
+    s.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rate_limit_does_not_charge_idempotent_resubmits() {
+    let mut s = server().await;
+    deploy(&s, "smoke").await;
+    queue_policy(
+        &s,
+        QueuePolicy {
+            queue: "iq".into(),
+            rate_limit: rate(1, 1),
+            ..QueuePolicy::default()
+        },
+    )
+    .await;
+    let body = json!({"input": {}, "queue": "iq", "idempotency_key": "k1"});
+    let id = start(&s, "smoke", body.clone()).await;
+    for _ in 0..3 {
+        let (st, _, b) = start_raw(&s, "smoke", body.clone()).await;
+        assert_eq!(st, StatusCode::OK, "idempotent re-submit: {b}");
+        assert_eq!(b["run_id"], id.as_str());
+        assert_eq!(b["created"], false);
+    }
+    let (st, _, b) = start_raw(
+        &s,
+        "smoke",
+        json!({"input": {}, "queue": "iq", "idempotency_key": "k2"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{b}");
+    assert_eq!(run_count(&s, "iq").await, 1);
+    s.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rate_limit_per_key_isolates_keys_and_maps_to_grpc() {
+    let mut s = server().await;
+    deploy(&s, "smoke").await;
+    queue_policy(
+        &s,
+        QueuePolicy {
+            queue: "gq".into(),
+            key_rate_limit: rate(1, 1),
+            ..QueuePolicy::default()
+        },
+    )
+    .await;
+    let mut runs = RunsClient::new(s.channel().await);
+    let req = |key: &str| pb::StartRunRequest {
+        workflow: "smoke".into(),
+        input_json: b"{}".to_vec(),
+        queue: Some("gq".into()),
+        concurrency_key: Some(key.into()),
+        ..Default::default()
+    };
+    runs.start(req("a")).await.expect("key a");
+    let e = runs.start(req("a")).await.expect_err("key a again");
+    assert_eq!(e.code(), tonic::Code::ResourceExhausted);
+    let details = ostro_api::grpc::status_details(&e).expect("details");
+    assert!(
+        details["retry_after_ms"].as_u64().expect("retry_after_ms") > 0,
+        "{details}"
+    );
+    assert_eq!(
+        ostro_api::ErrorCode::from_grpc_code_and_details(e.code(), Some(&details)),
+        ostro_api::ErrorCode::RateLimited
+    );
+    runs.start(req("b")).await.expect("key b is independent");
+    // Unkeyed starts are not key-limited.
+    for _ in 0..3 {
+        start(&s, "smoke", json!({"input": {}, "queue": "gq"})).await;
+    }
+    // REST maps the same limit to 429.
+    let (st, _, b) = start_raw(
+        &s,
+        "smoke",
+        json!({"input": {}, "queue": "gq", "concurrency_key": "b"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{b}");
     s.shutdown().await;
 }

@@ -333,6 +333,16 @@ pub(crate) async fn start_run(
         };
     }
 
+    // 07-08 (D-W21): StartRun rate limit before anything is written or proposed (429).
+    crate::flow::rate_limit::admit(
+        cp,
+        handle,
+        &workflow,
+        &queue,
+        req.concurrency_key.as_deref().unwrap_or_default(),
+        idem.as_deref(),
+    )
+    .await?;
     let run = RunId::new(p, uuid);
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed)
