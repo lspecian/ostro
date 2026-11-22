@@ -40,8 +40,8 @@ metrics:
 
 | Task | Commit | Content |
 |------|--------|---------|
-| 1 | `a25493d` | `conformance/guests/ts/index.ts`, `conformance/guests/ts-v2/index.ts`, `polyglot_ts.rs` engine leg + SM smoke |
-| 2 | `d4129f9` | `polyglot_ts.rs` server leg (4 families) + coverage test |
+| 1 | `528d006` | `conformance/guests/ts/index.ts`, `conformance/guests/ts-v2/index.ts`, `polyglot_ts.rs` engine leg + SM smoke |
+| 2 | `9b7d0e6` | `polyglot_ts.rs` server leg (4 families) + coverage test |
 
 ## Scenario table (TypeScript, QuickJS unless noted; debug build, `--test-threads=2`)
 
@@ -138,4 +138,4 @@ None. No file under `conformance/spec/**` changed.
 ## Self-Check: PASSED
 
 - FOUND: `conformance/guests/ts/index.ts`, `conformance/guests/ts-v2/index.ts`, `crates/ostro-conformance/tests/polyglot_ts.rs`.
-- FOUND: `a25493d`, `d4129f9`.
+- FOUND: `528d006`, `9b7d0e6`.
