@@ -39,9 +39,14 @@
 //! [`server`]: the `P11Ctx`, the `ApiExtensions::{ops, inventory}` slots, the UI router
 //! and the emission gate [`p11::p11_feature_enabled`]; [`rerun`] (11-07) and
 //! [`onfailure`] (11-12) are stubs until their plans.
+//!
+//! Phase 12 (12-02): [`cluster`] is the cluster wiring seam (12-14: transport, meta peers,
+//! controller, fetchers, replication listener); `[replication]` and the `[cluster]` peer
+//! keys live in [`config`]; [`ServerOptions::cluster_transport`] is the transport hook.
 
 pub mod bridge_services;
 pub mod children;
+pub mod cluster;
 pub mod config;
 pub mod control;
 pub mod derive;
@@ -107,10 +112,4 @@ mod phase7_dep_anchors {
     use rustls_pki_types as _;
     use tokio_rustls as _;
     use x509_parser as _;
-}
-
-// Phase 12 dependency declared once by plan 12-01 for the cluster wiring (12-02 stub,
-// 12-14 server wiring); anchored like the Phase 6/7/8 ones above until it is consumed.
-mod phase12_dep_anchors {
-    use ostro_cluster as _;
 }

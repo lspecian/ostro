@@ -299,6 +299,27 @@ pub struct Uploader {
     /// Upload from a node opened in Inspect mode (offline backup, 08-18): the closed
     /// readiness barriers do not stop the round.
     inspect: bool,
+    /// Phase 12 cluster mode (12-02 contract, consumed by 12-15); `None` = Phase 8
+    /// behaviour.
+    cluster: Option<UploaderClusterDeps>,
+}
+
+/// Phase 12 (D-P12-20): what the uploader needs in cluster mode. Passed by the server
+/// (12-14) through [`Uploader::with_cluster`]; consumed by 12-15.
+#[derive(Clone)]
+pub struct UploaderClusterDeps {
+    /// The partitions this node leads (only a partition's leader uploads its chunks).
+    pub roles: Arc<dyn ostro_partition::roles::PartitionRoles>,
+    /// Meta member count (`LOCK`/`manifest/current` only while it is 1, D-P12-3).
+    pub members: watch::Receiver<usize>,
+}
+
+impl std::fmt::Debug for UploaderClusterDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploaderClusterDeps")
+            .field("members", &*self.members.borrow())
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for Uploader {
@@ -389,7 +410,20 @@ impl Uploader {
             fenced: AtomicBool::new(false),
             hook: Mutex::new(None),
             inspect: false,
+            cluster: None,
         }
+    }
+
+    /// Phase 12 cluster mode (D-P12-20): per-partition leader uploads. Without it the
+    /// uploader keeps its Phase 8 behaviour.
+    pub fn with_cluster(mut self, deps: UploaderClusterDeps) -> Self {
+        self.cluster = Some(deps);
+        self
+    }
+
+    /// The cluster-mode deps, when set.
+    pub fn cluster(&self) -> Option<&UploaderClusterDeps> {
+        self.cluster.as_ref()
     }
 
     /// Allow rounds over a node opened in Inspect mode (offline backup, 08-18): its

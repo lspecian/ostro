@@ -1157,3 +1157,209 @@ fn phase7_sections_round_trip_through_toml_and_print() {
     .expect("reload printed config");
     assert_eq!(back, c);
 }
+
+// --------------------------------------------------------------- Phase 12 sections (12-02)
+
+fn load_profile(base: ServerConfig, body: &str) -> Result<ServerConfig, String> {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write_toml(&dir, body);
+    load_layered(base, Some(&p), true, &no_env(), &Overrides::default()).map_err(|e| e.to_string())
+}
+
+fn both_profiles() -> [ServerConfig; 2] {
+    [
+        ServerConfig::dev_defaults(),
+        ServerConfig::server_defaults(),
+    ]
+}
+
+const STATIC_CLUSTER: &str = r#"
+[node]
+node_id = 1
+
+[cluster]
+cluster_id = "prod-eu"
+replication_listen = "0.0.0.0:7702"
+
+[[cluster.peers]]
+id = 2
+addr = "ostro-1:7701"
+repl_addr = "ostro-1:7702"
+
+[[cluster.peers]]
+id = 3
+addr = "ostro-2:7701"
+
+[cluster.tls]
+ca_cert_file = "/etc/ostro/ca.crt"
+ca_key_file = "/etc/ostro/ca.key"
+
+[replication]
+session_timeout = "2s"
+meta_election_tick = 6
+rf = 3
+min_insync = 2
+"#;
+
+#[test]
+fn phase12_defaults_match_d_p12_10() {
+    for c in both_profiles() {
+        let r = &c.replication;
+        assert_eq!(r.session_timeout.get(), Duration::from_secs(3));
+        assert_eq!(r.replica_lag_max.get(), Duration::from_secs(10));
+        assert_eq!(r.meta_tick_interval.get(), Duration::from_millis(100));
+        assert_eq!(r.meta_election_tick, 10);
+        assert_eq!(r.meta_heartbeat_tick, 2);
+        assert_eq!(r.fetch_max_wait.get(), Duration::from_millis(500));
+        assert_eq!(r.fetch_read_timeout.get(), Duration::from_secs(5));
+        assert_eq!(r.fetch_max_bytes.get(), 8 * 1024 * 1024);
+        assert_eq!((r.rf, r.min_insync), (None, None));
+        assert!(c.cluster.peers.is_empty());
+        assert_eq!(c.cluster.cluster_id, None);
+        assert_eq!(c.cluster.replication_listen, None);
+        assert_eq!(c.cluster.tls.ca_cert_file, None);
+        assert_eq!(c.cluster.tls.ca_key_file, None);
+        c.validate_phase12().expect("defaults are valid");
+    }
+}
+
+#[test]
+fn phase12_static_cluster_parses_in_both_profiles() {
+    for base in both_profiles() {
+        let c = load_profile(base, STATIC_CLUSTER).expect("static cluster config");
+        assert_eq!(c.cluster.cluster_id.as_deref(), Some("prod-eu"));
+        assert_eq!(
+            c.cluster.replication_listen,
+            Some("0.0.0.0:7702".parse::<SocketAddr>().unwrap())
+        );
+        assert_eq!(c.cluster.peers.len(), 2);
+        assert_eq!(c.cluster.peers[0].id, 2);
+        assert_eq!(c.cluster.peers[0].addr, "ostro-1:7701");
+        assert_eq!(
+            c.cluster.peers[0].repl_addr.as_deref(),
+            Some("ostro-1:7702")
+        );
+        assert_eq!(c.cluster.peers[1].repl_addr, None);
+        assert_eq!(
+            c.cluster.tls.ca_cert_file,
+            Some(PathBuf::from("/etc/ostro/ca.crt"))
+        );
+        assert_eq!(c.replication.session_timeout.get(), Duration::from_secs(2));
+        assert_eq!(c.replication.meta_election_tick, 6);
+        assert_eq!(
+            (c.replication.rf, c.replication.min_insync),
+            (Some(3), Some(2))
+        );
+        // Untouched keys keep their defaults.
+        assert_eq!(c.replication.replica_lag_max.get(), Duration::from_secs(10));
+    }
+}
+
+#[test]
+fn phase12_peers_require_cluster_id_and_ca_files() {
+    let peers = "[[cluster.peers]]\nid = 2\naddr = \"n2:7701\"\n";
+    let ca = "[cluster.tls]\nca_cert_file = \"ca.crt\"\nca_key_file = \"ca.key\"\n";
+    for base in both_profiles() {
+        let err = load_profile(
+            base.clone(),
+            &format!("[cluster]\ncluster_id = \"c\"\n{peers}"),
+        )
+        .unwrap_err();
+        assert!(err.contains("cluster.tls.ca_cert_file"), "{err}");
+        assert!(err.contains("cluster.tls.ca_key_file"), "{err}");
+        let err = load_profile(base.clone(), &format!("{peers}{ca}")).unwrap_err();
+        assert!(err.contains("cluster.cluster_id"), "{err}");
+        let err = load_profile(
+            base.clone(),
+            &format!(
+                "[cluster]\ncluster_id = \"c\"\n{peers}[cluster.tls]\nca_cert_file = \"ca.crt\"\n"
+            ),
+        )
+        .unwrap_err();
+        assert!(err.contains("ca_key_file"), "{err}");
+        assert!(!err.contains("ca_cert_file"), "{err}");
+        load_profile(base, &format!("[cluster]\ncluster_id = \"c\"\n{peers}{ca}"))
+            .expect("complete static cluster");
+    }
+}
+
+#[test]
+fn phase12_peer_ids_are_unique_nonzero_and_not_self() {
+    let head = "[node]\nnode_id = 1\n[cluster]\ncluster_id = \"c\"\n[cluster.tls]\nca_cert_file = \"a\"\nca_key_file = \"b\"\n";
+    for base in both_profiles() {
+        for (peers, needle) in [
+            ("[[cluster.peers]]\nid = 0\naddr = \"x:1\"\n", "id 0"),
+            (
+                "[[cluster.peers]]\nid = 1\naddr = \"x:1\"\n",
+                "own node.node_id 1",
+            ),
+            (
+                "[[cluster.peers]]\nid = 2\naddr = \"x:1\"\n[[cluster.peers]]\nid = 2\naddr = \"y:1\"\n",
+                "duplicate id 2",
+            ),
+            ("[[cluster.peers]]\nid = 2\naddr = \"\"\n", "non-empty addr"),
+            (
+                "[[cluster.peers]]\nid = 2\naddr = \"x:1\"\nbogus = 1\n",
+                "bogus",
+            ),
+        ] {
+            let err = load_profile(base.clone(), &format!("{head}{peers}")).unwrap_err();
+            assert!(err.contains(needle), "{peers:?}: {err}");
+        }
+    }
+}
+
+#[test]
+fn phase12_replication_values_are_validated() {
+    for base in both_profiles() {
+        for (body, needle) in [
+            (
+                "[replication]\nsession_timeout = \"0s\"\n",
+                "replication.session_timeout",
+            ),
+            (
+                "[replication]\nfetch_max_wait = \"0s\"\n",
+                "replication.fetch_max_wait",
+            ),
+            (
+                "[replication]\nmeta_heartbeat_tick = 10\n",
+                "meta_heartbeat_tick",
+            ),
+            (
+                "[replication]\nmeta_heartbeat_tick = 0\n",
+                "meta_heartbeat_tick",
+            ),
+            ("[replication]\nfetch_max_bytes = 0\n", "fetch_max_bytes"),
+            ("[replication]\nrf = 0\n", "replication.rf"),
+            ("[replication]\nmin_insync = 0\n", "replication.min_insync"),
+            ("[replication]\nrf = 1\nmin_insync = 2\n", "must not exceed"),
+            ("[replication]\nbogus = 1\n", "bogus"),
+            ("[cluster]\ncluster_id = \" \"\n", "cluster.cluster_id"),
+        ] {
+            let err = load_profile(base.clone(), body).expect_err(body);
+            assert!(err.contains(needle), "{body:?}: {err}");
+        }
+    }
+    let c = load_toml_env(
+        "",
+        &env(&[
+            ("OSTRO_REPLICATION__RF", "3"),
+            ("OSTRO_REPLICATION__FETCH_MAX_BYTES", "4MiB"),
+        ]),
+    )
+    .expect("env overrides");
+    assert_eq!(c.replication.rf, Some(3));
+    assert_eq!(c.replication.fetch_max_bytes.get(), 4 * 1024 * 1024);
+}
+
+#[test]
+fn phase12_sections_round_trip_through_toml_and_print() {
+    for base in both_profiles() {
+        let c = load_profile(base.clone(), STATIC_CLUSTER).unwrap();
+        let s = c.to_toml_string();
+        assert!(s.contains("[replication]"), "{s}");
+        assert!(s.contains("peers = [{"), "{s}");
+        let back = load_profile(base, &s).expect("reload printed config");
+        assert_eq!(back, c);
+    }
+}

@@ -62,6 +62,9 @@ pub const SECTIONS: &[&str] = &[
     "ui",
     "bulk",
     "dlq",
+    // Phase 12 (D-P12-10/12, RESERVATIONS §11), parsed since 12-02. The peer keys live in
+    // `[cluster]`.
+    "replication",
 ];
 
 static PARSER: SpanParser = SpanParser::new();
@@ -425,6 +428,8 @@ pub struct ServerConfig {
     pub ui: UiSection,
     pub bulk: BulkSection,
     pub dlq: DlqSection,
+    // Phase 12 section (D-P12-10, plan 12-02).
+    pub replication: ReplicationSection,
 }
 
 impl ServerConfig {
@@ -543,6 +548,109 @@ impl ServerConfig {
         self.validate_phase7()?;
         // Phase 11 sections (11-04).
         self.validate_phase11()?;
+        // Phase 12 (12-02).
+        self.validate_phase12()?;
+        Ok(())
+    }
+
+    /// Phase 12 checks (`[replication]`, the `[cluster]` peer keys; 12-02, D-P12-14 B3).
+    ///
+    /// A static cluster (`[[cluster.peers]]` non-empty) needs `cluster_id`,
+    /// `[cluster.tls] ca_cert_file` and `ca_key_file`; peer ids are unique, non-zero and
+    /// never this node's own `[node] node_id`.
+    pub fn validate_phase12(&self) -> Result<(), ConfigError> {
+        let c = &self.cluster;
+        if let Some(id) = &c.cluster_id
+            && id.trim().is_empty()
+        {
+            return Err(ConfigError::Invalid(
+                "cluster.cluster_id must not be empty when set".into(),
+            ));
+        }
+        if !c.peers.is_empty() {
+            let mut missing = Vec::new();
+            if c.cluster_id.is_none() {
+                missing.push("cluster.cluster_id");
+            }
+            if c.tls.ca_cert_file.is_none() {
+                missing.push("cluster.tls.ca_cert_file");
+            }
+            if c.tls.ca_key_file.is_none() {
+                missing.push("cluster.tls.ca_key_file");
+            }
+            if !missing.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "cluster.peers is set (static cluster), so {} must also be set",
+                    missing.join(", ")
+                )));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for peer in &c.peers {
+            if peer.id == 0 {
+                return Err(ConfigError::Invalid(
+                    "cluster.peers: id 0 is reserved (no-leader sentinel)".into(),
+                ));
+            }
+            if peer.id == self.node.node_id {
+                return Err(ConfigError::Invalid(format!(
+                    "cluster.peers lists this node's own node.node_id {}; list only the other nodes",
+                    peer.id
+                )));
+            }
+            if !seen.insert(peer.id) {
+                return Err(ConfigError::Invalid(format!(
+                    "cluster.peers: duplicate id {}",
+                    peer.id
+                )));
+            }
+            if peer.addr.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "cluster.peers: peer {} needs a non-empty addr",
+                    peer.id
+                )));
+            }
+        }
+        let r = &self.replication;
+        for (key, d) in [
+            ("replication.session_timeout", r.session_timeout),
+            ("replication.replica_lag_max", r.replica_lag_max),
+            ("replication.meta_tick_interval", r.meta_tick_interval),
+            ("replication.fetch_max_wait", r.fetch_max_wait),
+            ("replication.fetch_read_timeout", r.fetch_read_timeout),
+        ] {
+            if d.get().is_zero() {
+                return Err(ConfigError::Invalid(format!("{key} must be non-zero")));
+            }
+        }
+        if r.meta_heartbeat_tick == 0 || r.meta_heartbeat_tick >= r.meta_election_tick {
+            return Err(ConfigError::Invalid(format!(
+                "replication.meta_heartbeat_tick ({}) must be at least 1 and below replication.meta_election_tick ({})",
+                r.meta_heartbeat_tick, r.meta_election_tick
+            )));
+        }
+        if r.fetch_max_bytes.get() == 0 {
+            return Err(ConfigError::Invalid(
+                "replication.fetch_max_bytes must be at least 1".into(),
+            ));
+        }
+        if r.rf == Some(0) {
+            return Err(ConfigError::Invalid(
+                "replication.rf must be at least 1".into(),
+            ));
+        }
+        if r.min_insync == Some(0) {
+            return Err(ConfigError::Invalid(
+                "replication.min_insync must be at least 1".into(),
+            ));
+        }
+        if let (Some(rf), Some(min)) = (r.rf, r.min_insync)
+            && min > rf
+        {
+            return Err(ConfigError::Invalid(format!(
+                "replication.min_insync ({min}) must not exceed replication.rf ({rf})"
+            )));
+        }
         Ok(())
     }
 
@@ -1365,6 +1473,26 @@ pub struct ClusterTlsSection {
     /// path, D-W25); unset = only join-issued certificates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ca: Option<PathBuf>,
+    /// Phase 12 (D-P12-14): the shared cluster CA certificate (PEM), imported with
+    /// `ClusterCa::import_pem`. Required with `[[cluster.peers]]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_cert_file: Option<PathBuf>,
+    /// Phase 12: the shared cluster CA private key (PEM). Required with `[[cluster.peers]]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_key_file: Option<PathBuf>,
+}
+
+/// One `[[cluster.peers]]` entry (Phase 12, D-P12-12): another voter of a static cluster.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PeerConfig {
+    /// The peer's `[node] node_id` (non-zero, unique, never this node's own id).
+    pub id: u64,
+    /// The peer's cluster listener (`host:port`).
+    pub addr: String,
+    /// The peer's dedicated replication listener, when it runs one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repl_addr: Option<String>,
 }
 
 /// `[cluster]`: the cluster listener (worker protocol, mTLS always; D-W16).
@@ -1378,6 +1506,16 @@ pub struct ClusterSection {
     pub advertise: Vec<String>,
     /// `[cluster.tls]`.
     pub tls: ClusterTlsSection,
+    /// Phase 12 (D-P12-14): the cluster id. Required with `peers`; otherwise resolved from
+    /// node.toml / the CA / meta.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_id: Option<String>,
+    /// Phase 12: an optional second listener serving only `Replication` (RP-10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_listen: Option<SocketAddr>,
+    /// Phase 12: the other voters of a static cluster (`[[cluster.peers]]`); empty = single
+    /// node.
+    pub peers: Vec<PeerConfig>,
 }
 
 impl Default for ClusterSection {
@@ -1386,6 +1524,57 @@ impl Default for ClusterSection {
             listen: SocketAddr::from(([0, 0, 0, 0], 7701)),
             advertise: Vec::new(),
             tls: ClusterTlsSection::default(),
+            cluster_id: None,
+            replication_listen: None,
+            peers: Vec::new(),
+        }
+    }
+}
+
+/// `[replication]` (Phase 12, D-P12-10): replication and metadata Raft timings. `rf` and
+/// `min_insync` are bootstrap seeds only (research OQ3); unset = `min(3, voters)` and
+/// `2` when rf ≥ 3, else `1`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReplicationSection {
+    /// A partition leader without meta contact for this long self-demotes; the controller's
+    /// liveness window.
+    pub session_timeout: FriendlyDuration,
+    /// A follower not caught up within this long leaves the ISR.
+    pub replica_lag_max: FriendlyDuration,
+    /// Metadata Raft tick.
+    pub meta_tick_interval: FriendlyDuration,
+    /// Metadata Raft election timeout in ticks.
+    pub meta_election_tick: u32,
+    /// Metadata Raft heartbeat interval in ticks (below `meta_election_tick`).
+    pub meta_heartbeat_tick: u32,
+    /// Fetch long-poll idle wait.
+    pub fetch_max_wait: FriendlyDuration,
+    /// Server-side bound of one fetch read (never cut by `fetch_max_wait`).
+    pub fetch_read_timeout: FriendlyDuration,
+    /// Fetch response size cap.
+    pub fetch_max_bytes: ByteSize,
+    /// Bootstrap replication factor seed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rf: Option<u8>,
+    /// Bootstrap minimum ISR seed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_insync: Option<u8>,
+}
+
+impl Default for ReplicationSection {
+    fn default() -> Self {
+        Self {
+            session_timeout: FriendlyDuration::from_secs(3),
+            replica_lag_max: FriendlyDuration::from_secs(10),
+            meta_tick_interval: FriendlyDuration::from_millis(100),
+            meta_election_tick: 10,
+            meta_heartbeat_tick: 2,
+            fetch_max_wait: FriendlyDuration::from_millis(500),
+            fetch_read_timeout: FriendlyDuration::from_secs(5),
+            fetch_max_bytes: ByteSize(8 * MIB),
+            rf: None,
+            min_insync: None,
         }
     }
 }
@@ -1778,7 +1967,8 @@ fn toml_render(cfg: &ServerConfig) -> String {
                 | serde_json::Value::Bool(_) => val.to_string(),
                 // `[telemetry] otlp_headers`: an inline table of strings.
                 // `[secrets] providers`, `[egress] allow_private`: arrays of strings.
-                serde_json::Value::Array(_) => val.to_string(),
+                // Phase 12 `[cluster] peers`: an array of inline tables.
+                serde_json::Value::Array(_) => inline_table(val),
                 // `[telemetry] otlp_headers` and `[secrets.vault]` / `[secrets.k8s]`: an
                 // inline table of scalars (unset keys omitted).
                 // Phase 7 `[api] tls` / `[cluster] tls` / `[workers] spill` nest one more
@@ -1809,6 +1999,10 @@ fn inline_table(v: &serde_json::Value) -> String {
                 })
                 .collect();
             format!("{{ {} }}", items.join(", "))
+        }
+        serde_json::Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(inline_table).collect();
+            format!("[{}]", items.join(", "))
         }
         other => other.to_string(),
     }

@@ -202,6 +202,9 @@ pub struct ServerOptions {
     /// it (`ostro dev` / `ostro server`); `None` derives it from the configuration
     /// ([`crate::tls::TlsProfile::of`]).
     pub tls_profile: Option<crate::tls::TlsProfile>,
+    /// Phase 12 (12-02 hook, wired by 12-14): the node-to-node transport. `None` = the
+    /// production mTLS TCP transport; the conformance harness injects an in-memory one.
+    pub cluster_transport: Option<Arc<dyn ostro_cluster::transport::ClusterTransport>>,
 }
 
 impl Default for ServerOptions {
@@ -211,6 +214,7 @@ impl Default for ServerOptions {
             clock: Arc::new(ostro_partition::SystemClock), // clock-exempt: injection root
             hooks: Arc::new(ExecutorHooks::default()),
             tls_profile: None,
+            cluster_transport: None,
         }
     }
 }
@@ -238,6 +242,15 @@ impl ServerOptions {
     /// profile from the configuration.
     pub fn with_tls_profile(mut self, profile: crate::tls::TlsProfile) -> Self {
         self.tls_profile = Some(profile);
+        self
+    }
+
+    /// Use `transport` for node-to-node traffic instead of mTLS TCP (Phase 12 test hook).
+    pub fn with_cluster_transport(
+        mut self,
+        transport: Arc<dyn ostro_cluster::transport::ClusterTransport>,
+    ) -> Self {
+        self.cluster_transport = Some(transport);
         self
     }
 }
@@ -277,7 +290,10 @@ async fn start_inner(
         clock,
         hooks,
         tls_profile,
+        cluster_transport,
     } = opts;
+    // Phase 12: consumed by the cluster wiring (12-14, `cluster::ClusterServices`).
+    drop(cluster_transport);
     // clock-exempt: startup step durations are reported (StartupTimings), never used for logic.
     let t0 = Instant::now();
     let count = PartitionCount::new(cfg.node.partitions)
