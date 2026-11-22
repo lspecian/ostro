@@ -39,9 +39,10 @@
 //! first-activation flag stays `current_attempt.is_none()`. No extra read.
 
 use ostro_types::command::{
-    AttemptGranted, ChildCompleted, ConflictPolicy, EventsAppended, JournalEvent, MAX_RUN_TAG_LEN,
-    MAX_RUN_TAGS, MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, StartRun,
-    TerminalStatus, derived::Intent, is_reserved_op, outbox_msg,
+    AttemptGranted, CHILD_ROW_JOURNAL, ChildCompleted, ChildJournal, ConflictPolicy,
+    EventsAppended, JournalEvent, MAX_RUN_TAG_LEN, MAX_RUN_TAGS, MAX_TENANT_LEN,
+    MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, StartRun, TerminalStatus, derived::Intent,
+    is_reserved_op, outbox_msg,
 };
 use ostro_types::journal::EventKind;
 use ostro_types::{AttemptToken, Epoch, PayloadRef, RunId};
@@ -467,6 +468,8 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
     let mut completed = false;
     let mut suspended = false;
     let mut enqueued = false;
+    // Child run id of the directly preceding `SendMessage(StartChild)` (09-05 ChildJournal).
+    let mut prev_child: Option<&[u8]> = None;
     for d in &e.derived {
         let Some(i) = &d.intent else {
             return Err(invalid(InvalidCode::MissingField));
@@ -474,7 +477,14 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
         if completed || suspended {
             return Err(invalid(InvalidCode::BadIntent));
         }
+        let prev = prev_child.take();
         match i {
+            // 09-05: the opt-in marker must directly follow its child's StartChild.
+            Intent::ChildJournal(j) => {
+                if prev != Some(j.child_run.as_slice()) {
+                    return Err(invalid(InvalidCode::BadIntent));
+                }
+            }
             // Apply-owned reserved timer ops (START_DELAY_OP, RUN_TIMEOUT_OP, ...) are never
             // guest ops (plan 05-01).
             Intent::ScheduleTimer(t) if is_reserved_op(t.op) => {
@@ -500,6 +510,9 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
                     return Err(invalid(InvalidCode::BadIntent));
                 }
                 msg_target(cur, msg)?;
+                if let Some(outbox_msg::Kind::StartChild(c)) = &msg.kind {
+                    prev_child = c.start.as_ref().map(|s| s.run_id.as_slice());
+                }
             }
             Intent::CompleteRun(c) => {
                 match terminal_status(c.status) {
@@ -665,6 +678,7 @@ pub(crate) fn apply_events_appended(
             // Phase 6 (06-03): blind effects-row writes, no reads.
             Intent::RegisterEffect(r) => effects::register_effect(b, &run, &rec, r),
             Intent::CancelEffect(c) => effects::cancel_effect(b, &run, c),
+            Intent::ChildJournal(j) => mark_child_journal(b, &run, j)?,
             Intent::CompleteRun(c) => {
                 let status = terminal_status(c.status)
                     .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;
@@ -706,6 +720,24 @@ pub(crate) fn apply_events_appended(
     }
     store_run(b, &run, &rec);
     Ok(ApplyOutcome::Accepted)
+}
+
+/// 09-05 opt-in marker: the `children` row of `j.child_run` (inserted by the directly
+/// preceding `SendMessage(StartChild)`, `check_intents`) gets the journaling value. Blind
+/// write; `rec.children` was already counted by the StartChild.
+pub(crate) fn mark_child_journal(
+    b: &mut ApplyBatch<'_>,
+    run: &RunId,
+    j: &ChildJournal,
+) -> Result<(), StoreError> {
+    let child = RunId::from_bytes(&j.child_run)
+        .map_err(|e| StoreError::Codec(format!("validated child run id: {e}")))?;
+    b.insert(
+        Table::Children,
+        children_key(run, &child),
+        CHILD_ROW_JOURNAL.to_vec(),
+    );
+    Ok(())
 }
 
 #[cfg(test)]

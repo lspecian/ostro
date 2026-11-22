@@ -27,11 +27,13 @@
 
 use ostro_types::RunId;
 use ostro_types::command::{
-    ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg, outbox_msg,
+    CHILD_ROW_JOURNAL, ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg, outbox_msg,
 };
+use ostro_types::journal::{self, EventBody, EventKind, Failure, OpOutput, encode_result};
 use prost::Message;
 
 use super::cursor::Cursor;
+use super::inputs::{journal_encoded, journal_input};
 use super::outbox::msg_oversize;
 use super::outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
 use super::run::{enqueue_ready, load_run, local_run, start_run, store_run, terminal_status};
@@ -224,26 +226,89 @@ fn child_completed(
         .map_err(|e| StoreError::Codec(format!("validated child run id: {e}")))?;
     let status = terminal_status(c.status)
         .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;
-    let result = c
-        .result
-        .as_ref()
-        .map(Message::encode_to_vec)
-        .unwrap_or_default();
-    push_inbox(
-        b,
-        &parent,
-        &mut rec,
-        &InboxMsg::ChildCompleted {
-            child: *child.as_bytes(),
-            op: c.op,
-            status,
-            result,
-        },
-    );
-    b.remove(Table::Children, children_key(&parent, &child));
+    let row = children_key(&parent, &child);
+    // 09-05: a row marked by the opt-in `ChildJournal` intent journals the completion as
+    // the parent's kind-67 event (D21); any other case keeps the v0.1 inbox row.
+    let journaled = b.get(Table::Children, &row)?.as_deref() == Some(CHILD_ROW_JOURNAL);
+    if journaled {
+        match &c.event {
+            // Submitter-encoded by the child's derive (PF-F1): verbatim, never decoded or
+            // fetched (BlobRef invariant). Its size was checked on the child's CompleteRun.
+            Some(ev) => {
+                journal_encoded(
+                    b,
+                    &parent,
+                    &mut rec,
+                    EventKind::ChildCompleted,
+                    ev,
+                    true,
+                    actions,
+                )?;
+            }
+            // Apply-built hard stops (and 09-08's re-completion): a no-user-data failure
+            // encoded here (D21 permits it). The inbound message carries no time, so the
+            // event ts is the parent's `created_at_ms`, like inbound CancelRequested.
+            None => {
+                let at = rec.created_at_ms;
+                journal_input(
+                    b,
+                    &parent,
+                    &mut rec,
+                    at,
+                    EventBody::ChildCompleted(journal::ChildCompleted {
+                        op: c.op,
+                        outcome: encode_result(&Err::<OpOutput, Failure>(hard_stop_failure(
+                            status,
+                        ))),
+                    }),
+                    actions,
+                )?;
+            }
+        }
+    } else {
+        let result = c
+            .result
+            .as_ref()
+            .map(Message::encode_to_vec)
+            .unwrap_or_default();
+        push_inbox(
+            b,
+            &parent,
+            &mut rec,
+            &InboxMsg::ChildCompleted {
+                child: *child.as_bytes(),
+                op: c.op,
+                status,
+                result,
+            },
+        );
+        let at = rec.created_at_ms;
+        make_ready(b, &parent, &mut rec, at, actions);
+    }
+    b.remove(Table::Children, row);
     rec.children = rec.children.saturating_sub(1);
-    let at = rec.created_at_ms;
-    make_ready(b, &parent, &mut rec, at, actions);
     store_run(b, &parent, &rec);
     Ok(())
+}
+
+/// Error kind of a child that was terminated (or whose result arrived while the parent was
+/// terminal, D-P9-24).
+pub(crate) const CHILD_TERMINATED_KIND: &str = "child_terminated";
+
+/// The parent-side failure of an event-less `ChildCompleted` (D-P9-9, PF-W7): Terminated ->
+/// non-retryable `child_terminated`, TimedOut -> `Timeout`, Cancelled -> `Cancelled`;
+/// Completed/Failed (re-completion of a resumed parent, D-P9-24 B3) -> `child_terminated`.
+pub(crate) fn hard_stop_failure(status: RunStatus) -> Failure {
+    let message = match status {
+        RunStatus::TimedOut => return Failure::Timeout,
+        RunStatus::Cancelled => return Failure::Cancelled,
+        RunStatus::Terminated => "child run was terminated",
+        RunStatus::Completed | RunStatus::Failed => "child completed while the parent was terminal",
+        _ => "child run ended without a result",
+    };
+    Failure::NonRetryable(journal::ErrorInfo {
+        kind: CHILD_TERMINATED_KIND.to_string(),
+        message: message.to_string(),
+        details: None,
+    })
 }

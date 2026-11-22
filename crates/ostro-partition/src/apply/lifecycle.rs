@@ -591,6 +591,8 @@ pub(crate) fn complete_continued_as_new(
                     _ => emit(b, cur, msg, actions)?,
                 }
             }
+            // 09-05 opt-in marker (validated by check_intents through check_can).
+            Intent::ChildJournal(j) => super::run::mark_child_journal(b, run, j)?,
             // Rejected by check_can / handled below.
             _ => {}
         }

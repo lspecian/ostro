@@ -444,7 +444,7 @@ pub struct EventsAppended {
 pub struct Derived {
     /// The intent.
     // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
-    #[prost(oneof = "derived::Intent", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
+    #[prost(oneof = "derived::Intent", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 19")]
     pub intent: Option<derived::Intent>,
 }
 
@@ -488,6 +488,13 @@ pub mod derived {
         /// Drop an in-flight effect's row (Phase 6): the op was cancelled or abandoned.
         #[prost(message, tag = "10")]
         CancelEffect(super::CancelEffect),
+        /// Opt-in marker (Phase 9, 09-05; RESERVATIONS P9 fallback intent slot): the parent
+        /// journals the completion of the child started by the preceding
+        /// `SendMessage(StartChild)` of the same batch as a kind-67 event (D21) instead of
+        /// the v0.1 legacy inbox row.
+        // RESERVATIONS.md: P9 = Intent 19..22 (19 used by 09-05).
+        #[prost(message, tag = "19")]
+        ChildJournal(super::ChildJournal),
     }
 }
 
@@ -540,7 +547,34 @@ impl Derived {
     pub fn cancel_effect(op: u64) -> Self {
         Self::new(derived::Intent::CancelEffect(CancelEffect { op }))
     }
+
+    /// A [`ChildJournal`] marker for `child_run` (Phase 9, 09-05).
+    pub fn child_journal(child_run: &RunId) -> Self {
+        Self::new(derived::Intent::ChildJournal(ChildJournal {
+            child_run: child_run.as_bytes().to_vec(),
+        }))
+    }
 }
+
+/// Opt-in child-completion journaling (Phase 9, 09-05, `Derived` tag 19 from the P9 fallback
+/// block; storage format v0.1 stays frozen, docs/storage-format.md section 16).
+///
+/// Must directly follow the `SendMessage(StartChild)` of `child_run` in the same
+/// `EventsAppended` (apply rejects it anywhere else with `BadIntent`). Apply marks the
+/// parent's `children` row of `child_run` (value [`CHILD_ROW_JOURNAL`] instead of empty);
+/// an inbound `ChildCompleted` for a marked row is journaled as the parent's kind-67
+/// `ChildCompleted` event (verbatim `event`, or an apply-encoded no-user-data failure). An
+/// unmarked row keeps the v0.1 semantics (legacy inbox row), so commands logged before
+/// Phase 9 apply exactly as before (frozen rule 4).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ChildJournal {
+    /// The child's run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub child_run: Vec<u8>,
+}
+
+/// Value of a parent's `children` row marked by [`ChildJournal`] (an unmarked row is empty).
+pub const CHILD_ROW_JOURNAL: &[u8] = &[1];
 
 /// Register an in-flight host effect for operation `op` (Phase 6, `Derived` tag 9; FX-01/FX-03).
 /// Submitted with the `EffectScheduled` event; apply records a row in the `effects` keyspace

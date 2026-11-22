@@ -107,7 +107,8 @@ State value fields (positional postcard, pre-freeze only; listed for cross-phase
 | 11–12 | spare | reserved P6 |
 | 13–16 | — | reserved P7 |
 | 17–18 | — (P8 declared 0 needs) | reserved P8 |
-| 19–22 | — (P9 fallback intent slot) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
+| 19 | ChildJournal `{child_run bytes 1}`: opt-in child-completion journaling marker, directly after its `SendMessage(StartChild)`; marks the parent's `children` row (value `[1]`) so an inbound `ChildCompleted` is journaled as kind 67 instead of the v0.1 inbox row (format v0.1 frozen, rule 4) | exists (P9, 09-05; P9 fallback slot, coordinator decision option (a)) |
+| 20–22 | — (P9 fallback intent slot) | reserved P9, **unused** (fallback only) |
 | 23+ | — | unallocated |
 
 ## 4. Journal `EventKind` codes (`ostro_types::journal`)
