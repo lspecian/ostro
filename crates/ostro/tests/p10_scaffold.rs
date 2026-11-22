@@ -92,8 +92,7 @@ fn verb_help_exits_0() {
 fn stubs_exit_2_naming_their_plan() {
     let dir = tempfile::tempdir().expect("tempdir");
     for (args, verb, plan) in [
-        (&["init", "--lang", "rust"][..], "init", "10-08"),
-        (&["build", "--json"], "build", "10-12"),
+        (&["build", "--json"][..], "build", "10-12"),
         (
             &["replay", "r1", "r2", "--module", "m.wasm"],
             "replay",
