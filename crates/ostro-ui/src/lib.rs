@@ -23,6 +23,14 @@
 //! | GET | `/ui/assets/{*path}` | embedded assets (ETag, 304) |
 //! | POST | `/ui/_probe` | guard probe, only with `UiConfig::test_probe` |
 //!
+//! # Routes (11-16, `actions`)
+//!
+//! | Method | Path | Answer |
+//! |---|---|---|
+//! | POST | `/ui/runs/{run_id}/{cancel,terminate,retry,signal,pause,resume}` | status fragment (htmx) or 303 -> run page |
+//! | POST | `/ui/dlq/{run_id}/requeue` | `HX-Redirect` / 303 -> resulting run |
+//! | POST | `/ui/dlq/{run_id}/dismiss` | empty 200 (htmx deletes the row) or 303 -> `/ui/dlq` |
+//!
 //! Every route sits behind [`security::guard`] (Host / `:authority` allowlist, security
 //! headers, D-P11-15).
 
@@ -40,8 +48,8 @@ mod timeline;
 
 use axum::routing::{get, post};
 
-/// Every `/ui` route pattern 11-15 registers (GET unless noted), for the hardening
-/// tests; 11-16/11-17 append theirs.
+/// Every `/ui` route pattern (GET unless noted), for the hardening tests: 11-15's, then
+/// 11-16's actions; 11-17 appends its own.
 #[doc(hidden)]
 pub const ROUTES: &[&str] = &[
     "/ui",
@@ -54,6 +62,15 @@ pub const ROUTES: &[&str] = &[
     "/ui/dlq",
     "/ui/assets/{*path}",
     "POST /ui/_probe",
+    // 11-16 actions
+    "POST /ui/runs/{run_id}/cancel",
+    "POST /ui/runs/{run_id}/terminate",
+    "POST /ui/runs/{run_id}/retry",
+    "POST /ui/runs/{run_id}/signal",
+    "POST /ui/runs/{run_id}/pause",
+    "POST /ui/runs/{run_id}/resume",
+    "POST /ui/dlq/{run_id}/requeue",
+    "POST /ui/dlq/{run_id}/dismiss",
 ];
 
 /// `[ui]` configuration as the router sees it.
@@ -96,7 +113,8 @@ pub fn router(deps: UiDeps) -> axum::Router {
     if probe {
         r = r.route("/ui/_probe", post(security::probe));
     }
-    // 11-16 merges actions::routes() here, 11-17 inventory::routes().
+    r = r.merge(actions::routes());
+    // 11-17 merges inventory::routes() here.
     r.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         security::guard,

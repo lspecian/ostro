@@ -160,3 +160,19 @@ pre.json { background: var(--panel); padding: 0.5rem; overflow: auto; max-height
 /* htmx indicators (htmx's own indicator styles are disabled, D-P11-15) */
 .htmx-indicator { opacity: 0; transition: opacity 200ms ease-in; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
+
+/* actions (plan 11-16) */
+.card.actions form.action { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: flex-end; margin: 0 0 0.5rem; }
+form.action label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); }
+form.action input, form.action select, form.action textarea { font: inherit; padding: 0.2rem 0.4rem; }
+table.dlq form.action { display: flex; gap: 0.3rem; align-items: flex-end; margin: 0 0 0.3rem; }
+button.secondary { background: var(--bg); color: var(--accent); }
+button.small { padding: 0.1rem 0.5rem; font-size: 12px; }
+button.danger, .button.danger { background: var(--bad); border-color: var(--bad); }
+form.stack { display: grid; gap: 0.6rem; max-width: 40rem; padding: 0.7rem; background: var(--panel); border: 1px solid var(--line); }
+form.stack label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); }
+form.stack input, form.stack select, form.stack textarea { font: inherit; padding: 0.25rem 0.4rem; }
+form.stack fieldset { border: 1px solid var(--line); padding: 0.4rem 0.6rem; }
+.verdict { padding: 0.5rem 0.8rem; border: 1px solid var(--ok); background: #e8f5ec; margin: 0.8rem 0; }
+.refusal { padding: 0.5rem 0.8rem; border: 1px solid var(--bad); background: #fdecea; margin: 0.8rem 0; }
+progress { width: 100%; max-width: 30rem; height: 1rem; }

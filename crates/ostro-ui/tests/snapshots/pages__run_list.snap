@@ -36,6 +36,7 @@ expression: html
 </label>
 <button type="submit">Filter</button>
 <a class="button secondary" href="/ui/runs">Clear</a>
+<a class="button secondary" href="/ui/bulk">Bulk…</a>
 </form>
 
 <table class="runs">

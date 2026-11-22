@@ -38,6 +38,7 @@ expression: main_of(&r.body)
 </label>
 <button type="submit">Filter</button>
 <a class="button secondary" href="/ui/runs">Clear</a>
+<a class="button secondary" href="/ui/bulk?workflow=greet&#38;queue=default&#38;status=running&#38;tags=env%3Dprod&#38;tags=team%3Da">Bulk…</a>
 </form>
 
 <p class="empty">No runs match these filters.</p>

@@ -1,0 +1,18 @@
+<form class="action" method="post" action="/ui/dlq/{{ r.href_id }}/requeue" hx-post="/ui/dlq/{{ r.href_id }}/requeue">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Mode
+<select name="mode">
+<option value="auto" selected>auto{% if r.resumable %} (resume){% else %} (restart){% endif %}</option>
+<option value="resume">resume</option>
+<option value="restart">restart</option>
+<option value="rerun">rerun from step</option>
+</select>
+</label>
+<label>Step <input name="step" placeholder="rerun only"></label>
+<button type="submit" class="small">Requeue</button>
+</form>
+<form class="action" method="post" action="/ui/dlq/{{ r.href_id }}/dismiss" hx-post="/ui/dlq/{{ r.href_id }}/dismiss" hx-target="closest tr" hx-swap="delete">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Reason <input name="reason" required maxlength="1024"></label>
+<button type="submit" class="small secondary">Dismiss</button>
+</form>

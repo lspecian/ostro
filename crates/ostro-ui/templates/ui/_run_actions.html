@@ -1,0 +1,32 @@
+<section id="run-actions" class="card actions"{% if oob %} hx-swap-oob="true"{% endif %}>
+<h3>Actions</h3>
+{% if !actions.any() %}<p class="muted">No actions apply to this run.</p>{% endif %}
+{% if actions.can_pause %}<form class="action" method="post" action="{{ actions.base }}/pause" hx-post="{{ actions.base }}/pause" hx-target="#run-status" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Note <input name="detail" maxlength="1024" placeholder="optional"></label>
+<button type="submit" class="secondary">Pause</button>
+</form>
+{% endif %}{% if actions.can_resume %}<form class="action" method="post" action="{{ actions.base }}/resume" hx-post="{{ actions.base }}/resume" hx-target="#run-status" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit">Resume</button>
+</form>
+{% endif %}{% if actions.can_retry %}<form class="action" method="post" action="{{ actions.base }}/retry" hx-post="{{ actions.base }}/retry" hx-target="#run-status" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit">Retry</button>
+</form>
+{% endif %}{% if actions.can_signal %}<form class="action" method="post" action="{{ actions.base }}/signal" hx-post="{{ actions.base }}/signal" hx-target="#run-status" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Signal <input name="name" required maxlength="256" placeholder="name"></label>
+<label>Payload (JSON) <textarea name="payload" rows="2" placeholder="null"></textarea></label>
+<button type="submit" class="secondary">Send signal</button>
+</form>
+{% endif %}{% if actions.can_cancel %}<form class="action" method="post" action="{{ actions.base }}/cancel" hx-post="{{ actions.base }}/cancel" hx-target="#run-status" hx-swap="outerHTML" hx-confirm="Cancel run {{ actions.run_id }}?">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="danger">Cancel</button>
+</form>
+{% endif %}{% if actions.can_terminate %}<form class="action" method="post" action="{{ actions.base }}/terminate" hx-post="{{ actions.base }}/terminate" hx-target="#run-status" hx-swap="outerHTML" hx-confirm="Terminate run {{ actions.run_id }} now? Running work is stopped without cleanup.">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Reason <input name="reason" maxlength="1024" placeholder="why"></label>
+<button type="submit" class="danger">Terminate</button>
+</form>
+{% endif %}</section>

@@ -27,7 +27,7 @@ expression: main_of(&r.body)
 </form>
 
 <table class="dlq">
-<thead><tr><th>Run</th><th>Workflow</th><th>Queue</th><th>Status</th><th>Reason</th><th>Failed</th><th>Resumable</th><th>Hook</th><th>State</th><th>Tags</th></tr></thead>
+<thead><tr><th>Run</th><th>Workflow</th><th>Queue</th><th>Status</th><th>Reason</th><th>Failed</th><th>Resumable</th><th>Hook</th><th>State</th><th>Tags</th><th>Actions</th></tr></thead>
 <tbody>
 <tr>
 <td class="mono"><a href="/ui/runs/run-000003">run-000003</a></td>
@@ -40,6 +40,24 @@ expression: main_of(&r.body)
 <td><a class="mono" href="/ui/runs/run-000005">run-000005</a></td>
 <td>open</td>
 <td><a class="chip" href="/ui/dlq?tags=%3Cscript%3Ealert%281%29%3C%2Fscript%3E">&#60;script&#62;alert(1)&#60;/script&#62;</a></td>
+<td><form class="action" method="post" action="/ui/dlq/run-000003/requeue" hx-post="/ui/dlq/run-000003/requeue">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<label>Mode
+<select name="mode">
+<option value="auto" selected>auto (restart)</option>
+<option value="resume">resume</option>
+<option value="restart">restart</option>
+<option value="rerun">rerun from step</option>
+</select>
+</label>
+<label>Step <input name="step" placeholder="rerun only"></label>
+<button type="submit" class="small">Requeue</button>
+</form>
+<form class="action" method="post" action="/ui/dlq/run-000003/dismiss" hx-post="/ui/dlq/run-000003/dismiss" hx-target="closest tr" hx-swap="delete">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<label>Reason <input name="reason" required maxlength="1024"></label>
+<button type="submit" class="small secondary">Dismiss</button>
+</form></td>
 </tr>
 </tbody>
 </table>

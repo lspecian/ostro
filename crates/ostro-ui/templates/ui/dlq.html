@@ -26,7 +26,7 @@
 <p class="empty">The dead-letter queue is empty.</p>
 {% else %}
 <table class="dlq">
-<thead><tr><th>Run</th><th>Workflow</th><th>Queue</th><th>Status</th><th>Reason</th><th>Failed</th><th>Resumable</th><th>Hook</th><th>State</th><th>Tags</th></tr></thead>
+<thead><tr><th>Run</th><th>Workflow</th><th>Queue</th><th>Status</th><th>Reason</th><th>Failed</th><th>Resumable</th><th>Hook</th><th>State</th><th>Tags</th><th>Actions</th></tr></thead>
 <tbody>
 {% for r in rows %}<tr>
 <td class="mono"><a href="{{ r.href }}">{{ r.run_id }}</a></td>
@@ -39,6 +39,7 @@
 <td>{% if let Some(h) = r.hook %}<a class="mono" href="{{ h.href }}">{{ h.text }}</a>{% else %}<span class="muted">none</span>{% endif %}</td>
 <td>{% if let Some(t) = r.requeued_to %}requeued to <a class="mono" href="{{ t.href }}">{{ t.text }}</a>{% else if let Some(d) = r.dismissed %}dismissed {{ d }}{% else %}open{% endif %}</td>
 <td>{% for c in r.tags %}<a class="chip{% if c.system %} system{% endif %}" href="{{ c.href }}">{{ c.text }}</a>{% endfor %}</td>
+<td>{% if r.requeued_to.is_none() && r.dismissed.is_none() %}{% include "ui/_dlq_actions.html" %}{% endif %}</td>
 </tr>
 {% endfor %}</tbody>
 </table>

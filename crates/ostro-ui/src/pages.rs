@@ -100,6 +100,11 @@ impl From<crate::auth::UiReject> for UiError {
 }
 
 impl UiError {
+    /// The message the error page shows.
+    pub(crate) fn message(&self) -> String {
+        self.status_and_message().1
+    }
+
     fn status_and_message(&self) -> (StatusCode, String) {
         match self {
             UiError::Api(e) => (e.code.http_status(), e.message.clone()),
@@ -193,7 +198,7 @@ pub(crate) fn href_encode(s: &str) -> String {
 }
 
 /// `base?k=v&...` with every pair encoded; `base` alone when empty.
-fn href(base: &str, pairs: &[(&str, &str)]) -> String {
+pub(crate) fn href(base: &str, pairs: &[(&str, &str)]) -> String {
     let q: Vec<String> = pairs
         .iter()
         .map(|(k, v)| format!("{}={}", href_encode(k), href_encode(v)))
@@ -205,7 +210,7 @@ fn href(base: &str, pairs: &[(&str, &str)]) -> String {
     }
 }
 
-fn run_href(run_id: &str) -> String {
+pub(crate) fn run_href(run_id: &str) -> String {
     format!("/ui/runs/{}", href_encode(run_id))
 }
 
@@ -221,17 +226,17 @@ fn pretty_json(bytes: &[u8]) -> String {
 // Query helpers
 // ---------------------------------------------------------------------------------
 
-type Params = Vec<(String, String)>;
+pub(crate) type Params = Vec<(String, String)>;
 
 /// The first non-empty value of `name`.
-fn param<'a>(q: &'a Params, name: &str) -> Option<&'a str> {
+pub(crate) fn param<'a>(q: &'a Params, name: &str) -> Option<&'a str> {
     q.iter()
         .find(|(k, v)| k == name && !v.trim().is_empty())
         .map(|(_, v)| v.trim())
 }
 
 /// Every non-empty value of `name`, deduplicated, in order.
-fn params(q: &Params, name: &str) -> Vec<String> {
+pub(crate) fn params(q: &Params, name: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (k, v) in q {
         let v = v.trim();
@@ -243,7 +248,7 @@ fn params(q: &Params, name: &str) -> Vec<String> {
 }
 
 /// An HTML page response, with the CSRF `Set-Cookie` when a token was minted.
-fn page_response(html: String, set_cookie: Option<HeaderValue>) -> Response {
+pub(crate) fn page_response(html: String, set_cookie: Option<HeaderValue>) -> Response {
     let mut resp = Html(html).into_response();
     if let Some(c) = set_cookie {
         resp.headers_mut().insert(header::SET_COOKIE, c);
@@ -302,6 +307,34 @@ struct RunsPage {
     rows: Vec<RunRow>,
     next_href: Option<String>,
     first_href: Option<String>,
+    bulk_href: String,
+}
+
+/// The run-list filter of a query or form (`workflow`, `queue`, `status`, `tags`);
+/// shared with the bulk form (11-16).
+pub(crate) struct RunFilterQuery {
+    pub(crate) workflow: Option<String>,
+    pub(crate) queue: Option<String>,
+    pub(crate) status: Option<RunStatus>,
+    pub(crate) tags: Vec<String>,
+}
+
+/// Parse the run-list filter out of `q`.
+pub(crate) fn parse_run_filter(q: &Params) -> Result<RunFilterQuery, UiError> {
+    let status = match param(q, "status") {
+        Some(s) => Some(
+            RunStatus::parse(s)
+                .ok_or_else(|| UiError::BadRequest(format!("unknown status {s}")))?,
+        ),
+        None => None,
+    };
+    let tags = ostro_api::phase11::search_tags(None, params(q, "tags")).map_err(UiError::Api)?;
+    Ok(RunFilterQuery {
+        workflow: param(q, "workflow").map(str::to_owned),
+        queue: param(q, "queue").map(str::to_owned),
+        status,
+        tags,
+    })
 }
 
 /// `GET /ui/` and `GET /ui/runs`.
@@ -312,20 +345,18 @@ pub(crate) async fn runs(
     uri: Uri,
     Query(q): Query<Params>,
 ) -> Result<Response, UiError> {
-    let status = match param(&q, "status") {
-        Some(s) => Some(
-            RunStatus::parse(s)
-                .ok_or_else(|| UiError::BadRequest(format!("unknown status {s}")))?,
-        ),
-        None => None,
-    };
-    let tags = ostro_api::phase11::search_tags(None, params(&q, "tags")).map_err(UiError::Api)?;
+    let RunFilterQuery {
+        workflow,
+        queue,
+        status,
+        tags,
+    } = parse_run_filter(&q)?;
     let newest = param(&q, "order") == Some("newest");
     let page_token = param(&q, "page_token").map(str::to_owned);
     let req = ListRunsRequest {
-        workflow: param(&q, "workflow").map(str::to_owned),
+        workflow: workflow.clone(),
         status,
-        queue: param(&q, "queue").map(str::to_owned),
+        queue: queue.clone(),
         tag: tags.first().cloned(),
         limit: PAGE_SIZE,
         page_token: page_token.clone(),
@@ -339,8 +370,8 @@ pub(crate) async fn runs(
     };
     let page = st.deps.cp.list_runs(req).await?;
     let f = RunFilters {
-        workflow: param(&q, "workflow").unwrap_or_default().to_owned(),
-        queue: param(&q, "queue").unwrap_or_default().to_owned(),
+        workflow: workflow.unwrap_or_default(),
+        queue: queue.unwrap_or_default(),
         status: status.map(|s| s.as_str().to_owned()).unwrap_or_default(),
         tags,
         newest,
@@ -367,6 +398,14 @@ pub(crate) async fn runs(
         href("/ui/runs", &p)
     });
     let first_href = page_token.map(|_| href("/ui/runs", &keep));
+    let bulk_href = href(
+        "/ui/bulk",
+        &keep
+            .iter()
+            .copied()
+            .filter(|(k, _)| *k != "order")
+            .collect::<Vec<_>>(),
+    );
     let rows = page
         .runs
         .into_iter()
@@ -395,6 +434,7 @@ pub(crate) async fn runs(
         rows,
         next_href,
         first_href,
+        bulk_href,
     }
     .render()?;
     Ok(page_response(html, set_cookie))
@@ -425,6 +465,7 @@ struct Link {
 struct DlqRow {
     run_id: String,
     href: String,
+    href_id: String,
     workflow: String,
     version: u32,
     queue: String,
@@ -486,6 +527,7 @@ pub(crate) async fn dlq(
             .into_iter()
             .map(|e| DlqRow {
                 href: run_href(&e.run_id),
+                href_id: href_encode(&e.run_id),
                 status: domain_status(e.status).as_str().to_owned(),
                 failed: fmt_ts(e.failed_at_ms),
                 hook: e.hook_run_id.map(|h| Link {
@@ -565,7 +607,7 @@ pub(crate) struct StatusView {
 }
 
 impl StatusView {
-    fn of(run: &RunInfo) -> Self {
+    pub(crate) fn of(run: &RunInfo) -> Self {
         StatusView {
             status_href: format!("{}/status", run_href(&run.run_id)),
             status: run.status.as_str(),
@@ -641,12 +683,14 @@ struct RunDetailPage {
     tab: &'static str,
     timeline: Option<TimelineView>,
     logs: Option<LogsView>,
+    actions: crate::actions::ActionsView,
+    oob: bool,
 }
 
 #[derive(Template)]
 #[template(path = "ui/_run_status.html")]
-struct StatusFragment {
-    status: StatusView,
+pub(crate) struct StatusFragment {
+    pub(crate) status: StatusView,
 }
 
 #[derive(Template)]
@@ -855,6 +899,8 @@ pub(crate) async fn run_detail(
         csrf,
         nav: "runs",
         status: StatusView::of(&run),
+        actions: crate::actions::ActionsView::of(&run),
+        oob: false,
         lineage: lineage(&run, source.as_deref()),
         tab,
         timeline,

@@ -23,6 +23,10 @@ expression: html
   &#34;progress&#34;: 100
 }</pre>
 </section>
+<section id="run-actions" class="card actions">
+<h3>Actions</h3>
+<p class="muted">No actions apply to this run.</p>
+</section>
 <section class="card">
 <h3>Run</h3>
 <dl class="kv">
