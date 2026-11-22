@@ -671,6 +671,8 @@ pub struct MetaLogDump {
     pub entries: Vec<MetaLogEntry>,
     /// Committed entries whose payload did not decode as a `MetaCommand` (index list).
     pub undecodable: Vec<u64>,
+    /// The snapshot's state (what `entries` continue from; `election::isr_only_from`).
+    pub snapshot_state: MetaState,
     /// The state after replaying the snapshot and every committed entry.
     pub state: MetaState,
 }
@@ -918,6 +920,7 @@ pub fn read_meta_log(meta_dir: &Path) -> Result<MetaLogDump, HarnessError> {
             by_index.insert(e.index, e);
         }
     }
+    let snapshot_state = state.clone();
     let mut entries = Vec::new();
     let mut undecodable = Vec::new();
     for (index, e) in by_index.range(snapshot_index + 1..=commit) {
@@ -944,6 +947,7 @@ pub fn read_meta_log(meta_dir: &Path) -> Result<MetaLogDump, HarnessError> {
         snapshot_index,
         entries,
         undecodable,
+        snapshot_state,
         state,
     })
 }
