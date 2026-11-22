@@ -1107,10 +1107,11 @@ async fn continue_as_new() {
         assert!(t0.elapsed() < LIMIT, "the chain did not progress");
         sleep(Duration::from_millis(1)).await;
     }
+    let gate = Arc::new(Semaphore::new(0));
     *s.hooks
         .pause_before_append
         .lock()
-        .unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(Semaphore::new(0)));
+        .unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&gate));
     sleep(Duration::from_millis(300)).await;
     let mid = chain(&s, &second);
     let last = s.run_record(mid.last().expect("run"));
@@ -1120,10 +1121,16 @@ async fn continue_as_new() {
         mid.len()
     );
     s.restart().await;
+    // The hooks outlive the restart, and an activation captures the gate when it starts:
+    // the restarted server may already have re-dispatched the stalled run (and parked on
+    // the 0-permit gate) before `restart()` returns. Clearing the slot only affects later
+    // activations, so lifting the gate also closes the semaphore, which releases every
+    // waiter (`acquire` on a closed semaphore returns at once).
     *s.hooks
         .pause_before_append
         .lock()
         .unwrap_or_else(|p| p.into_inner()) = None;
+    gate.close();
     s.wait_ready(Duration::from_secs(10)).await;
     let (st, v) = s
         .get_json(&format!(
