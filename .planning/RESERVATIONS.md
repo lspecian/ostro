@@ -432,3 +432,20 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Cert SAN URIs | `ostro://<cluster_id>/worker/<token_id>/<worker_id>` (join-issued), `ostro://<cluster_id>/worker/ext/<worker_id>` (external CA), `ostro://<cluster_id>/node/<node_id>` (node identity) | P7 (07-06 / 07-09) |
 | In-memory actions | `Action::RunPaused{run}`, `Action::RunResumed{run}` (informational, not persisted, not a RESERVATIONS space) | P7 (07-03) |
 | Note | `ostro-worker-proto` field numbers are versioned by `proto_version` inside that crate and are **not** a RESERVATIONS space | P7 (D-W2) |
+| Crates | `ostro-build` (hermetic project builds, templates, toolchain cache), `ostro-client` (Rust client library; Phase 10 moves `ostro-cli/src/client.rs` into it) (D-P10-19) | P10 (10-01) |
+| Cargo features | `testing` (crate `ostro-client`: `TestEnv`); `polyglot` (crate `ostro-build` and the `ostro` binary crate; distinct from P9's `polyglot` on `ostro-conformance`, same name, separate crates) | P10 (10-01) |
+| Dirs | `clients/python`, `clients/ts`, `clients/go`, `crates/ostro-build/templates/`, `deploy/build-image/`, project build output `target/ostro/` (never `./.ostro`) | P10 (10-01) |
+| Project files | `ostro.toml` (project file: `[project]`, `[build]`, `[deploy]`; the server config has no default filename, it is passed by path), `target/ostro/manifest.json` (`{"kind":"ostro.manifest","version":1,...}`) | P10 (10-01) |
+| REST paths | `GET /v1/dev/time`, `POST /v1/dev/time/skip`, `POST /v1/modules/{sha}/replay` (REST-only, no gRPC twin, D-P10-18) | P10 (10-01) |
+| Config section | `[dev]` (key `time_skipping`) | P10 (10-01) |
+| REST error codes | `time_skipping_disabled`, `sample_too_large` | P10 (10-01) |
+| Env vars | `OSTRO_BIN` (already read by `crates/ostro/tests/common` with the same meaning; P10 makes it the test-kit binary override), `OSTRO_TOOLCHAIN_DIR`, `OSTRO_OFFLINE`, `OSTRO_TOOLCHAIN_MIRROR`, `OSTRO_POLYGLOT_BUILDER`, `OSTRO_DOCKER`, `OSTRO_LINUX_BIN` | P10 (10-01) |
+| Packages | `ostro-client` on PyPI, npm and crates.io (avoid the npm `@ostro` scope); Go module `github.com/lspecian/ostro/clients/go` (publishing human_needed) | P10 (10-01) |
+| Docker image | `ostro-build` | P10 (10-01) |
+| CLI exit code | `4` = replay divergence (CLI-06 codes 0–3 unchanged) | P10 (10-01) |
+| JSON kind prefixes | `ostro.<verb>.result`, `ostro.manifest` | P10 (10-01) |
+| Metric prefix | `ostro_dev_` | P10 (10-01) |
+| Ready line (frozen contract, parsed by the test kits) | `NAME listening on http://ADDR (data: DIR[, ephemeral]) ready in N ms` | P10 (10-01) |
+| CLI verbs | `ostro init`, `ostro build`, `ostro replay`, `ostro toolchain`, `ostro doctor`, `ostro completions` | P10 (10-01) |
+
+Phase 10 allocates no ordinal (F7); no P10 block. (10-01 gate 2026-11-22: `10-01-rescheck.py` RESERVATIONS CHECK: PASS at 2c8642a, output in 10-01-SUMMARY.)
