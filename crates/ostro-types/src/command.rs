@@ -104,10 +104,12 @@
 //! `11-DECISIONS.md`.
 //!
 //! - [`Cmd::DlqUpdate`] at tag 45 (P11 block 45..=49; OPS-04): a dead-letter membership mark
-//!   (`HookStarted`, `Dismissed`, `Requeued`) for one failure episode of a run. Apply rejects
-//!   it with `Invalid(NotImplemented)` until 11-08.
+//!   (`HookStarted`, `Dismissed`, `Requeued`) for one failure episode of a run. Apply
+//!   semantics: 11-08 (`apply/dlq.rs`, `DlqRow` in the `dlq` keyspace); emitted by the DLQ
+//!   controllers and the `on_failure` hook service (11-12).
 //! - [`StartRun`] fields 40 `rerun_prefix` (the journal events `1..cut` copied verbatim) and
-//!   41 `rerun_from_seq` (the cut; 0 = not a rerun) (OPS-02). Apply ignores them until 11-07.
+//!   41 `rerun_from_seq` (the cut; 0 = not a rerun) (OPS-02). Apply journals the prefix
+//!   verbatim when 41 != 0 (11-07, `apply/rerun.rs`).
 //! - [`JournalEvent`] field 4 `attempt` (fixed64, `epoch << 32 | n`; 0 = apply-originated or
 //!   unknown). Set by the submitter; apply stores it verbatim and never stamps it.
 //! - All three default-omit in proto3, so every older command re-encodes to the same bytes.
@@ -1175,7 +1177,7 @@ pub struct ResumeRun {
 
 /// A dead-letter membership mark (Phase 11, `Cmd` tag 45; OPS-04). Names one failure episode
 /// of a run (W5: `RunRecord.completed_at_ms` of the failure it refers to), so a mark for an
-/// older episode never affects a newer one. Implemented by 11-08.
+/// older episode never affects a newer one. Apply semantics: 11-08.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct DlqUpdate {
     /// Target run id (18 bytes).
