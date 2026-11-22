@@ -400,13 +400,19 @@ impl<L: ReplicatedLog> PartitionSink<L> {
 
     async fn encode(&self, events: &[Event]) -> Result<Vec<JournalEvent>, AppendError> {
         let mut out = Vec::with_capacity(events.len());
+        // 11-07 (D-P11-18): the exact replay marker `epoch << 32 | n` on every submitted event.
+        let attempt = if crate::p11::p11_feature_enabled(crate::p11::P11Feature::JournalAttempt) {
+            (u64::from(self.token.epoch.0) << 32) | u64::from(self.token.n)
+        } else {
+            0
+        };
         for ev in events {
             let (kind, bytes) = encode_event(ev);
             out.push(JournalEvent {
                 seq: ev.seq,
                 kind,
                 payload: Some(self.prepare(bytes).await?),
-                ..Default::default()
+                attempt,
             });
         }
         Ok(out)

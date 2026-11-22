@@ -34,6 +34,9 @@
 //!    `Conflict` re-activates. After a restart the marker is gone and the re-arm runs once
 //!    more, which is harmless: `RegisterWait` is idempotent (05-08) and timer rows are keyed
 //!    by `(due, run, op)`.
+//!    **Rerun re-arm (11-07, D-P11-6):** a run carrying `__ostro/rerun_from=<cut>` whose
+//!    `next_seq` is still `cut` re-arms the same way on every activation
+//!    ([`crate::rerun::prearm_due`]); the prelude is shared, so worker queues re-arm too.
 //! 4. **Journal:** read from the store on every job (inputs sent between jobs are not
 //!    replayed by the dispatcher), then `repair_unsupported`.
 //! 5. **Inputs (ordered bridge):** the dispatcher's `InputAppended` seqs and the sink's own
@@ -964,6 +967,11 @@ impl EngineExecutor {
             if cancel.is_cancelled() {
                 return Err(ExecOutcome::Released);
             }
+        }
+        // 2c. Rerun re-arm (11-07, D-P11-6): every activation while no live event exists.
+        if crate::rerun::prearm_due(record, sink.next_seq()) {
+            crate::rerun::before_rearm()?;
+            self.rearm(handle, run, sink).await?;
         }
         // 3. Journal (+ repair of unsupported completions).
         let journal = match self.load_journal(handle, run, sink).await {
