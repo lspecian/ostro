@@ -157,10 +157,10 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **CLI-02**: `ostro server` runs a single node with zero-config defaults; TOML + env overrides [FR-0.2]
 - [ ] **CLI-03**: `ostro init --lang {rust,python,ts}` scaffolds a project with pinned toolchains [FR-2.1]
 - [x] **CLI-04**: `ostro build` produces a validated component + manifest for Rust, Python and TS with hermetic toolchains (cached downloads or `--docker`) [FR-2.2/2.3]
-- [ ] **CLI-05**: `ostro deploy [--activate]` builds if needed and uploads idempotently [FR-2.4]
+- [x] **CLI-05**: `ostro deploy [--activate]` builds if needed and uploads idempotently [FR-2.4]
 - [x] **CLI-06**: `ostro run/ls/inspect/history/signal/cancel/retry` with `--json` and `--dry-run` where applicable [FR-2.5]
 - [ ] **CLI-07**: `ostro replay <run|--sample N> --module new.wasm` detects non-determinism before deploy (CI gate) [FR-2.6]
-- [ ] **CLI-08**: `ostro dev --watch` rebuilds and redeploys on save [FR-2.7]
+- [x] **CLI-08**: `ostro dev --watch` rebuilds and redeploys on save [FR-2.7]
 
 ### UI
 
@@ -349,10 +349,10 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | CLI-02 | Phase 4 | Complete |
 | CLI-03 | Phase 10 | Pending |
 | CLI-04 | Phase 10 | Complete |
-| CLI-05 | Phase 10 | Pending |
+| CLI-05 | Phase 10 | Complete |
 | CLI-06 | Phase 5 | Complete (spawned-binary cli_verbs suite + --json snapshots: 05-14; order-saga happy/compensated/cancelled/kill -9 driven only by the CLI: 05-17 order_saga) |
 | CLI-07 | Phase 10 | Pending |
-| CLI-08 | Phase 10 | Pending |
+| CLI-08 | Phase 10 | Complete |
 | UI-01 | Phase 11 | Complete (11-18 ui_e2e: run list/filter, run detail, timeline/logs/status fragments, DLQ, published-status pages over HTTP on real runs with the D-P11-15 headers; ostro-ui pages/hardening/security; real-browser checks human_needed, 11-VALIDATION Manual-Only) |
 | UI-02 | Phase 11 | Complete (11-18 ui_e2e: terminate, cancel, retry, pause/resume run + queue, rerun preview + submit, DLQ requeue, bulk create + cancel change real state via same-origin CSRF requests; cross-site / foreign Host 403; ostro-ui actions; browser checks human_needed) |
 | UI-03 | Phase 11 | Complete (11-18 ui_e2e: modules, workflows, queues, schedules, workers and partition health with live data on a TLS ostro server with a real worker and a schedule; ostro-ui inventory; browser checks human_needed) |
