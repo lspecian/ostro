@@ -596,3 +596,77 @@ fn control_d26_rejected_terminate() {
     let l = Ledger::from_records(&recs);
     assert!(check_final(RUN, l.get(RUN).unwrap(), &failed, &exhausted).is_empty());
 }
+
+/// The journal of a run whose go wait (op 7) timed out before the go signal was journaled
+/// (campaign-p8 shard 04: the harness's go POSTs reached the server only after the 600 s
+/// wait timeout). The late go stays buffered; the guest saw `go = null`.
+fn late_go_journal() -> Vec<Event> {
+    let mut j = journal();
+    let go = j.remove(1);
+    j[6].details = json!({"op": 5}); // timer_fired of the timer_started now at seq 5
+    assert_eq!(j[7].kind, "signal_wait_started");
+    j[8] = Event::new(0, "wait_timed_out", json!({"op": 7}));
+    j.insert(9, go);
+    renumber(j)
+}
+
+fn go_null_view() -> RunView {
+    let mut view = completed_view();
+    view.result.as_mut().unwrap()["go"] = Value::Null;
+    view
+}
+
+#[test]
+fn late_signal_after_the_timeout_is_a_timeout_outcome() {
+    let l = ledger();
+    let r = l.get(RUN).unwrap();
+    let j = late_go_journal();
+    assert!(check_journal(RUN, &j, Some(r)).is_empty());
+    // The timeout won the wait: go = null is the correct result.
+    let vs = check_final(RUN, r, &go_null_view(), &j);
+    assert!(vs.is_empty(), "{vs:?}");
+    // A result claiming the late (never matched) go is wrong.
+    assert_eq!(
+        kinds(&check_final(RUN, r, &completed_view(), &j)),
+        [Kind::WrongResult]
+    );
+    // A late payload the harness never sent is still flagged although no wait consumed it.
+    let mut forged = j.clone();
+    forged[9].details["payload"]["key"] = json!("forged");
+    assert!(kinds(&check_final(RUN, r, &go_null_view(), &forged)).contains(&Kind::WrongResult));
+}
+
+#[test]
+fn control_lost_wake() {
+    // go journaled at seq 1, before the go wait (op 8) started, yet the wait timed out:
+    // registration must have matched the buffered signal.
+    let l = ledger();
+    let r = l.get(RUN).unwrap();
+    let mut j = journal();
+    assert_eq!(j[9].kind, "signal_matched");
+    j[9] = Event::new(9, "wait_timed_out", json!({"op": 8}));
+    assert_eq!(
+        kinds(&check_final(RUN, r, &go_null_view(), &j)),
+        [Kind::LostWake]
+    );
+    assert_eq!(
+        kinds(&check_final(RUN, r, &completed_view(), &j)),
+        [Kind::LostWake, Kind::WrongResult]
+    );
+    // Same with the signal journaled after the wait started but before its timeout fired.
+    let late_wait = late_go_journal();
+    let mut j = late_wait.clone();
+    let go = j.remove(9); // go payload (after wait_timed_out@8)
+    j.insert(8, go); // now between signal_wait_started@7 and wait_timed_out
+    let mut j = renumber(j);
+    j[9].details = json!({"op": 7});
+    assert_eq!(j[9].kind, "wait_timed_out");
+    assert_eq!(
+        kinds(&check_final(RUN, r, &go_null_view(), &j)),
+        [Kind::LostWake]
+    );
+    // A signal_matched that points at no go payload is a broken journal.
+    let mut j = journal();
+    j[9].details = json!({"op": 8, "payload_seq": 2});
+    assert!(kinds(&check_final(RUN, r, &completed_view(), &j)).contains(&Kind::WrongResult));
+}

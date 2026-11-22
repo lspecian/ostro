@@ -976,37 +976,8 @@ impl Shard {
         )
         .await;
         self.st.anomalies.extend(anomalies);
-        let ids: Vec<String> = ledger.acked().map(|(id, _)| id.to_owned()).collect();
-        let views = par_map(ids, 16, {
-            let http = self.http.clone();
-            let base = srv.base.clone();
-            move |id| {
-                let http = http.clone();
-                let base = base.clone();
-                async move {
-                    let v = get_run(&http, &base, &id).await;
-                    let h = history(&http, &base, &id).await;
-                    (id, v, h)
-                }
-            }
-        })
-        .await;
-        let mut summary = FinalSummary::default();
-        for (id, view, h) in views {
-            let l = ledger.get(&id).expect("acked run in ledger");
-            match (view, h) {
-                (Ok(Some(view)), Ok(Some(events))) => {
-                    *summary.statuses.entry(view.status.clone()).or_insert(0) += 1;
-                    vs.extend(check_final(&id, l, &view, &events));
-                    vs.extend(check_journal(&id, &events, Some(l)));
-                }
-                (Ok(None), _) | (_, Ok(None)) => {} // reported by check_exists
-                (Err(e), _) | (_, Err(e)) => vs.push(check_error(&id, e)),
-            }
-            summary.runs += 1;
-            summary.signals_acked += l.signals_acked.len() as u64;
-            summary.duplicate_start_acks += l.start_acks.len().saturating_sub(1) as u64;
-        }
+        let (final_vs, mut summary) = final_run_checks(&self.http, &srv.base, &ledger).await;
+        vs.extend(final_vs);
         // Dedupe (check_after_restart and the final pass both check journals).
         let mut seen = HashSet::new();
         vs.retain(|x| seen.insert(format!("{x}")));
@@ -1056,6 +1027,191 @@ impl Shard {
             ))
         }
     }
+}
+
+/// (b) + (c) for every acked run of `ledger` on a settled server: status and result
+/// ([`check_final`]) and the journal invariants ([`check_journal`]).
+async fn final_run_checks(
+    http: &reqwest::Client,
+    base: &str,
+    ledger: &Ledger,
+) -> (Vec<Violation>, FinalSummary) {
+    let mut vs = Vec::new();
+    let ids: Vec<String> = ledger.acked().map(|(id, _)| id.to_owned()).collect();
+    let views = par_map(ids, 16, {
+        let http = http.clone();
+        let base = base.to_owned();
+        move |id| {
+            let http = http.clone();
+            let base = base.clone();
+            async move {
+                let v = get_run(&http, &base, &id).await;
+                let h = history(&http, &base, &id).await;
+                (id, v, h)
+            }
+        }
+    })
+    .await;
+    let mut summary = FinalSummary::default();
+    for (id, view, h) in views {
+        let l = ledger.get(&id).expect("acked run in ledger");
+        match (view, h) {
+            (Ok(Some(view)), Ok(Some(events))) => {
+                *summary.statuses.entry(view.status.clone()).or_insert(0) += 1;
+                vs.extend(check_final(&id, l, &view, &events));
+                vs.extend(check_journal(&id, &events, Some(l)));
+            }
+            (Ok(None), _) | (_, Ok(None)) => {} // reported by check_exists
+            (Err(e), _) | (_, Err(e)) => vs.push(check_error(&id, e)),
+        }
+        summary.runs += 1;
+        summary.signals_acked += l.signals_acked.len() as u64;
+        summary.duplicate_start_acks += l.start_acks.len().saturating_sub(1) as u64;
+    }
+    (vs, summary)
+}
+
+// ------------------------------------------------------------------- offline re-check
+
+/// Copy `shard-NN.json` into `superseded` (kept as evidence; never overwritten).
+fn supersede_state(cfg: &CampaignCfg, id: u32, superseded: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(superseded)
+        .map_err(|e| format!("mkdir {}: {e}", superseded.display()))?;
+    let src = shard_path(&cfg.state_dir, id);
+    let dst = shard_path(superseded, id);
+    if !dst.exists() {
+        std::fs::copy(&src, &dst).map_err(|e| format!("copy {}: {e}", src.display()))?;
+    }
+    Ok(())
+}
+
+/// Offline re-check of a finished shard with the current checker (p8-gate). The shard's
+/// data dir is copied (the original stays untouched), a clean server (no FAILPOINTS, no
+/// `OSTRO_*` overrides, so no bucket) serves the copy, and the shard-end checks run again
+/// against the stored ack log: (a) + (c) as after a restart, then (b) + (c) per acked run.
+/// Only a shard whose recorded violations all came from its final check is re-checked;
+/// the new final violations replace them in `shard-NN.json` (the old file is kept in
+/// `superseded`). Returns the updated state and the violations found.
+pub async fn recheck_shard(
+    cfg: &CampaignCfg,
+    id: u32,
+    superseded: &Path,
+) -> Result<(ShardState, Vec<Violation>), String> {
+    let path = shard_path(&cfg.state_dir, id);
+    let mut st = load_shard(&path, cfg)?.ok_or_else(|| format!("no {}", path.display()))?;
+    if !st.final_checked {
+        return Err(format!("shard {id} has no final check to re-run"));
+    }
+    if st
+        .failures
+        .iter()
+        .any(|f| !f.starts_with("final: ") || f.contains(" more"))
+        || st.tally.total() != st.failures.len() as u64
+    {
+        return Err(format!(
+            "shard {id}: recorded violations are not all from the final check ({:?})",
+            st.tally
+        ));
+    }
+    let dir = cfg.state_dir.join(format!("shard-{id:02}"));
+    let tmp = tempfile::tempdir_in(&cfg.state_dir).map_err(|e| e.to_string())?;
+    let st_cp = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(dir.join("data"))
+        .arg(tmp.path().join("data"))
+        .status()
+        .map_err(|e| format!("cp: {e}"))?;
+    if !st_cp.success() {
+        return Err(format!("cp -a {}/data failed", dir.display()));
+    }
+    let ledger = Ledger::from_records(
+        &crate::workload::read_records(&dir.join("acks.jsonl")).map_err(|e| e.to_string())?,
+    );
+    let http = reqwest::Client::builder()
+        .pool_max_idle_per_host(16)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut srv = ServerTarget::spawn(
+        &failpoint_bin(),
+        &tmp.path().join("data"),
+        None,
+        &http,
+        READY_LIMIT,
+    )
+    .await?;
+    let mut anomalies = Vec::new();
+    let mut vs = check_after_restart(
+        &http,
+        &srv.base,
+        &ledger,
+        &mut HashSet::new(),
+        &mut anomalies,
+    )
+    .await;
+    let (final_vs, summary) = final_run_checks(&http, &srv.base, &ledger).await;
+    vs.extend(final_vs);
+    let mut seen = HashSet::new();
+    vs.retain(|x| seen.insert(format!("{x}")));
+    let _ = srv.kill9().await?;
+    supersede_state(cfg, id, superseded)?;
+    let before = st.tally.clone();
+    st.tally = Tally::default();
+    st.tally.add(&vs);
+    st.failures = vs.iter().take(50).map(|x| format!("final: {x}")).collect();
+    if vs.len() > 50 {
+        st.failures
+            .push(format!("final: ... {} more", vs.len() - 50));
+    }
+    st.anomalies.extend(anomalies);
+    st.anomalies.push(format!(
+        "recheck: final check re-run offline (wait winner from the journal + lost-wake \
+         check) on a copy of the data dir: runs {} statuses {:?}; tally before {before:?}",
+        summary.runs, summary.statuses
+    ));
+    save_shard(&path, &st)?;
+    Ok((st, vs))
+}
+
+/// Retry a shard's `rebuild_and_compare` that failed only because a `Node::open` timed out
+/// (a harness timeout under host load, not a digest mismatch). The dead data dir is still
+/// the one the failed rebuild saw (the shard stopped right there). On success the timeout
+/// failure is removed from `shard-NN.json` (the old file is kept in `superseded`), so the
+/// shard can resume its remaining kills; a mismatch or another timeout is returned as `Err`.
+pub async fn retry_rebuild_timeout(
+    cfg: &CampaignCfg,
+    id: u32,
+    superseded: &Path,
+) -> Result<ShardState, String> {
+    let path = shard_path(&cfg.state_dir, id);
+    let mut st = load_shard(&path, cfg)?.ok_or_else(|| format!("no {}", path.display()))?;
+    let [f] = st.failures.as_slice() else {
+        return Err(format!(
+            "shard {id}: expected exactly one failure, got {:?}",
+            st.failures
+        ));
+    };
+    if st.final_checked
+        || !f.starts_with("rebuild: CheckError")
+        || !f.ends_with("timed out")
+        || st.tally.total() != 1
+        || st.tally.other_violations != 1
+    {
+        return Err(format!("shard {id}: not a rebuild open timeout: {f}"));
+    }
+    let f = f.clone();
+    let data = cfg.state_dir.join(format!("shard-{id:02}")).join("data");
+    let t = Instant::now();
+    rebuild_and_compare(&data, PARTITIONS).await?;
+    supersede_state(cfg, id, superseded)?;
+    st.failures.clear();
+    st.tally = Tally::default();
+    st.anomalies.push(format!(
+        "retry: {f:?} was a Node::open timeout under host load; rebuild_and_compare of the \
+         same dead data dir re-run on a quiet host passed in {:.1} s",
+        t.elapsed().as_secs_f64()
+    ));
+    save_shard(&path, &st)?;
+    Ok(st)
 }
 
 /// Phase 8 invariant: a clean restart never reports `snapshot required` (retention keeps a

@@ -17,7 +17,10 @@
 //!   each signal `request_id` (embedded in the payload, W9) journaled at most once, and every
 //!   acked request_id exactly once ([`Kind::LostAckedSignal`]).
 //! - (b) [`check_final`]: after the final settle the run is terminal, with the status the
-//!   acked lifecycle calls allow and, when Completed, `result == crash_saga_expected(..)`.
+//!   acked lifecycle calls allow and, when Completed, `result == crash_saga_expected(..)`,
+//!   where each wait's value is the winner the journal records ([`wait_outcome`]: the
+//!   `signal_matched` payload, or `Null` after `wait_timed_out`). A signal journaled before
+//!   its wait's timeout fired, on a wait that then timed out, is a [`Kind::LostWake`].
 //!
 //! Never weaken a check to make a campaign pass: a violation is a durability bug.
 
@@ -100,21 +103,89 @@ pub struct RunLedger {
     pub stop_rejected: bool,
 }
 
-impl RunLedger {
-    /// Payload of the first journaled `name` signal (`Null` when none was journaled): the
-    /// signal the guest's wait matched. A signal whose response was lost to a kill may still
-    /// have been accepted, so this comes from the journal, not from the acks; every acked
-    /// signal must be journaled ([`Kind::LostAckedSignal`], checked by [`check_journal`]).
-    pub fn accepted_payload(&self, name: &str, events: &[Event]) -> Value {
-        events
-            .iter()
-            .find(|e| {
-                e.kind == "signal_payload"
-                    && e.details.get("name").and_then(Value::as_str) == Some(name)
-            })
-            .and_then(|e| e.details.get("payload").cloned())
-            .unwrap_or(Value::Null)
+/// How the guest's single wait for one signal name ended, read from the journal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaitOutcome {
+    /// No `signal_wait_started` for the name (the run ended before the wait, e.g. a
+    /// compensation), or the wait has no completion (the run was stopped while it waited).
+    NotCompleted,
+    /// `signal_matched{op, payload_seq}`: the signal won; the payload at `payload_seq`.
+    Matched(Value),
+    /// `wait_timed_out{op}`: the timeout won.
+    TimedOut { timed_out_seq: u64 },
+    /// `op_cancelled{op}`.
+    Cancelled,
+}
+
+impl WaitOutcome {
+    /// The value the guest saw: the matched payload, else `Null`.
+    pub fn payload(&self) -> Value {
+        match self {
+            WaitOutcome::Matched(p) => p.clone(),
+            _ => Value::Null,
+        }
     }
+}
+
+/// Who won the guest's (first) wait for `name`: the journal's own matching structure
+/// (`signal_wait_started` op -> `signal_matched` / `wait_timed_out` / `op_cancelled`), not
+/// "the first journaled signal". A signal journaled after the wait timed out is buffered and
+/// never consumed (crash-saga waits once per name), so it must not count as the winner.
+/// `Err` = the journal's matching structure is inconsistent (a `signal_matched` that points
+/// at no `name` payload).
+pub fn wait_outcome(name: &str, events: &[Event]) -> Result<WaitOutcome, String> {
+    let Some(start) = events.iter().find(|e| {
+        e.kind == "signal_wait_started"
+            && e.details.get("name").and_then(Value::as_str) == Some(name)
+    }) else {
+        return Ok(WaitOutcome::NotCompleted);
+    };
+    let op = start.seq;
+    let completion = events.iter().find(|e| {
+        matches!(
+            e.kind.as_str(),
+            "signal_matched" | "wait_timed_out" | "op_cancelled"
+        ) && e.details.get("op").and_then(Value::as_u64) == Some(op)
+    });
+    let Some(c) = completion else {
+        return Ok(WaitOutcome::NotCompleted);
+    };
+    match c.kind.as_str() {
+        "signal_matched" => {
+            let ps = c.details.get("payload_seq").and_then(Value::as_u64);
+            let p = events.iter().find(|e| {
+                Some(e.seq) == ps
+                    && e.kind == "signal_payload"
+                    && e.details.get("name").and_then(Value::as_str) == Some(name)
+            });
+            match p {
+                Some(p) => Ok(WaitOutcome::Matched(
+                    p.details.get("payload").cloned().unwrap_or(Value::Null),
+                )),
+                None => Err(format!(
+                    "signal_matched@{} for the {name} wait (op {op}) points at payload_seq \
+                     {ps:?}, which is not a {name} signal_payload",
+                    c.seq
+                )),
+            }
+        }
+        "wait_timed_out" => Ok(WaitOutcome::TimedOut {
+            timed_out_seq: c.seq,
+        }),
+        _ => Ok(WaitOutcome::Cancelled),
+    }
+}
+
+/// Payloads of every journaled `name` signal, in journal order.
+pub fn journaled_payloads<'a>(name: &str, events: &'a [Event]) -> Vec<(u64, &'a Value)> {
+    events
+        .iter()
+        .filter(|e| {
+            e.kind == "signal_payload"
+                && e.details.get("name").and_then(Value::as_str) == Some(name)
+        })
+        .map(|e| (e.seq, e.details.get("payload").unwrap_or(&Value::Null)))
+        .collect()
 }
 
 /// All runs, keyed by idempotency key, plus `run_id -> key`.
@@ -230,6 +301,9 @@ pub enum Kind {
     NonTerminal,
     WrongStatus,
     WrongResult,
+    /// A signal was journaled while its wait was still pending (before the wait's timeout
+    /// fired, i.e. before `wait_timed_out`), yet the wait ended with the timeout.
+    LostWake,
     CheckError,
 }
 
@@ -591,20 +665,47 @@ pub fn check_final(
         ));
         return out;
     }
-    let go = l.accepted_payload("go", events);
-    let extra = l.accepted_payload("extra", events);
-    for (name, got) in [("go", &go), ("extra", &extra)] {
-        if !got.is_null() && l.signal_intents.get(name).map(|(_, p)| p) != Some(got) {
-            out.push(v(
-                Kind::WrongResult,
-                run_id,
-                format!(
-                    "journaled {name} payload {got} was never sent (sent {:?})",
-                    l.signal_intents.get(name)
-                ),
-            ));
+    // The value each wait returned to the guest comes from the journal's matching structure
+    // (who won: signal or timeout), and every journaled payload must be one the harness sent.
+    let mut got = [Value::Null, Value::Null];
+    for (slot, name) in got.iter_mut().zip(["go", "extra"]) {
+        let sent = l.signal_intents.get(name).map(|(_, p)| p);
+        let journaled = journaled_payloads(name, events);
+        for (seq, p) in &journaled {
+            if sent != Some(*p) {
+                out.push(v(
+                    Kind::WrongResult,
+                    run_id,
+                    format!(
+                        "journaled {name} payload {p} (seq {seq}) was never sent (sent {:?})",
+                        l.signal_intents.get(name)
+                    ),
+                ));
+            }
+        }
+        match wait_outcome(name, events) {
+            Ok(w) => {
+                // Lost wake: a `name` signal journaled while the wait was pending (before its
+                // timeout fired) must have woken it (apply matches a pending wait, or the
+                // registration matches the buffered signal), never a timeout result.
+                if let WaitOutcome::TimedOut { timed_out_seq } = w
+                    && let Some((seq, _)) = journaled.iter().find(|(s, _)| *s < timed_out_seq)
+                {
+                    out.push(v(
+                        Kind::LostWake,
+                        run_id,
+                        format!(
+                            "{name} signal journaled at seq {seq}, before the wait's timeout \
+                             (wait_timed_out@{timed_out_seq}), but the wait timed out"
+                        ),
+                    ));
+                }
+                *slot = w.payload();
+            }
+            Err(e) => out.push(v(Kind::WrongResult, run_id, e)),
         }
     }
+    let [go, extra] = got;
     let expected = crash_saga_expected(&l.input, &go, &extra);
     let cancel_sent = l.stop_intent == Some(Stop::Cancel);
     let terminate_sent = l.stop_intent == Some(Stop::Terminate);

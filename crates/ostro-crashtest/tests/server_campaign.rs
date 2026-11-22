@@ -15,6 +15,13 @@
 //!        OSTRO_CAMPAIGN_SHARDS=20 OSTRO_CAMPAIGN_PARALLEL=6
 //! OSTRO_CAMPAIGN_SHARD_IDS=0-5 cargo test ... campaign   # then 6-11, 12-17, 18-19
 //! cargo test ... report
+//!
+//! # Offline re-check of finished shards with the current checker (p8-gate), then the
+//! # retry of a rebuild that failed only on a Node::open timeout (same exports as above;
+//! # the replaced shard-NN.json files go to $OSTRO_CAMPAIGN_STATE_DIR/$OSTRO_CAMPAIGN_SUPERSEDED):
+//! OSTRO_CAMPAIGN_SUPERSEDED=superseded-pre-recheck cargo test ... recheck
+//! OSTRO_CAMPAIGN_SHARD_IDS=10 OSTRO_CAMPAIGN_SUPERSEDED=superseded-shard10-open-timeout \
+//!     cargo test ... retry_rebuild
 //! ```
 //!
 //! See `ostro_crashtest::campaign` for the variables, the iteration shape and the checks.
@@ -55,6 +62,73 @@ fn report() {
     let (text, pass) = campaign::report(&cfg).unwrap_or_else(|e| panic!("{e}"));
     println!("{text}");
     assert!(pass, "campaign report: FAIL");
+}
+
+fn superseded_dir(cfg: &CampaignCfg) -> std::path::PathBuf {
+    cfg.state_dir.join(
+        std::env::var("OSTRO_CAMPAIGN_SUPERSEDED")
+            .unwrap_or_else(|_| "superseded-pre-recheck".into()),
+    )
+}
+
+/// Re-run the final check of every finished shard in `OSTRO_CAMPAIGN_SHARD_IDS` offline
+/// (`campaign::recheck_shard`); unfinished shards are skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "reads the campaign state dir and spawns the server on copies; run with --ignored"]
+async fn recheck() {
+    let cfg = CampaignCfg::from_env().unwrap_or_else(|e| panic!("{e}"));
+    let sup = superseded_dir(&cfg);
+    let mut bad = Vec::new();
+    for &id in &cfg.shard_ids {
+        match campaign::load_shard(&campaign::shard_path(&cfg.state_dir, id), &cfg) {
+            Ok(Some(s)) if s.final_checked => {}
+            other => {
+                println!(
+                    "shard {id:02}: skipped (not finished: {:?})",
+                    other.map(|s| s.map(|s| s.kills))
+                );
+                continue;
+            }
+        }
+        match campaign::recheck_shard(&cfg, id, &sup).await {
+            Ok((s, vs)) => {
+                println!(
+                    "shard {id:02}: rechecked runs {} violations {} tally {:?}",
+                    s.runs_acked,
+                    vs.len(),
+                    s.tally
+                );
+                for x in &vs {
+                    println!("shard {id:02}:   {x}");
+                }
+                if !vs.is_empty() {
+                    bad.push(id);
+                }
+            }
+            Err(e) => {
+                println!("shard {id:02}: recheck error: {e}");
+                bad.push(id);
+            }
+        }
+    }
+    assert!(bad.is_empty(), "shards with violations or errors: {bad:?}");
+}
+
+/// `campaign::retry_rebuild_timeout` for every shard in `OSTRO_CAMPAIGN_SHARD_IDS`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "reads the campaign state dir; run with --ignored"]
+async fn retry_rebuild() {
+    let cfg = CampaignCfg::from_env().unwrap_or_else(|e| panic!("{e}"));
+    let sup = superseded_dir(&cfg);
+    for &id in &cfg.shard_ids {
+        let s = campaign::retry_rebuild_timeout(&cfg, id, &sup)
+            .await
+            .unwrap_or_else(|e| panic!("shard {id}: {e}"));
+        println!(
+            "shard {id:02}: {}",
+            s.anomalies.last().map_or("", String::as_str)
+        );
+    }
 }
 
 /// Cross-check `crash_saga_expected` against the real guest on a live server: a plain
