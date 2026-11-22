@@ -24,6 +24,18 @@ export { ContinueAsNew, Ctx, f64FromU64 } from "./ctx.ts";
 export type { AwaitTokenHandle, ChildOpts, ContinueAsNewOpts, TimeoutOpts, WorkflowTarget } from "./ctx.ts";
 export { ChildRun, Op } from "./ops.ts";
 export {
+  HttpBuilder,
+  HttpClient,
+  IDEMPOTENCY_KEY_DOMAIN,
+  ObjectClient,
+  SqlBuilder,
+  idempotencyKeyFor,
+  sqlValue,
+} from "./effects.ts";
+export type { ObjectHead, ObjectPutInfo } from "./effects.ts";
+export { Saga, SagaReport } from "./saga.ts";
+export type { Compensation, CompensationFailure } from "./saga.ts";
+export {
   CANCELLED,
   CHILD_TERMINATED,
   CancelledError,
@@ -44,7 +56,7 @@ export {
 } from "./errors.ts";
 export { SdkPromise } from "./promise.ts";
 export { CANCELLATION_OP } from "./host.ts";
-export type { Host, LogLevel, Payload, RunInfo } from "./host.ts";
+export type { Header, Host, HttpRequest, HttpResponse, LogLevel, ObjectRequest, Payload, RunInfo, SqlRequest, SqlResult, SqlValue } from "./host.ts";
 export { decodeUtf8, encodeUtf8 } from "./utf8.ts";
 export { sha256, sha256Hex } from "./sha256.ts";
 // Targets of the bundle config's `transform.inject` (rolldown.ostro.mjs); not user API.

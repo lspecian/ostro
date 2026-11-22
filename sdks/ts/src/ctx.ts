@@ -22,6 +22,8 @@ import {
   decodeToken,
   decodeUnit,
 } from "./ops.ts";
+import { HttpClient, ObjectClient, SqlBuilder, idempotencyKeyFor } from "./effects.ts";
+import { Saga } from "./saga.ts";
 import { step, u32, u64 } from "./step.ts";
 import { checkString } from "./utf8.ts";
 
@@ -269,6 +271,33 @@ export class Ctx {
    */
   shielded<R>(fn: (s: Ctx) => R): R {
     return fn(this.isShielded ? this : new Ctx(this._act, true));
+  }
+
+  // --- effect builders, idempotency key, saga (09-12) -----------------------------------
+
+  /** HTTP effect builders: `await ctx.http.post(url).json(body).send()`. */
+  get http(): HttpClient {
+    return new HttpClient(this);
+  }
+
+  /** SQL statements against `connection`: `await ctx.sql("db").query(stmt, params)`. */
+  sql(connection: string): SqlBuilder {
+    return new SqlBuilder(connection, this);
+  }
+
+  /** Object-store operations against `connection`: `await ctx.object("s3").get(key)`. */
+  object(connection: string): ObjectClient {
+    return new ObjectClient(connection, this);
+  }
+
+  /** The semantic idempotency key for `name` in this run (P-11; equal across SDKs). */
+  idempotencyKey(name: string): string {
+    return idempotencyKeyFor(this.info().runId, name);
+  }
+
+  /** A new, empty `Saga` for this run (D-P9-18). */
+  saga(): Saga {
+    return new Saga(this);
   }
 
   /** `step(...)` as a ctx method. */
