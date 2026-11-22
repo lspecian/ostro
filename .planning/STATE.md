@@ -457,6 +457,28 @@ Recent decisions affecting current work:
   - D-P11-32: spawned-binary kill tests build `cargo build -p ostro --features failpoints --target-dir target/failpoints --locked` first (or run in-process).
   - D-P11-33: 11-14 treats Phase 10's client extraction (10-09) as landed iff 10-09-SUMMARY.md exists or crates/ostro-cli/src/client.rs references `ostro_client::`.
   - D-P11-34: every executor uses its own scratch worktree and private index; pre-commit verifies run the plan's own targets, workspace-wide only where shared types change.
+- [Phase 10 decisions (adopted defaults; user may override)]: adopted by the planner 2026-11-19 (10-DECISIONS.md, revised after the plan check); recorded by 10-01 (2026-11-22). 10-01 gate passed 2026-11-22 (Phase 9 complete, human_needed by-design only; Phase 8 clock seam F5 present).
+  - D-P10-1: "toolchain-free" = pinned, sha256-verified downloads into a content-addressed cache ($OSTRO_TOOLCHAIN_DIR, else $XDG_CACHE_HOME/ostro/toolchains, else ~/.cache or ~/Library/Caches; hand-written, no dirs crate), --docker as fallback; nothing linked or embedded.
+  - D-P10-2: Python = uv 0.7.15 exactly (sha-pinned), uv-managed CPython 3.12, released componentize-py 0.25.1 wheel via --require-hashes into a cache venv; build env as build-guest.sh.
+  - D-P10-3: TS = Node 24.13.0 (the 09-17 ci.yml pin, confirmed by 10-01) from official tarballs verified against pinned SHASUMS256; npm ci --ignore-scripts against the byte-identical embedded sdks/scripts/toolchain lockfile; jco flags = build-guest.sh ts mode.
+  - D-P10-4: --toolchain auto|hermetic|system|docker (also [build] toolchain); Rust auto = system rustup if present else hermetic rustup-init (minimal, RUSTFLAGS cleared); zig 0.17.1 cc shim when no host cc; Python/TS hermetic by default.
+  - D-P10-5: ostro.toml ([project] name/lang/entry, [build] toolchain, [deploy] activate/tenant; unknown keys rejected); all output in target/ostro/ (sdk/, stage/, <name>.wasm, manifest.json kind ostro.manifest v1, inputs.sha256); input-hash "up to date"; local validation = ostro_engine::validate + Runtime::describe.
+  - D-P10-6: server-side DevClock (base + monotonic offset + watch notifier) through the Phase 8 clock seam and RuntimeOptions.clock; only `ostro dev --ephemeral --time-skipping[=auto|manual]`; GET /v1/dev/time, POST /v1/dev/time/skip; 409 time_skipping_disabled; auto trigger = idle AND >=1 pending result long-poll AND 20 ms quiescence re-check. Adopted; USER REVIEW pending.
+  - D-P10-7: replay is server-side: idempotent upload without activation, then POST /v1/modules/{sha}/replay (runs|sample<=100 default, cap 1000 -> 400 sample_too_large); verdicts ok|ok_frontier|diverged|skipped|error; library = the existing `ostro_engine::replay_check(rt, module: &Prepared, run, journal) -> ReplayVerdict` (4 args, landed by 11-10; 10-11 reuses it unchanged).
+  - D-P10-8: client libraries hand-written over REST, zero runtime deps: Rust ostro-client (ostro-cli::client moved verbatim, publish = false), Python clients/python (ostro_client, stdlib only, >=3.9), TS clients/ts (ESM JS + hand-written .d.ts, Node >=18), Go clients/go (stdlib).
+  - D-P10-9: one test-kit design: binary from OSTRO_BIN else PATH, checks `ostro build-info --json`, spawns `ostro dev --ephemeral --time-skipping --listen 127.0.0.1:0`, parses the frozen ready line; Rust feature `testing`, Python TestEnv + pytest plugin, TS ostro-client/testing, Go ostrotest.
+  - D-P10-10: `ostro completions <shell>` via clap_complete 4.6.12; local verbs' --json start with "kind":"ostro.<verb>.result","version":1 (additive, snapshot-tested); REST-proxy verbs keep CLI-06; exit codes 0-3 unchanged + 4 replay divergence.
+  - D-P10-11: workspace pins by 10-02 only (notify =8.2.2, notify-debouncer-full =0.7.0, clap_complete =4.6.12, tar =0.4.46, flate2 =1.1.11 rust_backend, lzma-rust2 =0.25.0); deny.toml crate-scoped exception { allow = ["CC0-1.0"], crate = "notify" }; forbidden crates unchanged. Adopted; USER REVIEW pending.
+  - D-P10-12: ostro-build/build.rs embeds a deterministic SDK bundle tar (Rust SDK + macros with vendored WIT, Python/TS SDKs, toolchain lockfiles) and the init templates; `ostro init --lang rust|python|ts`.
+  - D-P10-13: `ostro deploy [PATH]`: a .wasm PATH keeps the 05-14 behaviour byte-for-byte; a project is built if stale, uploaded through ostro-client (idempotent), and only non-active versions are activated.
+  - D-P10-14: `ostro dev --watch [DIR]`: in-process server + build/deploy via the deploy path, notify-debouncer-full 250 ms, shared pipeline::IGNORE list, serialised builds with one follow-up, last good version kept on failure; loop in ostro-cli/src/watch.rs.
+  - D-P10-15: --docker = `docker run --rm ostro-build:<ver>` with the static musl ostro mounted read-only, the image built locally from the embedded deploy/build-image/Dockerfile (debian:12-slim by digest); OSTRO_DOCKER overrides the binary (recording shim in tests); macOS via OSTRO_LINUX_BIN.
+  - D-P10-16: parity with Phase 9: ostro build and build-guest.sh pass identical flags/env; OSTRO_POLYGLOT_BUILDER=ostro makes the conformance leg use ostro-built artefacts.
+  - D-P10-17: Phase 10 allocates no ordinal (F7); DevClock state is process memory; replay reads journals; no server-side source-hash dedupe.
+  - D-P10-18: /v1/dev/time, /v1/dev/time/skip and /v1/modules/{sha}/replay are REST/OpenAPI only (tags dev/tooling) with an explicit, commented exclusion list in the gRPC parity suite.
+  - D-P10-19: Phase 10 names are the RESERVATIONS §11 P10 rows (added by 10-01, commit ca8a62e).
+  - D-P10-20: SC1 via scripts/clean-machine.sh <lang> <image> [--docker] (ubuntu:24.04, debian:12; init -> deploy -> run --wait, 600 s per language), driven by #[ignore] crates/ostro/tests/clean_machine.rs and a ci.yml clean-machine job; musl binary size gate < 60 MB.
+  - D-P10-21: publishing (ostro-client on PyPI/npm/crates.io, Go tag, ostro-build image, Rust SDK crates) is human_needed; only dry runs locally.
 
 ### Pending Todos
 
@@ -506,6 +528,10 @@ Recent decisions affecting current work:
 - [USER REVIEW] D-P11-14 (Phase 11): UI stack askama =0.16.1 (syn 3) + vendored htmx 2.0.11 in crate ostro-ui; fallback maud 0.27.0. 11-03 records the outcome of the deny/MSRV probe.
 - [USER REVIEW] D-P11-17 (Phase 11): UI on by default in dev; in the server profile only for a loopback listener or explicit [ui] enabled = true, because REST and UI are unauthenticated until Phase 14.
 - [HUMAN] Phase 11 real-browser checks (Firefox + Chromium): render, keyboard navigation, htmx swaps and polling, hx-confirm dialogs, no CSP console errors, no-JS fallback. Checklist in 11-VALIDATION.md; no browser automation (Playwright needs Node).
+- [USER REVIEW] D-P10-11 (Phase 10): deny.toml crate-scoped licence exception { allow = ["CC0-1.0"], crate = "notify" } for notify 8.2.2 (ostro dev --watch). Alternative: polling watcher without notify (worse latency/CPU).
+- [USER REVIEW] D-P10-6 (Phase 10): auto time-skip trigger = node idle AND ≥1 pending result long-poll AND a 20 ms quiescence re-check. Alternative: always-auto when idle (simpler; races signal-before-await tests).
+- [HUMAN] Phase 10 publishing: ostro-client on PyPI/npm/crates.io, Go module tag clients/go/v0.1.0, the ostro-build Docker image, the Rust SDK crates. Only dry runs run locally.
+- [HUMAN] Phase 10 SC1: run scripts/clean-machine.sh (ubuntu:24.04, debian:12, all three languages, hermetic and --docker) on a machine with Docker, or via the ci.yml clean-machine job once a remote exists; plus one macOS clean run (zig cc host linker).
 
 ### Blockers/Concerns
 
@@ -562,6 +588,24 @@ Open:
   - `tests/common/mod.rs` (both crates): never edited by Phase 11; helpers in `tests/common/p11.rs`.
   - **Phase 13 obligation (D-P11-30):** every new Phase 11 encoding (Cmd 45, StartRun 40/41, ext tags 144/145, JournalEvent.4) is emitted only through `ostro_server::p11::p11_feature_enabled`, which returns true; Phase 13 must replace its body with the cluster-version/proposal gate.
   - Phase 14 notes: `UiAuth`/`UiPrincipal` seam; scopes `read` (views) / `operate` (actions, bulk, rerun, DLQ); audit at the ControlPlane covers UI actions; index prefix `0x04` for tenant listing.
+- **Phase 10 ↔ Phase 7/8/11 coordination** (recorded by 10-01, 2026-11-22; full table: 10-DECISIONS.md "Shared files"). Phases 7, 8 and 9 are complete, so only Phase 11 (11-18 gate still open) and Phase 12 run in parallel.
+  - Cargo files and deny.toml: 10-02 only. ci files (ci-local.sh, ci.yml): 10-02, 10-19, 10-20 (FAILPOINT_CRATES unchanged by Phase 10; 11-18 is appending to it now).
+  - `ostro-cli/src/client.rs`: 10-05 appends, then 10-09 moves it to `ostro-client`, including the delimited `// --- Phase 11 (11-14) ---` block as-is. After that, Phase 11 client methods go in a new `ostro-client` module.
+  - `ostro-cli/src/lib.rs` + `watch.rs` stub + Cargo anchors (incl. one main.rs anchor line): 10-02; `ostro-cli/src/{commands/mod.rs,output.rs}`: 10-03 (append variants; 10-18 appends EXIT_CODES).
+  - `crates/ostro/src/main.rs`: 10-02 (one anchor line), 10-10 (`--time-skipping`, `build-info --json`), 10-16, 10-18 (different waves). 10-18 also adds a completions presence check for the Phase 11 verbs rerun/dlq/bulk/limits in crates/ostro/tests/cli_p11.rs.
+  - clock-exempt sweep (comment-only): 10-06 owns partition `lib.rs`/`node.rs`/`machine.rs`/`shuffler.rs`/`dispatcher.rs` and server `executor.rs` (shared with Phase 11 11-06/11-07, both done) / `control/watch.rs` / `server.rs` in wave 2.
+  - Mutual exclusion with Phase 11 (numbering at 679a021): 10-02 ↔ 11-03/11-04, 10-05 ↔ 11-04/11-09, 10-09 ↔ 11-14. Moot as of 2026-11-22: 11-03, 11-04, 11-09 and 11-14 are done.
+  - `ostro-api` domain/fake/rest/openapi, parity.rs, the OpenAPI snapshot: 10-05 only. Regenerate the snapshot on a moved HEAD.
+  - server `control/mod.rs`: 10-05, 10-10. `server.rs`/`config.rs`/`lib.rs`: 10-10, 10-13.
+  - partition `dispatcher.rs`: 10-06 (comments), 10-10 (clock wake + skip barrier; the dispatcher does not wake on a ManualClock advance today, see its module doc), 10-13 (idle accessor).
+  - engine `lib.rs` + `tests/replay_corpus.rs`: 10-11. `ostro_engine::replay_check(rt, module: &Prepared, run, journal) -> ReplayVerdict` already exists (11-10): reuse it unchanged (single replay checker); the type is `Prepared`, not `PreparedModule` as D-P10-7 words it.
+  - `tests/common/mod.rs` (both crates): never. Use `common/p10.rs`.
+  - Rule: clean HEAD blob, append only, base check, re-apply on a moved HEAD, scratch worktree under `/tmp`, private index.
+  - Phase 11 overlaps found by 10-01 check 4 (all done except 11-18): 11-03 Cargo.toml/Cargo.lock/deny.toml/crate Cargo.toml files; 11-04 ostro-api phase11.rs/lib.rs/tests, server.rs, control/mod.rs, ci-local.sh, ci.yml; 11-09 ostro-api domain/rest/grpc/fake/openapi/parity/snapshot; 11-14 ostro-cli commands/{rerun,dlq,bulk,limits,runs,mod}.rs, client.rs, ostro/src/main.rs; 11-18 (open) ci-local.sh, ci.yml.
+  - Phase 12 overlaps (not in the 10-DECISIONS table; Phase 12 runs in parallel): 12-01 Cargo/deny/ci files (done); 12-02 server config.rs/server.rs; 12-08 partition dispatcher.rs + control/mod.rs + ci-local.sh; 12-14 control/mod.rs + server.rs; 12-17 server config.rs; 12-18 ci files. Same rule: append only, re-apply on a moved HEAD.
+- Phase 10 polyglot legs (real toolchain downloads, Python/TS builds) need network + the ostro-build polyglot feature; ci-local shows them under --no-polyglot as SKIP. Go client tests need Go ≥ 1.23 (--no-go skips visibly). Docker is absent locally: --docker and SC1 are tested with a recording docker shim locally and for real only in the ci.yml clean-machine job (human_needed until a remote exists).
+  - 10-01 note (2026-11-22): Docker IS now present on this machine (Docker Desktop WSL integration, client/server 29.1.3, `/usr/bin/docker` symlink dated 2026-11-22). 10-15/10-19 may run the real --docker and SC1 legs locally as an extra; the recording shim stays the CI-independent test.
+  - Candidate for 10-10/10-13 (open user item, not implemented by the gate): macOS `ostro dev --ephemeral` misses the 1 s budget because macOS has no tmpfs; coordinator suggestion = an in-memory / fsync-free ephemeral mode.
 
 Resolved in Phase 1:
 - ~~Do componentize-py/js reseed randomness after pre-init?~~ **Resolved** (S2, 01-05): no. Host-driven reseed works in all three languages; SDKs must reseed/patch from ctx. See docs/spikes/S2-guest-toolchains.md#determinism-probes
