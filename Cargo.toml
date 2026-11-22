@@ -149,6 +149,16 @@ codegen-units = 1
 strip = "debuginfo"
 # panic strategy: leave default (unwind) until Phase 3 decides (catch_unwind around guest calls)
 
+# Debug info trimmed to keep target dirs small (they filled the disk, 2026-11-22).
+# Backtraces still have file:line. To debug with variables in gdb/lldb, set
+# debug = true here and delete the [profile.dev.package."*"] block below
+# (or one-off: cargo --config profile.dev.debug=true --config 'profile.dev.package."*".debug=true' ...).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # Cranelift is slow unoptimised; optimise it even in dev/test builds (Phase 3).
 [profile.dev.package.cranelift-codegen]
 opt-level = 3
