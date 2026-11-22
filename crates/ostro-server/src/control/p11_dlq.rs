@@ -65,7 +65,7 @@ use ostro_api::phase11::{
 };
 use ostro_api::rest::RunStatusDto;
 use ostro_api::{ApiError, ControlPlane};
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_meta::{MetaKey, MetaRecord, QueuePolicy, WorkflowPolicy};
 use ostro_partition::query::{self, IndexError};
 use ostro_partition::store::derived::{IndexKind, SUFFIX_LEN, index_prefix};
@@ -179,7 +179,7 @@ pub fn reason_from_failure_json(bytes: &[u8]) -> Option<String> {
 
 /// The failure reason of a failed / timed-out run (see the module docs).
 pub async fn failure_reason(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     run: &RunId,
     rec: &RunRecord,
 ) -> Result<String, ApiError> {
@@ -231,7 +231,7 @@ fn id18(b: &[u8; 18]) -> String {
 
 /// Build the entry of a member.
 pub async fn entry(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     run: &RunId,
     rec: RunRecord,
     marks: Option<DlqRow>,
@@ -531,7 +531,7 @@ async fn scan_fallback(
 
 /// Submit a `DlqUpdate` for `run`'s episode `episode` (gated by D-P11-30).
 pub async fn submit_mark(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     run: &RunId,
     episode: u64,
     op: dlq_update::Op,
@@ -552,7 +552,7 @@ pub async fn submit_mark(
 }
 
 async fn read_both(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     run: RunId,
 ) -> Result<(RunRecord, Option<DlqRow>), ApiError> {
     let reader = handle.reader();
@@ -736,7 +736,7 @@ pub async fn requeue_dlq(
 /// placed by `partition_for_key(workflow, key)` and a repeat returns the existing run.
 async fn restart_with_key(
     ctx: &P11Ctx,
-    old_handle: &PartitionHandle<Rf1Log>,
+    old_handle: &PartitionHandle<PartitionLog>,
     old: RunId,
     rec: RunRecord,
     key: &str,

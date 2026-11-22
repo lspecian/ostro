@@ -54,7 +54,7 @@ use ostro_bridge::driver::{Bridge, EffectBase};
 use ostro_engine::EffectDriver;
 use ostro_engine::LiveEffect;
 use ostro_engine::sink::RunRef;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::store::values::RunRecord;
 use ostro_partition::{ApplyOutcome, Clock, PartitionHandle, RejectReason, query};
 use ostro_types::command::{CompleteEffect, complete_effect_payload};
@@ -63,7 +63,7 @@ use ostro_types::live::EffectKind;
 use ostro_types::{Command, RunId};
 
 /// The partition handle type of the server.
-pub type Handle = PartitionHandle<Rf1Log>;
+pub type Handle = PartitionHandle<PartitionLog>;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)

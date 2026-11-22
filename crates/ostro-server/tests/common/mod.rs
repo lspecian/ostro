@@ -15,7 +15,7 @@ use bytes::Bytes;
 use ostro_engine::config::EngineConfig;
 use ostro_engine::runtime::{Runtime, RuntimeOptions};
 use ostro_engine::sink::{ActivationOutcome, RunRef};
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::store::values::{RunRecord, RunStatus};
 use ostro_partition::{
     ApplyOutcome, DispatcherConfig, DispatcherStats, Executor, Node, NodeConfig, PartitionHandle,
@@ -232,11 +232,11 @@ impl TestNode {
         PartitionCount::new(self.opts.partitions).expect("non-zero")
     }
 
-    pub fn handle(&self, p: PartitionId) -> PartitionHandle<Rf1Log> {
+    pub fn handle(&self, p: PartitionId) -> PartitionHandle<PartitionLog> {
         self.node.handle(p).expect("partition ready").clone()
     }
 
-    pub fn handle_of(&self, run: &RunId) -> PartitionHandle<Rf1Log> {
+    pub fn handle_of(&self, run: &RunId) -> PartitionHandle<PartitionLog> {
         self.handle(run.partition())
     }
 
@@ -614,7 +614,7 @@ impl TestServer {
     }
 
     /// The partition handle owning `run`.
-    pub fn handle_of(&self, run: &RunId) -> PartitionHandle<Rf1Log> {
+    pub fn handle_of(&self, run: &RunId) -> PartitionHandle<PartitionLog> {
         self.h()
             .node()
             .handle(run.partition())
@@ -774,7 +774,7 @@ impl TestServer {
     }
 
     /// Every partition handle of the running server.
-    pub fn partitions(&self) -> Vec<PartitionHandle<Rf1Log>> {
+    pub fn partitions(&self) -> Vec<PartitionHandle<PartitionLog>> {
         (0..self.cfg.node.partitions)
             .map(|p| {
                 self.h()

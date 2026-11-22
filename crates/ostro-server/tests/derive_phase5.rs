@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ostro_engine::sink::{ActivationSink, AppendError, RunRef};
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::store::values::{RunRecord, RunStatus};
 use ostro_partition::{ApplyOutcome, Node, NodeConfig, PartitionHandle, query};
 use ostro_server::derive::{
@@ -719,7 +719,7 @@ fn rref(run: &RunId) -> RunRef {
 struct Fx {
     _dir: tempfile::TempDir,
     _node: Node,
-    handle: PartitionHandle<Rf1Log>,
+    handle: PartitionHandle<PartitionLog>,
     run: RunId,
     token: AttemptToken,
     sink: PartitionSink,
@@ -872,7 +872,7 @@ fn decode(r: &ostro_types::journal::RecordedResult, kind: &str) -> String {
 }
 
 /// Wait until `run` exists on the handle's partition.
-async fn wait_record(h: &PartitionHandle<Rf1Log>, run: &RunId) -> RunRecord {
+async fn wait_record(h: &PartitionHandle<PartitionLog>, run: &RunId) -> RunRecord {
     let deadline = Instant::now() + T;
     loop {
         if let Some(r) = h.read_run(run).expect("read") {

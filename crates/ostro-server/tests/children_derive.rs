@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use ostro_engine::sink::{ActivationSink, AppendError, RunRef};
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::store::keys::children_key;
 use ostro_partition::store::values::RunRecord;
 use ostro_partition::{ApplyOutcome, Node, NodeConfig, PartitionHandle, Table, query};
@@ -134,7 +134,7 @@ fn base_start(run: &RunId, parent: Option<ParentRef>) -> StartRun {
 struct Fx {
     _dir: tempfile::TempDir,
     _node: Node,
-    handle: PartitionHandle<Rf1Log>,
+    handle: PartitionHandle<PartitionLog>,
 }
 
 impl Fx {

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ostro_engine::sink::{ActivationOutcome, ActivationSink, AppendError, RunRef};
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::store::values::RunStatus;
 use ostro_partition::{ApplyOutcome, Node, NodeConfig, PartitionHandle, Table, query};
 use ostro_server::derive;
@@ -45,12 +45,12 @@ async fn open(dir: &Path) -> Node {
         .expect("node open")
 }
 
-fn h(node: &Node) -> PartitionHandle<Rf1Log> {
+fn h(node: &Node) -> PartitionHandle<PartitionLog> {
     node.handle(P0).expect("partition ready").clone()
 }
 
 /// Start a run pinned to MODULE_SHA and grant attempt 1.
-async fn start(handle: &PartitionHandle<Rf1Log>) -> (RunId, AttemptToken) {
+async fn start(handle: &PartitionHandle<PartitionLog>) -> (RunId, AttemptToken) {
     let run = RunId::new_v7(P0);
     let o = handle
         .submit_one(Command::start_run(StartRun {
@@ -85,7 +85,7 @@ fn rref(run: &RunId) -> RunRef {
 struct Fixture {
     _dir: tempfile::TempDir,
     node: Node,
-    handle: PartitionHandle<Rf1Log>,
+    handle: PartitionHandle<PartitionLog>,
     run: RunId,
     token: AttemptToken,
     sink: Arc<PartitionSink>,

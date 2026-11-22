@@ -332,7 +332,7 @@ impl Rig {
 
     // --------------------------------------------------------------------- node + jobs
 
-    pub fn handle(&self) -> PartitionHandle<ostro_log::Rf1Log> {
+    pub fn handle(&self) -> PartitionHandle<ostro_log::PartitionLog> {
         self.node
             .as_ref()
             .expect("RigOpts.node")

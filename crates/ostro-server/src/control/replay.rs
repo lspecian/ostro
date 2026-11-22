@@ -38,7 +38,7 @@ use ostro_api::{ApiError, ControlPlane};
 use ostro_engine::replay_check::{ReplayVerdict, replay_check};
 use ostro_engine::runtime::{Prepared, Runtime};
 use ostro_engine::sink::RunRef;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::{PartitionHandle, query};
 use ostro_types::RunId;
 use tokio::sync::Semaphore;
@@ -188,7 +188,7 @@ fn verdict_of(
 async fn check_one(
     runtime: Arc<Runtime>,
     module: Arc<Prepared>,
-    handle: PartitionHandle<Rf1Log>,
+    handle: PartitionHandle<PartitionLog>,
     sel: &Selected,
 ) -> ReplayVerdictInfo {
     let journal = match journal_io::read_journal(&handle, &sel.run).await {

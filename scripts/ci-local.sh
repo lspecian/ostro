@@ -283,6 +283,18 @@ check_forbidden_crates() {
   bash scripts/forbidden-crates.sh --self-test && bash scripts/forbidden-crates.sh
 }
 
+# Phase 12 (12-08, D5 / docs/04 §4 rule 1): one partition log implementation. The former
+# RF=1 type name must not come back, and the log crate must not branch on the replication
+# factor (RF=1 is a replica set of one, not a second path).
+check_one_log_path() {
+  local hits rc=0
+  hits=$(grep -rn "Rf1Log" crates/ || true)
+  if [ -n "$hits" ]; then echo "Rf1Log is gone (use PartitionLog):"; echo "$hits"; rc=1; fi
+  hits=$(grep -rnE "rf *== *1|replicas\.len\(\) *== *1" crates/ostro-log/src || true)
+  if [ -n "$hits" ]; then echo "RF-specific branch in ostro-log:"; echo "$hits"; rc=1; fi
+  return $rc
+}
+
 check_workflow() {
   if command -v actionlint >/dev/null 2>&1; then
     actionlint "$WORKFLOW"
@@ -555,6 +567,7 @@ step "cargo deny check" cargo deny check
 step "check-vendored.sh" bash scripts/check-vendored.sh
 step "check-deny-fixtures.sh" bash scripts/check-deny-fixtures.sh
 step "no chronik/tokio-uring/prometheus" check_forbidden_crates
+step "one partition log path (12-08)" check_one_log_path
 if [[ -f "$WORKFLOW" ]]; then
   step "workflow validation" check_workflow
 else

@@ -50,6 +50,10 @@ async fn write_log(dir: &Path, p: PartitionId, batches: Vec<(u32, Vec<Bytes>)>) 
     let (node, log) = open_partition_log_for_tests(&dir.join("wal"), p, 1, Offset(0))
         .await
         .expect("open log");
+    // The fixture log opens unassigned (12-08): lead it the RF=1 way first.
+    let first = batches.first().map_or(1, |(e, _)| *e);
+    log.become_leader(Epoch(first), ostro_log::ReplicaSet::solo(1))
+        .expect("become leader");
     for (e, cmds) in batches {
         let r = log.append(Epoch(e), cmds).await.expect("append");
         log.wait_committed(r.last).await.expect("committed");

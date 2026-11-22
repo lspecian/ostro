@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_log::{
-    EpochHistory, Isr, LogError, LogHealth, LogNode, LogNodeConfig, RawBatch, ReplicaSet,
-    ReplicatedLog, Rf1Log, Role, TrimPermit, VerifiedBatch,
+    EpochHistory, Isr, LogError, LogHealth, LogNode, LogNodeConfig, PartitionLog, RawBatch,
+    ReplicaSet, ReplicatedLog, Role, TrimPermit, VerifiedBatch,
 };
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId, envelope};
 use tokio::sync::watch;
 
-async fn open(dir: &Path) -> (LogNode, Arc<Rf1Log>) {
+async fn open(dir: &Path) -> (LogNode, Arc<PartitionLog>) {
     let cfg = LogNodeConfig::new(dir.join("wal"), PartitionCount::new(1).unwrap(), 1);
     let (node, mut logs) = LogNode::open(cfg, &[Offset::ZERO]).await.unwrap();
     let log = logs.remove(0).unwrap();
@@ -22,7 +22,7 @@ async fn open(dir: &Path) -> (LogNode, Arc<Rf1Log>) {
 }
 
 /// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
-fn lead(log: &Rf1Log) {
+fn lead(log: &PartitionLog) {
     let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
     log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
@@ -34,7 +34,7 @@ fn cmds(tag: &str, n: usize) -> Vec<Bytes> {
 }
 
 /// `(epoch, n_cmds)` per batch; returns the last offset.
-async fn append_all(log: &Rf1Log, batches: &[(u32, usize)]) -> Offset {
+async fn append_all(log: &PartitionLog, batches: &[(u32, usize)]) -> Offset {
     let mut last = Offset::ZERO;
     for (i, &(e, n)) in batches.iter().enumerate() {
         last = log
@@ -190,10 +190,10 @@ async fn respects_the_high_watermark() {
     node.shutdown().await;
 }
 
-/// Delegates to an `Rf1Log` but uses the trait's **default** `read_envelopes` and caps the
+/// Delegates to an `PartitionLog` but uses the trait's **default** `read_envelopes` and caps the
 /// high watermark at `cap`.
 struct CappedLog {
-    inner: Arc<Rf1Log>,
+    inner: Arc<PartitionLog>,
     cap: Offset,
 }
 

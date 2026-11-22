@@ -50,7 +50,7 @@ use ostro_api::domain::{
     RetryRequest, RetryResponse, RunStatus, SignalRequest, SignalResponse, TerminateRequest,
     TerminateResponse,
 };
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::apply::InvalidCode;
 use ostro_partition::store::Table;
 use ostro_partition::store::keys::{signal_seen_key, wait_key};
@@ -74,7 +74,7 @@ const JSON: &str = "application/json";
 
 /// The run's record, or 404.
 pub(crate) async fn read_record(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     run: RunId,
 ) -> Result<RunRecord, ApiError> {
     let reader = handle.reader();
@@ -87,7 +87,7 @@ pub(crate) async fn read_record(
 
 /// Point read on the partition's state store.
 async fn point_read(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     table: Table,
     key: Vec<u8>,
 ) -> Result<Option<Vec<u8>>, ApiError> {
@@ -99,7 +99,7 @@ async fn point_read(
 }
 
 /// 409 `run_terminal` with the run's current status (re-read after a race).
-async fn terminal_error(handle: &PartitionHandle<Rf1Log>, run: RunId) -> ApiError {
+async fn terminal_error(handle: &PartitionHandle<PartitionLog>, run: RunId) -> ApiError {
     match read_record(handle, run).await {
         Ok(rec) => ApiError::run_terminal(&run.to_string(), status(rec.status)),
         Err(e) => e,
@@ -107,7 +107,7 @@ async fn terminal_error(handle: &PartitionHandle<Rf1Log>, run: RunId) -> ApiErro
 }
 
 /// Map a rejection shared by every lifecycle command.
-async fn rejected(handle: &PartitionHandle<Rf1Log>, run: RunId, r: RejectReason) -> ApiError {
+async fn rejected(handle: &PartitionHandle<PartitionLog>, run: RunId, r: RejectReason) -> ApiError {
     match r {
         RejectReason::RunNotFound => not_found(&run.to_string()),
         RejectReason::RunTerminal => terminal_error(handle, run).await,
@@ -126,7 +126,7 @@ async fn rejected(handle: &PartitionHandle<Rf1Log>, run: RunId, r: RejectReason)
 /// up to 256 KiB, else offloaded to the blob store.
 async fn encoded_event(
     cp: &ServerControlPlane,
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     body: EventBody,
 ) -> Result<PayloadRef, ApiError> {
     let (_, bytes) = encode_event(&Event {
@@ -147,7 +147,10 @@ fn json_payload(v: &serde_json::Value) -> Payload {
     }
 }
 
-async fn submit(handle: &PartitionHandle<Rf1Log>, c: Command) -> Result<ApplyOutcome, ApiError> {
+async fn submit(
+    handle: &PartitionHandle<PartitionLog>,
+    c: Command,
+) -> Result<ApplyOutcome, ApiError> {
     handle.submit_one(c).await.map_err(partition_error)
 }
 
@@ -366,7 +369,7 @@ pub(crate) async fn retry_run(
 /// input bytes, no `continued_from`) through `attach_run_started`.
 async fn restart(
     cp: &ServerControlPlane,
-    old_handle: &PartitionHandle<Rf1Log>,
+    old_handle: &PartitionHandle<PartitionLog>,
     old: RunId,
     rec: RunRecord,
 ) -> Result<RetryResponse, ApiError> {

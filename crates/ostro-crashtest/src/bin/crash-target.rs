@@ -193,7 +193,7 @@ fn main() {
 /// Submit `cmds`; print an ACK for every `Accepted` outcome. `runs[i]` is the run id of
 /// `cmds[i]` when it is a `StartRun`. Returns the outcomes, or `None` after a failure.
 async fn submit(
-    h: &PartitionHandle<ostro_log::Rf1Log>,
+    h: &PartitionHandle<ostro_log::PartitionLog>,
     cmds: Vec<Command>,
     runs: &[Option<RunId>],
 ) -> Option<Vec<ApplyOutcome>> {
@@ -219,7 +219,7 @@ async fn submit(
 }
 
 async fn load(
-    h: PartitionHandle<ostro_log::Rf1Log>,
+    h: PartitionHandle<ostro_log::PartitionLog>,
     count: u16,
     mut rng: Rng,
     shared: Shared,

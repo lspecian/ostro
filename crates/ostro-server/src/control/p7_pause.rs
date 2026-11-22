@@ -28,7 +28,7 @@
 use ostro_api::ApiError;
 use ostro_api::domain::{RetryMode, RetryRequest, RetryResponse};
 use ostro_api::phase7::{PauseRunRequest, RunPauseState};
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::{ApplyOutcome, PartitionHandle, RejectReason};
 use ostro_types::RunId;
 use ostro_types::command::{Command, PAUSE_REASON_OPERATOR, PauseRun, ResumeRun};
@@ -38,7 +38,7 @@ use super::lifecycle::read_record;
 use super::runs::{not_found, parse_run_id, partition_error, status};
 
 /// Map a rejected PauseRun / ResumeRun.
-async fn rejected(handle: &PartitionHandle<Rf1Log>, run: RunId, r: RejectReason) -> ApiError {
+async fn rejected(handle: &PartitionHandle<PartitionLog>, run: RunId, r: RejectReason) -> ApiError {
     match r {
         RejectReason::RunNotFound => not_found(&run.to_string()),
         RejectReason::RunTerminal => match read_record(handle, run).await {
@@ -52,7 +52,11 @@ async fn rejected(handle: &PartitionHandle<Rf1Log>, run: RunId, r: RejectReason)
     }
 }
 
-async fn submit(handle: &PartitionHandle<Rf1Log>, run: RunId, c: Command) -> Result<(), ApiError> {
+async fn submit(
+    handle: &PartitionHandle<PartitionLog>,
+    run: RunId,
+    c: Command,
+) -> Result<(), ApiError> {
     match handle.submit_one(c).await.map_err(partition_error)? {
         ApplyOutcome::Accepted | ApplyOutcome::Duplicate { .. } => Ok(()),
         ApplyOutcome::Rejected(e) => Err(rejected(handle, run, e).await),
@@ -96,7 +100,7 @@ pub(crate) async fn pause_run(
 
 async fn submit_resume(
     cp: &ServerControlPlane,
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     run: RunId,
 ) -> Result<(), ApiError> {
     submit(

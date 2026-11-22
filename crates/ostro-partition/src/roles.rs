@@ -24,7 +24,7 @@ use crate::handle::PartitionError;
 use crate::store::StoreConfig;
 
 /// The concrete partition log handle `Node` holds. The only line that names the type.
-pub type PartitionLogHandle = ostro_log::Rf1Log;
+pub type PartitionLogHandle = ostro_log::PartitionLog;
 
 /// Test/fixture constructor next to the alias (W6): opens a one-node log for
 /// `partition` (partition count `partition + 1`) under `wal_dir`, anchored at `floor`

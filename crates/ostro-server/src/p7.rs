@@ -35,7 +35,7 @@ use std::time::Duration;
 use axum::Router;
 use ostro_blob::BlobStore;
 use ostro_engine::runtime::Runtime;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_meta::{MetaHandle, MetaView};
 use ostro_partition::{
     Clock, DispatcherConfig, DispatcherStats, Executor, Node, PartitionHandle, PartitionSlot,
@@ -72,7 +72,7 @@ pub enum P7Error {
 #[derive(Clone)]
 pub struct NodeRefs {
     /// One entry per partition: `Some` when the slot started.
-    pub partitions: Vec<Option<PartitionHandle<Rf1Log>>>,
+    pub partitions: Vec<Option<PartitionHandle<PartitionLog>>>,
     /// The node-wide blob store (`None` if no partition started).
     pub blobs: Option<Arc<BlobStore>>,
 }
@@ -263,7 +263,7 @@ pub fn dispatcher_config(
 
 /// Record the opened node (partition handles + blob store) in [`P7Shared::node`].
 pub fn attach_node(ctx: &P7Ctx, node: &Node) {
-    let partitions: Vec<Option<PartitionHandle<Rf1Log>>> = node
+    let partitions: Vec<Option<PartitionHandle<PartitionLog>>> = node
         .slots()
         .iter()
         .map(|s| match s {

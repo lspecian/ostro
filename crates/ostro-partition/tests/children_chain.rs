@@ -443,7 +443,7 @@ mod rebuild {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use ostro_log::{ReplicatedLog, Rf1Log};
+    use ostro_log::{PartitionLog, ReplicatedLog};
     use ostro_partition::{Node, NodeConfig, PartitionHandle, PartitionSlot, StartMode};
     use ostro_types::command::{
         AttemptTokenMsg, CompleteRun, ConflictPolicy, Derived, EventsAppended, JournalEvent,
@@ -467,7 +467,7 @@ mod rebuild {
             .expect("node open")
     }
 
-    fn h(node: &Node, p: u16) -> PartitionHandle<Rf1Log> {
+    fn h(node: &Node, p: u16) -> PartitionHandle<PartitionLog> {
         node.handle(PartitionId(p)).expect("ready").clone()
     }
 

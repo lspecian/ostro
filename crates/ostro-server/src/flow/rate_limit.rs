@@ -21,7 +21,7 @@
 //! of one new key may both be charged although only one creates a run.
 
 use ostro_api::ApiError;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::PartitionHandle;
 use ostro_partition::store::Table;
 use ostro_partition::store::keys::dedupe_key;
@@ -56,7 +56,7 @@ pub fn admit_start(
 /// row of `(workflow, idempotency)` read from `handle` (the key's partition).
 pub(crate) async fn admit(
     cp: &ServerControlPlane,
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     workflow: &str,
     queue: &str,
     key: &str,

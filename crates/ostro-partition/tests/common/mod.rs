@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ostro_blob::BlobStore;
-use ostro_log::{LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log};
+use ostro_log::{LogNode, LogNodeConfig, PartitionLog, ReplicaSet, ReplicatedLog};
 use ostro_partition::{
     ApplyOutcome, Cursor, MachineConfig, MachineHandle, PartitionError, PartitionHandle,
     PartitionHealth, PartitionStore, PendingAcks, StoreConfig, apply_chunk,
@@ -68,9 +68,9 @@ pub fn pc() -> PartitionCount {
 pub const P0: PartitionId = PartitionId(0);
 
 /// One partition: the log node, the raw RF=1 log and the handle (whose log may wrap it).
-pub struct TestPartition<L: ReplicatedLog = Rf1Log> {
+pub struct TestPartition<L: ReplicatedLog = PartitionLog> {
     pub node: LogNode,
-    pub rf1: Arc<Rf1Log>,
+    pub rf1: Arc<PartitionLog>,
     pub handle: PartitionHandle<L>,
 }
 
@@ -112,7 +112,7 @@ pub async fn open_with<L, F>(
 ) -> TestPartition<L>
 where
     L: ReplicatedLog,
-    F: FnOnce(Arc<Rf1Log>) -> Arc<L>,
+    F: FnOnce(Arc<PartitionLog>) -> Arc<L>,
 {
     let (store, meta) =
         PartitionStore::open(dir, P0, pc(), &StoreConfig::default()).expect("open store");
@@ -290,7 +290,7 @@ pub fn fast_shuffler(cfg: &mut ostro_partition::NodeConfig) {
     cfg.leader.shuffler.idle_poll = Duration::from_millis(20);
 }
 
-pub fn handle_of(node: &ostro_partition::Node, p: PartitionId) -> &PartitionHandle<Rf1Log> {
+pub fn handle_of(node: &ostro_partition::Node, p: PartitionId) -> &PartitionHandle<PartitionLog> {
     node.handle(p).expect("partition ready")
 }
 

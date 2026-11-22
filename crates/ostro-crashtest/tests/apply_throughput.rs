@@ -247,7 +247,7 @@ fn plan(cmds: Vec<(usize, Command)>, per_env: usize) -> Vec<Plan> {
 
 /// Submits every lane concurrently; returns (accepted, other outcomes, wall time).
 async fn run_plan(
-    h: &ostro_partition::PartitionHandle<ostro_log::Rf1Log>,
+    h: &ostro_partition::PartitionHandle<ostro_log::PartitionLog>,
     lanes: Vec<Plan>,
 ) -> (usize, usize, Duration) {
     let t0 = Instant::now();

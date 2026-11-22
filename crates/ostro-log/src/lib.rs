@@ -44,8 +44,6 @@ pub use replicated::{
     AppendReceipt, EpochHistory, FollowerProgress, FollowerStatus, Isr, LogHealth, RawBatch,
     ReplicaSet, ReplicaStatus, ReplicatedLog, Role,
 };
-/// Former name of [`PartitionLog`]; removed by the rename ripple later in plan 12-08.
-pub type Rf1Log = PartitionLog;
 pub use verify::{Corruption, VerifiedBatch, verify_record};
 
 // Dependencies wired in plan 02-01 ahead of their consuming plans.

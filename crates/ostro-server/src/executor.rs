@@ -567,7 +567,7 @@ impl Drop for TaskGuard {
 /// is forwarded once. Public for the ordering test only.
 #[doc(hidden)]
 pub async fn input_bridge(
-    handle: PartitionHandle<ostro_log::Rf1Log>,
+    handle: PartitionHandle<ostro_log::PartitionLog>,
     run: RunId,
     mut next: u64,
     mut seqs: mpsc::UnboundedReceiver<u64>,
@@ -841,7 +841,7 @@ impl EngineExecutor {
     #[allow(clippy::too_many_arguments)]
     async fn drive(
         &self,
-        handle: &PartitionHandle<ostro_log::Rf1Log>,
+        handle: &PartitionHandle<ostro_log::PartitionLog>,
         run: RunId,
         token: AttemptToken,
         record: &ostro_partition::store::values::RunRecord,
@@ -925,7 +925,7 @@ impl EngineExecutor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn prelude(
         &self,
-        handle: &PartitionHandle<ostro_log::Rf1Log>,
+        handle: &PartitionHandle<ostro_log::PartitionLog>,
         run: RunId,
         token: AttemptToken,
         record: &ostro_partition::store::values::RunRecord,
@@ -1122,7 +1122,7 @@ impl EngineExecutor {
     /// the journal end as read. `Err` = the job's outcome.
     async fn rearm(
         &self,
-        handle: &PartitionHandle<ostro_log::Rf1Log>,
+        handle: &PartitionHandle<ostro_log::PartitionLog>,
         run: RunId,
         sink: &PartitionSink,
     ) -> Result<(), ExecOutcome> {
@@ -1229,7 +1229,7 @@ impl EngineExecutor {
 
     async fn run_started(
         &self,
-        handle: &PartitionHandle<ostro_log::Rf1Log>,
+        handle: &PartitionHandle<ostro_log::PartitionLog>,
         run: RunId,
         record: &ostro_partition::store::values::RunRecord,
         sha: &[u8; 32],
@@ -1255,7 +1255,7 @@ impl EngineExecutor {
 
     async fn load_journal(
         &self,
-        handle: &PartitionHandle<ostro_log::Rf1Log>,
+        handle: &PartitionHandle<ostro_log::PartitionLog>,
         run: RunId,
         sink: &PartitionSink,
     ) -> Result<Vec<Event>, String> {

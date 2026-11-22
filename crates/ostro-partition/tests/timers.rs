@@ -30,7 +30,7 @@ use tokio::time::{sleep, timeout};
 const START: u64 = 1_000_000;
 const P0: PartitionId = PartitionId(0);
 
-type Handle = PartitionHandle<ostro_log::Rf1Log>;
+type Handle = PartitionHandle<ostro_log::PartitionLog>;
 
 async fn open(dir: &Path, clock: &ManualClock, timers: TimerConfig) -> Node {
     let mut cfg = NodeConfig::new(dir.to_path_buf(), PartitionCount::new(1).expect("non-zero"));

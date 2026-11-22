@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_log::{
-    ImportMode, LogError, LogNode, LogNodeConfig, RawBatch, ReplicaSet, ReplicatedLog, Rf1Log,
-    write_partition_log,
+    ImportMode, LogError, LogNode, LogNodeConfig, PartitionLog, RawBatch, ReplicaSet,
+    ReplicatedLog, write_partition_log,
 };
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId, envelope};
 
 const P: PartitionId = PartitionId(0);
 
-async fn open(dir: &Path, floor: Offset) -> (LogNode, Arc<Rf1Log>) {
+async fn open(dir: &Path, floor: Offset) -> (LogNode, Arc<PartitionLog>) {
     let cfg = LogNodeConfig::new(dir.join("wal"), PartitionCount::new(1).unwrap(), 1);
     let (node, mut logs) = LogNode::open(cfg, &[floor]).await.unwrap();
     let log = logs.remove(0).unwrap();
@@ -22,7 +22,7 @@ async fn open(dir: &Path, floor: Offset) -> (LogNode, Arc<Rf1Log>) {
 }
 
 /// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
-fn lead(log: &Rf1Log) {
+fn lead(log: &PartitionLog) {
     let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
     log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
@@ -68,7 +68,7 @@ const LAYOUT: [(u32, u64); 6] = [(1, 3), (1, 1), (1, 4), (2, 2), (2, 5), (4, 1)]
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_trip_against_a_real_log() {
-    // Source: a real log written through Rf1Log.
+    // Source: a real log written through PartitionLog.
     let src = tempfile::tempdir().unwrap();
     let (node, log) = open(src.path(), Offset::ZERO).await;
     let mut last = Offset::ZERO;

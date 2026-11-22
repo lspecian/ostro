@@ -25,7 +25,7 @@ pub mod timers;
 
 use std::sync::Arc;
 
-use ostro_log::{ReadyBarrier, Rf1Log};
+use ostro_log::{PartitionLog, ReadyBarrier};
 use ostro_types::{PartitionCount, PartitionId};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -39,7 +39,7 @@ use crate::router::PartitionRouter;
 pub struct LeaderCtx {
     pub partition: PartitionId,
     pub count: PartitionCount,
-    pub handle: PartitionHandle<Rf1Log>,
+    pub handle: PartitionHandle<PartitionLog>,
     pub router: Arc<dyn PartitionRouter>,
     pub barrier: ReadyBarrier,
     pub clock: Arc<dyn Clock>,

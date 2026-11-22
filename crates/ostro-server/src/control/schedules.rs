@@ -51,7 +51,7 @@ use ostro_api::ApiError;
 use ostro_api::phase8::{
     CatchupPolicyDto, OverlapPolicyDto, ScheduleApi, ScheduleDto, version_mismatch,
 };
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_meta::records::{Schedule, WorkflowVersion};
 use ostro_meta::{MetaCommand, MetaError, MetaKey, MetaRecord, MetaResult, MetaView};
 use ostro_partition::ApplyOutcome;
@@ -153,7 +153,7 @@ fn resolve_workflow(
 pub async fn build_schedule_start(
     meta: &MetaView,
     runs: &RunsSection,
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     spec: &ScheduleSpec,
     req: FireRequest,
 ) -> Result<StartRun, StartError> {
@@ -288,7 +288,7 @@ impl ScheduleSource for MetaScheduleSource {
 
     fn build_start<'a>(
         &'a self,
-        handle: &'a PartitionHandle<Rf1Log>,
+        handle: &'a PartitionHandle<PartitionLog>,
         spec: &'a ScheduleSpec,
         req: FireRequest,
     ) -> StartFuture<'a> {

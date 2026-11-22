@@ -44,7 +44,7 @@ use tokio::time::{Instant, sleep, timeout};
 
 const P0: PartitionId = PartitionId(0);
 
-type Handle = PartitionHandle<ostro_log::Rf1Log>;
+type Handle = PartitionHandle<ostro_log::PartitionLog>;
 type ExecFuture = Pin<Box<dyn Future<Output = ExecOutcome> + Send + 'static>>;
 type Script = dyn Fn(Job, usize) -> ExecFuture + Send + Sync;
 

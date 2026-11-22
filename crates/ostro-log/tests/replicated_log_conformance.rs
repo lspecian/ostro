@@ -1,5 +1,5 @@
 //! Generic `ReplicatedLog` conformance checks (Phase 12 reuses the `check_*` functions for the
-//! cluster implementation), instantiated here for the RF=1 `Rf1Log`.
+//! cluster implementation), instantiated here for the RF=1 `PartitionLog`.
 
 #![allow(dead_code)]
 
@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_log::{
-    LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicaProgress, ReplicaSet, ReplicatedLog,
-    Rf1Log, Role, compute_hw,
+    LogError, LogNode, LogNodeConfig, PartitionLog, ReadyBarrier, ReplicaProgress, ReplicaSet,
+    ReplicatedLog, Role, compute_hw,
 };
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 
@@ -175,17 +175,17 @@ pub fn check_isr<L: ReplicatedLog>(log: &L, node: u64) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Rf1Log instantiation
+// PartitionLog instantiation
 // ---------------------------------------------------------------------------------------------
 
 fn cfg(dir: &Path, p: u16) -> LogNodeConfig {
     LogNodeConfig::new(dir.join("wal"), PartitionCount::new(p).unwrap(), NODE)
 }
 
-async fn open(dir: &Path, p: u16) -> (LogNode, Vec<Arc<Rf1Log>>) {
+async fn open(dir: &Path, p: u16) -> (LogNode, Vec<Arc<PartitionLog>>) {
     let floors = vec![Offset::ZERO; p as usize];
     let (node, logs) = LogNode::open(cfg(dir, p), &floors).await.unwrap();
-    let logs: Vec<Arc<Rf1Log>> = logs.into_iter().map(Result::unwrap).collect();
+    let logs: Vec<Arc<PartitionLog>> = logs.into_iter().map(Result::unwrap).collect();
     // Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
     for log in &logs {
         let e = log.latest_epoch().map_or(1, |e| e.0 + 1);

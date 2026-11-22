@@ -64,7 +64,7 @@
 use bytes::Bytes;
 use ostro_api::ApiError;
 use ostro_api::domain::{ConflictPolicy, RunInfo, RunStatus, StartRunRequest, StartRunResult};
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_meta::WorkflowVersion;
 use ostro_partition::store::Table;
 use ostro_partition::store::keys::dedupe_key;
@@ -407,7 +407,7 @@ pub(crate) async fn start_run(
 /// 256 KiB, else a durable blob written before the command is appended. Apply journals it
 /// verbatim at seq 0 and the executor skips its own RunStarted append (`next_seq > 0`).
 pub(crate) async fn attach_run_started(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     mut start: StartRun,
     input: &[u8],
 ) -> Result<StartRun, ApiError> {

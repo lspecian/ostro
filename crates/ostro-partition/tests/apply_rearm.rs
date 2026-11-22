@@ -21,7 +21,7 @@ use ostro_types::journal::{
 use ostro_types::{AttemptToken, Command, PayloadRef, RunId};
 use tokio::time::timeout;
 
-type Handle = PartitionHandle<ostro_log::Rf1Log>;
+type Handle = PartitionHandle<ostro_log::PartitionLog>;
 
 /// Far in the future (ms), so neither a run timeout nor a re-armed timer fires.
 const FAR_MS: u64 = 4_102_444_800_000;

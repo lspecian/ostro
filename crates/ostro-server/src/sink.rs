@@ -107,7 +107,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::Bytes;
 use ostro_engine::sink::{ActivationOutcome, ActivationSink, AppendError, GuestLogRecord, RunRef};
-use ostro_log::{ReplicatedLog, Rf1Log};
+use ostro_log::{PartitionLog, ReplicatedLog};
 use ostro_partition::apply::InvalidCode;
 use ostro_partition::store::keys::children_key;
 use ostro_partition::{ApplyOutcome, PartitionHandle, RejectReason, Table};
@@ -157,7 +157,7 @@ macro_rules! failpoint {
 pub type RenewFn = Arc<dyn Fn() + Send + Sync>;
 
 /// The real [`ActivationSink`]: one per activation (one run, one attempt token).
-pub struct PartitionSink<L: ReplicatedLog = Rf1Log> {
+pub struct PartitionSink<L: ReplicatedLog = PartitionLog> {
     handle: PartitionHandle<L>,
     run: RunId,
     run_str: String,
@@ -217,7 +217,7 @@ fn unsupported_completion(ev: &Event, bridge: bool) -> Option<EventBody> {
     }
 }
 
-impl PartitionSink<Rf1Log> {
+impl PartitionSink<PartitionLog> {
     /// Route effects through the bridge (06-14; module docs). Registers this sink's
     /// partition handle with the bridge's partition table (the gate and the completion
     /// sink look partitions up there).

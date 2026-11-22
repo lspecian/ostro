@@ -66,7 +66,7 @@ use ostro_api::phase7::{
 use ostro_api::{ApiError, ApiExtensions};
 use ostro_blob::BlobStore;
 use ostro_engine::runtime::Runtime;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_meta::records::SealedSecret;
 use ostro_meta::{MetaHandle, MetaKey, MetaRecord, MetaView};
 use ostro_partition::{Clock, Node, PartitionHandle, PartitionHealth};
@@ -107,7 +107,7 @@ pub mod webhooks;
 pub struct ServerControlPlane {
     pub(crate) meta: Arc<MetaHandle>,
     /// One entry per partition: `Some` when the slot started (`PartitionSlot::Ready`).
-    pub(crate) partitions: Vec<Option<PartitionHandle<Rf1Log>>>,
+    pub(crate) partitions: Vec<Option<PartitionHandle<PartitionLog>>>,
     pub(crate) count: PartitionCount,
     /// The node-wide blob store (shared by every partition); `None` if no partition started.
     pub(crate) blobs: Option<Arc<BlobStore>>,
@@ -143,7 +143,7 @@ impl std::fmt::Debug for ServerControlPlane {
 impl ServerControlPlane {
     pub(crate) fn new(
         meta: Arc<MetaHandle>,
-        partitions: Vec<Option<PartitionHandle<Rf1Log>>>,
+        partitions: Vec<Option<PartitionHandle<PartitionLog>>>,
         count: PartitionCount,
         runtime: Arc<Runtime>,
         cfg: Arc<ServerConfig>,
@@ -218,7 +218,7 @@ impl ServerControlPlane {
     }
 
     /// Partition `p`'s handle, or `Unavailable` when its slot failed to start.
-    pub fn partition(&self, p: PartitionId) -> Result<&PartitionHandle<Rf1Log>, ApiError> {
+    pub fn partition(&self, p: PartitionId) -> Result<&PartitionHandle<PartitionLog>, ApiError> {
         self.partitions
             .get(p.index())
             .and_then(Option::as_ref)

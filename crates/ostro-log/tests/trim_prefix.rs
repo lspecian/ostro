@@ -7,7 +7,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use ostro_log::recovery::{list_segments, segment_dir};
 use ostro_log::{
-    LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicaSet, ReplicatedLog, Rf1Log,
+    LogError, LogNode, LogNodeConfig, PartitionLog, ReadyBarrier, ReplicaSet, ReplicatedLog,
 };
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 
@@ -17,7 +17,7 @@ fn cfg(dir: &Path) -> LogNodeConfig {
     LogNodeConfig::new(dir.join("wal"), PartitionCount::new(1).unwrap(), 1)
 }
 
-async fn open(dir: &Path) -> (LogNode, Arc<Rf1Log>) {
+async fn open(dir: &Path) -> (LogNode, Arc<PartitionLog>) {
     let (node, mut logs) = LogNode::open(cfg(dir), &[Offset::ZERO]).await.unwrap();
     let log = logs.remove(0).unwrap();
     lead(&log);
@@ -25,7 +25,7 @@ async fn open(dir: &Path) -> (LogNode, Arc<Rf1Log>) {
 }
 
 /// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
-fn lead(log: &Rf1Log) {
+fn lead(log: &PartitionLog) {
     let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
     log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
@@ -35,7 +35,7 @@ fn cmd(o: u64) -> Bytes {
 }
 
 /// Append `batches` batches of `per` commands each and wait until committed.
-async fn append_batches(log: &Rf1Log, batches: u64, per: u64) {
+async fn append_batches(log: &PartitionLog, batches: u64, per: u64) {
     let mut last = None;
     for _ in 0..batches {
         let base = log.log_end();
@@ -70,7 +70,7 @@ async fn five_segments(dir: &Path) {
     assert_eq!(non_empty_segments(dir).len(), 5);
 }
 
-async fn check_read_all(log: &Rf1Log) {
+async fn check_read_all(log: &PartitionLog) {
     let start = log.log_start();
     let hw = *log.high_watermark().borrow();
     let got = log.read(start, hw, usize::MAX).await.unwrap();

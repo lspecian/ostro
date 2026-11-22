@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_triggers::cron::{CatchupPolicy, CronSpec, plan_catchup};
 use ostro_types::command::{
     ConflictPolicy, MAX_RUN_TAG_LEN, ScheduleFire, ScheduleFireKind, StartRun, cron_idempotency_key,
@@ -141,7 +141,7 @@ pub trait ScheduleSource: Send + Sync + 'static {
     /// and the pre-encoded `RunStarted` like an API start.
     fn build_start<'a>(
         &'a self,
-        handle: &'a PartitionHandle<Rf1Log>,
+        handle: &'a PartitionHandle<PartitionLog>,
         spec: &'a ScheduleSpec,
         req: FireRequest,
     ) -> StartFuture<'a> {
@@ -199,7 +199,7 @@ pub const DEFAULT_START_QUEUE: &str = "default";
 /// [`DEFAULT_START_QUEUE`], the input bytes, `ReturnExisting` on the idempotency key, the
 /// schedule tag and an rng seed derived from the run id. Used by sources without metadata.
 pub async fn default_start(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     spec: &ScheduleSpec,
     req: FireRequest,
 ) -> Result<StartRun, StartError> {

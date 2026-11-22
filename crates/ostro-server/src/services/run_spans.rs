@@ -168,7 +168,7 @@ pub fn dlq_reason(resumable: bool, failure_json: &[u8]) -> Option<&'static str> 
 
 /// Count one completed run (and a dead-lettered failure).
 async fn count_completed(
-    h: &PartitionHandle<ostro_log::Rf1Log>,
+    h: &PartitionHandle<ostro_log::PartitionLog>,
     run: &ostro_types::RunId,
     rec: &RunRecord,
 ) {

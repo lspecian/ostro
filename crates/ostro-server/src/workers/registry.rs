@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::{LeaseRenewer, PartitionHandle};
 use ostro_types::{AttemptToken, Epoch, RunId};
 use ostro_worker_proto::v1;
@@ -125,7 +125,7 @@ pub struct AttachSpec {
     pub run: RunId,
     pub token: AttemptToken,
     pub lease: LeaseRenewer,
-    pub handle: PartitionHandle<Rf1Log>,
+    pub handle: PartitionHandle<PartitionLog>,
     /// The run's module (`RunRecord.module_sha`): `FetchBlob` may serve it.
     pub module_sha: Option<[u8; 32]>,
 }
@@ -168,7 +168,7 @@ pub struct JobAccess {
     pub job_id: u64,
     pub run: RunId,
     pub token: AttemptToken,
-    pub handle: PartitionHandle<Rf1Log>,
+    pub handle: PartitionHandle<PartitionLog>,
     pub module_sha: Option<[u8; 32]>,
 }
 
@@ -247,7 +247,7 @@ struct JobSlot {
     run: RunId,
     token: AttemptToken,
     lease: LeaseRenewer,
-    handle: PartitionHandle<Rf1Log>,
+    handle: PartitionHandle<PartitionLog>,
     module_sha: Option<[u8; 32]>,
     /// Blob refs served to the worker (sha -> len).
     blobs: HashMap<[u8; 32], u64>,

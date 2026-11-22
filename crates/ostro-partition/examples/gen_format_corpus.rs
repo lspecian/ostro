@@ -373,7 +373,10 @@ fn complete(status: TerminalStatus, resumable: bool, parent_event: Option<Payloa
 }
 
 impl Gen {
-    fn h(&self, p: u16) -> Result<&ostro_partition::PartitionHandle<ostro_log::Rf1Log>, String> {
+    fn h(
+        &self,
+        p: u16,
+    ) -> Result<&ostro_partition::PartitionHandle<ostro_log::PartitionLog>, String> {
         self.node
             .handle(PartitionId(p))
             .ok_or_else(|| format!("p{p} not ready"))

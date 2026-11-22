@@ -19,24 +19,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use ostro_log::{HwVector, LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log};
+use ostro_log::{HwVector, LogNode, LogNodeConfig, PartitionLog, ReplicaSet, ReplicatedLog};
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
 const P: u16 = 4;
 
-async fn open(dir: &Path) -> (LogNode, Vec<Arc<Rf1Log>>) {
+async fn open(dir: &Path) -> (LogNode, Vec<Arc<PartitionLog>>) {
     let cfg = LogNodeConfig::new(dir.join("wal"), PartitionCount::new(P).unwrap(), 1);
     let floors = vec![Offset::ZERO; usize::from(P)];
     let (node, logs) = LogNode::open(cfg, &floors).await.unwrap();
-    let logs: Vec<Arc<Rf1Log>> = logs.into_iter().map(Result::unwrap).collect();
+    let logs: Vec<Arc<PartitionLog>> = logs.into_iter().map(Result::unwrap).collect();
     logs.iter().for_each(|l| lead(l));
     (node, logs)
 }
 
 /// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
-fn lead(log: &Rf1Log) {
+fn lead(log: &PartitionLog) {
     let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
     log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
@@ -63,7 +63,7 @@ fn spawn_cutter(
 
 /// Append to A, wait until A's HW watch shows `x`, then append to B and wait for `y`.
 async fn dependent_pair(
-    logs: &[Arc<Rf1Log>],
+    logs: &[Arc<PartitionLog>],
     a: usize,
     b: usize,
     na: usize,

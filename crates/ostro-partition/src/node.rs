@@ -22,8 +22,8 @@ use std::sync::Arc;
 use ostro_blob::BlobStore;
 use ostro_log::ostro_wal::GroupCommitConfig;
 use ostro_log::{
-    LogClock, LogError, LogNode, LogNodeConfig, RawBatch, ReadyBarrier, ReplicaSet, ReplicatedLog,
-    Rf1Log,
+    LogClock, LogError, LogNode, LogNodeConfig, PartitionLog, RawBatch, ReadyBarrier, ReplicaSet,
+    ReplicatedLog,
 };
 use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId};
 use tokio::sync::{broadcast, watch};
@@ -120,7 +120,7 @@ impl NodeConfig {
 /// One partition after startup.
 #[derive(Debug)]
 pub enum PartitionSlot {
-    Ready(PartitionHandle<Rf1Log>),
+    Ready(PartitionHandle<PartitionLog>),
     /// The partition failed to start (corrupt log, state ahead of log, ...). The other
     /// partitions are unaffected.
     Failed {
@@ -191,7 +191,7 @@ impl std::fmt::Debug for Node {
 /// Per-partition state between the startup steps.
 type Stage = Result<(Arc<PartitionStore>, StoreMeta), String>;
 /// A partition that recovered and validated: store, meta, log.
-type Recovered = (Arc<PartitionStore>, StoreMeta, Arc<Rf1Log>);
+type Recovered = (Arc<PartitionStore>, StoreMeta, Arc<PartitionLog>);
 
 impl Node {
     /// Open every partition in the order documented in [`startup`](crate::startup).
@@ -618,7 +618,7 @@ impl Node {
     }
 
     /// Partition `p`'s handle, if it started.
-    pub fn handle(&self, p: PartitionId) -> Option<&PartitionHandle<Rf1Log>> {
+    pub fn handle(&self, p: PartitionId) -> Option<&PartitionHandle<PartitionLog>> {
         match self.slots.get(p.index()) {
             Some(PartitionSlot::Ready(h)) => Some(h),
             _ => None,
@@ -679,7 +679,7 @@ impl Node {
 ///
 /// A log with no records was anchored at the floor (`log_start = LEO = applied`, Phase 12
 /// F3), so it always passes; "state ahead of log" is raised only for a non-empty log.
-fn validate(meta: &StoreMeta, log: &Rf1Log) -> Result<(), String> {
+fn validate(meta: &StoreMeta, log: &PartitionLog) -> Result<(), String> {
     let leo = log.log_end();
     if meta.applied > leo {
         return Err(format!(
@@ -713,7 +713,7 @@ async fn settle_state(
     cfg: &NodeConfig,
     p: PartitionId,
     stage: Stage,
-    rf1: &Rf1Log,
+    rf1: &PartitionLog,
     missing: bool,
     local: &[LocalSnapshot],
 ) -> Result<(Arc<PartitionStore>, StoreMeta, Option<Offset>), String> {
@@ -813,7 +813,7 @@ struct PartitionStart {
     p: PartitionId,
     store: Arc<PartitionStore>,
     meta: StoreMeta,
-    rf1: Arc<Rf1Log>,
+    rf1: Arc<PartitionLog>,
     blobs: Arc<BlobStore>,
     machine: MachineConfig,
     mode: StartMode,
@@ -824,7 +824,7 @@ struct PartitionStart {
 }
 
 impl PartitionStart {
-    async fn run(self) -> Result<PartitionHandle<Rf1Log>, String> {
+    async fn run(self) -> Result<PartitionHandle<PartitionLog>, String> {
         self.seed_anchored_epochs().await?;
         // The term's epoch is picked before catch-up (12-08): the log opened with HW =
         // applied (F4), and leading with ISR {self} is what raises the HW to the durable LEO,
@@ -898,7 +898,7 @@ impl PartitionStart {
 
     async fn catch_up_and_announce(
         &self,
-        handle: &PartitionHandle<Rf1Log>,
+        handle: &PartitionHandle<PartitionLog>,
         epoch: Epoch,
     ) -> Result<(), String> {
         let p = self.p.0;

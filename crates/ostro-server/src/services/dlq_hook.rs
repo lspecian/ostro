@@ -189,7 +189,7 @@ fn hook_after_start() -> bool {
 
 /// The run's input as JSON (`null` when absent; a non-JSON input becomes a string).
 async fn source_input(
-    handle: &ostro_partition::PartitionHandle<ostro_log::Rf1Log>,
+    handle: &ostro_partition::PartitionHandle<ostro_log::PartitionLog>,
     run: &RunId,
 ) -> serde_json::Value {
     let reader = handle.reader();

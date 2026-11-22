@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::RwLock;
 
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_types::command::InboundBatch;
 use ostro_types::{Command, PartitionCount, PartitionId};
 
@@ -25,7 +25,7 @@ pub trait PartitionRouter: Send + Sync + 'static {
 /// Routes to local partition handles registered once each partition is ready.
 #[derive(Debug)]
 pub struct InProcessRouter {
-    slots: RwLock<Vec<Option<PartitionHandle<Rf1Log>>>>,
+    slots: RwLock<Vec<Option<PartitionHandle<PartitionLog>>>>,
 }
 
 impl InProcessRouter {
@@ -37,7 +37,7 @@ impl InProcessRouter {
     }
 
     /// Make `handle.partition()` routable.
-    pub fn register(&self, handle: PartitionHandle<Rf1Log>) {
+    pub fn register(&self, handle: PartitionHandle<PartitionLog>) {
         let i = handle.partition().index();
         let mut s = self.slots.write().unwrap_or_else(|p| p.into_inner());
         if let Some(slot) = s.get_mut(i) {
@@ -51,7 +51,7 @@ impl InProcessRouter {
         s.iter_mut().for_each(|h| *h = None);
     }
 
-    fn get(&self, p: PartitionId) -> Option<PartitionHandle<Rf1Log>> {
+    fn get(&self, p: PartitionId) -> Option<PartitionHandle<PartitionLog>> {
         let s = self.slots.read().unwrap_or_else(|p| p.into_inner());
         s.get(p.index()).and_then(Clone::clone)
     }

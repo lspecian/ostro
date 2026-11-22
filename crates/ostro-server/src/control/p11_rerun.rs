@@ -64,7 +64,7 @@ use ostro_api::{ApiError, ErrorCode};
 use ostro_engine::replay_check::{ReplayVerdict, replay_check};
 use ostro_engine::runtime::Prepared;
 use ostro_engine::sink::RunRef;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::store::Table;
 use ostro_partition::store::keys::{dedupe_key, event_key};
 use ostro_partition::store::values::RunRecord;
@@ -263,7 +263,7 @@ async fn prepare(ctx: &P11Ctx, sha: [u8; 32]) -> Result<Arc<Prepared>, ApiError>
 
 /// Stored rows `0..cut` of `run` as `JournalEvent`s, verbatim (attempt included).
 async fn source_rows(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     run: RunId,
     cut: u64,
 ) -> Result<Vec<JournalEvent>, ApiError> {
@@ -302,7 +302,7 @@ async fn source_rows(
 
 /// The id of the run already deduped under `dedupe` on `handle`, if any.
 async fn existing_run(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     workflow: &str,
     dedupe: &str,
 ) -> Result<Option<RunId>, ApiError> {
@@ -345,7 +345,7 @@ fn encoded_len(start: &StartRun) -> usize {
 /// encoded StartRun fits `bound` (D-P11-7). Returns the encoded size and the number of
 /// payloads offloaded.
 async fn fit_envelope(
-    handle: &PartitionHandle<Rf1Log>,
+    handle: &PartitionHandle<PartitionLog>,
     start: &mut StartRun,
     bound: usize,
 ) -> Result<(usize, usize), ApiError> {

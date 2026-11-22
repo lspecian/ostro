@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use fail::FailScenario;
 use ostro_log::{
-    LogError, LogHealth, LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log, Role,
+    LogError, LogHealth, LogNode, LogNodeConfig, PartitionLog, ReplicaSet, ReplicatedLog, Role,
 };
 use ostro_types::{Epoch, Offset, PartitionCount};
 use tokio::time::timeout;
@@ -22,15 +22,15 @@ fn cfg(dir: &Path) -> LogNodeConfig {
     LogNodeConfig::new(dir.join("wal"), PartitionCount::new(2).unwrap(), 1)
 }
 
-async fn open(dir: &Path, floors: &[Offset]) -> (LogNode, Vec<Arc<Rf1Log>>) {
+async fn open(dir: &Path, floors: &[Offset]) -> (LogNode, Vec<Arc<PartitionLog>>) {
     let (node, logs) = LogNode::open(cfg(dir), floors).await.unwrap();
-    let logs: Vec<Arc<Rf1Log>> = logs.into_iter().map(Result::unwrap).collect();
+    let logs: Vec<Arc<PartitionLog>> = logs.into_iter().map(Result::unwrap).collect();
     logs.iter().for_each(|l| lead(l));
     (node, logs)
 }
 
 /// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
-fn lead(log: &Rf1Log) {
+fn lead(log: &PartitionLog) {
     let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
     log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
@@ -39,7 +39,7 @@ fn cmd(p: usize, o: u64) -> Bytes {
     Bytes::from(format!("p{p}-cmd-{o:05}-{}", "z".repeat((o % 13) as usize)))
 }
 
-async fn append_one(log: &Rf1Log, p: usize) -> Result<ostro_log::AppendReceipt, LogError> {
+async fn append_one(log: &PartitionLog, p: usize) -> Result<ostro_log::AppendReceipt, LogError> {
     let o = log.log_end().0;
     let epoch = log.replica_status().epoch;
     log.append(epoch, vec![cmd(p, o), cmd(p, o + 1)]).await

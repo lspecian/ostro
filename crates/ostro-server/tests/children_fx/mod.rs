@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use ostro_engine::sink::RunRef;
-use ostro_log::Rf1Log;
+use ostro_log::PartitionLog;
 use ostro_partition::store::keys::children_key;
 use ostro_partition::store::values::RunRecord;
 use ostro_partition::{ApplyOutcome, Node, NodeConfig, PartitionHandle, Table, query};
@@ -134,7 +134,7 @@ impl Fx {
         }
     }
 
-    pub fn h(&self, run: &RunId) -> PartitionHandle<Rf1Log> {
+    pub fn h(&self, run: &RunId) -> PartitionHandle<PartitionLog> {
         self.node
             .handle(run.partition())
             .expect("partition ready")

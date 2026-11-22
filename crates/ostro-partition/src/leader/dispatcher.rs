@@ -111,7 +111,7 @@
 //! Dispatch = take a slot permit, record a lease in phase *Granting*, and in a task: read
 //! the run record once, compute the next token `n + 1` of the current epoch from it, and
 //! **append** `AttemptGranted` to the log without waiting for its ack. The append returns
-//! once the sequencer fixed the grant's offset (the Rf1Log sequencer assigns offsets under
+//! once the sequencer fixed the grant's offset (the PartitionLog sequencer assigns offsets under
 //! one lock in submission order), so the job is handed to the executor right away, with the
 //! record read before the grant (patched with the new token, `Running`, no ready slot) and
 //! no second record read. Every executor append is submitted after the grant returned, so
@@ -208,7 +208,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use ostro_log::{ReplicatedLog, Rf1Log};
+use ostro_log::{PartitionLog, ReplicatedLog};
 use ostro_types::command::{AttemptGranted, AttemptTokenMsg, encode_command};
 use ostro_types::{AttemptToken, Command, Offset, PartitionId, RunId};
 use tokio::sync::broadcast::{
@@ -263,7 +263,7 @@ pub struct Job {
     pub token: AttemptToken,
     /// Read right after the grant (re-read on [`ExecOutcome::Reactivate`]).
     pub record: RunRecord,
-    pub handle: PartitionHandle<Rf1Log>,
+    pub handle: PartitionHandle<PartitionLog>,
     /// Seqs of inputs journaled while leased (`InputAppended`).
     pub inputs: mpsc::UnboundedReceiver<u64>,
     /// `true` = lease lost (expiry / shutdown / requeue): stop now.
@@ -1937,7 +1937,7 @@ fn describe_queue_metrics() {
 /// token is above it. `fault` (test hook) stamps the token with a stale epoch so apply
 /// rejects the grant.
 async fn pipelined_grant(
-    h: &PartitionHandle<Rf1Log>,
+    h: &PartitionHandle<PartitionLog>,
     run: RunId,
     after: Option<Offset>,
     floor: Option<AttemptToken>,
@@ -2014,7 +2014,11 @@ fn failpoint_eval(name: &str) -> Result<(), PartitionError> {
 /// Read check for an `EnqueueReady` seen while `run`'s pipelined grant `token` is not yet
 /// acknowledged: `true` = the run was requeued after the grant (record holds the token and
 /// is `Ready`); a read error also counts as a requeue (the lease is dropped, which is safe).
-fn requeued_after_grant(h: &PartitionHandle<Rf1Log>, run: &RunId, token: AttemptToken) -> bool {
+fn requeued_after_grant(
+    h: &PartitionHandle<PartitionLog>,
+    run: &RunId,
+    token: AttemptToken,
+) -> bool {
     match h.read_run(run) {
         Ok(Some(r)) => {
             r.current_attempt == Some((token.epoch.0, token.n)) && r.status == RunStatus::Ready
@@ -2026,7 +2030,7 @@ fn requeued_after_grant(h: &PartitionHandle<Rf1Log>, run: &RunId, token: Attempt
 /// [`PartitionHandle::grant_attempt`] with `after_failure = true` (F9): the next attempt
 /// `n + 1` of the current epoch, counted in `RunRecord.attempt_failures` by apply.
 async fn grant_after_failure(
-    h: &PartitionHandle<Rf1Log>,
+    h: &PartitionHandle<PartitionLog>,
     run: RunId,
 ) -> Result<AttemptToken, PartitionError> {
     let epoch = h.epoch();

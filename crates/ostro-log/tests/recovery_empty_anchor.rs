@@ -11,7 +11,7 @@ use bytes::Bytes;
 use common::{write_batches, write_log};
 use ostro_log::recovery::{recover_partition, segment_dir};
 use ostro_log::{
-    EpochHistory, LogError, LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log,
+    EpochHistory, LogError, LogNode, LogNodeConfig, PartitionLog, ReplicaSet, ReplicatedLog,
 };
 use ostro_testkit::corrupt;
 use ostro_testkit::fs::tempdir;
@@ -19,14 +19,14 @@ use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 
 const P: PartitionId = PartitionId(0);
 
-async fn open(dir: &Path, floor: Offset) -> (LogNode, Arc<Rf1Log>) {
+async fn open(dir: &Path, floor: Offset) -> (LogNode, Arc<PartitionLog>) {
     let cfg = LogNodeConfig::new(dir.to_path_buf(), PartitionCount::new(1).unwrap(), 1);
     let (node, mut logs) = LogNode::open(cfg, &[floor]).await.unwrap();
     (node, logs.remove(0).unwrap())
 }
 
 /// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
-fn lead(log: &Rf1Log) {
+fn lead(log: &PartitionLog) {
     let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
     log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
