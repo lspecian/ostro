@@ -32,7 +32,8 @@
 //! | `OpCancelled{op}`, `op` a signal / token wait | `CancelWait{op}` |
 //! | `EffectScheduled{request}` (06-14) | `RegisterEffect{op: s, kind: EffectKind::from_request, scheduled_at_ms: ceil(t / 1e6)}` |
 //! | `OpCancelled{op}`, `op` an `EffectScheduled` (06-14) | `CancelEffect{op}` |
-//! | `OpCancelled{op}`, `op` anything else (children: 09-08) | none |
+//! | `OpCancelled{op}`, `op` an attached `ChildStarted` (09-08) | `SendMessage(CancelRun{child_run_id(run, op, P), "parent_cancel_op"})` |
+//! | `OpCancelled{op}`, `op` anything else (incl. a detached child) | none |
 //! | `ChildStarted` at `s`, target resolved (09-05) | `SendMessage(StartChild(StartRun{child_run_id(run, s, P), …, parent: ParentRef{run, s}}))` + `ChildJournal{child}` |
 //! | `ChildStarted` at `s`, detached, resolved (09-05) | `SendMessage(StartChild(StartRun{…, parent: None}))` |
 //! | `ChildStarted`, target unresolvable | none (the sink journals `unknown_workflow`) |
@@ -87,7 +88,7 @@
 
 use ostro_partition::store::values::RunRecord;
 use ostro_types::command::{
-    CancelTimer, CompleteRun, Derived, OutboxMsg, ParentRef, ScheduleTimer, SendMessage,
+    CancelRun, CancelTimer, CompleteRun, Derived, OutboxMsg, ParentRef, ScheduleTimer, SendMessage,
     StartChild, StartRun, TerminalStatus, WaitKind, derived::Intent, outbox_msg,
 };
 use ostro_types::journal::{CANCELLATION_OP, Continuation, Event, EventBody, Failure};
@@ -300,6 +301,10 @@ pub struct ChildCtx<'a> {
     pub starts: &'a dyn Fn(u64) -> Option<StartRun>,
     /// The prepared `CompleteRun.parent_event` of a child run's guest terminal (PF-F1).
     pub parent_event: Option<PayloadRef>,
+    /// The deterministic child run id of op `op` (`children::child_run_id(run, op, P)`),
+    /// for the CancelRun of a cancelled attached child op (09-08); `None` = no children
+    /// context (no CancelRun).
+    pub child_run: &'a dyn Fn(u64) -> Option<RunId>,
 }
 
 /// Map one appended batch to its intents (see the module docs), without children: every
@@ -311,6 +316,7 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
         ChildCtx {
             starts: &|_| None,
             parent_event: None,
+            child_run: &|_| None,
         },
     )
 }
@@ -329,6 +335,7 @@ pub fn derive_with_children(
     let ChildCtx {
         starts,
         mut parent_event,
+        child_run,
     } = kids;
     let terminal_batch = events.last().is_some_and(is_terminal);
     let mut out = Vec::new();
@@ -416,7 +423,21 @@ pub fn derive_with_children(
                         out.push(Derived::cancel_wait(c.op));
                     }
                     EventBody::EffectScheduled(_) => out.push(Derived::cancel_effect(c.op)),
-                    // Children: Phase 9.
+                    // 09-08 (D-P9-11): a graceful cancel of the attached child; the op itself
+                    // completes Err(Cancelled) in the engine (D5). Detached: nothing.
+                    EventBody::ChildStarted(ch) if !ch.options.detached => {
+                        if let Some(child) = child_run(c.op) {
+                            out.push(Derived::new(Intent::SendMessage(SendMessage {
+                                msg: Some(OutboxMsg {
+                                    kind: Some(outbox_msg::Kind::CancelRun(CancelRun {
+                                        target_run: child.as_bytes().to_vec(),
+                                        reason: crate::children::REASON_PARENT_CANCEL_OP
+                                            .to_string(),
+                                    })),
+                                }),
+                            })));
+                        }
+                    }
                     _ => {}
                 }
             }

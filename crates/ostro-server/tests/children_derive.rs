@@ -391,6 +391,7 @@ fn derive_maps_prepared_child_starts_and_the_marker() {
         ChildCtx {
             starts: &starts,
             parent_event: None,
+            child_run: &|_| None,
         },
     )
     .expect("derive");
@@ -430,6 +431,7 @@ fn derive_sets_parent_event_on_guest_terminals_only() {
         ChildCtx {
             starts: &|_| None,
             parent_event: Some(pe.clone()),
+            child_run: &|_| None,
         },
     )
     .expect("derive");
@@ -459,6 +461,7 @@ fn derive_sets_parent_event_on_guest_terminals_only() {
         ChildCtx {
             starts: &|_| None,
             parent_event: Some(pe),
+            child_run: &|_| None,
         },
     );
     assert_eq!(e, Err(DeriveError::UnexpectedParentEvent));
@@ -841,7 +844,7 @@ async fn repair_journals_unknown_workflow_once_when_still_unresolvable() {
         1,
         &[
             child_started(1, "nope", attached()),
-            // Detached children are left to 09-08.
+            // 09-08: an unresolvable detached child gets unknown_workflow too.
             child_started(
                 2,
                 "nope",
@@ -858,10 +861,10 @@ async fn repair_journals_unknown_workflow_once_when_still_unresolvable() {
         .await
         .expect("repair");
     let j = fx.journal(&run).await;
-    assert_eq!(j.len(), 4);
+    assert_eq!(j.len(), 5);
     assert_unknown_workflow(completion_of(&j, 1));
-    assert_eq!(completion_of(&j, 2), None);
+    assert_unknown_workflow(completion_of(&j, 2));
     sink.repair_unsupported(&j).await.expect("repair");
-    assert_eq!(fx.journal(&run).await.len(), 4, "once");
+    assert_eq!(fx.journal(&run).await.len(), 5, "once");
     assert_eq!(fx.runs(), 1);
 }

@@ -60,6 +60,24 @@
 //! delivered, skip; else re-send the StartChild (intents-only `EventsAppended`) if the
 //! target resolves now, or journal `unknown_workflow` once.
 //!
+//! # Children, part 2 (09-08)
+//!
+//! - `OpCancelled` of an attached child op derives `SendMessage(CancelRun{child,
+//!   "parent_cancel_op"})` ([`derive::ChildCtx::child_run`]).
+//! - A detached child's op is completed right after the flush that carried its StartChild:
+//!   `ChildCompleted{op, Ok(Child({"run_id": id}))}` ([`children::detached_completion`]),
+//!   journaled and sent on the hot-wait channel like the other post-flush completions.
+//! - The journal-load repair executes every [`children::plan_child_repairs`] action (repair
+//!   table in `children.rs`): attached re-sends (+ `ChildJournal`), detached re-sends + the
+//!   `{run_id}` completion, `unknown_workflow`, and the W-b `child_terminated` completion
+//!   of a parent resumed after its retention window.
+//! - Failpoints (feature `failpoints`, `return` = `AppendError::Unavailable`, the
+//!   executor re-activates the run): `child::start_child_after_flush` after the accepted
+//!   flush of a batch with a `ChildStarted`, before any post-flush completion;
+//!   `child::detached_after_flush` before a detached completion is journaled;
+//!   `child::parent_event_before_flush` after a child's `parent_event` was prepared, before
+//!   its terminal append.
+//!
 //! # Post-flush completions (Phase 4 mechanism)
 //!
 //! Without a bridge, effects are not executed. Instead of hanging, the run gets an
@@ -119,6 +137,21 @@ pub const CHILDREN_UNSUPPORTED: &str = "child workflows arrive in Phase 6/9";
 /// Attempts to journal unsupported completions when the journal end moves underneath
 /// (an input such as `TimerFired` landed between the two appends).
 const INPUT_RETRIES: usize = 4;
+
+/// Evaluate a `child::` failpoint (09-08; module docs): `Ok` unless configured with `return`.
+/// Without the feature `failpoints` it expands to `Ok(())`.
+macro_rules! failpoint {
+    ($name:literal) => {{
+        #[cfg(feature = "failpoints")]
+        let r = match fail::eval($name, |arg| arg) {
+            None => Ok(()),
+            Some(_) => Err(AppendError::Unavailable(format!("{} (injected)", $name))),
+        };
+        #[cfg(not(feature = "failpoints"))]
+        let r = Ok::<(), AppendError>(());
+        r
+    }};
+}
 
 /// Callback run after every accepted append (lease renewal).
 pub type RenewFn = Arc<dyn Fn() + Send + Sync>;
@@ -490,6 +523,9 @@ impl<L: ReplicatedLog> PartitionSink<L> {
                 // An unreadable row is treated as present: never re-decide on doubt.
                 .unwrap_or(true)
         };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let plan = children::plan_child_repairs(
             &self.run,
             partitions,
@@ -497,12 +533,15 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             journal,
             &has_row,
             &*self.modules,
+            rec.retention_ms,
+            now_ms,
         );
         let mut resend = Vec::new();
-        let mut unknown = Vec::new();
+        // Post-repair completions by op (journaled in op order).
+        let mut inputs = BTreeMap::new();
         for r in plan {
             match r {
-                ChildRepair::Resend { op, target } => {
+                ChildRepair::Resend { op, target } | ChildRepair::Detached { op, target } => {
                     let Some(ev) = journal.iter().find(|e| e.seq == op) else {
                         continue;
                     };
@@ -520,14 +559,24 @@ impl<L: ReplicatedLog> PartitionSink<L> {
                             }),
                         },
                     )));
-                    resend.push(Derived::child_journal(&child));
+                    if c.options.detached {
+                        // 09-08 (D-P9-10): the detached op completes with its run id.
+                        inputs.insert(op, children::detached_completion(op, &child));
+                    } else {
+                        resend.push(Derived::child_journal(&child));
+                    }
                 }
                 ChildRepair::UnknownWorkflow { op, message } => {
                     tracing::warn!(run = %self.run_str, op, %message, "child target unresolvable");
-                    unknown.push(children::unknown_workflow_completion(op, &message));
+                    inputs.insert(op, children::unknown_workflow_completion(op, &message));
+                }
+                ChildRepair::Expired { op } => {
+                    tracing::warn!(run = %self.run_str, op, "child not re-sent: parent resumed after its retention window");
+                    inputs.insert(op, children::expired_child_completion(op));
                 }
             }
         }
+        let unknown: Vec<EventBody> = inputs.into_values().collect();
         if !resend.is_empty() {
             // Intents-only EventsAppended (apply accepts `events = []`, D-P9-25).
             match self.submit_intents(resend).await {
@@ -735,6 +784,30 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
         // Children (09-05): resolved/prepared starts, unresolvable targets, parent event.
         let (starts, mut unknown_children) = self.prepare_children(&events).await?;
         let parent_event = self.parent_event(&events).await?;
+        if parent_event.is_some() {
+            failpoint!("child::parent_event_before_flush")?;
+        }
+        // 09-08: child ids of cancelled child ops (the partition count is read only then),
+        // and the `{run_id}` completions of detached starts (journaled after the flush).
+        let partitions = if events
+            .iter()
+            .any(|e| matches!(e.body, EventBody::OpCancelled(_)))
+        {
+            Some(self.partitions()?)
+        } else {
+            None
+        };
+        let mut detached: BTreeMap<u64, EventBody> = starts
+            .iter()
+            .filter(|(_, s)| s.parent.is_none())
+            .filter_map(|(op, s)| {
+                let child = RunId::from_bytes(&s.run_id).ok()?;
+                Some((*op, children::detached_completion(*op, &child)))
+            })
+            .collect();
+        let has_child_start = events
+            .iter()
+            .any(|e| matches!(e.body, EventBody::ChildStarted(_)));
         // 2. Intents (pure).
         let prior = self.prior_events(&events).await?;
         let derived = derive::derive_with_children(
@@ -747,6 +820,7 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
             derive::ChildCtx {
                 starts: &|op| starts.get(&op).cloned(),
                 parent_event,
+                child_run: &|op| partitions.map(|p| children::child_run_id(&self.run, op, p)),
             },
         )
         .map_err(unavailable)?;
@@ -784,15 +858,23 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
                 b.bridge().cancel(run.partition, &run.run_id, op);
             }
         }
+        if has_child_start {
+            failpoint!("child::start_child_after_flush")?;
+        }
         // Post-flush completions after the scheduling append (same token): unsupported
-        // effects without a bridge, then unresolvable children (09-05).
+        // effects without a bridge, then unresolvable children (09-05) and detached
+        // children (09-08).
         if !self.is_terminal() {
+            if !detached.is_empty() {
+                failpoint!("child::detached_after_flush")?;
+            }
             // In op order, like the scheduling events.
             let bodies: Vec<EventBody> = events
                 .iter()
                 .filter_map(|e| {
                     self.unsupported_input(e)
                         .or_else(|| unknown_children.remove(&e.seq))
+                        .or_else(|| detached.remove(&e.seq))
                 })
                 .collect();
             self.journal_inputs(bodies, max_ts).await?;
