@@ -46,6 +46,7 @@ serde = { version = "1", features = ["derive"] }
 ```rust
 use std::time::Duration;
 use ostro_sdk::prelude::*;
+use serde_json::Value;
 
 #[derive(Deserialize)]
 pub struct Input { name: String }
@@ -187,8 +188,90 @@ These are the frozen WIT 0.1 semantics (Phase 5) as the Rust SDK exposes them.
 
 ### Current server limitations
 
-- The server does not bridge effects yet: `http_fetch` and child ops complete with a
-  non-retryable `unsupported` failure until Phase 6.
-- Timers, signals and cancellation work end to end. Server-side await-token completion
-  and continue-as-new successors land with the rest of Phase 5 (the SDK surface above is
-  final; the engine already executes both).
+- None for this SDK surface since Phase 9: effects are bridged (Phase 6), await tokens and
+  continue-as-new run end to end (Phase 5), and child workflows run on the server
+  (Phase 9, below). The note that used to stand here predates those phases.
+
+## Children, saga, random_f64
+
+Added in Phase 9 (plan 09-06). The same surface exists in the Python and TypeScript SDKs,
+and all three pass the same conformance scenarios ([docs/conformance.md](../../docs/conformance.md)).
+
+### Child workflows (WF-06)
+
+```rust
+use ostro_sdk::prelude::*;
+use serde_json::Value;
+
+// Attached: the op completes with the child's output.
+let out: Value = ctx
+    .start_child("charge", &input, ChildOptions::new().queue("payments").version(2))
+    .wait()?;
+
+// Detached: completes with the child's run id once the start is flushed.
+let run: ChildRun = ctx.start_child("audit", &input, ChildOptions::new().detached()).wait()?;
+
+// cancel-op on a child (D5): the op ends Err(cancelled) and the child gets a graceful cancel.
+let op = ctx.start_child::<Value, _>("long", &input, ChildOptions::new());
+ctx.cancel(&op);
+assert!(op.wait().unwrap_err().is_cancelled());
+```
+
+- `ChildOptions::new()` with `queue(..)`, `version(..)`, `detached()` and
+  `run_timeout(Duration)`. Without them the child runs the workflow's Active version on its
+  default queue, inheriting the tenant and trace context. `try_start_child` returns a
+  non-retryable `invalid_json` error (and starts nothing) when the input cannot be
+  JSON-encoded; `start_child` panics in that case.
+- The child's run id is derived from (parent run, op) (D-P9-7), so a re-delivered start
+  never creates a second child.
+- **Outcome mapping (PF-W7):** Completed → `Ok(output)`; Failed → `Err(<the child's
+  failure>)`; Cancelled → `Err(cancelled)`; TimedOut → `Err(timeout)`; Terminated →
+  `Err(non-retryable{kind: "child_terminated"})`, recognised by
+  `StepError::is_child_terminated()` (`ostro_sdk::CHILD_TERMINATED`). A child that
+  continues-as-new is followed to the last run of its chain.
+- When the parent reaches any terminal status, every attached child still running gets a
+  graceful cancel (reason `parent_closed`). Detached children are never cancelled with the
+  parent. A shielded wait on an in-flight child still returns `Err(cancelled)` when the
+  parent is cancelled, because the child run itself is cancelled (the cancel cascade beats
+  shielding, D-P9-26).
+- An unknown child workflow or version fails the op with non-retryable
+  `unknown_workflow`.
+
+Full semantics, including resume after close and continue-as-new chains:
+[docs/children.md](../../docs/children.md).
+
+### Saga (WF-10)
+
+```rust
+let mut saga = Saga::new(ctx);
+book_a(ctx)?;
+saga.add("cancel_a", |ctx| cancel_a(ctx));
+book_b(ctx)?;
+saga.add("cancel_b", |ctx| cancel_b(ctx));
+if let Err(e) = book_c(ctx) {
+    return Err(saga.fail_with(e)); // runs cancel_b, then cancel_a, re-raises e with details
+}
+```
+
+- `compensate()` runs the compensations sequentially, last registered first (LIFO),
+  inside `ctx.shielded`, so a cancelled workflow still compensates. It continues past a
+  failing compensation and returns a `SagaReport { compensated, failures }`.
+- `fail_with(err)` compensates and returns `err` with
+  `{"compensated": [...], "compensation_failures": [{"compensation", "error": {kind,
+  message, retryable}}]}` in its details (`WorkflowError::with_details` / `details()`);
+  earlier details stay under `"details"`. Parallel compensation is out of scope.
+
+### `random_f64` and cross-SDK values
+
+- `ctx.random_f64()` is `(random_u64() >> 11) as f64 * 2^-53` (`ostro_sdk::f64_from_u64`),
+  the same mapping as Python `ctx.random_f64()` and TS `ctx.randomF64()`. Inside a step it
+  draws from the step-local stream (D7).
+- `idempotency_key_for(run_id, name)` is the P-11 key that `ctx.idempotency_key(name)`
+  uses. `ostro_sdk::codec::{encode_json, decode_json}` expose the SDK's JSON codec.
+- The vectors in `conformance/vectors/` (`idempotency.json`, `random_f64.json`,
+  `json.json`) pin these functions for all three SDKs (`cargo test --manifest-path
+  sdks/rust/Cargo.toml -p ostro-sdk --test vectors`). For the same seed and run id,
+  `random_u64`, `random_f64`, `uuid_v7` and `idempotency_key` are byte-identical across
+  Rust, Python and TS (C-VAL-01).
+- The crate vendors the frozen WIT at `ostro-sdk/wit/runtime.wit` (D-P9-29), checked
+  byte-identical by `tests/wit_copy.rs`.
