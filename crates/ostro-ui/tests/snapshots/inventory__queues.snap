@@ -1,0 +1,41 @@
+---
+source: crates/ostro-ui/tests/inventory.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Queues</h1>
+
+
+<table class="inventory queues">
+<thead><tr><th>Queue</th><th>State</th><th>Ready</th><th>Running</th><th>Demand</th><th>Flow</th><th>Actions</th></tr></thead>
+<tbody>
+<tr id="queue-default">
+<td><a href="/ui/runs?queue=default" title="Runs on default">default</a></td>
+<td><span class="badge active">active</span></td>
+<td>2</td>
+<td>1</td>
+<td>3</td>
+<td class="mono">concurrency=4, placement=workers</td>
+<td><form class="action" method="post" action="/ui/queues/default/pause" hx-post="/ui/queues/default/pause" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small secondary">Pause</button>
+</form></td>
+</tr>
+<tr id="queue-payments">
+<td><a href="/ui/runs?queue=payments" title="Runs on payments">payments</a></td>
+<td><span class="badge paused">paused</span></td>
+<td>0</td>
+<td>0</td>
+<td>—</td>
+<td class="mono">—</td>
+<td><form class="action" method="post" action="/ui/queues/payments/resume" hx-post="/ui/queues/payments/resume" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small">Resume</button>
+</form></td>
+</tr>
+</tbody>
+</table>
+
+
+</main>

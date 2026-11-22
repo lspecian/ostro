@@ -1,0 +1,18 @@
+---
+source: crates/ostro-ui/tests/inventory.rs
+expression: "&r.body[start..end]"
+---
+<header class="top">
+<a class="brand" href="/ui/">Ostro</a>
+<nav aria-label="Main">
+<a href="/ui/runs">Runs</a>
+<a href="/ui/dlq">DLQ</a>
+<a href="/ui/bulk">Bulk</a>
+<a href="/ui/modules" aria-current="page">Modules</a>
+<a href="/ui/workflows">Workflows</a>
+<a href="/ui/queues">Queues</a>
+<a href="/ui/schedules">Schedules</a>
+<a href="/ui/workers">Workers</a>
+<a href="/ui/partitions">Partitions</a>
+</nav>
+</header>

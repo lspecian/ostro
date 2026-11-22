@@ -1,0 +1,15 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+{% if !available %}
+<p class="empty">Schedules are not available on this server.</p>
+{% else if rows.is_empty() %}
+<p class="empty">No schedules.</p>
+{% else %}
+<table class="inventory schedules">
+<thead><tr><th>Schedule</th><th>Workflow</th><th>Cron</th><th>Time zone</th><th>State</th><th>Next fire</th><th>Last fire</th><th>Actions</th></tr></thead>
+<tbody>
+{% for r in rows %}{% include "ui/_schedule_row.html" %}
+{% endfor %}</tbody>
+</table>
+{% endif %}
+{% endblock %}

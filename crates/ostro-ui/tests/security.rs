@@ -214,6 +214,10 @@ async fn foreign_host_is_403_on_every_route_while_auth_is_off() {
         paths.push(
             path.replace("{run_id}", &s.completed)
                 .replace("{job_id}", "blk_0000000000000001")
+                .replace("{w}", "greet")
+                .replace("{q}", "default")
+                .replace("{name}", "nightly")
+                .replace("{id}", "wrk-1")
                 .replace("{*path}", "app.css"),
         );
     }

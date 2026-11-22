@@ -1,0 +1,13 @@
+<tr id="worker-{{ r.href_id }}">
+<td class="mono">{{ r.id }}</td>
+<td>{% for l in r.labels %}<span class="chip">{{ l }}</span>{% endfor %}{% if r.labels.is_empty() %}<span class="muted">none</span>{% endif %}</td>
+<td>{% if r.draining %}<span class="badge draining">draining</span>{% else %}<span class="badge active">active</span>{% endif %}</td>
+<td>{{ r.leases }}</td>
+<td>{{ r.slots }}</td>
+<td class="mono">{{ r.node }}</td>
+<td class="mono">{{ r.connected }}</td>
+<td>{% if !r.draining %}<form class="action" method="post" action="/ui/workers/{{ r.href_id }}/drain" hx-post="/ui/workers/{{ r.href_id }}/drain" hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Drain worker {{ r.id }}? It gets no new work and finishes its leases.">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small danger">Drain</button>
+</form>{% else %}<span class="muted">draining</span>{% endif %}</td>
+</tr>

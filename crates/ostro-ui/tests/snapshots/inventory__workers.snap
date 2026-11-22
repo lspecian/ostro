@@ -1,0 +1,40 @@
+---
+source: crates/ostro-ui/tests/inventory.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Workers</h1>
+
+
+<table class="inventory workers">
+<thead><tr><th>Worker</th><th>Labels</th><th>State</th><th>Leases</th><th>Slots</th><th>Node</th><th>Connected</th><th>Actions</th></tr></thead>
+<tbody>
+<tr id="worker-wrk-1">
+<td class="mono">wrk-1</td>
+<td><span class="chip">gpu=a100</span><span class="chip">region=eu</span></td>
+<td><span class="badge active">active</span></td>
+<td>2</td>
+<td>6 free of 8</td>
+<td class="mono">1</td>
+<td class="mono">2023-11-14 22:13:30Z</td>
+<td><form class="action" method="post" action="/ui/workers/wrk-1/drain" hx-post="/ui/workers/wrk-1/drain" hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Drain worker wrk-1? It gets no new work and finishes its leases.">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small danger">Drain</button>
+</form></td>
+</tr>
+<tr id="worker-wrk-2">
+<td class="mono">wrk-2</td>
+<td><span class="muted">none</span></td>
+<td><span class="badge draining">draining</span></td>
+<td>0</td>
+<td>2 free of 2</td>
+<td class="mono">1</td>
+<td class="mono">2023-11-14 22:13:40Z</td>
+<td><span class="muted">draining</span></td>
+</tr>
+</tbody>
+</table>
+
+
+</main>

@@ -6,7 +6,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
-use common::{HOST, TOKEN, get, get_ok, seed, send, ui};
+use common::{HOST, TOKEN, get, get_ok, seed, seed_inventory, send, ui, ui_bare};
 use http::{Request, StatusCode};
 use sha2::{Digest, Sha256};
 
@@ -38,6 +38,11 @@ fn concrete(pattern: &str, run: &str, job: &str) -> Option<(&'static str, String
     let path = path
         .replace("{run_id}", run)
         .replace("{job_id}", job)
+        // 11-17 inventory (seed_inventory names)
+        .replace("{w}", "greet")
+        .replace("{q}", "default")
+        .replace("{name}", "nightly")
+        .replace("{id}", "wrk-1")
         .replace("{*path}", "vendor/htmx-2.0.11.min.js");
     assert!(!path.contains('{'), "unmapped parameter in {pattern}");
     Some((method, path))
@@ -47,6 +52,7 @@ fn concrete(pattern: &str, run: &str, job: &str) -> Option<(&'static str, String
 async fn every_route_carries_csp_and_security_headers() {
     let ui = ui();
     let s = seed(&ui).await;
+    seed_inventory(&ui).await;
     assert!(ostro_ui::ROUTES.len() >= 10);
     let job = bulk_job(&ui).await;
     for pattern in ostro_ui::ROUTES {
@@ -197,6 +203,7 @@ fn templates_have_no_inline_script_style_or_handlers() {
 async fn rendered_pages_pass_the_lint_and_carry_the_htmx_config() {
     let ui = ui();
     let s = seed(&ui).await;
+    seed_inventory(&ui).await;
     for path in [
         "/ui/".to_owned(),
         "/ui/dlq".to_owned(),
@@ -207,6 +214,13 @@ async fn rendered_pages_pass_the_lint_and_carry_the_htmx_config() {
         format!("/ui/runs/{}/rerun?from_seq=2", s.completed),
         "/ui/bulk?workflow=greet".to_owned(),
         format!("/ui/bulk/{}", bulk_job(&ui).await),
+        // 11-17
+        "/ui/modules".to_owned(),
+        "/ui/workflows".to_owned(),
+        "/ui/queues".to_owned(),
+        "/ui/schedules".to_owned(),
+        "/ui/workers".to_owned(),
+        "/ui/partitions".to_owned(),
     ] {
         let r = get_ok(&ui, &path).await;
         assert_eq!(lint_tags(&r.body), Vec::<String>::new(), "{path}");
@@ -321,4 +335,27 @@ async fn ui_root_redirects_to_the_run_list() {
     let r = send(&ui.router, get("/ui")).await;
     assert_eq!(r.status, StatusCode::PERMANENT_REDIRECT);
     assert_eq!(r.header("location"), Some("/ui/"));
+}
+
+#[tokio::test]
+async fn inventory_fragments_and_unavailable_views_pass_the_lint() {
+    let ui = ui();
+    seed(&ui).await;
+    seed_inventory(&ui).await;
+    let r = get_ok(&ui, "/ui/partitions/fragment").await;
+    assert_eq!(lint_tags(&r.body), Vec::<String>::new());
+    let bare = ui_bare();
+    for path in [
+        "/ui/modules",
+        "/ui/workflows",
+        "/ui/queues",
+        "/ui/schedules",
+        "/ui/workers",
+        "/ui/partitions",
+        "/ui/partitions/fragment",
+    ] {
+        let r = get_ok(&bare, path).await;
+        assert_eq!(lint_tags(&r.body), Vec::<String>::new(), "{path}");
+        assert_security_headers(&r, path);
+    }
 }

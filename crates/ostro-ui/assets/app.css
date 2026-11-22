@@ -176,3 +176,18 @@ form.stack fieldset { border: 1px solid var(--line); padding: 0.4rem 0.6rem; }
 .verdict { padding: 0.5rem 0.8rem; border: 1px solid var(--ok); background: #e8f5ec; margin: 0.8rem 0; }
 .refusal { padding: 0.5rem 0.8rem; border: 1px solid var(--bad); background: #fdecea; margin: 0.8rem 0; }
 progress { width: 100%; max-width: 30rem; height: 1rem; }
+
+/* inventory (plan 11-17) */
+table.inventory form.action { display: inline-flex; gap: 0.3rem; margin: 0 0.3rem 0.2rem 0; }
+ul.versions { list-style: none; margin: 0; padding: 0; }
+ul.versions li { padding: 0.05rem 0; color: var(--muted); }
+ul.versions li.active { color: inherit; font-weight: 600; }
+.badge.active, .badge.healthy, .badge.resumed { background: var(--ok); }
+.badge.paused, .badge.draining { background: var(--warn); }
+.badge.unhealthy { background: var(--bad); }
+table.partitions tr.unhealthy td { background: #fdecea; }
+table.partitions td.bar { white-space: nowrap; }
+table.partitions td.bar svg { vertical-align: middle; margin-right: 0.4rem; }
+table.partitions svg rect.track { fill: var(--panel); }
+table.partitions svg rect.fill { fill: var(--ok); }
+table.partitions tr.unhealthy svg rect.fill { fill: var(--bad); }

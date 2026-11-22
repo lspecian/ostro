@@ -1,0 +1,15 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+{% if !available %}
+<p class="empty">Workflows are not available on this server.</p>
+{% else if rows.is_empty() %}
+<p class="empty">No workflows registered.</p>
+{% else %}
+<table class="inventory workflows">
+<thead><tr><th>Workflow</th><th>Active</th><th>Versions</th><th>Actions</th></tr></thead>
+<tbody>
+{% for r in rows %}{% include "ui/_workflow_row.html" %}
+{% endfor %}</tbody>
+</table>
+{% endif %}
+{% endblock %}

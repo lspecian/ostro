@@ -39,6 +39,22 @@
 //! | GET | `/ui/bulk/{job_id}`, `/ui/bulk/{job_id}/progress` | job page / progress fragment (polls every 2 s while active) |
 //! | POST | `/ui/bulk/{job_id}/cancel` | progress fragment (htmx) or 303 -> job page |
 //!
+//! # Routes (11-17, `inventory`)
+//!
+//! | Method | Path | Answer |
+//! |---|---|---|
+//! | GET | `/ui/modules` | stored modules (`?page_token=`) |
+//! | GET | `/ui/workflows` | workflows, versions, active version |
+//! | POST | `/ui/workflows/{w}/{pause,resume}` | row fragment (htmx) or 303 -> `/ui/workflows` |
+//! | GET | `/ui/queues` | queues: paused, ready/running, demand, flow |
+//! | POST | `/ui/queues/{q}/{pause,resume}` | row fragment (htmx) or 303 -> `/ui/queues` |
+//! | GET | `/ui/schedules` | schedules with next/last fire |
+//! | POST | `/ui/schedules/{name}/{pause,resume}` | row fragment (htmx) or 303 -> `/ui/schedules` |
+//! | POST | `/ui/schedules/{name}/trigger` | row with the started run (htmx) or 303 -> the run |
+//! | GET | `/ui/workers` | connected workers |
+//! | POST | `/ui/workers/{id}/drain` | row fragment (htmx) or 303 -> `/ui/workers` |
+//! | GET | `/ui/partitions`, `/ui/partitions/fragment` | partition health (polls every 5 s) |
+//!
 //! Every route sits behind [`security::guard`] (Host / `:authority` allowlist, security
 //! headers, D-P11-15).
 
@@ -57,7 +73,7 @@ mod timeline;
 use axum::routing::{get, post};
 
 /// Every `/ui` route pattern (GET unless noted), for the hardening tests: 11-15's, then
-/// 11-16's actions; 11-17 appends its own.
+/// 11-16's actions, then 11-17's inventory.
 #[doc(hidden)]
 pub const ROUTES: &[&str] = &[
     "/ui",
@@ -88,6 +104,22 @@ pub const ROUTES: &[&str] = &[
     "/ui/bulk/{job_id}",
     "/ui/bulk/{job_id}/progress",
     "POST /ui/bulk/{job_id}/cancel",
+    // 11-17 inventory
+    "/ui/modules",
+    "/ui/workflows",
+    "POST /ui/workflows/{w}/pause",
+    "POST /ui/workflows/{w}/resume",
+    "/ui/queues",
+    "POST /ui/queues/{q}/pause",
+    "POST /ui/queues/{q}/resume",
+    "/ui/schedules",
+    "POST /ui/schedules/{name}/pause",
+    "POST /ui/schedules/{name}/resume",
+    "POST /ui/schedules/{name}/trigger",
+    "/ui/workers",
+    "POST /ui/workers/{id}/drain",
+    "/ui/partitions",
+    "/ui/partitions/fragment",
 ];
 
 /// `[ui]` configuration as the router sees it.
@@ -131,7 +163,7 @@ pub fn router(deps: UiDeps) -> axum::Router {
         r = r.route("/ui/_probe", post(security::probe));
     }
     r = r.merge(actions::routes());
-    // 11-17 merges inventory::routes() here.
+    r = r.merge(inventory::routes());
     r.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         security::guard,

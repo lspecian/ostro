@@ -1,0 +1,14 @@
+<tr id="workflow-{{ r.href_id }}">
+<td><a href="{{ r.runs.href }}" title="Runs of {{ r.name }}">{{ r.name }}</a>{% if r.paused == Some(true) %} <span class="badge paused">paused</span>{% else if r.paused == Some(false) %} <span class="badge resumed">resumed</span>{% endif %}</td>
+<td class="mono">{{ r.active }}</td>
+<td><ul class="versions">
+{% for v in r.versions %}<li{% if v.active %} class="active"{% endif %}><span class="mono">v{{ v.version }}</span>{% if v.active %} <strong>(active)</strong>{% endif %} · <span class="mono" title="{{ v.sha }}">{{ v.short }}</span> · queue {{ v.queue }} · timeout {{ v.timeout }}</li>
+{% endfor %}</ul></td>
+<td>{% if r.paused != Some(true) %}<form class="action" method="post" action="/ui/workflows/{{ r.href_id }}/pause" hx-post="/ui/workflows/{{ r.href_id }}/pause" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small secondary">Pause</button>
+</form>{% endif %}{% if r.paused != Some(false) %}<form class="action" method="post" action="/ui/workflows/{{ r.href_id }}/resume" hx-post="/ui/workflows/{{ r.href_id }}/resume" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small">Resume</button>
+</form>{% endif %}</td>
+</tr>

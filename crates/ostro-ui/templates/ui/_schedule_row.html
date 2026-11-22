@@ -1,0 +1,19 @@
+<tr id="schedule-{{ r.href_id }}">
+<td>{{ r.name }}{% if let Some(s) = r.started %}<br><span class="muted">started</span> <a class="mono" href="{{ s.href }}">{{ s.text }}</a>{% endif %}</td>
+<td><a href="{{ r.workflow.href }}">{{ r.workflow.text }}</a> <span class="muted">{{ r.version }}</span></td>
+<td class="mono">{{ r.cron }}</td>
+<td>{{ r.timezone }}</td>
+<td>{% if r.paused %}<span class="badge paused">paused</span>{% else %}<span class="badge active">active</span>{% endif %}</td>
+<td class="mono">{{ r.next }}</td>
+<td class="mono">{{ r.last }}</td>
+<td>{% if r.paused %}<form class="action" method="post" action="/ui/schedules/{{ r.href_id }}/resume" hx-post="/ui/schedules/{{ r.href_id }}/resume" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small">Resume</button>
+</form>{% else %}<form class="action" method="post" action="/ui/schedules/{{ r.href_id }}/pause" hx-post="/ui/schedules/{{ r.href_id }}/pause" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small secondary">Pause</button>
+</form>{% endif %}<form class="action" method="post" action="/ui/schedules/{{ r.href_id }}/trigger" hx-post="/ui/schedules/{{ r.href_id }}/trigger" hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Start a run of schedule {{ r.name }} now?">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small">Trigger now</button>
+</form></td>
+</tr>

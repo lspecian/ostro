@@ -1,0 +1,15 @@
+<tr id="queue-{{ r.href_id }}">
+<td><a href="{{ r.runs_href }}" title="Runs on {{ r.name }}">{{ r.name }}</a></td>
+<td>{% if r.paused %}<span class="badge paused">paused</span>{% else %}<span class="badge active">active</span>{% endif %}</td>
+<td>{{ r.ready }}</td>
+<td>{{ r.running }}</td>
+<td>{{ r.demand }}</td>
+<td class="mono">{{ r.flow }}</td>
+<td>{% if r.paused %}<form class="action" method="post" action="/ui/queues/{{ r.href_id }}/resume" hx-post="/ui/queues/{{ r.href_id }}/resume" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small">Resume</button>
+</form>{% else %}<form class="action" method="post" action="/ui/queues/{{ r.href_id }}/pause" hx-post="/ui/queues/{{ r.href_id }}/pause" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="small secondary">Pause</button>
+</form>{% endif %}</td>
+</tr>

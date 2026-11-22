@@ -1,0 +1,23 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+{% if !available %}
+<p class="empty">Modules are not available on this server.</p>
+{% else if rows.is_empty() %}
+<p class="empty">No modules uploaded.</p>
+{% else %}
+<table class="inventory modules">
+<thead><tr><th>Module</th><th>Size</th><th>Workflows</th><th>Uploaded</th></tr></thead>
+<tbody>
+{% for m in rows %}<tr>
+<td class="mono" title="{{ m.sha }}">{{ m.short }}</td>
+<td>{{ m.size }}</td>
+<td>{% for w in m.workflows %}<a class="chip" href="{{ w.href }}">{{ w.text }}</a>{% endfor %}{% if m.workflows.is_empty() %}<span class="muted">none</span>{% endif %}</td>
+<td class="mono">{{ m.uploaded }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+{% endif %}
+<nav class="pager" aria-label="Pages">
+{% if let Some(h) = next_href %}<a href="{{ h }}" rel="next">Next page</a>{% endif %}
+</nav>
+{% endblock %}

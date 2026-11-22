@@ -59,9 +59,8 @@ pub struct UiReject {
 pub(crate) struct Reader(#[allow(dead_code)] pub(crate) UiPrincipal);
 
 /// The caller of a mutating `/ui` route: [`UiAuth::principal`] holding `operate`
-/// (actions, bulk, rerun and DLQ; consumed by 11-16).
-#[allow(dead_code)]
-pub(crate) struct Operator(pub(crate) UiPrincipal);
+/// (actions, bulk, rerun, DLQ and the inventory actions).
+pub(crate) struct Operator(#[allow(dead_code)] pub(crate) UiPrincipal);
 
 fn principal_with(
     parts: &http::request::Parts,

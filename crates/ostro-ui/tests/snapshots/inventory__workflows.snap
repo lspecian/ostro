@@ -1,0 +1,45 @@
+---
+source: crates/ostro-ui/tests/inventory.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Workflows</h1>
+
+
+<table class="inventory workflows">
+<thead><tr><th>Workflow</th><th>Active</th><th>Versions</th><th>Actions</th></tr></thead>
+<tbody>
+<tr id="workflow-billing">
+<td><a href="/ui/runs?workflow=billing" title="Runs of billing">billing</a></td>
+<td class="mono">v2</td>
+<td><ul class="versions">
+<li class="active"><span class="mono">v2</span> <strong>(active)</strong> · <span class="mono" title="a34a404543104ad077a28c7c790dfb23413c68a18d0c0940500d240acd1f14e7">a34a40454310</span> · queue — · timeout —</li>
+</ul></td>
+<td><form class="action" method="post" action="/ui/workflows/billing/pause" hx-post="/ui/workflows/billing/pause" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small secondary">Pause</button>
+</form><form class="action" method="post" action="/ui/workflows/billing/resume" hx-post="/ui/workflows/billing/resume" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small">Resume</button>
+</form></td>
+</tr>
+<tr id="workflow-greet">
+<td><a href="/ui/runs?workflow=greet" title="Runs of greet">greet</a></td>
+<td class="mono">v1</td>
+<td><ul class="versions">
+<li class="active"><span class="mono">v1</span> <strong>(active)</strong> · <span class="mono" title="a34a404543104ad077a28c7c790dfb23413c68a18d0c0940500d240acd1f14e7">a34a40454310</span> · queue — · timeout —</li>
+</ul></td>
+<td><form class="action" method="post" action="/ui/workflows/greet/pause" hx-post="/ui/workflows/greet/pause" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small secondary">Pause</button>
+</form><form class="action" method="post" action="/ui/workflows/greet/resume" hx-post="/ui/workflows/greet/resume" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small">Resume</button>
+</form></td>
+</tr>
+</tbody>
+</table>
+
+
+</main>

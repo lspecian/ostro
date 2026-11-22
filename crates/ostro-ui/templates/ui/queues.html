@@ -1,0 +1,15 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+{% if !available %}
+<p class="empty">Queues are not available on this server.</p>
+{% else if rows.is_empty() %}
+<p class="empty">No queues.</p>
+{% else %}
+<table class="inventory queues">
+<thead><tr><th>Queue</th><th>State</th><th>Ready</th><th>Running</th><th>Demand</th><th>Flow</th><th>Actions</th></tr></thead>
+<tbody>
+{% for r in rows %}{% include "ui/_queue_row.html" %}
+{% endfor %}</tbody>
+</table>
+{% endif %}
+{% endblock %}

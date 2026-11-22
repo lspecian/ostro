@@ -208,7 +208,6 @@ fn ct_eq(a: &str, b: &str) -> bool {
 #[derive(Debug, Clone)]
 pub(crate) struct SameOriginMutation {
     htmx: bool,
-    #[allow(dead_code)] // read by 11-16's actions through `field`/`fields`
     fields: Vec<(String, String)>,
 }
 
@@ -219,7 +218,6 @@ impl SameOriginMutation {
     }
 
     /// The first value of form field `name`.
-    #[allow(dead_code)] // consumed by 11-16's actions
     pub(crate) fn field(&self, name: &str) -> Option<&str> {
         self.fields
             .iter()
@@ -228,7 +226,6 @@ impl SameOriginMutation {
     }
 
     /// Every form field, in order.
-    #[allow(dead_code)] // consumed by 11-16's actions
     pub(crate) fn fields(&self) -> &[(String, String)] {
         &self.fields
     }

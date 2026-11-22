@@ -1,0 +1,49 @@
+---
+source: crates/ostro-ui/tests/inventory.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Schedules</h1>
+
+
+<table class="inventory schedules">
+<thead><tr><th>Schedule</th><th>Workflow</th><th>Cron</th><th>Time zone</th><th>State</th><th>Next fire</th><th>Last fire</th><th>Actions</th></tr></thead>
+<tbody>
+<tr id="schedule-hourly">
+<td>hourly</td>
+<td><a href="/ui/runs?workflow=greet">greet</a> <span class="muted">active version</span></td>
+<td class="mono">0 * * * *</td>
+<td>UTC</td>
+<td><span class="badge paused">paused</span></td>
+<td class="mono">paused</td>
+<td class="mono">—</td>
+<td><form class="action" method="post" action="/ui/schedules/hourly/resume" hx-post="/ui/schedules/hourly/resume" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small">Resume</button>
+</form><form class="action" method="post" action="/ui/schedules/hourly/trigger" hx-post="/ui/schedules/hourly/trigger" hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Start a run of schedule hourly now?">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small">Trigger now</button>
+</form></td>
+</tr>
+<tr id="schedule-nightly">
+<td>nightly</td>
+<td><a href="/ui/runs?workflow=greet">greet</a> <span class="muted">active version</span></td>
+<td class="mono">0 3 * * *</td>
+<td>Europe/Berlin</td>
+<td><span class="badge active">active</span></td>
+<td class="mono">2023-11-15 01:00:00Z</td>
+<td class="mono">2023-11-14 19:26:40Z</td>
+<td><form class="action" method="post" action="/ui/schedules/nightly/pause" hx-post="/ui/schedules/nightly/pause" hx-target="closest tr" hx-swap="outerHTML">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small secondary">Pause</button>
+</form><form class="action" method="post" action="/ui/schedules/nightly/trigger" hx-post="/ui/schedules/nightly/trigger" hx-target="closest tr" hx-swap="outerHTML" hx-confirm="Start a run of schedule nightly now?">
+<input type="hidden" name="csrf" value="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef">
+<button type="submit" class="small">Trigger now</button>
+</form></td>
+</tr>
+</tbody>
+</table>
+
+
+</main>

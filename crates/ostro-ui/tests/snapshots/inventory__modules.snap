@@ -1,0 +1,38 @@
+---
+source: crates/ostro-ui/tests/inventory.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Modules</h1>
+
+
+<table class="inventory modules">
+<thead><tr><th>Module</th><th>Size</th><th>Workflows</th><th>Uploaded</th></tr></thead>
+<tbody>
+<tr>
+<td class="mono" title="a34a404543104ad077a28c7c790dfb23413c68a18d0c0940500d240acd1f14e7">a34a40454310</td>
+<td>1.5 KiB</td>
+<td><a class="chip" href="/ui/runs?workflow=greet">greet</a><a class="chip" href="/ui/runs?workflow=billing">billing</a></td>
+<td class="mono">2023-11-14 22:13:20Z</td>
+</tr>
+<tr>
+<td class="mono" title="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&#60;script&#62;alert(1)&#60;/script&#62;">aaaaaaaaaaaa</td>
+<td>10 B</td>
+<td><a class="chip" href="/ui/runs?workflow=%3Cscript%3Ealert%281%29%3C%2Fscript%3E">&#60;script&#62;alert(1)&#60;/script&#62;</a></td>
+<td class="mono">2023-11-14 22:21:40Z</td>
+</tr>
+<tr>
+<td class="mono" title="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff">ffffffffffff</td>
+<td>3.0 MiB</td>
+<td><span class="muted">none</span></td>
+<td class="mono">—</td>
+</tr>
+</tbody>
+</table>
+
+<nav class="pager" aria-label="Pages">
+
+</nav>
+
+</main>

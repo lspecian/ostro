@@ -1,0 +1,42 @@
+---
+source: crates/ostro-ui/tests/inventory.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Partitions</h1>
+
+<div id="partitions" hx-get="/ui/partitions/fragment" hx-trigger="every 5s" hx-swap="outerHTML">
+
+<table class="inventory partitions">
+<thead><tr><th>Partition</th><th>Role</th><th>Leader</th><th>Epoch</th><th>Applied</th><th>Log end</th><th>Lag</th><th>Ready</th><th>Running</th><th>Health</th></tr></thead>
+<tbody>
+<tr class="healthy">
+<td class="mono">0</td>
+<td>leader</td>
+<td class="mono">1</td>
+<td class="mono">7</td>
+<td class="mono">90</td>
+<td class="mono">120</td>
+<td class="bar"><svg width="120" height="10" viewBox="0 0 120 10" role="img" aria-label="applied 90 of 120"><rect class="track" x="0" y="0" width="120" height="10"></rect><rect class="fill" x="0" y="0" width="90" height="10"></rect></svg><span class="mono">30</span></td>
+<td>2</td>
+<td>1</td>
+<td><span class="badge healthy">healthy</span></td>
+</tr>
+<tr class="unhealthy">
+<td class="mono">1</td>
+<td>follower</td>
+<td class="mono">—</td>
+<td class="mono">—</td>
+<td class="mono">—</td>
+<td class="mono">—</td>
+<td class="bar"><span class="mono">—</span></td>
+<td>—</td>
+<td>—</td>
+<td><span class="badge unhealthy">unhealthy</span> <span class="muted">apply loop stalled &#60;x&#62;</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+</main>

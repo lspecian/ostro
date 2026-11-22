@@ -1,0 +1,15 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+{% if !available %}
+<p class="empty">Workers are not available on this server.</p>
+{% else if rows.is_empty() %}
+<p class="empty">No workers connected.</p>
+{% else %}
+<table class="inventory workers">
+<thead><tr><th>Worker</th><th>Labels</th><th>State</th><th>Leases</th><th>Slots</th><th>Node</th><th>Connected</th><th>Actions</th></tr></thead>
+<tbody>
+{% for r in rows %}{% include "ui/_worker_row.html" %}
+{% endfor %}</tbody>
+</table>
+{% endif %}
+{% endblock %}
