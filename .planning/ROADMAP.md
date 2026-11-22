@@ -363,7 +363,7 @@ Plans:
 
 Plans:
 - [x] 10-01-PLAN.md — PHASE-10 GATE (Phase 9 complete incl. D-P9-28/29/30 outputs, Phase 8 clock seam, code vs RESERVATIONS, stale-blob rule) + Phase 10 name rows + decisions D-P10-1..21 and coordination rules to STATE (all) (W1)
-- [ ] 10-02-PLAN.md — Contract A (Cargo/deny/ci mutex holder): every Phase 10 dep incl. test deps, notify CC0 crate-scoped exception, ostro-build/ostro-client skeletons, fixture HTTP server, ci-local/ci.yml client + polyglot steps (all) (W2)
+- [x] 10-02-PLAN.md — Contract A (Cargo/deny/ci mutex holder): every Phase 10 dep incl. test deps, notify CC0 crate-scoped exception, ostro-build/ostro-client skeletons, fixture HTTP server, ci-local/ci.yml client + polyglot steps (all) (W2)
 - [ ] 10-03-PLAN.md — Contract B: CLI verb stubs with full flag sets (positional replay RUNs), exit code 4, local JSON envelope, p10 spawn helpers (CLI-03..08) (W2)
 - [ ] 10-04-PLAN.md — Contract C: Python/TS/Go client package scaffolds (SDK-06, SDK-07) (W2)
 - [ ] 10-05-PLAN.md — API contract: GET /v1/dev/time, POST /v1/dev/time/skip, POST /v1/modules/{sha}/replay (trait defaults, REST, OpenAPI, fake, REST-only parity exclusion), server delegation stubs, client methods (SDK-06, SDK-07, CLI-07) (W2)
@@ -542,7 +542,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
 | 9. Polyglot SDKs & Conformance | 0/TBD | Not started | - |
-| 10. Developer CLI & Test Kits | 1/20 | In progress (10-01 gate passed 2026-11-22) | - |
+| 10. Developer CLI & Test Kits | 2/20 | In progress (10-01 gate passed 2026-11-22; 10-02 contract A done) | - |
 | 11. Run Operations & Embedded UI | 18/18 | Plans complete; phase verification pending | - |
 | 12. Replicated Partition Logs | 0/TBD | Not started | - |
 | 13. Cluster Membership, Routing & Upgrades | 0/TBD | Not started | - |
