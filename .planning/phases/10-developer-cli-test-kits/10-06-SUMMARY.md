@@ -126,9 +126,9 @@ workers/spill.rs, plus ostro-backup uploader.rs) were annotated here on coordina
 - `cargo fmt --all --check`: clean.
 - `cargo clippy -p ostro-partition -p ostro-server -p ostro-backup --all-targets --locked -- -D warnings`: clean.
 - `cargo test -p ostro-partition -p ostro-server -p ostro-backup --locked`: 1063 passed, 0 failed, 7 ignored (123 test binaries, exit 0)
-- `cargo check --workspace --all-targets` after rebase onto main: clean (rebased onto 6983af8; no overlap with 12-03/12-10/10-11/10-12)
+- `cargo check --workspace --all-targets` after rebase onto main: clean (on top of 728bdea; no overlap with 12-03/12-10/10-11/10-12)
 
 ## Self-Check: PASSED
 
-- Commits cd36b64, 8c450ca are present on the rebased branch
+- Commits 727b415, 2924068 are present on the rebased branch
 - The 13 modified files carry clock-exempt annotations, and the strict CLOCK_GATE output is empty
