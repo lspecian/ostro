@@ -179,6 +179,29 @@ fn watch_redeploys_on_save_ignores_noise_and_survives_broken_edits() {
     eprintln!("[10-16] edit -> `new runs use v2`: {:?}", t.elapsed());
     assert_eq!(active(&dev), Some(2));
     assert_eq!(run_version(&dev), 2);
+    // FSEvents (macOS) does not bound its delivery by the debounce window: the save can
+    // arrive as two batches, the second one during the build, which gives exactly one
+    // follow-up build of the same sources. Let it finish before measuring the noise; it
+    // must not deploy anything new.
+    log.settle(Duration::from_secs(5));
+    assert_eq!(
+        log.count(mark, "deployed hello"),
+        1,
+        "one deploy for one save: {:?}",
+        log.watch_lines(mark)
+    );
+    assert_eq!(
+        log.count(mark, "build failed"),
+        0,
+        "{:?}",
+        log.watch_lines(mark)
+    );
+    assert!(
+        log.count(mark, "building") <= 2,
+        "{:?}",
+        log.watch_lines(mark)
+    );
+    assert_eq!(active(&dev), Some(2));
 
     // 3. noise: target/, .git/, swap files and vim's 4913 never trigger a build
     let mark = log.all.len();

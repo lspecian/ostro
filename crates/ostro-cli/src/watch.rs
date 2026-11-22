@@ -21,6 +21,7 @@ use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use notify_debouncer_full::notify::event::ModifyKind;
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use ostro_build::pipeline::{ignored_dir, ignored_file, is_ignored};
@@ -231,6 +232,21 @@ pub async fn run_watch(
                 let paths: Vec<PathBuf> = events
                     .iter()
                     .filter(|e| !matches!(e.event.kind, EventKind::Access(_)))
+                    // A directory's own content/metadata change (its mtime moves when an
+                    // entry, even an ignored one, is created in it; backends differ in
+                    // whether they report that) is not a source change: its files report
+                    // their own events. Creates, removes and renames of a directory count.
+                    .filter(|e| {
+                        !(matches!(
+                            e.event.kind,
+                            EventKind::Modify(
+                                ModifyKind::Data(_)
+                                    | ModifyKind::Metadata(_)
+                                    | ModifyKind::Any
+                                    | ModifyKind::Other
+                            )
+                        ) && e.event.paths.iter().all(|p| p.is_dir()))
+                    })
                     .flat_map(|e| e.event.paths.iter())
                     .filter(|p| relevant(&filter_root, p, &extra))
                     .cloned()
