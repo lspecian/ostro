@@ -273,7 +273,15 @@ async fn deploy_run_ls_inspect_history() {
     let ins = d.ok(&["inspect", &echo]);
     assert_eq!(ins["retention_ms"], 48 * 3600 * 1000, "{ins}");
     insta::assert_snapshot!("inspect", redacted(&ins, &[]));
-    let hist = d.ok(&["history", &echo]);
+    let mut hist = d.ok(&["history", &echo]);
+    // 11-07/11-11: sink-stamped events carry `attempt = epoch << 32 | n`. The leader
+    // epoch is not part of the contract under test, so keep `n` and mask the epoch.
+    for ev in hist["events"].as_array_mut().unwrap() {
+        if let Some(a) = ev.get("attempt").and_then(Value::as_u64) {
+            assert!(a >> 32 >= 1, "attempt without an epoch: {a}");
+            ev["attempt"] = json!(format!("[epoch]<<32|{}", a & 0xffff_ffff));
+        }
+    }
     insta::assert_snapshot!("history", redacted(&hist, &[(&echo, "[run_id]")]));
     let page = d.ok(&["history", &echo, "--limit", "1"]);
     assert_eq!(page["events"].as_array().unwrap().len(), 1);

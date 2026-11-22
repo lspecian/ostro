@@ -24,6 +24,7 @@ expression: "redacted(&hist, &[(&echo, \"[run_id]\")])"
       "ts_ms": "[ms]"
     },
     {
+      "attempt": "[epoch]<<32|1",
       "details": {
         "output": {
           "hello": "file"
