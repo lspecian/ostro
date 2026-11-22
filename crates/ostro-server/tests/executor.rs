@@ -12,7 +12,7 @@ use common::{Opts, T, TestNode, count, guest_wasm, rref};
 use ostro_engine::error::AttemptFailure;
 use ostro_engine::sink::{ActivationOutcome, ActivationSink};
 use ostro_partition::store::values::RunStatus;
-use ostro_server::executor::input_bridge;
+use ostro_server::executor::{JobRecord, input_bridge};
 use ostro_server::run_started::{build_run_started, input_payload};
 use ostro_server::sink::PartitionSink;
 use ostro_types::journal::{
@@ -165,16 +165,16 @@ async fn trapping_attempts_retry_then_fail_the_run() {
     assert!(v["message"].as_str().unwrap_or("").contains("trap"), "{v}");
     // A new attempt token per retry, max_attempt_failures (3) attempts in total.
     assert_eq!(rec.current_attempt.map(|a| a.1), Some(3));
-    let failed: Vec<_> = n
-        .jobs_of(&run)
-        .into_iter()
-        .filter(|j| {
-            matches!(
-                j.activation,
-                Some(ActivationOutcome::AttemptFailed(AttemptFailure::Trap(_)))
-            )
-        })
-        .collect();
+    // The executor records a job after `drive` returns, which can be after the final
+    // AttemptFailed was applied and the run went terminal: wait for the third record.
+    let is_trap = |j: &JobRecord| {
+        matches!(
+            j.activation,
+            Some(ActivationOutcome::AttemptFailed(AttemptFailure::Trap(_)))
+        )
+    };
+    n.wait_job(&run, T, |j| j.token.n == 3 && is_trap(j)).await;
+    let failed: Vec<_> = n.jobs_of(&run).into_iter().filter(|j| is_trap(j)).collect();
     assert_eq!(failed.len(), 3, "{failed:?}");
     let tokens: Vec<u32> = failed.iter().map(|j| j.token.n).collect();
     assert_eq!(tokens, [1, 2, 3]);
