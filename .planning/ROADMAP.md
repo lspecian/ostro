@@ -362,7 +362,7 @@ Plans:
 **Plans**: 20 plans (8 waves; revised after the plan check (5 blockers, 10 warnings): 10-02 split into 10-02/10-03/10-04, new 10-06 clock-exempt sweep; 10-01 is the PHASE-10 GATE requiring Phase 9 complete (all 09-*-SUMMARY + 09-VERIFICATION passed, or human_needed with by-design items only) and the Phase 8 injected clock seam (F5); Phase 10 claims no ordinal (F7), only RESERVATIONS §11 name rows (F1); decisions D-P10-1..D-P10-21 adopted in 10-DECISIONS.md (pinned sha256 toolchain downloads into a cache + --docker fallback; uv 0.7.15 + uv-managed CPython + the released componentize-py 0.25.1 wheel; Node 24 + embedded lockfile; rustup-init + zig cc fallback; server-side DevClock time skipping with a skip barrier (--ephemeral --time-skipping, auto-skip + manual endpoint); server-side replay (4-arg replay_check shared with Phase 11) + offline --corpus, exit 4; hand-written zero-dependency Python/TS/Go clients + extracted ostro-client crate; clap_complete; build output in target/ostro/); notify CC0-1.0 deny exception and the auto-skip trigger flagged USER REVIEW; runs alongside Phase 11 under the 10-DECISIONS shared-file rules: Cargo/deny/ci only 10-02 (never concurrently with 11-02), ostro-api + OpenAPI snapshot only 10-05 (never with 11-07), client extraction 10-09 (never with 11-12), main.rs 10-02 anchor/10-10/10-16/10-18; clean-machine Docker runs, macOS run and publishing human_needed)
 
 Plans:
-- [ ] 10-01-PLAN.md — PHASE-10 GATE (Phase 9 complete incl. D-P9-28/29/30 outputs, Phase 8 clock seam, code vs RESERVATIONS, stale-blob rule) + Phase 10 name rows + decisions D-P10-1..21 and coordination rules to STATE (all) (W1)
+- [x] 10-01-PLAN.md — PHASE-10 GATE (Phase 9 complete incl. D-P9-28/29/30 outputs, Phase 8 clock seam, code vs RESERVATIONS, stale-blob rule) + Phase 10 name rows + decisions D-P10-1..21 and coordination rules to STATE (all) (W1)
 - [ ] 10-02-PLAN.md — Contract A (Cargo/deny/ci mutex holder): every Phase 10 dep incl. test deps, notify CC0 crate-scoped exception, ostro-build/ostro-client skeletons, fixture HTTP server, ci-local/ci.yml client + polyglot steps (all) (W2)
 - [ ] 10-03-PLAN.md — Contract B: CLI verb stubs with full flag sets (positional replay RUNs), exit code 4, local JSON envelope, p10 spawn helpers (CLI-03..08) (W2)
 - [ ] 10-04-PLAN.md — Contract C: Python/TS/Go client package scaffolds (SDK-06, SDK-07) (W2)
@@ -542,7 +542,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 7. Workers, Placement & Flow Control | 0/TBD | Not started | - |
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
 | 9. Polyglot SDKs & Conformance | 0/TBD | Not started | - |
-| 10. Developer CLI & Test Kits | 0/TBD | Not started | - |
+| 10. Developer CLI & Test Kits | 1/20 | In progress (10-01 gate passed 2026-11-22) | - |
 | 11. Run Operations & Embedded UI | 0/TBD | Not started | - |
 | 12. Replicated Partition Logs | 0/TBD | Not started | - |
 | 13. Cluster Membership, Routing & Upgrades | 0/TBD | Not started | - |
