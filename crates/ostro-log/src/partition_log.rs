@@ -960,7 +960,17 @@ impl ReplicatedLog for PartitionLog {
         seq.next = new;
         self.leo.store(new.0, Ordering::Release);
         self.core.on_truncated(new);
-        self.epochs_lock().truncate_from_end(new);
+        let latest = {
+            let mut epochs = self.epochs_lock();
+            epochs.truncate_from_end(new);
+            epochs.latest_epoch()
+        };
+        // A follower that truncated a divergent suffix (KIP-279) accepts the leader's records
+        // from the newest epoch it still holds: the dropped epochs no longer bound
+        // `append_replica` (their records are gone). Leaders keep their fence.
+        if matches!(self.core.lock().mode, Mode::Follower { .. }) {
+            seq.current_epoch = latest.unwrap_or_default();
+        }
         *self.index.lock().await = None;
         self.status.truncations.send_modify(|g| *g += 1);
         info!(
