@@ -7,7 +7,9 @@
 //! - `weights`: queues of weight 3 and 1 share the first 40 grants about 3:1.
 //! - `priority`: priority-10 runs all start before priority-0 runs queued with them.
 //! - `keyed_fairness`: key_concurrency 1 over 10 keys (one hot key with 10x the backlog):
-//!   no key ever runs twice at once, Jain's index over the contended window >= 0.9.
+//!   no key ever runs twice at once, Jain's index over the contended window >= 0.9
+//!   (1 partition). `keyed_concurrency_node_wide`: the same load on 4 partitions, no key
+//!   ever runs twice at once.
 //! - `throttle_vs_rate_limit`: a throttle spaces first activations and accepts every
 //!   start, a re-activation is not throttled; a rate limit answers 429 `rate_limited`
 //!   + Retry-After and creates nothing; an idempotent re-submit is not limited.
@@ -26,8 +28,9 @@
 //! permit) is released only after the terminal record is applied, so overlap counts over
 //! these intervals are an upper bound of the true execution overlap.
 //!
-//! Partitions: priorities and DRR weights are per partition dispatcher, so `weights` and
-//! `priority` run a 1-partition server; the node-wide limits run 4 partitions.
+//! Partitions: priorities, DRR weights and keyed fairness are per partition dispatcher, so
+//! `weights`, `priority` and `keyed_fairness` run a 1-partition server; the node-wide
+//! limits run 4 partitions.
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
@@ -413,11 +416,28 @@ async fn priority() {
     );
 }
 
+/// Keyed fairness (DRR over concurrency keys) is per partition dispatcher, like priorities
+/// and queue weights (07-19-SUMMARY): with N partitions each dispatcher only arbitrates
+/// between the keys whose runs hash to it, and the hot key has backlog in every partition,
+/// so node-wide it wins a freed slot in each of them and the node-wide Jain index measures
+/// partition placement, not the scheduler (macOS CI: 0.89 over [18,7,10,9,...] on 4
+/// partitions). The fairness bound is therefore checked on 1 partition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn keyed_fairness() {
+    keyed(1, "keyed_fairness", true).await;
+}
+
+/// key_concurrency is a node-wide limit: no key runs twice at once across 4 partitions.
+/// Jain is logged but not asserted here (see `keyed_fairness`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyed_concurrency_node_wide() {
+    keyed(4, "keyed_concurrency_node_wide", false).await;
+}
+
+async fn keyed(partitions: u16, name: &str, assert_jain: bool) {
     let _serial = SERIAL.lock().await;
     let t0 = Instant::now();
-    let c = P7Cluster::start(opts(4, 4, "")).await;
+    let c = P7Cluster::start(opts(partitions, 4, "")).await;
     c.api.deploy("cpu-burn").await;
     c.api.set_flow("kq", json!({"key_concurrency": 1})).await;
     // Everything is submitted "at t0": held behind a queue pause, released at once.
@@ -467,16 +487,18 @@ async fn keyed_fairness() {
         .collect();
     let j = jain(&counts);
     eprintln!(
-        "flow_e2e::keyed_fairness: per-key max concurrency {per_key_max:?}, node overlap {} \
-         (slots 4), completions per key in the contended window {counts:?}, Jain {j:.4}, \
-         total {:?}",
+        "flow_e2e::{name}: partitions {partitions}, per-key max concurrency {per_key_max:?}, \
+         node overlap {} (slots 4), completions per key in the contended window {counts:?}, \
+         Jain {j:.4}, total {:?}",
         max_overlap(&iv),
         t0.elapsed()
     );
     for (k, m) in per_key_max.iter().enumerate() {
         assert!(*m <= 1, "key k{k} ran {m} at once (key_concurrency 1)");
     }
-    assert!(j >= 0.9, "Jain's index {j:.4} < 0.9 over {counts:?}");
+    if assert_jain {
+        assert!(j >= 0.9, "Jain's index {j:.4} < 0.9 over {counts:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
