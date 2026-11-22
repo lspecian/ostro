@@ -1,13 +1,25 @@
-//! [`MetaHandle`]: starts the single-voter metadata Raft group and offers
-//! propose / read / watch with read-your-writes on one node (META-01).
+//! [`MetaHandle`]: starts the metadata Raft group (a lone voter, or a static 3/5-voter
+//! group since Phase 12, D-P12-2) and offers propose / read / watch with read-your-writes
+//! (META-01).
+//!
+//! A multi-voter group is wired by the caller through [`MetaStart`]: the [`Outbox`] that
+//! carries Raft messages to the peers and a [`ProposeForwarder`] that runs a proposal on
+//! the current leader (ostro-cluster implements both over `MetaPeer`; ostro-meta stays
+//! transport-free).
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
+
+use ostro_raft_driver::raft::eraftpb::Message;
+use tokio::time::Instant;
 
 use crate::command::{self, DecodeError, MetaCommand, MetaResult, decode_result, encode_command};
 use crate::records::ClusterInfo;
 use crate::sm::{MetaSm, MetaView};
-use crate::{DriverConfig, NullOutbox, ProposeError, RaftDriver, RaftHandle};
+use crate::{Applied, DriverConfig, NullOutbox, Outbox, ProposeError, RaftDriver, RaftHandle};
 
 /// How long `start` waits for this node to become leader and catch up. A hang guard, not a
 /// latency target (a lone voter campaigns at once and normally leads in tens of ms): 5 s
@@ -19,6 +31,89 @@ const OUTCOME_UNKNOWN_RETRIES: u32 = 5;
 const OUTCOME_UNKNOWN_BACKOFF: Duration = Duration::from_millis(50);
 /// How long a proposal failed with `Stopped` waits for the driver to publish why.
 const STOPPED_REASON_WAIT: Duration = Duration::from_secs(1);
+/// Multi-voter: how long a proposal keeps retrying while no leader is known or the
+/// leader moved (an election takes `election_tick` .. `2 * election_tick` ticks), and
+/// how long a forwarded proposal waits for the local apply (read-your-writes).
+const PROPOSE_DEADLINE: Duration = Duration::from_secs(30);
+/// Multi-voter: pause between retries while no leader is known / the leader moved.
+const LEADER_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// The future returned by [`ProposeForwarder::forward`].
+pub type ForwardFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Applied, ProposeError>> + Send + 'a>>;
+
+/// Runs an encoded proposal on the metadata leader (12-05; ostro-cluster's
+/// `GrpcForwarder` over `MetaPeer.Propose`).
+///
+/// The result carries the leader's `Applied { index, term, result }`; [`MetaHandle`]
+/// then waits until the local node applied `index` (read-your-writes). Errors keep the
+/// driver's meaning: `NotLeader { leader }` (the target is not the leader: nothing was
+/// applied), `Dropped`, `OutcomeUnknown` (it may or may not take effect; transport
+/// failures after the request may have been sent belong here) and `Stopped`.
+pub trait ProposeForwarder: Send + Sync + 'static {
+    /// Propose `cmd` (an encoded [`MetaCommand`]) on `leader`.
+    fn forward(&self, leader: u64, cmd: Vec<u8>) -> ForwardFuture<'_>;
+}
+
+/// Raft timing of the metadata group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickConfig {
+    /// Driver tick.
+    pub interval: Duration,
+    /// Election timeout in ticks (randomized in `[election_tick, 2 * election_tick)`).
+    pub election_tick: usize,
+    /// Leader heartbeat in ticks (`< election_tick`).
+    pub heartbeat_tick: usize,
+}
+
+impl Default for TickConfig {
+    /// The vendored driver's defaults (100 ms, election 20, heartbeat 3), which the
+    /// single-voter [`MetaHandle::start`] has always used.
+    fn default() -> Self {
+        let d = DriverConfig::new(1);
+        TickConfig {
+            interval: d.tick_interval,
+            election_tick: d.election_tick,
+            heartbeat_tick: d.heartbeat_tick,
+        }
+    }
+}
+
+/// How to start the metadata group ([`MetaHandle::start_with`]).
+pub struct MetaStart {
+    /// This node's id (a member of `voters`).
+    pub node_id: u64,
+    /// The static voter set; every founding node passes the same set. `[node_id]` is the
+    /// single-voter group (immediate campaign, as [`MetaHandle::start`]).
+    pub voters: Vec<u64>,
+    /// Carries Raft messages to the other voters. Must not block (driver thread).
+    pub outbox: Box<dyn Outbox>,
+    /// Runs proposals on the leader when this node is a follower. `None`: a follower's
+    /// proposal fails with `NotLeader`.
+    pub forwarder: Option<Arc<dyn ProposeForwarder>>,
+    /// Raft timing.
+    pub tick: TickConfig,
+}
+
+impl std::fmt::Debug for MetaStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetaStart")
+            .field("node_id", &self.node_id)
+            .field("voters", &self.voters)
+            .field("forwarder", &self.forwarder.is_some())
+            .field("tick", &self.tick)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Adapts the boxed caller outbox to the driver's generic `Outbox` parameter.
+struct DynOutbox(Box<dyn Outbox>);
+
+impl Outbox for DynOutbox {
+    fn send(&mut self, messages: Vec<Message>) {
+        self.0.send(messages);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MetaError {
@@ -49,13 +144,17 @@ pub struct MetaRaftStatus {
     pub is_leader: bool,
 }
 
-/// A running single-voter metadata group.
+/// A running metadata group member.
 pub struct MetaHandle {
     /// `Some` until [`MetaHandle::stop`]; dropping the handle also stops the
     /// driver (blocking the dropping thread on the join).
     driver: Option<RaftDriver>,
     raft: RaftHandle,
     view: MetaView,
+    node_id: u64,
+    /// More than one voter: proposals wait out elections and are forwarded.
+    multi: bool,
+    forwarder: Option<Arc<dyn ProposeForwarder>>,
 }
 
 impl std::fmt::Debug for MetaHandle {
@@ -80,18 +179,89 @@ impl MetaHandle {
     /// [`MetaError::Start`] carrying [`DecodeError::PreFreezeFormat`]'s message
     /// ("delete the dev data dir"), whether the old data is in the snapshot or
     /// in the log.
+    ///
+    /// Tests/examples only; production uses [`MetaHandle::start_with`] with the cluster
+    /// `PeerOutbox` (12-14), so the cluster transport is live in every mode (D-P12-13).
+    /// This is `start_with` with no peers ([`NullOutbox`]), no forwarder and the default
+    /// ticks.
     pub async fn start(dir: &Path, node_id: u64) -> Result<MetaHandle, MetaError> {
+        Self::start_with(
+            dir,
+            MetaStart {
+                node_id,
+                voters: vec![node_id],
+                outbox: Box::new(NullOutbox),
+                forwarder: None,
+                tick: TickConfig::default(),
+            },
+        )
+        .await
+    }
+
+    /// Open (or create) the metadata Raft log in `dir` as member `start.node_id` of the
+    /// static voter group `start.voters`.
+    ///
+    /// - `voters == [node_id]`: exactly [`MetaHandle::start`]'s behaviour (immediate
+    ///   campaign; returns once leader and caught up).
+    /// - More voters: returns once the local log is replayed (applied ≥ the persisted
+    ///   commit index), without waiting for an election, because the peers' messages may
+    ///   only start flowing once the caller wired its transport to [`MetaHandle::raft`].
+    ///   Call [`MetaHandle::wait_ready`] to wait for a leader.
+    ///
+    /// The pre-Phase-5 format check of [`MetaHandle::start`] applies to both.
+    pub async fn start_with(dir: &Path, start: MetaStart) -> Result<MetaHandle, MetaError> {
+        let MetaStart {
+            node_id,
+            voters,
+            outbox,
+            forwarder,
+            tick,
+        } = start;
+        if node_id == 0 || voters.contains(&0) {
+            return Err(MetaError::Start("node id 0 is reserved".into()));
+        }
+        if !voters.contains(&node_id) {
+            return Err(MetaError::Start(format!(
+                "node {node_id} is not one of the metadata voters {voters:?}"
+            )));
+        }
+        for (i, v) in voters.iter().enumerate() {
+            if voters[..i].contains(v) {
+                return Err(MetaError::Start(format!(
+                    "metadata voters {voters:?} list node {v} twice"
+                )));
+            }
+        }
+        let multi = voters.len() > 1;
+        let config = DriverConfig {
+            tick_interval: tick.interval,
+            election_tick: tick.election_tick,
+            heartbeat_tick: tick.heartbeat_tick,
+            ..DriverConfig::new(node_id)
+        };
         let (sm, view) = MetaSm::new();
-        let driver = RaftDriver::start(dir, DriverConfig::new(node_id), &[node_id], sm, NullOutbox)
+        let driver = RaftDriver::start(dir, config, &voters, sm, DynOutbox(outbox))
             .map_err(|e| MetaError::Start(e.to_string()))?;
         let raft = driver.handle();
-        raft.campaign();
+        if !multi {
+            raft.campaign();
+        }
         let handle = MetaHandle {
             driver: Some(driver),
             raft,
             view,
+            node_id,
+            multi,
+            forwarder,
         };
-        match tokio::time::timeout(START_TIMEOUT, handle.wait_leader_caught_up()).await {
+        let ready = async {
+            if multi {
+                handle.wait_replayed().await
+            } else {
+                handle.wait_leader_caught_up().await
+            }
+        };
+        match tokio::time::timeout(START_TIMEOUT, ready).await {
             Ok(Ok(())) => match handle.view.pre_freeze_format() {
                 // A replayed log entry predates the Phase 5 meta format (D20).
                 Some(found) => {
@@ -111,6 +281,44 @@ impl MetaHandle {
                 Err(MetaError::Timeout)
             }
         }
+    }
+
+    /// Wait until some node leads the group and this node applied everything it knows
+    /// committed (multi-voter readiness; immediate for a started single voter).
+    /// [`MetaError::Timeout`] after 30 s.
+    pub async fn wait_ready(&self) -> Result<(), MetaError> {
+        let ready = async {
+            let mut rx = self.raft.subscribe();
+            loop {
+                {
+                    let s = rx.borrow_and_update();
+                    if let Some(f) = &s.failed {
+                        return Err(MetaError::Start(f.clone()));
+                    }
+                    if s.leader_id.is_some() && s.applied >= s.commit {
+                        return Ok(());
+                    }
+                }
+                rx.changed()
+                    .await
+                    .map_err(|_| MetaError::Start(ProposeError::Stopped.to_string()))?;
+            }
+        };
+        tokio::time::timeout(START_TIMEOUT, ready)
+            .await
+            .map_err(|_| MetaError::Timeout)?
+    }
+
+    /// Wait until the entries committed before this start are applied locally.
+    async fn wait_replayed(&self) -> Result<(), MetaError> {
+        let s = self.raft.status();
+        if let Some(f) = s.failed {
+            return Err(MetaError::Start(f));
+        }
+        self.raft
+            .wait_applied(s.commit)
+            .await
+            .map_err(|e| MetaError::Start(e.to_string()))
     }
 
     /// Bootstrap a brand-new metadata group in the empty directory `dir` from a metadata
@@ -172,12 +380,29 @@ impl MetaHandle {
     /// is safe because every command is CAS-guarded: a retry of a command that
     /// did take effect cannot apply twice (it reports `Conflict`/`StaleVersion`
     /// instead, or `Ok` for idempotent commands).
+    ///
+    /// Multi-voter (12-05): on a follower the proposal goes to the leader through the
+    /// [`ProposeForwarder`], then waits until this node applied the leader's index. While
+    /// no leader is known, or the leader moved, it retries for up to 30 s.
     pub async fn propose(&self, cmd: MetaCommand) -> Result<MetaResult, MetaError> {
         let bytes = encode_command(&cmd);
+        let deadline = Instant::now() + PROPOSE_DEADLINE;
         let mut attempt = 0;
         loop {
-            match self.raft.propose(bytes.clone()).await {
-                Ok(applied) => {
+            let outcome = match self.raft.propose(bytes.clone()).await {
+                Err(ProposeError::NotLeader { leader: Some(l) }) if l != self.node_id => {
+                    match &self.forwarder {
+                        Some(f) => f.forward(l, bytes.clone()).await.map(|a| (a, true)),
+                        None => Err(ProposeError::NotLeader { leader: Some(l) }),
+                    }
+                }
+                other => other.map(|a| (a, false)),
+            };
+            match outcome {
+                Ok((applied, forwarded)) => {
+                    if forwarded {
+                        self.wait_applied_until(applied.index, deadline).await?;
+                    }
                     return decode_result(&applied.result)
                         .map_err(|e| MetaError::Decode(e.to_string()));
                 }
@@ -186,11 +411,27 @@ impl MetaHandle {
                     tracing::warn!(attempt, "metadata proposal outcome unknown; retrying");
                     tokio::time::sleep(OUTCOME_UNKNOWN_BACKOFF).await;
                 }
+                Err(ProposeError::NotLeader { leader })
+                    if self.multi && Instant::now() < deadline =>
+                {
+                    tracing::debug!(?leader, "metadata leader unknown or moved; retrying");
+                    tokio::time::sleep(LEADER_RETRY_BACKOFF).await;
+                }
                 Err(ProposeError::Stopped) => {
                     return Err(MetaError::Propose(self.stopped_reason().await));
                 }
                 Err(e) => return Err(MetaError::Propose(e.to_string())),
             }
+        }
+    }
+
+    /// Read-your-writes after a forwarded proposal: wait until `index` is applied here.
+    async fn wait_applied_until(&self, index: u64, deadline: Instant) -> Result<(), MetaError> {
+        match tokio::time::timeout_at(deadline, self.raft.wait_applied(index)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(ProposeError::Stopped)) => Err(MetaError::Propose(self.stopped_reason().await)),
+            Ok(Err(e)) => Err(MetaError::Propose(e.to_string())),
+            Err(_) => Err(MetaError::Timeout),
         }
     }
 
@@ -274,9 +515,15 @@ impl MetaHandle {
         }
     }
 
-    /// The underlying Raft handle (status, subscribe).
+    /// The underlying Raft handle (status, subscribe, `step` for incoming peer messages,
+    /// `report_unreachable`, `sample_live`, `leader_contact_age`).
     pub fn raft(&self) -> &RaftHandle {
         &self.raft
+    }
+
+    /// This node's id.
+    pub fn node_id(&self) -> u64 {
+        self.node_id
     }
 
     /// Stop the driver, joining its thread off the async runtime.
