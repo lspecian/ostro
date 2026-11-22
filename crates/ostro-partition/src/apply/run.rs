@@ -510,8 +510,13 @@ pub(crate) fn check_intents(cur: &Cursor, e: &EventsAppended, status: RunStatus)
                     return Err(invalid(InvalidCode::BadIntent));
                 }
                 msg_target(cur, msg)?;
+                // A detached child has no row to mark (09-08).
                 if let Some(outbox_msg::Kind::StartChild(c)) = &msg.kind {
-                    prev_child = c.start.as_ref().map(|s| s.run_id.as_slice());
+                    prev_child = c
+                        .start
+                        .as_ref()
+                        .filter(|s| s.parent.is_some())
+                        .map(|s| s.run_id.as_slice());
                 }
             }
             Intent::CompleteRun(c) => {
@@ -658,8 +663,12 @@ pub(crate) fn apply_events_appended(
                     let child_bytes = c.start.as_ref().map_or(&[][..], |s| &s.run_id);
                     let child = RunId::from_bytes(child_bytes)
                         .map_err(|e| StoreError::Codec(format!("child run id: {e}")))?;
-                    b.insert(Table::Children, children_key(&run, &child), Vec::new());
-                    rec.children = rec.children.saturating_add(1);
+                    // 09-08: a detached child (no ParentRef) gets no children row: it is
+                    // never cancelled with the parent and never reports to it (D-P9-10).
+                    if c.start.as_ref().is_some_and(|s| s.parent.is_some()) {
+                        b.insert(Table::Children, children_key(&run, &child), Vec::new());
+                        rec.children = rec.children.saturating_add(1);
+                    }
                 }
                 emit(b, cur, msg, actions)?;
             }

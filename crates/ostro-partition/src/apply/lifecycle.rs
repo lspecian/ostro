@@ -44,9 +44,9 @@
 
 use ostro_types::RunId;
 use ostro_types::command::{
-    AttemptGranted, CancelRun, ChildCompleted, CompleteRun, EXPIRE_OP, EventsAppended,
-    MAX_REASON_LEN, OutboxMsg, ParentRef, RUN_TIMEOUT_OP, RetryRun, SCHEDULE_TO_START_OP, StartRun,
-    TerminalStatus, TerminateRun, TimerFired, derived::Intent, outbox_msg,
+    AttemptGranted, ChildCompleted, CompleteRun, EXPIRE_OP, EventsAppended, MAX_REASON_LEN,
+    OutboxMsg, ParentRef, RUN_TIMEOUT_OP, RetryRun, SCHEDULE_TO_START_OP, StartRun, TerminalStatus,
+    TerminateRun, TimerFired, derived::Intent, outbox_msg,
 };
 use ostro_types::journal::{self, EventBody, EventKind};
 use prost::Message;
@@ -60,7 +60,7 @@ use super::run::{
     put_event, remove_ready, start_run, store_run, terminal_status,
 };
 use super::{terminal, waits};
-use crate::store::keys::{children_key, children_prefix, payload_key, timer_key};
+use crate::store::keys::{children_key, payload_key, timer_key};
 use crate::store::values::{RunRecord, RunStatus};
 use crate::store::{ApplyBatch, StoreError, Table};
 
@@ -68,8 +68,6 @@ use crate::store::{ApplyBatch, StoreError, Table};
 pub(crate) const REASON_RUN_TIMEOUT: &str = "run_timeout";
 /// Hard-stop reason of a schedule-to-start timeout (D2).
 pub(crate) const REASON_SCHEDULE_TO_START: &str = "schedule_to_start";
-
-const RUN_LEN: usize = 18;
 
 fn reject(r: RejectReason) -> ApplyResult {
     Ok(ApplyOutcome::Rejected(r))
@@ -131,31 +129,21 @@ fn status_code(s: RunStatus) -> i32 {
 // ------------------------------------------------------------------ hard stop
 
 /// Graceful `CancelRun` to every child of `run` (one children prefix scan, only when
-/// `children > 0`). Local equivalent of the cascade in `inbound::cancel_run`.
+/// `children > 0`). From 09-08 (PF-F3) the hard stop is a parent close: the rows are removed
+/// and `children` is 0 (`terminal::close_children`), so a resumed parent's journal-load
+/// repair re-sends the StartChild (D-P9-24).
 fn cascade_cancel(
     b: &mut ApplyBatch<'_>,
     cur: &mut Cursor,
     run: &RunId,
-    rec: &RunRecord,
+    rec: &mut RunRecord,
     reason: &str,
     actions: &mut Vec<Action>,
 ) -> Result<(), StoreError> {
     if rec.children == 0 {
         return Ok(());
     }
-    for (k, _) in b.range_prefix(Table::Children, &children_prefix(run))? {
-        let child = k
-            .get(RUN_LEN..)
-            .ok_or_else(|| StoreError::Codec("short children key".into()))?;
-        let msg = OutboxMsg {
-            kind: Some(outbox_msg::Kind::CancelRun(CancelRun {
-                target_run: child.to_vec(),
-                reason: reason.to_string(),
-            })),
-        };
-        emit(b, cur, &msg, actions)?;
-    }
-    Ok(())
+    terminal::close_children(b, cur, run, rec, reason, actions)
 }
 
 /// What a hard stop sets: status (`Terminated` / `TimedOut`), reason, time.
@@ -216,7 +204,7 @@ fn hard_stop(
         };
         emit(b, cur, &msg, actions)?;
     }
-    cascade_cancel(b, cur, run, &rec, reason, actions)?;
+    cascade_cancel(b, cur, run, &mut rec, reason, actions)?;
     store_run(b, run, &rec);
     Ok(ApplyOutcome::Accepted)
 }
@@ -584,8 +572,11 @@ pub(crate) fn complete_continued_as_new(
                         let child_bytes = ch.start.as_ref().map_or(&[][..], |s| &s.run_id);
                         let child = RunId::from_bytes(child_bytes)
                             .map_err(|e| StoreError::Codec(format!("child run id: {e}")))?;
-                        b.insert(Table::Children, children_key(run, &child), Vec::new());
-                        rec.children = rec.children.saturating_add(1);
+                        // 09-08: a detached child (no ParentRef) gets no children row.
+                        if ch.start.as_ref().is_some_and(|s| s.parent.is_some()) {
+                            b.insert(Table::Children, children_key(run, &child), Vec::new());
+                            rec.children = rec.children.saturating_add(1);
+                        }
                         emit(b, cur, msg, actions)?;
                     }
                     _ => emit(b, cur, msg, actions)?,

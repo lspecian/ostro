@@ -19,20 +19,35 @@
 //!
 //! Phase 7 (07-04): last, the hook clears `RunRecord.pause` (no read).
 //!
+//! Phase 9 (09-08, PF-F3, D-P9-11): **parent-close cascade.** For an executor or
+//! continue-as-new terminal (Completed, Failed, Cancelled, ContinuedAsNew) of a run with
+//! `children > 0`, the hook sends a graceful `CancelRun{reason: "parent_closed"}` to every
+//! child in the `children` keyspace (one prefix scan), removes those rows and sets
+//! `children = 0`. The hard stops (Terminated, TimedOut) keep 05-09's cascade in
+//! `lifecycle::hard_stop`, which runs after the parent's `ChildCompleted` and carries the
+//! hard-stop reason; from 09-08 it removes the rows too. Removing the rows at close is what
+//! makes the journal-load repair re-send the StartChild after a RetryRun resume (D-P9-24).
+//! A child that already ended drops the extra `CancelRun` (per-message drop at the target).
+//!
 //! **Read budget:** the two `waits` prefix scans (2 reads) run only when
 //! `RunRecord.open_waits > 0`; otherwise the hook reads nothing (asserted in
 //! `tests/apply_seams.rs`). Documented exception, docs/storage-format.md §13. Non-resumable
 //! terminals add 1 effects prefix scan by run (06-03; asserted in `tests/apply_effects.rs`).
 //! Schedule-started runs add 1 (reverse row) to 3 reads (08-07; asserted in
 //! `tests/apply_schedule.rs`).
+//! The parent-close cascade adds 1 children prefix scan, only when `RunRecord.children > 0`
+//! (09-08; asserted in `tests/children_close.rs`).
 
 use ostro_types::RunId;
 
+use ostro_types::command::{CancelRun, OutboxMsg, outbox_msg};
+
 use super::cursor::Cursor;
+use super::outbox::emit;
 use super::outcome::Action;
 use super::{effects, lifecycle, schedule};
-use crate::store::keys::{WAIT_ROW, decode_wait_key, timer_key, wait_prefixes};
-use crate::store::values::{self, RunRecord, WaitRow};
+use crate::store::keys::{WAIT_ROW, children_prefix, decode_wait_key, timer_key, wait_prefixes};
+use crate::store::values::{self, RunRecord, RunStatus, WaitRow};
 use crate::store::{ApplyBatch, StoreError, Table};
 
 pub(crate) fn on_terminal(
@@ -56,9 +71,43 @@ pub(crate) fn on_terminal(
     if rec.idempotency_key.starts_with(schedule::CRON_KEY_PREFIX) {
         schedule::on_run_terminal(b, cur, run, rec.status, actions)?;
     }
+    // 09-08 (PF-F3): parent-close cascade (hard stops cascade in `lifecycle::hard_stop`).
+    if rec.children > 0 && !matches!(rec.status, RunStatus::Terminated | RunStatus::TimedOut) {
+        close_children(b, cur, run, rec, REASON_PARENT_CLOSED, actions)?;
+    }
     // 07-04 (B7): a terminal run is never paused, so a resumed (RetryRun) run is not stuck
     // behind the enqueue_ready gate. Callers store the record after the hook.
     rec.pause = None;
+    Ok(())
+}
+
+/// `CancelRun` reason of the parent-close cascade (09-08, D-P9-11).
+pub(crate) const REASON_PARENT_CLOSED: &str = "parent_closed";
+
+/// Graceful `CancelRun{reason}` to every child row of `run`, then the rows are removed and
+/// `rec.children` is 0 (09-08). One prefix scan; callers check `children > 0`.
+pub(crate) fn close_children(
+    b: &mut ApplyBatch<'_>,
+    cur: &mut Cursor,
+    run: &RunId,
+    rec: &mut RunRecord,
+    reason: &str,
+    actions: &mut Vec<Action>,
+) -> Result<(), StoreError> {
+    for (k, _) in b.range_prefix(Table::Children, &children_prefix(run))? {
+        let child = k
+            .get(RunId::LEN..)
+            .ok_or_else(|| StoreError::Codec("short children key".into()))?;
+        let msg = OutboxMsg {
+            kind: Some(outbox_msg::Kind::CancelRun(CancelRun {
+                target_run: child.to_vec(),
+                reason: reason.to_string(),
+            })),
+        };
+        emit(b, cur, &msg, actions)?;
+        b.remove(Table::Children, k);
+    }
+    rec.children = 0;
     Ok(())
 }
 

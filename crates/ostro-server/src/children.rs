@@ -48,12 +48,9 @@ pub fn child_run_id(parent: &RunId, op: u64, partitions: u16) -> RunId {
     h.update(parent.as_bytes());
     h.update(op.to_be_bytes());
     let d = h.finalize();
-    let mut u = [0u8; 16];
-    u.copy_from_slice(&d[..16]);
-    u[6] = (u[6] & 0x0f) | 0x80;
-    u[8] = (u[8] & 0x3f) | 0x80;
     let p = u16::from_be_bytes([d[16], d[17]]) % partitions.max(1);
-    RunId::new(PartitionId(p), uuid::Uuid::from_bytes(u))
+    // 09-08: the uuid part is the shared pure fn apply also uses (D-P9-27 row matching).
+    RunId::new(PartitionId(p), ostro_types::ids::child_run_uuid(parent, op))
 }
 
 /// A resolved `start-child` target (D-P9-8). `workflow` and `queue` are qualified (D23).

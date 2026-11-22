@@ -24,21 +24,44 @@
 //! signal journals its `SignalPayload` and matches the oldest wait or is
 //! buffered; a `CancelRun` sets the flag, journals `CancelRequested` once and
 //! cascades to the children, or is forwarded along a continue-as-new chain.
+//!
+//! Phase 9 children (plan 09-08, D-P9-24, D-P9-27):
+//!
+//! - **Duplicate StartChild (resume re-send, B3).** A `StartChild` for an existing run whose
+//!   `RunRecord.parent` equals the incoming `ParentRef` is answered when the child is
+//!   terminal: an event-less outbox `ChildCompleted{parent, child, op, status}` (the parent
+//!   journals `Err(child_terminated)` / `Err(Timeout)` / `Err(Cancelled)`, D-P9-9). A
+//!   `ContinuedAsNew` child forwards the duplicate to `continued_to` (start `run_id`
+//!   rewritten, like the CancelRun forward of 05-08). A live child or a parent mismatch is a
+//!   drop. One extra point read (the child record).
+//! - **Row guard.** The parent accepts a `ChildCompleted` only with a matching `children`
+//!   row: the exact `(parent, child)` row, else (one prefix scan, only when `children > 0`)
+//!   the row whose child uuid is `child_run_uuid(parent, op)`, i.e. the original child of
+//!   a continue-as-new chain whose successor reports. The row is removed; no row → drop, so
+//!   a re-completion never completes an op twice. A uuid match also sends
+//!   `CancelRun{reason: "chain_done"}` to the original child.
+//! - **`chain_done`.** A `ContinuedAsNew` run receiving it forwards it to `continued_to` and
+//!   clears `continued_to` (no cancel request); a record whose expiry was deferred
+//!   (`retention.rs`) is deleted instead. Any other run drops it. "chain_done" is therefore a
+//!   reserved CancelRun reason; a user cancel reason equal to it, cascaded to a child, is
+//!   dropped by the child (documented limit).
 
 use ostro_types::RunId;
 use ostro_types::command::{
-    CHILD_ROW_JOURNAL, ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg, outbox_msg,
+    CHILD_ROW_JOURNAL, CancelRun, ChildCompleted, CronStart, InboundBatch, InboundMsg, OutboxMsg,
+    StartChild, outbox_msg,
 };
+use ostro_types::ids::child_run_uuid;
 use ostro_types::journal::{self, EventBody, EventKind, Failure, OpOutput, encode_result};
 use prost::Message;
 
 use super::cursor::Cursor;
 use super::inputs::{journal_encoded, journal_input};
-use super::outbox::msg_oversize;
+use super::outbox::{emit, msg_oversize, msg_target};
 use super::outcome::{Action, ApplyOutcome, InvalidCode, RejectReason};
 use super::run::{enqueue_ready, load_run, local_run, start_run, store_run, terminal_status};
-use super::{lifecycle, waits};
-use crate::store::keys::{children_key, inbox_key};
+use super::{lifecycle, retention, waits};
+use crate::store::keys::{children_key, children_prefix, inbox_key};
 use crate::store::values::{self, InboxMsg, RunRecord, RunStatus};
 use crate::store::{ApplyBatch, StoreError, Table};
 
@@ -139,9 +162,13 @@ fn apply_msg(
     match kind {
         Kind::StartChild(c) => {
             // The child run id is unique: a resend hits the runs-row check
-            // (Duplicate) and is consumed like any other outcome.
-            if let Some(s) = &c.start {
-                start_run(b, cur, s, None, actions)?;
+            // (Duplicate); 09-08 answers a duplicate for a terminal child (B3).
+            if let Some(s) = &c.start
+                && let ApplyOutcome::Duplicate {
+                    existing: Some(child),
+                } = start_run(b, cur, s, None, actions)?
+            {
+                duplicate_start_child(b, cur, c, &child, actions)?;
             }
         }
         Kind::CronStart(c) => cron_start(b, cur, c, actions)?,
@@ -152,6 +179,8 @@ fn apply_msg(
         Kind::Signal(s) => waits::inbound_signal(b, cur, s, actions)?,
         // Graceful cancel (plan 05-08): flag + journaled CancelRequested + children cascade,
         // forwarded along a continue-as-new chain (PF-F2).
+        // 09-08 (D-P9-27): the chain bookkeeping reason is never a cancel request.
+        Kind::CancelRun(c) if c.reason == REASON_CHAIN_DONE => chain_done(b, cur, c, actions)?,
         Kind::CancelRun(c) => waits::inbound_cancel(b, cur, c, actions)?,
         Kind::StartRun(s) => lifecycle::inbound_start_run(b, cur, s, actions)?,
     }
@@ -213,9 +242,136 @@ fn cron_start(
     Ok(())
 }
 
+/// `CancelRun` reason the parent sends to the original child of a finished continue-as-new
+/// chain (09-08, D-P9-27).
+pub(crate) const REASON_CHAIN_DONE: &str = "chain_done";
+
+/// A `StartChild` whose run already exists (09-08, B3; module docs). Reads: the child record.
+fn duplicate_start_child(
+    b: &mut ApplyBatch<'_>,
+    cur: &mut Cursor,
+    c: &StartChild,
+    child: &RunId,
+    actions: &mut Vec<Action>,
+) -> Result<(), StoreError> {
+    let Some(s) = &c.start else { return Ok(()) };
+    let Some(p) = &s.parent else { return Ok(()) };
+    let Some(rec) = load_run(b, child)? else {
+        return Ok(());
+    };
+    let Ok(parent) = p.run_id() else {
+        return Ok(());
+    };
+    if rec.parent != Some((*parent.as_bytes(), p.op)) || !rec.status.is_terminal() {
+        return Ok(());
+    }
+    let msg = if rec.status == RunStatus::ContinuedAsNew {
+        let Some(next) = rec.continued_to else {
+            return Ok(());
+        };
+        let mut fwd = s.clone();
+        fwd.run_id = next.as_bytes().to_vec();
+        OutboxMsg {
+            kind: Some(outbox_msg::Kind::StartChild(StartChild {
+                start: Some(fwd),
+            })),
+        }
+    } else {
+        OutboxMsg {
+            kind: Some(outbox_msg::Kind::ChildCompleted(ChildCompleted {
+                parent_run: p.run_id.clone(),
+                child_run: child.as_bytes().to_vec(),
+                op: p.op,
+                status: c_status(rec.status),
+                result: None,
+                event: None,
+            })),
+        }
+    };
+    // An unaddressable target (outside the partition count) is a drop, never a failure.
+    if msg_target(cur, &msg).is_ok() {
+        emit(b, cur, &msg, actions)?;
+    }
+    Ok(())
+}
+
+fn c_status(s: RunStatus) -> i32 {
+    use ostro_types::command::TerminalStatus as T;
+    (match s {
+        RunStatus::Completed => T::Completed,
+        RunStatus::Failed => T::Failed,
+        RunStatus::Cancelled => T::Cancelled,
+        RunStatus::Terminated => T::Terminated,
+        RunStatus::TimedOut => T::TimedOut,
+        _ => T::ContinuedAsNew,
+    }) as i32
+}
+
+/// One `(key, value)` row.
+type KeyValue = (Vec<u8>, Vec<u8>);
+
+/// The `children` row of a continue-as-new chain's original child: the row of `parent`
+/// whose child uuid is `child_run_uuid(parent, op)` (D-P9-27). One prefix scan, only when
+/// `children > 0`.
+fn chain_row(
+    b: &mut ApplyBatch<'_>,
+    parent: &RunId,
+    rec: &RunRecord,
+    op: u64,
+) -> Result<Option<KeyValue>, StoreError> {
+    if rec.children == 0 {
+        return Ok(None);
+    }
+    let want = child_run_uuid(parent, op);
+    Ok(b.range_prefix(Table::Children, &children_prefix(parent))?
+        .into_iter()
+        .find(|(k, _)| {
+            k.get(RunId::LEN..)
+                .and_then(|c| RunId::from_bytes(c).ok())
+                .is_some_and(|c| c.uuid() == want)
+        }))
+}
+
+/// `CancelRun{reason: "chain_done"}` (09-08, D-P9-27; module docs).
+fn chain_done(
+    b: &mut ApplyBatch<'_>,
+    cur: &mut Cursor,
+    c: &CancelRun,
+    actions: &mut Vec<Action>,
+) -> Result<(), StoreError> {
+    let Ok(run) = local_run(cur, &c.target_run) else {
+        return Ok(());
+    };
+    let Some(mut rec) = load_run(b, &run)? else {
+        return Ok(());
+    };
+    if rec.status != RunStatus::ContinuedAsNew {
+        return Ok(());
+    }
+    let Some(next) = rec.continued_to else {
+        return Ok(());
+    };
+    let msg = OutboxMsg {
+        kind: Some(outbox_msg::Kind::CancelRun(CancelRun {
+            target_run: next.as_bytes().to_vec(),
+            reason: REASON_CHAIN_DONE.to_string(),
+        })),
+    };
+    if msg_target(cur, &msg).is_ok() {
+        emit(b, cur, &msg, actions)?;
+    }
+    if retention::is_deferred(&rec) {
+        retention::delete_deferred(b, &run, &mut rec, actions)?;
+    } else {
+        rec.continued_to = None;
+        store_run(b, &run, &rec);
+    }
+    Ok(())
+}
+
 fn child_completed(
     b: &mut ApplyBatch<'_>,
-    cur: &Cursor,
+    cur: &mut Cursor,
     c: &ChildCompleted,
     actions: &mut Vec<Action>,
 ) -> Result<(), StoreError> {
@@ -226,10 +382,22 @@ fn child_completed(
         .map_err(|e| StoreError::Codec(format!("validated child run id: {e}")))?;
     let status = terminal_status(c.status)
         .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;
-    let row = children_key(&parent, &child);
+    // 09-08 row guard: the exact row, else the original child's row of a continue-as-new
+    // chain (uuid match, D-P9-27); no row -> per-message drop (no double completion).
+    let exact = children_key(&parent, &child);
+    let (row, value, chained) = match b.get(Table::Children, &exact)? {
+        Some(v) => (exact, v, None),
+        None => match chain_row(b, &parent, &rec, c.op)? {
+            Some((k, v)) => {
+                let original = k[RunId::LEN..].to_vec();
+                (k, v, Some(original))
+            }
+            None => return Ok(()),
+        },
+    };
     // 09-05: a row marked by the opt-in `ChildJournal` intent journals the completion as
     // the parent's kind-67 event (D21); any other case keeps the v0.1 inbox row.
-    let journaled = b.get(Table::Children, &row)?.as_deref() == Some(CHILD_ROW_JOURNAL);
+    let journaled = value.as_slice() == CHILD_ROW_JOURNAL;
     if journaled {
         match &c.event {
             // Submitter-encoded by the child's derive (PF-F1): verbatim, never decoded or
@@ -288,6 +456,18 @@ fn child_completed(
     b.remove(Table::Children, row);
     rec.children = rec.children.saturating_sub(1);
     store_run(b, &parent, &rec);
+    // 09-08 (D-P9-27): the chain is done; its predecessors stop being kept for forwarding.
+    if let Some(original) = chained {
+        let msg = OutboxMsg {
+            kind: Some(outbox_msg::Kind::CancelRun(CancelRun {
+                target_run: original,
+                reason: REASON_CHAIN_DONE.to_string(),
+            })),
+        };
+        if msg_target(cur, &msg).is_ok() {
+            emit(b, cur, &msg, actions)?;
+        }
+    }
     Ok(())
 }
 

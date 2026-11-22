@@ -581,9 +581,15 @@ fn terminate_notifies_the_parent_and_cancels_children_gracefully() {
         op: 4,
     });
     running_with(&mut h, cs);
-    // The child starts a grandchild on partition 5.
+    // The child starts an attached grandchild on partition 5 (09-08: a detached start
+    // writes no children row).
+    let mut gs = start(&grandchild);
+    gs.parent = Some(ParentRef {
+        run_id: child.as_bytes().to_vec(),
+        op: 0,
+    });
     let gc = Derived::new(derived::Intent::SendMessage(SendMessage {
-        msg: Some(OutboxMsg::start_child(start(&grandchild))),
+        msg: Some(OutboxMsg::start_child(gs)),
     }));
     h.ok(&append(&child, 0, 1, vec![gc]));
     assert!(

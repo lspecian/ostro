@@ -196,6 +196,29 @@ impl RunId {
     }
 }
 
+/// Domain separator of the child run id digest (D-P9-7).
+const CHILD_ID_DOMAIN: &[u8] = b"ostro/child/v1";
+
+/// The uuid part of the deterministic child run id of `(parent, op)` (D-P9-7, plan 09-08):
+/// `d = sha256("ostro/child/v1" ‖ parent (18 bytes) ‖ op u64 BE)`, uuid = `d[..16]` with the
+/// RFC 9562 version nibble 8 and variant `10`. The server's `children::child_run_id` adds the
+/// partition (`u16::from_be_bytes(d[16..18]) % P`); apply matches a continue-as-new
+/// successor's completion to the parent's children row by this uuid (D-P9-27), with no
+/// partition count needed. Pure.
+pub fn child_run_uuid(parent: &RunId, op: u64) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(CHILD_ID_DOMAIN);
+    h.update(parent.as_bytes());
+    h.update(op.to_be_bytes());
+    let d = h.finalize();
+    let mut u = [0u8; 16];
+    u.copy_from_slice(&d[..16]);
+    u[6] = (u[6] & 0x0f) | 0x80;
+    u[8] = (u[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(u)
+}
+
 fn decode_char(c: u8) -> Option<u8> {
     let c = c.to_ascii_lowercase();
     let c = match c {
@@ -287,5 +310,25 @@ mod tests {
     #[test]
     fn string_len_is_29() {
         assert_eq!(RUN_ID_STR_LEN, 29);
+    }
+
+    /// Golden vectors equal to 09-05's `child_run_id` uuid part (parent = partition 3 ‖
+    /// 16 × 0x11): op 7 → `0071t7sbx8jw72bzhfyq2k5jaj6zw` at P 16.
+    #[test]
+    fn child_run_uuid_golden() {
+        let mut b = [0x11u8; 18];
+        b[..2].copy_from_slice(&3u16.to_be_bytes());
+        let parent = RunId::from_bytes(&b).expect("parent");
+        for (op, s) in [
+            (7u64, "0071t7sbx8jw72bzhfyq2k5jaj6zw"),
+            (8, "002yhpcepx40309vk1cdaptr0q16j"),
+            (7, "0001t7sbx8jw72bzhfyq2k5jaj6zw"),
+        ] {
+            let want: RunId = s.parse().expect("golden");
+            let u = child_run_uuid(&parent, op);
+            assert_eq!(u, want.uuid(), "op {op}");
+            assert_eq!(u.as_bytes()[6] >> 4, 8);
+            assert_eq!(u.as_bytes()[8] >> 6, 0b10);
+        }
     }
 }
