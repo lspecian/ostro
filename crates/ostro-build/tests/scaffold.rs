@@ -169,12 +169,15 @@ async fn slow_bin_stalls_after_the_headers() {
 }
 
 #[test]
-fn build_stub_answers_not_implemented() {
-    let err = ostro_build::build(ostro_build::BuildOptions::default()).unwrap_err();
-    assert!(matches!(
-        err,
-        ostro_build::BuildError::NotImplemented("10-12")
-    ));
+fn build_without_a_project_is_a_usage_error() {
+    // 10-12 implemented the pipeline (tests/pipeline.rs); an empty dir has no project.
+    let dir = tempfile::tempdir().unwrap();
+    let err = ostro_build::build(ostro_build::BuildOptions {
+        dir: dir.path().to_path_buf(),
+        ..ostro_build::BuildOptions::default()
+    })
+    .unwrap_err();
+    assert!(err.is_usage(), "{err:?}");
     // 10-08 replaced the empty-tar build.rs stub with the real bundle (tests/sdk_bundle.rs)
     assert!(ostro_build::sdk_bundle::SDK_BUNDLE.len() > 1024);
     assert!(ostro_build::pipeline::IGNORE.contains(&"node_modules/"));
