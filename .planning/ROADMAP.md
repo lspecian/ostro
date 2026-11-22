@@ -406,7 +406,7 @@ Plans:
 - [ ] 11-08-PLAN.md — DlqUpdate apply + DlqRow marks with failure episodes, rebuild_digest generator, storage-format "Phase 11 additions" (OPS-04) (W3)
 - [x] 11-09-PLAN.md — API surface (single owner; exclusive with 10-05): REST + gRPC RunOps/Inventory, search params, history attempt, separate failure-policy endpoints (RunPolicy untouched), limit validation on REST and gRPC, fakes, parity, OpenAPI re-bless (/ → 303 /ui/) (OPS-02..07, UI-03) (W4)
 - [ ] 11-10-PLAN.md — Rerun control plane: cut resolution, mandatory 4-arg replay_check with the new run id (created if absent), envelope fitting, idempotency, rerun-cuts, DLQ rerun requeue (OPS-02) (W6)
-- [ ] 11-11-PLAN.md — Indexed search with scan fallback (via the P11Ctx OnceLock), inventory (modules/queues/partitions) and limits endpoints, API-cap e2e incl. gRPC, docs/limits.md sync test, history attempts (OPS-05, OPS-07, UI-03) (W5)
+- [x] 11-11-PLAN.md — Indexed search with scan fallback (via the P11Ctx OnceLock), inventory (modules/queues/partitions) and limits endpoints, API-cap e2e incl. gRPC, docs/limits.md sync test, history attempts (OPS-05, OPS-07, UI-03) (W5)
 - [ ] 11-12-PLAN.md — DLQ server (view, requeue, dismiss, failure-policy ext tags) + on_failure hook service (one hook per failure episode, loop guard, catch-up with index fallback, metrics) (OPS-04) (W5)
 - [ ] 11-13-PLAN.md — Bulk operations: snapshot bound, pinned cursor + processed set, Phase 7 GCRA pacing, backpressure, per-run idempotency, checkpoints + crash resume (OPS-03) (W7)
 - [ ] 11-14-PLAN.md — CLI: ostro rerun, dlq, bulk, limits, ls --tag/--newest/--dlq, completions presence (CLI-06 contract; exclusive with 10-09) (OPS-02..05, OPS-07) (W7)
