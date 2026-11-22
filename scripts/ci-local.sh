@@ -41,7 +41,7 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 # Phase 12 (12-01): ostro-cluster (repl::/fetch::/isr::/install:: sites) and ostro-repl-conformance
 # (mutant matrix, fault legs) are appended last. 09-17 appends ostro-server:children_failpoints
 # (09-08's child:: failpoints).
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance ostro-server:children_failpoints)
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance ostro-server:children_failpoints ostro-server:rerun_rearm ostro-server:dlq_api ostro-server:bulk_ops ostro:ops_kill)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)
