@@ -19,7 +19,7 @@ expression: pretty
         "tags": [
           "meta"
         ],
-        "summary": "Web UI shell (placeholder until the UI phase).",
+        "summary": "Web UI shell, or a redirect to the embedded UI when it is enabled (D-P11-17).",
         "operationId": "ui_shell",
         "responses": {
           "200": {
@@ -31,6 +31,9 @@ expression: pretty
                 }
               }
             }
+          },
+          "303": {
+            "description": "The embedded UI is enabled: Location /ui/"
           }
         }
       }
@@ -212,6 +215,190 @@ expression: pretty
         }
       }
     },
+    "/v1/bulk": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Every bulk job on this node.",
+        "operationId": "list_bulk",
+        "responses": {
+          "200": {
+            "description": "Bulk jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkJobList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Create a bulk job (or count its matches, for dry_run).",
+        "operationId": "create_bulk",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Dry run: estimate and up to 20 samples",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkCreateResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Job created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request; bulk_too_many_matches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "bulk_too_many_jobs (details.retry_after_ms)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bulk/{job_id}": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "One bulk job.",
+        "operationId": "get_bulk",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "Job id (blk_...)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkJobView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job, or run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bulk/{job_id}/cancel": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Cancel a bulk job.",
+        "operationId": "cancel_bulk",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "description": "Job id (blk_...)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job (state cancelled)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkJobView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job, or run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connections": {
       "get": {
         "tags": [
@@ -347,6 +534,252 @@ expression: pretty
           },
           "404": {
             "description": "Unknown connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dlq": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "List DLQ entries (failed and timed-out runs).",
+        "operationId": "list_dlq",
+        "parameters": [
+          {
+            "name": "workflow",
+            "in": "query",
+            "description": "Workflow filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "queue",
+            "in": "query",
+            "description": "Queue filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "Failure reason prefix.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_dismissed",
+            "in": "query",
+            "description": "Include dismissed entries.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 100).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Continuation token.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "description": "Repeatable; every tag must match (max 8)",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of DLQ entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DlqPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter (> 8 tags: details.limit = search_tags)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dlq/{run_id}/dismiss": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Dismiss a DLQ entry.",
+        "operationId": "dismiss_dlq",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "DLQ member",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DismissBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The dismissed entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DlqEntry"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Reason over 1024 bytes (details.limit = reason_bytes)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run, or run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "dlq_not_member (details.reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dlq/{run_id}/requeue": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Requeue a DLQ entry (resume, restart or rerun).",
+        "operationId": "requeue_dlq",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "DLQ member",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; empty = mode auto",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequeueBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Requeued (or validated, for dry_run)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DlqRequeueResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run, or run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "dlq_not_member (details.reason)",
             "content": {
               "application/json": {
                 "schema": {
@@ -599,6 +1032,90 @@ expression: pretty
           },
           "404": {
             "description": "Unknown grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/limits": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "The published limits.",
+        "operationId": "get_limits",
+        "responses": {
+          "200": {
+            "description": "Every published limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LimitsView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/modules": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Stored modules.",
+        "operationId": "list_modules",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 100).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "description": "Continuation token.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of modules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModulePage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Inventory not enabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -928,6 +1445,68 @@ expression: pretty
         }
       }
     },
+    "/v1/partitions": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Partitions with role and health.",
+        "operationId": "list_partitions",
+        "responses": {
+          "200": {
+            "description": "Partitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PartitionList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Inventory not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/queues": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Queues with counts.",
+        "operationId": "list_queues",
+        "responses": {
+          "200": {
+            "description": "Queues",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Inventory not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/queues/{name}/demand": {
       "get": {
         "tags": [
@@ -959,6 +1538,129 @@ expression: pretty
           },
           "400": {
             "description": "Invalid queue name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/queues/{name}/failure-policy": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "A queue's failure policy (on_failure hook, DLQ policy).",
+        "operationId": "get_queue_failure_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The failure policy (empty when never set)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailurePolicy"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Replace a queue's failure policy (CAS on version_tag / If-Match).",
+        "operationId": "put_queue_failure_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Queue name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_tag",
+            "in": "query",
+            "description": "Meta record version (alternatively the body's `version_tag` or `If-Match`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FailurePolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stored policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailurePolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policy (hook workflow name)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version_tag (details.reason = version_mismatch)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1298,10 +2000,28 @@ expression: pretty
           {
             "name": "tag",
             "in": "query",
-            "description": "Tag filter.",
+            "description": "Tag filter (same as one `tags` value).",
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "Result order: `oldest` (default) or `newest` (D-P11-10).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ListOrderDto"
+            }
+          },
+          {
+            "name": "dlq",
+            "in": "query",
+            "description": "Only DLQ members (failed / timed-out runs not dismissed or requeued).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           },
           {
@@ -1341,6 +2061,18 @@ expression: pretty
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "description": "Repeatable; every tag must match (AND, max 8; tag counts as one)",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         ],
         "responses": {
@@ -1355,7 +2087,7 @@ expression: pretty
             }
           },
           "400": {
-            "description": "Invalid filter or page token",
+            "description": "Invalid filter or page token; > 8 tags: details.limit = search_tags",
             "content": {
               "application/json": {
                 "schema": {
@@ -1709,6 +2441,140 @@ expression: pretty
         }
       }
     },
+    "/v1/runs/{run_id}/rerun": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Rerun a terminal run from a cut.",
+        "operationId": "rerun_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Source run (terminal)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Dry run, or an existing run for the idempotency key (existing = true)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerunResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New run started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run, or run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "run_not_terminal, rerun_cut_unsafe, rerun_nondeterministic (details.reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "rerun_prefix_too_large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/{run_id}/rerun-cuts": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Candidate rerun cuts of a run (safe / unsafe per step).",
+        "operationId": "rerun_cuts",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cuts in journal order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerunCutsView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown run, or run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/runs/{run_id}/result": {
       "get": {
         "tags": [
@@ -1983,7 +2849,7 @@ expression: pretty
             }
           },
           "413": {
-            "description": "Body exceeds api.max_request_bytes",
+            "description": "Body exceeds api.max_request_bytes, or payload exceeds limits.max_payload_bytes (details.limit = payload_bytes)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2706,7 +3572,7 @@ expression: pretty
             }
           },
           "413": {
-            "description": "Body exceeds api.max_request_bytes",
+            "description": "Body exceeds api.max_request_bytes, or payload exceeds limits.max_payload_bytes (details.limit = payload_bytes)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3300,6 +4166,129 @@ expression: pretty
         }
       }
     },
+    "/v1/workflows/{name}/failure-policy": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "A workflow's failure policy (on_failure hook).",
+        "operationId": "get_workflow_failure_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The failure policy (empty when never set)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailurePolicy"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Replace a workflow's failure policy (CAS on version_tag / If-Match).",
+        "operationId": "put_workflow_failure_policy",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Workflow name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version_tag",
+            "in": "query",
+            "description": "Meta record version (alternatively the body's `version_tag` or `If-Match`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FailurePolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stored policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailurePolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policy (hook workflow name)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run operations not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale version_tag (details.reason = version_mismatch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/workflows/{name}/pause": {
       "post": {
         "tags": [
@@ -3548,7 +4537,7 @@ expression: pretty
             }
           },
           "400": {
-            "description": "Invalid request",
+            "description": "Invalid request (a tag starting with __ostro/ is reserved)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3588,7 +4577,7 @@ expression: pretty
             }
           },
           "413": {
-            "description": "Body exceeds api.max_request_bytes",
+            "description": "Body exceeds api.max_request_bytes, or input exceeds limits.max_payload_bytes (details.limit = payload_bytes)",
             "content": {
               "application/json": {
                 "schema": {
@@ -3632,6 +4621,392 @@ expression: pretty
         "type": "string",
         "format": "binary",
         "description": "Tar archive (documentation-only schema of the backup download)."
+      },
+      "BulkAction": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Cancel.",
+            "enum": [
+              "cancel"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "Terminate.",
+            "required": [
+              "terminate"
+            ],
+            "properties": {
+              "terminate": {
+                "type": "object",
+                "description": "Terminate.",
+                "required": [
+                  "reason"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "description": "Operator reason."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "string",
+            "description": "Retry (resume) failed runs.",
+            "enum": [
+              "retry"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "Rerun from a cut.",
+            "required": [
+              "rerun"
+            ],
+            "properties": {
+              "rerun": {
+                "type": "object",
+                "description": "Rerun from a cut.",
+                "required": [
+                  "from"
+                ],
+                "properties": {
+                  "from": {
+                    "$ref": "#/components/schemas/RerunFrom",
+                    "description": "Cut point."
+                  },
+                  "version": {
+                    "$ref": "#/components/schemas/RerunVersion",
+                    "description": "Version to execute."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Requeue DLQ members.",
+            "required": [
+              "requeue"
+            ],
+            "properties": {
+              "requeue": {
+                "type": "object",
+                "description": "Requeue DLQ members.",
+                "properties": {
+                  "mode": {
+                    "$ref": "#/components/schemas/RequeueMode",
+                    "description": "Mode."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "string",
+            "description": "Pause.",
+            "enum": [
+              "pause"
+            ]
+          },
+          {
+            "type": "string",
+            "description": "Resume a paused run.",
+            "enum": [
+              "resume"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "Send a signal.",
+            "required": [
+              "signal"
+            ],
+            "properties": {
+              "signal": {
+                "type": "object",
+                "description": "Send a signal.",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Signal name."
+                  },
+                  "payload": {
+                    "description": "Signal payload."
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "The operation a bulk job applies to each matched run."
+      },
+      "BulkCreateRequest": {
+        "type": "object",
+        "description": "`POST /v1/bulk`.",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/BulkAction",
+            "description": "Operation."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Count and sample only."
+          },
+          "filter": {
+            "$ref": "#/components/schemas/BulkFilter",
+            "description": "Selection."
+          },
+          "max_in_flight": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Concurrent ops (default `[bulk] max_in_flight`).",
+            "minimum": 0
+          },
+          "rate_per_sec": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Ops per second (default `[bulk] default_rate`, capped at `max_rate`).",
+            "minimum": 0
+          }
+        }
+      },
+      "BulkCreateResponse": {
+        "type": "object",
+        "description": "Result of creating a bulk job.",
+        "required": [
+          "matched_estimate"
+        ],
+        "properties": {
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The job (`blk_<uuidv7>`); `None` on a dry run."
+          },
+          "matched_estimate": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Estimated matches.",
+            "minimum": 0
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Up to 20 matched run ids."
+          }
+        }
+      },
+      "BulkFailure": {
+        "type": "object",
+        "description": "One failed bulk op.",
+        "required": [
+          "run_id",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Error."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          }
+        }
+      },
+      "BulkFilter": {
+        "type": "object",
+        "description": "Which runs a bulk job selects.",
+        "properties": {
+          "created_after_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Created at or after, ms since the epoch.",
+            "minimum": 0
+          },
+          "created_before_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Created before, ms since the epoch (the job's creation time is always added).",
+            "minimum": 0
+          },
+          "dlq": {
+            "type": "boolean",
+            "description": "Only DLQ members."
+          },
+          "queue": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Queue."
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RunStatusDto",
+                "description": "Status."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every tag must match."
+          },
+          "workflow": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Workflow."
+          }
+        }
+      },
+      "BulkJobList": {
+        "type": "object",
+        "description": "`GET /v1/bulk`.",
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkJobView"
+            },
+            "description": "Every bulk job on this node."
+          }
+        }
+      },
+      "BulkJobView": {
+        "type": "object",
+        "description": "A bulk job's progress.",
+        "required": [
+          "job_id",
+          "state",
+          "action",
+          "matched",
+          "done",
+          "skipped",
+          "failed_count",
+          "rate_per_sec",
+          "created_at_ms"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Action name."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Created, ms since the epoch.",
+            "minimum": 0
+          },
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ops applied.",
+            "minimum": 0
+          },
+          "eta_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Estimated time to completion.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkFailure"
+            },
+            "description": "The first 100 failures."
+          },
+          "failed_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total failures.",
+            "minimum": 0
+          },
+          "finished_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Finished.",
+            "minimum": 0
+          },
+          "job_id": {
+            "type": "string",
+            "description": "Job id."
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Runs matched.",
+            "minimum": 0
+          },
+          "rate_per_sec": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Effective rate.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Runs skipped (no longer eligible).",
+            "minimum": 0
+          },
+          "started_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Started.",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "description": "`pending` | `running` | `paused_backpressure` | `done` | `cancelled` | `failed`."
+          }
+        }
       },
       "CancelResponseDto": {
         "type": "object",
@@ -3842,6 +5217,185 @@ expression: pretty
           }
         }
       },
+      "DismissBody": {
+        "type": "object",
+        "description": "`{\"reason\"}` body of `POST /v1/dlq/{run_id}/dismiss`.",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Operator reason (≤ 1024 bytes)."
+          }
+        }
+      },
+      "DlqEntry": {
+        "type": "object",
+        "description": "One DLQ entry: a failed or timed-out run.",
+        "required": [
+          "run_id",
+          "workflow",
+          "version",
+          "queue",
+          "status",
+          "reason",
+          "failed_at_ms",
+          "resumable"
+        ],
+        "properties": {
+          "dismiss_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was dismissed."
+          },
+          "dismissed_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the entry was dismissed.",
+            "minimum": 0
+          },
+          "failed_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the run failed, ms since the epoch.",
+            "minimum": 0
+          },
+          "hook_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The on_failure hook run of the current episode."
+          },
+          "queue": {
+            "type": "string",
+            "description": "Queue."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Failure reason."
+          },
+          "requeued_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it was requeued.",
+            "minimum": 0
+          },
+          "requeued_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The run it was requeued to (restart / rerun)."
+          },
+          "resumable": {
+            "type": "boolean",
+            "description": "Whether the run can be resumed."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatusDto",
+            "description": "Terminal status."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Run tags."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Workflow version.",
+            "minimum": 0
+          },
+          "workflow": {
+            "type": "string",
+            "description": "Workflow."
+          }
+        }
+      },
+      "DlqPage": {
+        "type": "object",
+        "description": "A page of DLQ entries.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DlqEntry"
+            },
+            "description": "Entries."
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation token."
+          }
+        }
+      },
+      "DlqPolicyDto": {
+        "type": "object",
+        "description": "DLQ policy of a queue (ext tag 145). Absent = enabled, 24 h catch-up.",
+        "required": [
+          "enabled",
+          "hook_catchup_ms"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Failed runs of this queue enter the DLQ."
+          },
+          "hook_catchup_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hook catch-up window at leader start, in ms.",
+            "minimum": 0
+          }
+        }
+      },
+      "DlqRequeueResponse": {
+        "type": "object",
+        "description": "Result of a requeue.",
+        "required": [
+          "run_id",
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "The mode actually used (`resume` | `restart` | `rerun`)."
+          },
+          "new_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new run (restart / rerun)."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The requeued run."
+          }
+        }
+      },
       "DrainResult": {
         "type": "object",
         "description": "`POST /v1/workers/{id}/drain` response.",
@@ -3939,6 +5493,43 @@ expression: pretty
           "pause"
         ]
       },
+      "FailurePolicy": {
+        "type": "object",
+        "description": "The failure policy of a workflow or a queue.",
+        "properties": {
+          "dlq": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DlqPolicyDto",
+                "description": "DLQ policy (queues only)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "on_failure": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OnFailurePolicy",
+                "description": "The `on_failure` hook (the workflow's wins over the queue's)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version_tag": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Meta record version for CAS on write; returned on read.",
+            "minimum": 0
+          }
+        }
+      },
       "GrantDto": {
         "type": "object",
         "description": "An origin-bound secret grant.",
@@ -4001,6 +5592,15 @@ expression: pretty
           "details"
         ],
         "properties": {
+          "attempt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Activation attempt that wrote the event (`epoch << 32 | n`); absent when not\nrecorded (D-P11-18).",
+            "minimum": 0
+          },
           "details": {
             "description": "Details (embedded JSON)."
           },
@@ -4133,6 +5733,62 @@ expression: pretty
           }
         }
       },
+      "LimitView": {
+        "type": "object",
+        "description": "One published limit.",
+        "required": [
+          "name",
+          "value",
+          "unit",
+          "configurable",
+          "enforced",
+          "error"
+        ],
+        "properties": {
+          "configurable": {
+            "type": "boolean",
+            "description": "Whether the operator can change it."
+          },
+          "enforced": {
+            "type": "string",
+            "description": "Where it is enforced."
+          },
+          "error": {
+            "type": "string",
+            "description": "The error a breach produces."
+          },
+          "name": {
+            "type": "string",
+            "description": "Limit name (e.g. `max_history_events`)."
+          },
+          "unit": {
+            "type": "string",
+            "description": "Unit (`events`, `children`, `bytes`)."
+          },
+          "value": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Effective value.",
+            "minimum": 0
+          }
+        }
+      },
+      "LimitsView": {
+        "type": "object",
+        "description": "`GET /v1/limits`.",
+        "required": [
+          "limits"
+        ],
+        "properties": {
+          "limits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LimitView"
+            },
+            "description": "Every published limit."
+          }
+        }
+      },
       "ListWorkflowsResponse": {
         "type": "object",
         "description": "Workflow listing.",
@@ -4208,10 +5864,93 @@ expression: pretty
           }
         }
       },
+      "ModulePage": {
+        "type": "object",
+        "description": "A page of modules.",
+        "required": [
+          "modules"
+        ],
+        "properties": {
+          "modules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModuleSummary"
+            },
+            "description": "Modules."
+          },
+          "next_page_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Continuation token."
+          }
+        }
+      },
+      "ModuleSummary": {
+        "type": "object",
+        "description": "One stored module.",
+        "required": [
+          "sha256",
+          "size_bytes"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "description": "Content hash (hex)."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          },
+          "uploaded_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Upload time, when known.",
+            "minimum": 0
+          },
+          "workflows": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Workflows whose versions reference it."
+          }
+        }
+      },
       "ObjectBytes": {
         "type": "string",
         "format": "binary",
         "description": "Object bytes (documentation-only schema of presigned object bodies)."
+      },
+      "OnFailurePolicy": {
+        "type": "object",
+        "description": "The `on_failure` hook (ext tag 144): start `workflow` when a run fails or times out.",
+        "required": [
+          "workflow"
+        ],
+        "properties": {
+          "include_input": {
+            "type": "boolean",
+            "description": "Pass the failed run's input to the hook."
+          },
+          "queue": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Queue of the hook run; absent = the hook workflow's default."
+          },
+          "workflow": {
+            "type": "string",
+            "description": "Hook workflow."
+          }
+        }
       },
       "OverlapPolicyDto": {
         "type": "string",
@@ -4223,6 +5962,108 @@ expression: pretty
           "cancel_other",
           "terminate_other"
         ]
+      },
+      "PartitionList": {
+        "type": "object",
+        "description": "`GET /v1/partitions`.",
+        "required": [
+          "partitions"
+        ],
+        "properties": {
+          "partitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartitionView"
+            },
+            "description": "Partitions."
+          }
+        }
+      },
+      "PartitionView": {
+        "type": "object",
+        "description": "One partition. Only fields the node exposes are filled (11-11 records the list).",
+        "required": [
+          "id",
+          "role",
+          "healthy"
+        ],
+        "properties": {
+          "applied_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Applied log offset.",
+            "minimum": 0
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Health detail."
+          },
+          "epoch": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Leader epoch.",
+            "minimum": 0
+          },
+          "healthy": {
+            "type": "boolean",
+            "description": "Healthy."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Partition id.",
+            "minimum": 0
+          },
+          "leader": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Leader node id.",
+            "minimum": 0
+          },
+          "log_end_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Log end offset.",
+            "minimum": 0
+          },
+          "ready": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Ready runs.",
+            "minimum": 0
+          },
+          "role": {
+            "type": "string",
+            "description": "Role on this node (`leader`, `follower`, ...)."
+          },
+          "running": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Running runs.",
+            "minimum": 0
+          }
+        }
       },
       "PauseRunRequest": {
         "type": "object",
@@ -4500,6 +6341,66 @@ expression: pretty
         ],
         "description": "A queue's flow configuration with its record version."
       },
+      "QueueList": {
+        "type": "object",
+        "description": "`GET /v1/queues`.",
+        "required": [
+          "queues"
+        ],
+        "properties": {
+          "queues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueView"
+            },
+            "description": "Queues."
+          }
+        }
+      },
+      "QueueView": {
+        "type": "object",
+        "description": "One queue.",
+        "required": [
+          "name",
+          "paused",
+          "ready",
+          "running"
+        ],
+        "properties": {
+          "demand": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Worker demand, when known.",
+            "minimum": 0
+          },
+          "flow": {
+            "description": "Phase 7 flow configuration, when set."
+          },
+          "name": {
+            "type": "string",
+            "description": "Queue name."
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "Paused."
+          },
+          "ready": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ready runs.",
+            "minimum": 0
+          },
+          "running": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Running runs.",
+            "minimum": 0
+          }
+        }
+      },
       "RateSpecDto": {
         "type": "object",
         "description": "`limit` events per `period_ms` (> 0), with `burst` extra tokens.",
@@ -4527,6 +6428,304 @@ expression: pretty
             "minimum": 0
           }
         }
+      },
+      "RequeueBody": {
+        "type": "object",
+        "description": "Body of `POST /v1/dlq/{run_id}/requeue` (optional: empty = auto, not a dry run).",
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/RequeueMode",
+            "description": "Mode."
+          }
+        }
+      },
+      "RequeueMode": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Resume if resumable, else restart.",
+            "enum": [
+              "auto"
+            ]
+          },
+          {
+            "type": "string",
+            "description": "Resume the run in place.",
+            "enum": [
+              "resume"
+            ]
+          },
+          {
+            "type": "string",
+            "description": "Start a new run with the same input.",
+            "enum": [
+              "restart"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "Rerun from a cut.",
+            "required": [
+              "rerun"
+            ],
+            "properties": {
+              "rerun": {
+                "type": "object",
+                "description": "Rerun from a cut.",
+                "required": [
+                  "from"
+                ],
+                "properties": {
+                  "from": {
+                    "$ref": "#/components/schemas/RerunFrom",
+                    "description": "Cut point."
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "How a DLQ entry is requeued."
+      },
+      "RerunBody": {
+        "type": "object",
+        "description": "Body of `POST /v1/runs/{run_id}/rerun`.",
+        "required": [
+          "from"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Validate only."
+          },
+          "from": {
+            "$ref": "#/components/schemas/RerunFrom",
+            "description": "Cut point."
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Dedupe key of the new run."
+          },
+          "version": {
+            "$ref": "#/components/schemas/RerunVersion",
+            "description": "Version to execute (default `active`)."
+          }
+        }
+      },
+      "RerunCut": {
+        "type": "object",
+        "description": "One candidate cut of a run (for the UI).",
+        "required": [
+          "seq",
+          "occurrence",
+          "safe"
+        ],
+        "properties": {
+          "nearest_safe_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Nearest safe cut, when unsafe.",
+            "minimum": 0
+          },
+          "occurrence": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1-based occurrence of `step`.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why not, when unsafe."
+          },
+          "safe": {
+            "type": "boolean",
+            "description": "Whether a rerun may cut here."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Journal sequence number.",
+            "minimum": 0
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Step name at this point, if any."
+          }
+        }
+      },
+      "RerunCutsView": {
+        "type": "object",
+        "description": "`GET /v1/runs/{id}/rerun-cuts`.",
+        "required": [
+          "run_id",
+          "cuts"
+        ],
+        "properties": {
+          "cuts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RerunCut"
+            },
+            "description": "Candidate cuts in journal order."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "The analysed run."
+          }
+        }
+      },
+      "RerunFrom": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Journal sequence number: events `< seq` are copied.",
+            "required": [
+              "seq"
+            ],
+            "properties": {
+              "seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Journal sequence number: events `< seq` are copied.",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The `occurrence`-th (1-based) execution of step `name`.",
+            "required": [
+              "step"
+            ],
+            "properties": {
+              "step": {
+                "type": "object",
+                "description": "The `occurrence`-th (1-based) execution of step `name`.",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Step name."
+                  },
+                  "occurrence": {
+                    "type": "integer",
+                    "format": "int32",
+                    "description": "1-based occurrence (default 1).",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "Where a rerun cuts the source journal."
+      },
+      "RerunResponse": {
+        "type": "object",
+        "description": "Result of a rerun.",
+        "required": [
+          "source_run_id",
+          "cut_seq",
+          "copied_events",
+          "workflow",
+          "version",
+          "verdict"
+        ],
+        "properties": {
+          "copied_events": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events copied from the source.",
+            "minimum": 0
+          },
+          "cut_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Effective cut sequence number.",
+            "minimum": 0
+          },
+          "existing": {
+            "type": "boolean",
+            "description": "`true` when the idempotency key returned an existing run."
+          },
+          "new_run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new run; `None` on a dry run."
+          },
+          "source_run_id": {
+            "type": "string",
+            "description": "Source run."
+          },
+          "verdict": {
+            "type": "string",
+            "description": "`\"ok\"` or `\"ok_frontier\"`."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Version of the new run.",
+            "minimum": 0
+          },
+          "workflow": {
+            "type": "string",
+            "description": "Workflow of the new run."
+          }
+        }
+      },
+      "RerunVersion": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "The workflow's active version.",
+            "enum": [
+              "active"
+            ]
+          },
+          {
+            "type": "string",
+            "description": "The source run's version.",
+            "enum": [
+              "source"
+            ]
+          },
+          {
+            "type": "object",
+            "description": "An explicit version.",
+            "required": [
+              "version"
+            ],
+            "properties": {
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "An explicit version.",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "Which workflow version a rerun executes."
       },
       "RetryBody": {
         "type": "object",
@@ -6045,6 +8244,14 @@ expression: pretty
     {
       "name": "workers",
       "description": "Worker administration, join tokens and join (Phase 7)"
+    },
+    {
+      "name": "operations",
+      "description": "Rerun, dead-letter queue, bulk jobs, limits and failure policies (Phase 11)"
+    },
+    {
+      "name": "inventory",
+      "description": "Modules, queues and partitions (Phase 11)"
     },
     {
       "name": "health",

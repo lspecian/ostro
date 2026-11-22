@@ -243,6 +243,7 @@ pub(crate) async fn run_history(
             ts_ms: ms(ev.ts_nanos),
             summary: ev.body.summary(),
             details_json: details(&ev.body).to_string().into_bytes(),
+            attempt: None,
         });
     }
     Ok(HistoryPage {

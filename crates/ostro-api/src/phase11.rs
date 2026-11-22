@@ -16,12 +16,48 @@
 //!
 //! Failure policy (on_failure hook, DLQ) is the separate [`FailurePolicy`] DTO (B2,
 //! D-P11-29): [`crate::rest`]'s `RunPolicy` is untouched.
+//!
+//! # Routes (11-09)
+//!
+//! | Method | Path | Trait method |
+//! |---|---|---|
+//! | POST | `/v1/runs/{run_id}/rerun` | [`OpsApi::rerun_run`] (201 new run; 200 dry run / `existing`) |
+//! | GET | `/v1/runs/{run_id}/rerun-cuts` | [`OpsApi::analyze_rerun`] |
+//! | GET | `/v1/dlq` | [`OpsApi::list_dlq`] (`tags` repeatable) |
+//! | POST | `/v1/dlq/{run_id}/requeue`, `/dismiss` | [`OpsApi::requeue_dlq`] / [`OpsApi::dismiss_dlq`] |
+//! | GET / POST | `/v1/bulk` | [`OpsApi::list_bulk`] / [`OpsApi::create_bulk`] (201 job; 200 dry run) |
+//! | GET / POST | `/v1/bulk/{job_id}`, `/v1/bulk/{job_id}/cancel` | [`OpsApi::get_bulk`] / [`OpsApi::cancel_bulk`] |
+//! | GET | `/v1/limits` | [`OpsApi::limits`] |
+//! | GET / PUT | `/v1/{workflows,queues}/{name}/failure-policy` | [`OpsApi::get_failure_policy`] / [`OpsApi::set_failure_policy`] |
+//! | GET | `/v1/modules`, `/v1/queues`, `/v1/partitions` | [`InventoryApi`] |
+//!
+//! An absent `ops` / `inventory` slot answers 404 `not_found` on REST, and its gRPC
+//! service (`ostro.api.v1.RunOps` / `ostro.api.v1.Inventory`) is not mounted
+//! (`UNIMPLEMENTED`), as for Phase 8. Request validation that needs no server state
+//! (cut shape, reason length, tag counts, rates, D23 names) runs here for both
+//! transports before the trait is called.
+//!
+//! The API caps of D-P11-13 also live here and are applied by the core start / signal /
+//! token-completion handlers on both transports ([`check_payload`],
+//! [`validate_user_tags`], [`search_tags`]); every limit error carries
+//! `details{reason: "limit_exceeded", limit, max, actual}` ([`limit_error`]).
 
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::rejection::{BytesRejection, JsonRejection, QueryRejection};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
-use crate::error::{ApiError, ErrorCode};
-use crate::rest::RunStatusDto;
+use crate::error::{ApiError, ErrorBody, ErrorCode};
+use crate::phase8::{ApiExtensions, ExtState};
+use crate::rest::{RunStatusDto, if_match_version, json_body, optional_json_body, query};
 
 /// The `Unimplemented` default body of a Phase 11 trait method.
 fn lands_in(method: &str, plan: &str) -> ApiError {
@@ -687,6 +723,981 @@ pub trait InventoryApi: Send + Sync + 'static {
     async fn list_partitions(&self) -> Result<Vec<PartitionView>, ApiError> {
         Err(lands_in("list_partitions", "11-11"))
     }
+}
+
+// ---------------------------------------------------------------------------------
+// Error vocabulary and shared validation (11-09, D-P11-21, D-P11-13, D-P11-31)
+// ---------------------------------------------------------------------------------
+
+/// Most tags a run search may carry (`GET /v1/runs?tags=`, DLQ and bulk filters;
+/// D-P11-10).
+pub const MAX_SEARCH_TAGS: usize = 8;
+
+/// Prefix of system run tags (`__ostro/on_failure_of=<run>`, D-P11-25). User-supplied
+/// tags never start with it.
+pub const SYSTEM_TAG_PREFIX: &str = "__ostro/";
+
+/// Default DLQ / module page size when the request says 0.
+pub const DEFAULT_OPS_PAGE: u32 = 100;
+
+/// Machine-readable `details.reason` values of Phase 11 (D-P11-21). No new
+/// [`ErrorCode`] exists for them: the code says the transport status, the reason the
+/// cause.
+pub mod reason {
+    /// A cap was exceeded: `details{limit, max, actual}` (413 for byte caps, 400 for
+    /// count caps).
+    pub const LIMIT_EXCEEDED: &str = "limit_exceeded";
+    /// Rerun of a run that is not terminal. 409.
+    pub const RUN_NOT_TERMINAL: &str = crate::error::reason::RUN_NOT_TERMINAL;
+    /// The rerun cut is not a safe point: `details{seq, detail, nearest_safe_seq}`. 409.
+    pub const RERUN_CUT_UNSAFE: &str = "rerun_cut_unsafe";
+    /// The copied prefix does not replay on the target version: `details{seq, detail}`.
+    /// 409.
+    pub const RERUN_NONDETERMINISTIC: &str = "rerun_nondeterministic";
+    /// The copied prefix exceeds the history limit or 3.5 MiB encoded. 413.
+    pub const RERUN_PREFIX_TOO_LARGE: &str = "rerun_prefix_too_large";
+    /// The run is not a DLQ member (not failed / timed out, or already dismissed or
+    /// requeued in this failure episode). 409.
+    pub const DLQ_NOT_MEMBER: &str = "dlq_not_member";
+    /// `[bulk] max_jobs` jobs are running: [`crate::ErrorCode::RateLimited`] (429,
+    /// Phase 7's code) with `details.retry_after_ms`.
+    pub const BULK_TOO_MANY_JOBS: &str = "bulk_too_many_jobs";
+    /// The filter matches more than `[bulk] max_matches` runs. 400.
+    pub const BULK_TOO_MANY_MATCHES: &str = "bulk_too_many_matches";
+}
+
+/// A limit error: `details == {"reason": "limit_exceeded", "limit", "max", "actual"}`
+/// (D-P11-13). `code` is [`ErrorCode::PayloadTooLarge`] for byte caps and
+/// [`ErrorCode::InvalidArgument`] for count caps.
+pub fn limit_error(code: ErrorCode, limit: &str, max: u64, actual: u64) -> ApiError {
+    ApiError::new(
+        code,
+        format!("{limit}: {actual} exceeds the limit of {max}"),
+    )
+    .with_details(serde_json::json!({
+        "reason": reason::LIMIT_EXCEEDED,
+        "limit": limit,
+        "max": max,
+        "actual": actual,
+    }))
+}
+
+/// An error refined by `details.reason`; the keys of `extra` (an object, else ignored)
+/// are merged next to it.
+pub fn reason_error(
+    code: ErrorCode,
+    reason: &str,
+    msg: impl Into<String>,
+    extra: serde_json::Value,
+) -> ApiError {
+    let mut details = serde_json::Map::new();
+    details.insert("reason".to_owned(), reason.into());
+    if let serde_json::Value::Object(m) = extra {
+        for (k, v) in m {
+            if k != "reason" {
+                details.insert(k, v);
+            }
+        }
+    }
+    ApiError::new(code, msg).with_details(serde_json::Value::Object(details))
+}
+
+/// 409 `rerun_cut_unsafe` with the cut, why it is unsafe and the nearest safe cut.
+pub fn rerun_cut_unsafe(seq: u64, detail: &str, nearest_safe_seq: Option<u64>) -> ApiError {
+    reason_error(
+        ErrorCode::Conflict,
+        reason::RERUN_CUT_UNSAFE,
+        format!("seq {seq} is not a safe rerun cut: {detail}"),
+        serde_json::json!({ "seq": seq, "detail": detail, "nearest_safe_seq": nearest_safe_seq }),
+    )
+}
+
+/// 409 `dlq_not_member`.
+pub fn dlq_not_member(run_id: &str) -> ApiError {
+    reason_error(
+        ErrorCode::Conflict,
+        reason::DLQ_NOT_MEMBER,
+        format!("run {run_id} is not in the DLQ"),
+        serde_json::json!({ "run_id": run_id }),
+    )
+}
+
+/// 429 `bulk_too_many_jobs` (Phase 7's [`ErrorCode::RateLimited`], so clients honour
+/// `retry_after_ms` as for any throttle).
+pub fn bulk_too_many_jobs(max_jobs: u64, retry_after_ms: u64) -> ApiError {
+    reason_error(
+        ErrorCode::RateLimited,
+        reason::BULK_TOO_MANY_JOBS,
+        format!("{max_jobs} bulk jobs are already running"),
+        serde_json::json!({
+            crate::error::RETRY_AFTER_MS: retry_after_ms,
+            "limit": "bulk_jobs",
+            "max": max_jobs,
+        }),
+    )
+}
+
+/// The user payload cap (`[limits] max_payload_bytes`): a payload of `actual` bytes over
+/// `max` is 413 [`limit_error`] `payload_bytes`. `field` names the payload in the
+/// message (`input`, `payload`).
+pub fn check_payload(field: &str, actual: usize, max: usize) -> Result<(), ApiError> {
+    if actual <= max {
+        return Ok(());
+    }
+    let mut e = limit_error(
+        ErrorCode::PayloadTooLarge,
+        "payload_bytes",
+        max as u64,
+        actual as u64,
+    );
+    e.message = format!("{field} is {actual} bytes, limits.max_payload_bytes is {max}");
+    Err(e)
+}
+
+/// [`check_payload`] on the compact JSON encoding of `v` (what is stored).
+pub fn check_json_payload(field: &str, v: &serde_json::Value, max: usize) -> Result<(), ApiError> {
+    let len = serde_json::to_vec(v).map(|b| b.len()).unwrap_or(usize::MAX);
+    check_payload(field, len, max)
+}
+
+/// User-supplied run tags: none may start with [`SYSTEM_TAG_PREFIX`] (400). The count
+/// and length caps (64 × 128 bytes) stay where they are enforced today (the control
+/// plane / apply).
+pub fn validate_user_tags(tags: &[String]) -> Result<(), ApiError> {
+    if let Some(t) = tags.iter().find(|t| t.starts_with(SYSTEM_TAG_PREFIX)) {
+        return Err(ApiError::invalid_argument(format!(
+            "tag {t:?}: the {SYSTEM_TAG_PREFIX:?} prefix is reserved for system tags"
+        ))
+        .with_details(serde_json::json!({ "field": "tags", "tag": t })));
+    }
+    Ok(())
+}
+
+/// The tags of a search: the legacy single `tag` (first) plus `tags`, duplicates
+/// removed; more than [`MAX_SEARCH_TAGS`] is 400 [`limit_error`] `search_tags`.
+pub fn search_tags(tag: Option<String>, tags: Vec<String>) -> Result<Vec<String>, ApiError> {
+    let mut out: Vec<String> = Vec::with_capacity(tags.len() + 1);
+    for t in tag.into_iter().chain(tags) {
+        if t.is_empty() {
+            return Err(ApiError::invalid_argument("tags: empty tag"));
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    check_search_tags(out.len())?;
+    Ok(out)
+}
+
+fn check_search_tags(n: usize) -> Result<(), ApiError> {
+    if n > MAX_SEARCH_TAGS {
+        return Err(limit_error(
+            ErrorCode::InvalidArgument,
+            "search_tags",
+            MAX_SEARCH_TAGS as u64,
+            n as u64,
+        ));
+    }
+    Ok(())
+}
+
+/// D23 resource name `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` (the grammar of
+/// `ostro_meta::is_resource_name`, which ostro-api does not depend on).
+fn is_resource_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 128
+        && b[0].is_ascii_alphanumeric()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+/// D23 tenant id `^[a-z0-9][a-z0-9-]{0,62}$`.
+fn is_tenant_id(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 63
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// A D23 name, optionally tenant-qualified (`[<tenant>/]<name>`): 400 otherwise.
+pub fn validate_qualified_name(field: &str, s: &str) -> Result<(), ApiError> {
+    let ok = match s.split_once('/') {
+        None => is_resource_name(s),
+        Some((t, n)) => is_tenant_id(t) && is_resource_name(n),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_argument(format!(
+            "{field}: {s:?} is not a valid name ([<tenant>/]<name>, name = [A-Za-z0-9][A-Za-z0-9._-]{{0,127}})"
+        )))
+    }
+}
+
+fn validate_from(from: &RerunFrom) -> Result<(), ApiError> {
+    if let RerunFrom::Step { name, occurrence } = from {
+        if name.is_empty() {
+            return Err(ApiError::invalid_argument("from.step.name is required"));
+        }
+        if *occurrence == 0 {
+            return Err(ApiError::invalid_argument(
+                "from.step.occurrence is 1-based (must be >= 1)",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), ApiError> {
+    if run_id.is_empty() {
+        return Err(ApiError::invalid_argument("run_id is required"));
+    }
+    Ok(())
+}
+
+fn validate_reason(field: &str, r: &str) -> Result<(), ApiError> {
+    if r.len() > crate::domain::MAX_REASON_LEN {
+        let mut e = limit_error(
+            ErrorCode::InvalidArgument,
+            "reason_bytes",
+            crate::domain::MAX_REASON_LEN as u64,
+            r.len() as u64,
+        );
+        e.message = format!(
+            "{field} is {} bytes, the limit is {}",
+            r.len(),
+            crate::domain::MAX_REASON_LEN
+        );
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Transport-neutral validation of the Phase 11 requests (shared by REST and gRPC).
+pub(crate) mod check {
+    use super::*;
+
+    pub(crate) fn rerun(r: &RerunRequest) -> Result<(), ApiError> {
+        validate_run_id(&r.run_id)?;
+        validate_from(&r.from)?;
+        if r.idempotency_key.as_deref() == Some("") {
+            return Err(ApiError::invalid_argument(
+                "idempotency_key must not be empty when set",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn dlq_list(r: &DlqListRequest) -> Result<(), ApiError> {
+        check_search_tags(r.tags.len())
+    }
+
+    pub(crate) fn requeue(r: &DlqRequeueRequest) -> Result<(), ApiError> {
+        validate_run_id(&r.run_id)?;
+        if let RequeueMode::Rerun { from } = &r.mode {
+            validate_from(from)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn dismiss(r: &DlqDismissRequest) -> Result<(), ApiError> {
+        validate_run_id(&r.run_id)?;
+        validate_reason("reason", &r.reason)
+    }
+
+    pub(crate) fn bulk(r: &BulkCreateRequest) -> Result<(), ApiError> {
+        check_search_tags(r.filter.tags.len())?;
+        if r.rate_per_sec == Some(0) {
+            return Err(ApiError::invalid_argument(
+                "rate_per_sec must be > 0 when set",
+            ));
+        }
+        if r.max_in_flight == Some(0) {
+            return Err(ApiError::invalid_argument(
+                "max_in_flight must be > 0 when set",
+            ));
+        }
+        match &r.action {
+            BulkAction::Terminate { reason } => validate_reason("action.terminate.reason", reason),
+            BulkAction::Rerun { from, .. } => validate_from(from),
+            BulkAction::Requeue {
+                mode: RequeueMode::Rerun { from },
+            } => validate_from(from),
+            BulkAction::Signal { name, .. } => {
+                if name.is_empty() || name.len() > crate::domain::MAX_SIGNAL_NAME_LEN {
+                    return Err(ApiError::invalid_argument(format!(
+                        "action.signal.name must be 1..={} bytes",
+                        crate::domain::MAX_SIGNAL_NAME_LEN
+                    )));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn job_id(id: &str) -> Result<(), ApiError> {
+        if id.is_empty() {
+            return Err(ApiError::invalid_argument("job_id is required"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn scope(s: &PolicyScope) -> Result<(), ApiError> {
+        match s {
+            PolicyScope::Workflow(n) => validate_qualified_name("workflow", n),
+            PolicyScope::Queue(n) => validate_qualified_name("queue", n),
+        }
+    }
+
+    pub(crate) fn failure_policy(s: &PolicyScope, p: &FailurePolicy) -> Result<(), ApiError> {
+        scope(s)?;
+        if let Some(of) = &p.on_failure {
+            validate_qualified_name("on_failure.workflow", &of.workflow)?;
+            if let Some(q) = &of.queue {
+                validate_qualified_name("on_failure.queue", q)?;
+            }
+        }
+        if p.dlq.is_some() && matches!(s, PolicyScope::Workflow(_)) {
+            return Err(ApiError::invalid_argument(
+                "dlq policy is set per queue, not per workflow",
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// REST (11-09)
+// ---------------------------------------------------------------------------------
+
+/// Router-wide options the REST handlers of [`crate::rest`] read (installed by
+/// [`crate::router_with`] as an axum `Extension`; absent = [`crate::ApiConfig`]
+/// defaults).
+#[derive(Clone, Debug, Default)]
+pub struct RestOptions {
+    /// `[limits] max_payload_bytes`.
+    pub max_payload_bytes: usize,
+    /// `GET /` redirect target.
+    pub root_redirect: Option<String>,
+}
+
+impl RestOptions {
+    /// From the router's [`crate::ApiConfig`].
+    pub fn from_config(cfg: &crate::ApiConfig) -> Self {
+        RestOptions {
+            max_payload_bytes: cfg.max_payload_bytes,
+            root_redirect: cfg.root_redirect.clone(),
+        }
+    }
+
+    pub(crate) fn of(ext: Option<axum::Extension<RestOptions>>) -> RestOptions {
+        ext.map(|axum::Extension(o)| o)
+            .unwrap_or_else(|| RestOptions::from_config(&crate::ApiConfig::default()))
+    }
+}
+
+/// `{"reason"}` body of `POST /v1/dlq/{run_id}/dismiss`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DismissBody {
+    /// Operator reason (≤ 1024 bytes).
+    pub reason: String,
+}
+
+/// Body of `POST /v1/dlq/{run_id}/requeue` (optional: empty = auto, not a dry run).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RequeueBody {
+    /// Mode.
+    #[serde(default)]
+    pub mode: RequeueMode,
+    /// Validate only.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Body of `POST /v1/runs/{run_id}/rerun`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RerunBody {
+    /// Cut point.
+    pub from: RerunFrom,
+    /// Version to execute (default `active`).
+    #[serde(default)]
+    pub version: RerunVersion,
+    /// Dedupe key of the new run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Validate only.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// `GET /v1/bulk`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct BulkJobList {
+    /// Every bulk job on this node.
+    pub jobs: Vec<BulkJobView>,
+}
+
+/// `GET /v1/queues`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct QueueList {
+    /// Queues.
+    pub queues: Vec<QueueView>,
+}
+
+/// `GET /v1/partitions`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PartitionList {
+    /// Partitions.
+    pub partitions: Vec<PartitionView>,
+}
+
+/// Result order of `GET /v1/runs` (D-P11-10).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListOrderDto {
+    /// Oldest first (default; the pre-Phase 11 order).
+    #[default]
+    Oldest,
+    /// Newest first.
+    Newest,
+}
+
+impl From<ListOrderDto> for crate::domain::ListOrder {
+    fn from(o: ListOrderDto) -> Self {
+        match o {
+            ListOrderDto::Oldest => crate::domain::ListOrder::Oldest,
+            ListOrderDto::Newest => crate::domain::ListOrder::Newest,
+        }
+    }
+}
+
+/// `GET /v1/dlq` scalar parameters (`tags` is repeatable and read separately).
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct DlqListQuery {
+    /// Workflow filter.
+    pub workflow: Option<String>,
+    /// Queue filter.
+    pub queue: Option<String>,
+    /// Failure reason prefix.
+    pub reason: Option<String>,
+    /// Include dismissed entries.
+    pub include_dismissed: Option<bool>,
+    /// Page size (default 100).
+    pub limit: Option<u32>,
+    /// Continuation token.
+    pub page_token: Option<String>,
+}
+
+/// `GET /v1/modules` parameters.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ModulesQuery {
+    /// Page size (default 100).
+    pub limit: Option<u32>,
+    /// Continuation token.
+    pub page_token: Option<String>,
+}
+
+/// `version_tag` of a failure-policy PUT as a query parameter.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct PolicyTagQuery {
+    /// Meta record version (alternatively the body's `version_tag` or `If-Match`).
+    pub version_tag: Option<u64>,
+}
+
+/// Every value of the repeatable query parameter `key` (`?tags=a&tags=b`).
+pub(crate) fn repeated(pairs: &[(String, String)], key: &str) -> Vec<String> {
+    pairs
+        .iter()
+        .filter(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .collect()
+}
+
+/// The query as `(key, value)` pairs (axum's `Query` cannot collect repeated keys into
+/// a struct field).
+pub(crate) fn query_pairs(
+    q: Result<Query<Vec<(String, String)>>, QueryRejection>,
+) -> Result<Vec<(String, String)>, ApiError> {
+    q.map(|Query(v)| v)
+        .map_err(|r| ApiError::invalid_argument(r.body_text()))
+}
+
+fn absent(what: &str) -> ApiError {
+    ApiError::not_found(format!("the {what} API is not enabled on this server"))
+}
+
+fn ops(ext: &ApiExtensions) -> Result<&dyn OpsApi, ApiError> {
+    ext.ops.as_deref().ok_or_else(|| absent("run operations"))
+}
+
+fn inventory(ext: &ApiExtensions) -> Result<&dyn InventoryApi, ApiError> {
+    ext.inventory.as_deref().ok_or_else(|| absent("inventory"))
+}
+
+fn merge_tag(body: Option<u64>, other: Option<u64>) -> Result<Option<u64>, ApiError> {
+    match (body, other) {
+        (Some(b), Some(o)) if b != o => Err(ApiError::invalid_argument(
+            "version_tag and If-Match / query disagree",
+        )),
+        (b, o) => Ok(b.or(o)),
+    }
+}
+
+/// Rerun a terminal run from a cut.
+#[utoipa::path(
+    post,
+    path = "/v1/runs/{run_id}/rerun",
+    tag = "operations",
+    params(("run_id" = String, Path, description = "Source run (terminal)")),
+    request_body = RerunBody,
+    responses(
+        (status = 201, description = "New run started", body = RerunResponse),
+        (status = 200, description = "Dry run, or an existing run for the idempotency key (existing = true)", body = RerunResponse),
+        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 404, description = "Unknown run, or run operations not enabled", body = ErrorBody),
+        (status = 409, description = "run_not_terminal, rerun_cut_unsafe, rerun_nondeterministic (details.reason)", body = ErrorBody),
+        (status = 413, description = "rerun_prefix_too_large", body = ErrorBody),
+    )
+)]
+async fn rerun_run(
+    State(ext): State<ExtState>,
+    Path(run_id): Path<String>,
+    body: Result<Json<RerunBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let api = ops(&ext)?;
+    let b = json_body(body)?;
+    let req = RerunRequest {
+        run_id,
+        from: b.from,
+        version: b.version,
+        idempotency_key: b.idempotency_key,
+        dry_run: b.dry_run,
+    };
+    check::rerun(&req)?;
+    let dry = req.dry_run;
+    let res = api.rerun_run(req).await?;
+    let status = if dry || res.existing || res.new_run_id.is_none() {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(res)).into_response())
+}
+
+/// Candidate rerun cuts of a run (safe / unsafe per step).
+#[utoipa::path(
+    get,
+    path = "/v1/runs/{run_id}/rerun-cuts",
+    tag = "operations",
+    params(("run_id" = String, Path, description = "Run id")),
+    responses(
+        (status = 200, description = "Cuts in journal order", body = RerunCutsView),
+        (status = 404, description = "Unknown run, or run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn rerun_cuts(
+    State(ext): State<ExtState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<RerunCutsView>, ApiError> {
+    let api = ops(&ext)?;
+    validate_run_id(&run_id)?;
+    Ok(Json(api.analyze_rerun(run_id).await?))
+}
+
+/// List DLQ entries (failed and timed-out runs).
+#[utoipa::path(
+    get,
+    path = "/v1/dlq",
+    tag = "operations",
+    params(
+        DlqListQuery,
+        ("tags" = Option<Vec<String>>, Query, description = "Repeatable; every tag must match (max 8)"),
+    ),
+    responses(
+        (status = 200, description = "A page of DLQ entries", body = DlqPage),
+        (status = 400, description = "Invalid filter (> 8 tags: details.limit = search_tags)", body = ErrorBody),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn list_dlq(
+    State(ext): State<ExtState>,
+    q: Result<Query<DlqListQuery>, QueryRejection>,
+    pairs: Result<Query<Vec<(String, String)>>, QueryRejection>,
+) -> Result<Json<DlqPage>, ApiError> {
+    let api = ops(&ext)?;
+    let q = query(q)?;
+    let tags = repeated(&query_pairs(pairs)?, "tags");
+    let req = DlqListRequest {
+        workflow: q.workflow,
+        queue: q.queue,
+        reason: q.reason,
+        tags,
+        include_dismissed: q.include_dismissed.unwrap_or(false),
+        limit: q.limit.unwrap_or(0),
+        page_token: q.page_token,
+    };
+    check::dlq_list(&req)?;
+    Ok(Json(api.list_dlq(req).await?))
+}
+
+/// Requeue a DLQ entry (resume, restart or rerun).
+#[utoipa::path(
+    post,
+    path = "/v1/dlq/{run_id}/requeue",
+    tag = "operations",
+    params(("run_id" = String, Path, description = "DLQ member")),
+    request_body(content = RequeueBody, description = "Optional; empty = mode auto"),
+    responses(
+        (status = 200, description = "Requeued (or validated, for dry_run)", body = DlqRequeueResponse),
+        (status = 404, description = "Unknown run, or run operations not enabled", body = ErrorBody),
+        (status = 409, description = "dlq_not_member (details.reason)", body = ErrorBody),
+    )
+)]
+async fn requeue_dlq(
+    State(ext): State<ExtState>,
+    Path(run_id): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<DlqRequeueResponse>, ApiError> {
+    let api = ops(&ext)?;
+    let b: RequeueBody = optional_json_body(body)?;
+    let req = DlqRequeueRequest {
+        run_id,
+        mode: b.mode,
+        dry_run: b.dry_run,
+    };
+    check::requeue(&req)?;
+    Ok(Json(api.requeue_dlq(req).await?))
+}
+
+/// Dismiss a DLQ entry.
+#[utoipa::path(
+    post,
+    path = "/v1/dlq/{run_id}/dismiss",
+    tag = "operations",
+    params(("run_id" = String, Path, description = "DLQ member")),
+    request_body = DismissBody,
+    responses(
+        (status = 200, description = "The dismissed entry", body = DlqEntry),
+        (status = 400, description = "Reason over 1024 bytes (details.limit = reason_bytes)", body = ErrorBody),
+        (status = 404, description = "Unknown run, or run operations not enabled", body = ErrorBody),
+        (status = 409, description = "dlq_not_member (details.reason)", body = ErrorBody),
+    )
+)]
+async fn dismiss_dlq(
+    State(ext): State<ExtState>,
+    Path(run_id): Path<String>,
+    body: Result<Json<DismissBody>, JsonRejection>,
+) -> Result<Json<DlqEntry>, ApiError> {
+    let api = ops(&ext)?;
+    let b = json_body(body)?;
+    let req = DlqDismissRequest {
+        run_id,
+        reason: b.reason,
+    };
+    check::dismiss(&req)?;
+    Ok(Json(api.dismiss_dlq(req).await?))
+}
+
+/// Every bulk job on this node.
+#[utoipa::path(
+    get,
+    path = "/v1/bulk",
+    tag = "operations",
+    responses(
+        (status = 200, description = "Bulk jobs", body = BulkJobList),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn list_bulk(State(ext): State<ExtState>) -> Result<Json<BulkJobList>, ApiError> {
+    let jobs = ops(&ext)?.list_bulk().await?;
+    Ok(Json(BulkJobList { jobs }))
+}
+
+/// Create a bulk job (or count its matches, for dry_run).
+#[utoipa::path(
+    post,
+    path = "/v1/bulk",
+    tag = "operations",
+    request_body = BulkCreateRequest,
+    responses(
+        (status = 201, description = "Job created", body = BulkCreateResponse),
+        (status = 200, description = "Dry run: estimate and up to 20 samples", body = BulkCreateResponse),
+        (status = 400, description = "Invalid request; bulk_too_many_matches", body = ErrorBody),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+        (status = 429, description = "bulk_too_many_jobs (details.retry_after_ms)", body = ErrorBody),
+    )
+)]
+async fn create_bulk(
+    State(ext): State<ExtState>,
+    body: Result<Json<BulkCreateRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let api = ops(&ext)?;
+    let req = json_body(body)?;
+    check::bulk(&req)?;
+    let res = api.create_bulk(req).await?;
+    let status = if res.job_id.is_some() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(res)).into_response())
+}
+
+/// One bulk job.
+#[utoipa::path(
+    get,
+    path = "/v1/bulk/{job_id}",
+    tag = "operations",
+    params(("job_id" = String, Path, description = "Job id (blk_...)")),
+    responses(
+        (status = 200, description = "Progress", body = BulkJobView),
+        (status = 404, description = "Unknown job, or run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn get_bulk(
+    State(ext): State<ExtState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<BulkJobView>, ApiError> {
+    let api = ops(&ext)?;
+    check::job_id(&job_id)?;
+    Ok(Json(api.get_bulk(job_id).await?))
+}
+
+/// Cancel a bulk job.
+#[utoipa::path(
+    post,
+    path = "/v1/bulk/{job_id}/cancel",
+    tag = "operations",
+    params(("job_id" = String, Path, description = "Job id (blk_...)")),
+    responses(
+        (status = 200, description = "The job (state cancelled)", body = BulkJobView),
+        (status = 404, description = "Unknown job, or run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn cancel_bulk(
+    State(ext): State<ExtState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<BulkJobView>, ApiError> {
+    let api = ops(&ext)?;
+    check::job_id(&job_id)?;
+    Ok(Json(api.cancel_bulk(job_id).await?))
+}
+
+/// The published limits.
+#[utoipa::path(
+    get,
+    path = "/v1/limits",
+    tag = "operations",
+    responses(
+        (status = 200, description = "Every published limit", body = LimitsView),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn get_limits(State(ext): State<ExtState>) -> Result<Json<LimitsView>, ApiError> {
+    Ok(Json(ops(&ext)?.limits().await?))
+}
+
+async fn get_policy(ext: &ApiExtensions, scope: PolicyScope) -> Result<FailurePolicy, ApiError> {
+    let api = ops(ext)?;
+    check::scope(&scope)?;
+    api.get_failure_policy(scope).await
+}
+
+async fn put_policy(
+    ext: &ApiExtensions,
+    scope: PolicyScope,
+    headers: &HeaderMap,
+    q: Result<Query<PolicyTagQuery>, QueryRejection>,
+    body: Result<Json<FailurePolicy>, JsonRejection>,
+) -> Result<FailurePolicy, ApiError> {
+    let api = ops(ext)?;
+    let mut p = json_body(body)?;
+    let other = merge_tag(query(q)?.version_tag, if_match_version(headers)?)?;
+    p.version_tag = merge_tag(p.version_tag, other)?;
+    check::failure_policy(&scope, &p)?;
+    api.set_failure_policy(scope, p).await
+}
+
+/// A workflow's failure policy (on_failure hook).
+#[utoipa::path(
+    get,
+    path = "/v1/workflows/{name}/failure-policy",
+    tag = "operations",
+    params(("name" = String, Path, description = "Workflow name")),
+    responses(
+        (status = 200, description = "The failure policy (empty when never set)", body = FailurePolicy),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn get_workflow_failure_policy(
+    State(ext): State<ExtState>,
+    Path(name): Path<String>,
+) -> Result<Json<FailurePolicy>, ApiError> {
+    Ok(Json(get_policy(&ext, PolicyScope::Workflow(name)).await?))
+}
+
+/// Replace a workflow's failure policy (CAS on version_tag / If-Match).
+#[utoipa::path(
+    put,
+    path = "/v1/workflows/{name}/failure-policy",
+    tag = "operations",
+    params(("name" = String, Path, description = "Workflow name"), PolicyTagQuery),
+    request_body = FailurePolicy,
+    responses(
+        (status = 200, description = "The stored policy", body = FailurePolicy),
+        (status = 400, description = "Invalid policy (hook workflow name)", body = ErrorBody),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+        (status = 409, description = "Stale version_tag (details.reason = version_mismatch)", body = ErrorBody),
+    )
+)]
+async fn put_workflow_failure_policy(
+    State(ext): State<ExtState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    q: Result<Query<PolicyTagQuery>, QueryRejection>,
+    body: Result<Json<FailurePolicy>, JsonRejection>,
+) -> Result<Json<FailurePolicy>, ApiError> {
+    Ok(Json(
+        put_policy(&ext, PolicyScope::Workflow(name), &headers, q, body).await?,
+    ))
+}
+
+/// A queue's failure policy (on_failure hook, DLQ policy).
+#[utoipa::path(
+    get,
+    path = "/v1/queues/{name}/failure-policy",
+    tag = "operations",
+    params(("name" = String, Path, description = "Queue name")),
+    responses(
+        (status = 200, description = "The failure policy (empty when never set)", body = FailurePolicy),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+    )
+)]
+async fn get_queue_failure_policy(
+    State(ext): State<ExtState>,
+    Path(name): Path<String>,
+) -> Result<Json<FailurePolicy>, ApiError> {
+    Ok(Json(get_policy(&ext, PolicyScope::Queue(name)).await?))
+}
+
+/// Replace a queue's failure policy (CAS on version_tag / If-Match).
+#[utoipa::path(
+    put,
+    path = "/v1/queues/{name}/failure-policy",
+    tag = "operations",
+    params(("name" = String, Path, description = "Queue name"), PolicyTagQuery),
+    request_body = FailurePolicy,
+    responses(
+        (status = 200, description = "The stored policy", body = FailurePolicy),
+        (status = 400, description = "Invalid policy (hook workflow name)", body = ErrorBody),
+        (status = 404, description = "Run operations not enabled", body = ErrorBody),
+        (status = 409, description = "Stale version_tag (details.reason = version_mismatch)", body = ErrorBody),
+    )
+)]
+async fn put_queue_failure_policy(
+    State(ext): State<ExtState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    q: Result<Query<PolicyTagQuery>, QueryRejection>,
+    body: Result<Json<FailurePolicy>, JsonRejection>,
+) -> Result<Json<FailurePolicy>, ApiError> {
+    Ok(Json(
+        put_policy(&ext, PolicyScope::Queue(name), &headers, q, body).await?,
+    ))
+}
+
+/// Stored modules.
+#[utoipa::path(
+    get,
+    path = "/v1/modules",
+    tag = "inventory",
+    params(ModulesQuery),
+    responses(
+        (status = 200, description = "A page of modules", body = ModulePage),
+        (status = 404, description = "Inventory not enabled", body = ErrorBody),
+    )
+)]
+async fn list_modules(
+    State(ext): State<ExtState>,
+    q: Result<Query<ModulesQuery>, QueryRejection>,
+) -> Result<Json<ModulePage>, ApiError> {
+    let api = inventory(&ext)?;
+    let q = query(q)?;
+    Ok(Json(
+        api.list_modules(ListModulesRequest {
+            limit: q.limit.unwrap_or(0),
+            page_token: q.page_token,
+        })
+        .await?,
+    ))
+}
+
+/// Queues with counts.
+#[utoipa::path(
+    get,
+    path = "/v1/queues",
+    tag = "inventory",
+    responses(
+        (status = 200, description = "Queues", body = QueueList),
+        (status = 404, description = "Inventory not enabled", body = ErrorBody),
+    )
+)]
+async fn list_queues(State(ext): State<ExtState>) -> Result<Json<QueueList>, ApiError> {
+    let queues = inventory(&ext)?.list_queues().await?;
+    Ok(Json(QueueList { queues }))
+}
+
+/// Partitions with role and health.
+#[utoipa::path(
+    get,
+    path = "/v1/partitions",
+    tag = "inventory",
+    responses(
+        (status = 200, description = "Partitions", body = PartitionList),
+        (status = 404, description = "Inventory not enabled", body = ErrorBody),
+    )
+)]
+async fn list_partitions(State(ext): State<ExtState>) -> Result<Json<PartitionList>, ApiError> {
+    let partitions = inventory(&ext)?.list_partitions().await?;
+    Ok(Json(PartitionList { partitions }))
+}
+
+/// The Phase 11 REST routes with their OpenAPI description, without state (merged into
+/// the document by [`crate::openapi()`]).
+pub fn api_routes() -> OpenApiRouter<ExtState> {
+    OpenApiRouter::new()
+        .routes(routes!(rerun_run))
+        .routes(routes!(rerun_cuts))
+        .routes(routes!(list_dlq))
+        .routes(routes!(requeue_dlq))
+        .routes(routes!(dismiss_dlq))
+        .routes(routes!(list_bulk, create_bulk))
+        .routes(routes!(get_bulk))
+        .routes(routes!(cancel_bulk))
+        .routes(routes!(get_limits))
+        .routes(routes!(
+            get_workflow_failure_policy,
+            put_workflow_failure_policy
+        ))
+        .routes(routes!(get_queue_failure_policy, put_queue_failure_policy))
+        .routes(routes!(list_modules))
+        .routes(routes!(list_queues))
+        .routes(routes!(list_partitions))
+}
+
+/// The Phase 11 REST router over `ext` (merged by [`crate::router_with`]).
+pub fn router(ext: ApiExtensions) -> axum::Router {
+    let (r, _doc) = api_routes().split_for_parts();
+    r.with_state(Arc::new(ext))
 }
 
 #[cfg(test)]

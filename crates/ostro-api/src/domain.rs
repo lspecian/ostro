@@ -571,6 +571,9 @@ pub struct HistoryEvent {
     pub summary: String,
     /// Event details (JSON text).
     pub details_json: Vec<u8>,
+    /// Activation attempt that wrote the event (`epoch << 32 | n`, D-P11-18); `None`
+    /// when the stored field is 0 (apply-originated inputs, pre-Phase 11 journals).
+    pub attempt: Option<u64>,
 }
 
 /// A page of history.
@@ -591,7 +594,9 @@ pub struct ListRunsRequest {
     pub status: Option<RunStatus>,
     /// Queue filter.
     pub queue: Option<String>,
-    /// Tag filter (run must carry it).
+    /// Tag filter (run must carry it). The adapters set it to the first entry of
+    /// [`ListRunsRequest::tags`], so implementations that predate `tags` keep filtering
+    /// on one tag.
     pub tag: Option<String>,
     /// Only runs created at or after this time (ms).
     pub created_after_ms: Option<u64>,
@@ -601,6 +606,24 @@ pub struct ListRunsRequest {
     pub limit: u32,
     /// Opaque token from a previous page.
     pub page_token: Option<String>,
+    /// Every tag the run must carry (AND, at most
+    /// [`crate::phase11::MAX_SEARCH_TAGS`]); includes the legacy `tag` parameter
+    /// (D-P11-10).
+    pub tags: Vec<String>,
+    /// Result order (default [`ListOrder::Oldest`], the pre-Phase 11 behaviour).
+    pub order: ListOrder,
+    /// Only DLQ members (failed or timed-out runs not dismissed or requeued, D-P11-11).
+    pub dlq: bool,
+}
+
+/// Order of a run listing (D-P11-10).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ListOrder {
+    /// Oldest first (the pre-Phase 11 order).
+    #[default]
+    Oldest,
+    /// Newest first (served by the run index, D-P11-9).
+    Newest,
 }
 
 /// Run listing row.

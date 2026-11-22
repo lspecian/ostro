@@ -354,6 +354,10 @@ pub struct HistoryEventDto {
     pub summary: String,
     /// Details (embedded JSON).
     pub details: serde_json::Value,
+    /// Activation attempt that wrote the event (`epoch << 32 | n`); absent when not
+    /// recorded (D-P11-18).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u64>,
 }
 
 /// History page.
@@ -375,8 +379,12 @@ pub struct ListRunsQuery {
     pub status: Option<RunStatusDto>,
     /// Queue filter.
     pub queue: Option<String>,
-    /// Tag filter.
+    /// Tag filter (same as one `tags` value).
     pub tag: Option<String>,
+    /// Result order: `oldest` (default) or `newest` (D-P11-10).
+    pub order: Option<crate::phase11::ListOrderDto>,
+    /// Only DLQ members (failed / timed-out runs not dismissed or requeued).
+    pub dlq: Option<bool>,
     /// Created at or after (RFC 3339).
     pub created_after: Option<String>,
     /// Created before (RFC 3339).
@@ -944,15 +952,16 @@ async fn activate_workflow(
     responses(
         (status = 201, description = "Run created", body = StartRunResponse),
         (status = 200, description = "Existing run returned (idempotency key)", body = StartRunResponse),
-        (status = 400, description = "Invalid request", body = ErrorBody),
+        (status = 400, description = "Invalid request (a tag starting with __ostro/ is reserved)", body = ErrorBody),
         (status = 404, description = "Unknown workflow or version", body = ErrorBody),
         (status = 409, description = "Idempotency key used (conflict_policy=reject); details.existing_run_id", body = ErrorBody),
         (status = 412, description = "Workflow has no active version", body = ErrorBody),
-        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes, or input exceeds limits.max_payload_bytes (details.limit = payload_bytes)", body = ErrorBody),
     )
 )]
 async fn start_run(
     State(cp): State<Arc<dyn ControlPlane>>,
+    opts: Option<axum::Extension<crate::phase11::RestOptions>>,
     Path(name): Path<String>,
     headers: HeaderMap,
     body: Result<Json<StartRunBody>, JsonRejection>,
@@ -960,6 +969,10 @@ async fn start_run(
     let b = json_body(body)?;
     let input_json = serde_json::to_vec(&b.input)
         .map_err(|e| ApiError::invalid_argument(format!("input: {e}")))?;
+    // Phase 11 API caps (D-P11-13), before anything is proposed.
+    let opts = crate::phase11::RestOptions::of(opts);
+    crate::phase11::check_payload("input", input_json.len(), opts.max_payload_bytes)?;
+    crate::phase11::validate_user_tags(&b.tags)?;
     // Body wins; else the `traceparent` header (08-10). Validated either way.
     let traceparent = crate::phase8::resolve_traceparent(
         b.traceparent,
@@ -1059,6 +1072,7 @@ async fn run_history(
                 ts_ms: e.ts_ms,
                 summary: e.summary,
                 details: embed_json(&e.details_json),
+                attempt: e.attempt,
             })
             .collect(),
         next_from_seq: page.next_from_seq,
@@ -1070,17 +1084,26 @@ async fn run_history(
     get,
     path = "/v1/runs",
     tag = "runs",
-    params(ListRunsQuery),
+    params(
+        ListRunsQuery,
+        ("tags" = Option<Vec<String>>, Query, description = "Repeatable; every tag must match (AND, max 8; tag counts as one)"),
+    ),
     responses(
         (status = 200, description = "A page of runs", body = RunListResponse),
-        (status = 400, description = "Invalid filter or page token", body = ErrorBody),
+        (status = 400, description = "Invalid filter or page token; > 8 tags: details.limit = search_tags", body = ErrorBody),
     )
 )]
 async fn list_runs(
     State(cp): State<Arc<dyn ControlPlane>>,
     q: Result<Query<ListRunsQuery>, QueryRejection>,
+    pairs: Result<Query<Vec<(String, String)>>, QueryRejection>,
 ) -> Result<Json<RunListResponse>, ApiError> {
     let q = query(q)?;
+    // Phase 11 (D-P11-10): repeatable `tags`, merged with the legacy `tag`.
+    let tags = crate::phase11::search_tags(
+        q.tag,
+        crate::phase11::repeated(&crate::phase11::query_pairs(pairs)?, "tags"),
+    )?;
     let created_after_ms = q
         .created_after
         .as_deref()
@@ -1096,11 +1119,14 @@ async fn list_runs(
             workflow: q.workflow,
             status: q.status.map(Into::into),
             queue: q.queue,
-            tag: q.tag,
+            tag: tags.first().cloned(),
             created_after_ms,
             created_before_ms,
             limit: domain::effective_limit(q.limit.unwrap_or(0)),
             page_token: q.page_token,
+            tags,
+            order: q.order.unwrap_or_default().into(),
+            dlq: q.dlq.unwrap_or(false),
         })
         .await?;
     Ok(Json(RunListResponse {
@@ -1124,15 +1150,21 @@ async fn list_runs(
         (status = 400, description = "Invalid request", body = ErrorBody),
         (status = 404, description = "Unknown run", body = ErrorBody),
         (status = 409, description = "Run already terminal (details.reason = run_terminal)", body = ErrorBody),
-        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes, or payload exceeds limits.max_payload_bytes (details.limit = payload_bytes)", body = ErrorBody),
     )
 )]
 async fn signal_run(
     State(cp): State<Arc<dyn ControlPlane>>,
+    opts: Option<axum::Extension<crate::phase11::RestOptions>>,
     Path((run_id, name)): Path<(String, String)>,
     body: Result<Json<SignalBody>, JsonRejection>,
 ) -> Result<Json<SignalResponseDto>, ApiError> {
     let b = json_body(body)?;
+    crate::phase11::check_json_payload(
+        "payload",
+        &b.payload,
+        crate::phase11::RestOptions::of(opts).max_payload_bytes,
+    )?;
     let r = cp
         .signal_run(domain::SignalRequest {
             run_id,
@@ -1301,14 +1333,20 @@ async fn run_result(
         (status = 400, description = "Malformed or unverifiable token (details.reason = token_invalid)", body = ErrorBody),
         (status = 404, description = "The token's run no longer exists", body = ErrorBody),
         (status = 409, description = "Token already completed (token_already_completed) or run terminal (run_terminal)", body = ErrorBody),
-        (status = 413, description = "Body exceeds api.max_request_bytes", body = ErrorBody),
+        (status = 413, description = "Body exceeds api.max_request_bytes, or payload exceeds limits.max_payload_bytes (details.limit = payload_bytes)", body = ErrorBody),
     )
 )]
 async fn complete_token(
     State(cp): State<Arc<dyn ControlPlane>>,
+    opts: Option<axum::Extension<crate::phase11::RestOptions>>,
     body: Result<Json<CompleteTokenBody>, JsonRejection>,
 ) -> Result<Json<CompleteTokenResponseDto>, ApiError> {
     let b = json_body(body)?;
+    crate::phase11::check_json_payload(
+        "payload",
+        &b.payload,
+        crate::phase11::RestOptions::of(opts).max_payload_bytes,
+    )?;
     let r = cp
         .complete_token(domain::CompleteTokenRequest {
             token: b.token,
@@ -1458,15 +1496,21 @@ async fn openapi_json() -> Response {
     ([(header::CONTENT_TYPE, "application/json")], body.clone()).into_response()
 }
 
-/// Web UI shell (placeholder until the UI phase).
+/// Web UI shell, or a redirect to the embedded UI when it is enabled (D-P11-17).
 #[utoipa::path(
     get,
     path = "/",
     tag = "meta",
-    responses((status = 200, description = "UI shell", body = String, content_type = "text/html"))
+    responses(
+        (status = 200, description = "UI shell", body = String, content_type = "text/html"),
+        (status = 303, description = "The embedded UI is enabled: Location /ui/"),
+    )
 )]
-async fn ui_shell() -> Html<String> {
-    Html(crate::ui_shell_html())
+async fn ui_shell(opts: Option<axum::Extension<crate::phase11::RestOptions>>) -> Response {
+    match crate::phase11::RestOptions::of(opts).root_redirect {
+        Some(to) => axum::response::Redirect::to(&to).into_response(),
+        None => Html(crate::ui_shell_html()).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------------
@@ -2540,6 +2584,8 @@ fn phase7_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
         (name = "secrets", description = "Write-only secrets and origin-bound secret grants (Phase 6)"),
         (name = "connectors", description = "Connections, module egress policies and presigned object URLs (Phase 6)"),
         (name = "workers", description = "Worker administration, join tokens and join (Phase 7)"),
+        (name = "operations", description = "Rerun, dead-letter queue, bulk jobs, limits and failure policies (Phase 11)"),
+        (name = "inventory", description = "Modules, queues and partitions (Phase 11)"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )

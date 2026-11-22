@@ -97,6 +97,10 @@ struct State {
     worker_tokens: BTreeMap<String, (WorkerTokenInfo, String)>,
     /// queue -> (rate-limit window index, starts in it).
     rate_windows: BTreeMap<String, (u64, u64)>,
+    /// Phase 11 (11-09): the last [`ControlPlane::list_runs`] request.
+    last_list_runs: Option<ListRunsRequest>,
+    /// Phase 11: failed runs hidden from `dlq = true` listings (dismissed / requeued).
+    dlq_hidden: BTreeSet<String>,
 }
 
 impl State {
@@ -181,6 +185,7 @@ impl State {
             ts_ms,
             summary: kind.to_owned(),
             details_json: details.to_string().into_bytes(),
+            attempt: None,
         });
     }
 
@@ -289,6 +294,29 @@ impl FakeControlPlane {
         }
     }
 
+    /// Test helper (11-09): the last request [`ControlPlane::list_runs`] received.
+    pub fn last_list_runs(&self) -> Option<ListRunsRequest> {
+        self.lock().last_list_runs.clone()
+    }
+
+    /// Test helper (11-09): hide a failed run from `dlq = true` listings (as a dismissal
+    /// or requeue would).
+    pub fn hide_from_dlq(&self, run_id: &str) {
+        self.lock().dlq_hidden.insert(run_id.to_owned());
+    }
+
+    /// Test helper (11-09): set the `attempt` of history event `seq` of `run_id`.
+    pub fn set_history_attempt(&self, run_id: &str, seq: u64, attempt: Option<u64>) {
+        if let Some(ev) = self
+            .lock()
+            .history
+            .get_mut(run_id)
+            .and_then(|h| h.iter_mut().find(|e| e.seq == seq))
+        {
+            ev.attempt = attempt;
+        }
+    }
+
     /// Test helper: the stored value of a secret (the API never returns one).
     pub fn secret_value(&self, name: &str, tenant: Option<&str>) -> Option<Vec<u8>> {
         self.lock()
@@ -369,6 +397,7 @@ impl FakeControlPlane {
             ts_ms: now,
             summary: format!("status -> {}", status.as_str()),
             details_json: format!("{{\"status\":\"{}\"}}", status.as_str()).into_bytes(),
+            attempt: None,
         });
         drop(st);
         self.changed.notify_waiters();
@@ -739,6 +768,7 @@ impl ControlPlane for FakeControlPlane {
                 ts_ms: now,
                 summary: format!("started {}@{version}", req.workflow),
                 details_json: format!("{{\"input\":{input}}}").into_bytes(),
+                attempt: None,
             }],
         );
         st.runs.insert(run_id.clone(), run);
@@ -788,9 +818,11 @@ impl ControlPlane for FakeControlPlane {
     }
 
     async fn list_runs(&self, req: ListRunsRequest) -> Result<RunPage, ApiError> {
-        let st = self.lock();
+        let mut st = self.lock();
+        st.last_list_runs = Some(req.clone());
+        let st = st;
         let limit = effective_limit(req.limit) as usize;
-        let start = match &req.page_token {
+        let after = match &req.page_token {
             Some(t) if !t.is_empty() => {
                 if !t.starts_with("run-") {
                     return Err(ApiError::invalid_argument("bad page_token"));
@@ -799,14 +831,25 @@ impl ControlPlane for FakeControlPlane {
             }
             _ => std::ops::Bound::Unbounded,
         };
-        let mut it = st
-            .runs
-            .range((start, std::ops::Bound::Unbounded))
+        // Phase 11 (D-P11-10): newest first walks the id-ordered map backwards; the
+        // page token is the last run id either way.
+        let ordered: Box<dyn Iterator<Item = (&String, &RunInfo)> + '_> = match req.order {
+            ListOrder::Oldest => Box::new(st.runs.range((after, std::ops::Bound::Unbounded))),
+            ListOrder::Newest => Box::new(st.runs.range((std::ops::Bound::Unbounded, after)).rev()),
+        };
+        let dismissed = &st.dlq_hidden;
+        let mut it = ordered
             .map(|(_, r)| r)
             .filter(|r| req.workflow.as_ref().is_none_or(|w| &r.workflow == w))
             .filter(|r| req.status.is_none_or(|s| r.status == s))
             .filter(|r| req.queue.as_ref().is_none_or(|q| &r.queue == q))
             .filter(|r| req.tag.as_ref().is_none_or(|t| r.tags.contains(t)))
+            .filter(|r| req.tags.iter().all(|t| r.tags.contains(t)))
+            .filter(|r| {
+                !req.dlq
+                    || (matches!(r.status, RunStatus::Failed | RunStatus::TimedOut)
+                        && !dismissed.contains(&r.run_id))
+            })
             .filter(|r| req.created_after_ms.is_none_or(|a| r.created_at_ms >= a))
             .filter(|r| req.created_before_ms.is_none_or(|b| r.created_at_ms < b));
         let runs: Vec<RunSummary> = it.by_ref().take(limit).map(summary_of).collect();
@@ -1503,6 +1546,573 @@ impl ControlPlane for FakeControlPlane {
             renew_after_ms: FAKE_RENEW_AFTER_MS,
             cluster_id: FAKE_CLUSTER_ID.to_owned(),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 11 (11-09): in-memory OpsApi / InventoryApi
+// ---------------------------------------------------------------------------------
+
+pub use p11::{FAKE_MAX_BULK_JOBS, FakeInventory, FakeOps};
+
+mod p11 {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    use crate::error::ApiError;
+    use crate::phase8::ApiExtensions;
+    use crate::phase11::*;
+
+    use super::{FAKE_EPOCH_MS, FAKE_TICK_MS};
+
+    /// Bulk jobs the fake runs at once before answering `bulk_too_many_jobs`.
+    pub const FAKE_MAX_BULK_JOBS: usize = 4;
+
+    #[derive(Default)]
+    struct OpsState {
+        clock: u64,
+        next_run: u64,
+        next_job: u64,
+        errors: BTreeMap<String, ApiError>,
+        rerun_keys: BTreeMap<String, RerunResponse>,
+        cuts: BTreeMap<String, RerunCutsView>,
+        dlq: BTreeMap<String, DlqEntry>,
+        bulk_matches: Vec<String>,
+        jobs: BTreeMap<String, BulkJobView>,
+        policies: BTreeMap<String, FailurePolicy>,
+        reruns: Vec<RerunRequest>,
+        bulk_requests: Vec<BulkCreateRequest>,
+    }
+
+    impl OpsState {
+        fn tick(&mut self) -> u64 {
+            self.clock += 1;
+            FAKE_EPOCH_MS + self.clock * FAKE_TICK_MS
+        }
+    }
+
+    /// In-memory [`OpsApi`] for adapter, UI and CLI tests. Deterministic: new run ids
+    /// are `run-rerun-<n>` / `run-requeue-<n>`, job ids `blk_<n>` (16 hex digits),
+    /// times come from a fake clock starting at [`FAKE_EPOCH_MS`].
+    ///
+    /// - Rerun: any non-empty run id is a terminal source; a dry run returns the cut and
+    ///   no run id; an idempotency key seen before returns the same run with
+    ///   `existing = true`. `cut_seq` is the `seq` cut, or `occurrence` for a step cut.
+    /// - Cuts: seeded with [`FakeOps::set_cuts`]; unknown runs are 404.
+    /// - DLQ: seeded with [`FakeOps::push_dlq`]; ordered by run id; the page token is the
+    ///   last run id of the page. Dismiss and requeue on a non-member are 409
+    ///   `dlq_not_member`; `auto` resolves to `resume` when the entry is resumable, else
+    ///   `restart`.
+    /// - Bulk: the matched set is [`FakeOps::set_bulk_matches`]; jobs start `running` with
+    ///   no progress ([`FakeOps::set_bulk_progress`] advances them); more than
+    ///   [`FAKE_MAX_BULK_JOBS`] unfinished jobs is 429 `bulk_too_many_jobs`.
+    /// - Limits: the D-P11-13 defaults.
+    /// - Failure policies: stored per scope with a `version_tag` starting at 1; a stale tag
+    ///   is 409 `version_mismatch`.
+    /// - [`FakeOps::fail`] makes a method (by trait method name) answer an error until
+    ///   cleared.
+    #[derive(Default)]
+    pub struct FakeOps {
+        state: Mutex<OpsState>,
+    }
+
+    impl FakeOps {
+        /// Empty fake.
+        pub fn new() -> Arc<Self> {
+            Arc::new(FakeOps::default())
+        }
+
+        fn lock(&self) -> MutexGuard<'_, OpsState> {
+            self.state.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        fn check(&self, method: &str) -> Result<MutexGuard<'_, OpsState>, ApiError> {
+            let st = self.lock();
+            match st.errors.get(method) {
+                Some(e) => Err(e.clone()),
+                None => Ok(st),
+            }
+        }
+
+        /// Make `method` (an [`OpsApi`] method name) answer `err` (`None` clears it).
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            let mut st = self.lock();
+            match err {
+                Some(e) => st.errors.insert(method.to_owned(), e),
+                None => st.errors.remove(method),
+            };
+        }
+
+        /// Seed the cuts of a run.
+        pub fn set_cuts(&self, view: RerunCutsView) {
+            self.lock().cuts.insert(view.run_id.clone(), view);
+        }
+
+        /// Add (or replace) a DLQ entry.
+        pub fn push_dlq(&self, entry: DlqEntry) {
+            self.lock().dlq.insert(entry.run_id.clone(), entry);
+        }
+
+        /// The current DLQ entry of `run_id` (dismissed / requeued included).
+        pub fn dlq_entry(&self, run_id: &str) -> Option<DlqEntry> {
+            self.lock().dlq.get(run_id).cloned()
+        }
+
+        /// The runs a bulk filter matches (the fake ignores the filter).
+        pub fn set_bulk_matches(&self, runs: Vec<String>) {
+            self.lock().bulk_matches = runs;
+        }
+
+        /// Set a job's progress; `done + skipped + failed_count >= matched` finishes it.
+        pub fn set_bulk_progress(&self, job_id: &str, done: u64, skipped: u64) {
+            let mut st = self.lock();
+            let now = st.tick();
+            if let Some(j) = st.jobs.get_mut(job_id) {
+                j.done = done;
+                j.skipped = skipped;
+                if j.state == "running" && done + skipped + j.failed_count >= j.matched {
+                    j.state = "done".to_owned();
+                    j.finished_at_ms = Some(now);
+                    j.eta_ms = None;
+                }
+            }
+        }
+
+        /// Every rerun request received (dry runs included), in order.
+        pub fn reruns(&self) -> Vec<RerunRequest> {
+            self.lock().reruns.clone()
+        }
+
+        /// Every bulk create request received, in order.
+        pub fn bulk_requests(&self) -> Vec<BulkCreateRequest> {
+            self.lock().bulk_requests.clone()
+        }
+
+        /// Fill `ext.ops` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.ops = Some(Arc::clone(self) as Arc<dyn OpsApi>);
+        }
+    }
+
+    fn cut_seq(from: &RerunFrom) -> u64 {
+        match from {
+            RerunFrom::Seq(s) => *s,
+            RerunFrom::Step { occurrence, .. } => u64::from(*occurrence),
+        }
+    }
+
+    fn action_name(a: &BulkAction) -> &'static str {
+        match a {
+            BulkAction::Cancel => "cancel",
+            BulkAction::Terminate { .. } => "terminate",
+            BulkAction::Retry => "retry",
+            BulkAction::Rerun { .. } => "rerun",
+            BulkAction::Requeue { .. } => "requeue",
+            BulkAction::Pause => "pause",
+            BulkAction::Resume => "resume",
+            BulkAction::Signal { .. } => "signal",
+        }
+    }
+
+    fn scope_key(s: &PolicyScope) -> String {
+        match s {
+            PolicyScope::Workflow(n) => format!("workflow/{n}"),
+            PolicyScope::Queue(n) => format!("queue/{n}"),
+        }
+    }
+
+    fn is_member(e: &DlqEntry) -> bool {
+        e.dismissed_at_ms.is_none() && e.requeued_to.is_none()
+    }
+
+    #[async_trait::async_trait]
+    impl OpsApi for FakeOps {
+        async fn rerun_run(&self, req: RerunRequest) -> Result<RerunResponse, ApiError> {
+            let mut st = self.check("rerun_run")?;
+            st.reruns.push(req.clone());
+            if let Some(k) = &req.idempotency_key
+                && let Some(prev) = st.rerun_keys.get(k)
+            {
+                return Ok(RerunResponse {
+                    existing: true,
+                    ..prev.clone()
+                });
+            }
+            let version = match req.version {
+                RerunVersion::Version(v) => v,
+                RerunVersion::Active | RerunVersion::Source => 1,
+            };
+            let cut = cut_seq(&req.from);
+            let mut res = RerunResponse {
+                new_run_id: None,
+                source_run_id: req.run_id.clone(),
+                cut_seq: cut,
+                copied_events: cut.saturating_sub(1),
+                workflow: "fake".to_owned(),
+                version,
+                verdict: "ok".to_owned(),
+                existing: false,
+            };
+            if req.dry_run {
+                return Ok(res);
+            }
+            st.tick();
+            st.next_run += 1;
+            res.new_run_id = Some(format!("run-rerun-{:06}", st.next_run));
+            if let Some(k) = req.idempotency_key {
+                st.rerun_keys.insert(k, res.clone());
+            }
+            Ok(res)
+        }
+
+        async fn analyze_rerun(&self, run_id: String) -> Result<RerunCutsView, ApiError> {
+            let st = self.check("analyze_rerun")?;
+            st.cuts
+                .get(&run_id)
+                .cloned()
+                .ok_or_else(|| ApiError::not_found(format!("run {run_id} not found")))
+        }
+
+        async fn list_dlq(&self, req: DlqListRequest) -> Result<DlqPage, ApiError> {
+            let st = self.check("list_dlq")?;
+            let limit = if req.limit == 0 {
+                DEFAULT_OPS_PAGE
+            } else {
+                req.limit.min(crate::domain::MAX_PAGE_LIMIT)
+            } as usize;
+            let after = req.page_token.clone().unwrap_or_default();
+            let mut it = st
+                .dlq
+                .values()
+                .filter(|e| e.run_id > after)
+                .filter(|e| req.include_dismissed || is_member(e))
+                .filter(|e| req.workflow.as_ref().is_none_or(|w| &e.workflow == w))
+                .filter(|e| req.queue.as_ref().is_none_or(|q| &e.queue == q))
+                .filter(|e| req.reason.as_ref().is_none_or(|r| e.reason.starts_with(r)))
+                .filter(|e| req.tags.iter().all(|t| e.tags.contains(t)));
+            let entries: Vec<DlqEntry> = it.by_ref().take(limit).cloned().collect();
+            let next_page_token = if it.next().is_some() {
+                entries.last().map(|e| e.run_id.clone())
+            } else {
+                None
+            };
+            Ok(DlqPage {
+                entries,
+                next_page_token,
+            })
+        }
+
+        async fn requeue_dlq(
+            &self,
+            req: DlqRequeueRequest,
+        ) -> Result<DlqRequeueResponse, ApiError> {
+            let mut st = self.check("requeue_dlq")?;
+            let entry = st
+                .dlq
+                .get(&req.run_id)
+                .filter(|e| is_member(e))
+                .cloned()
+                .ok_or_else(|| dlq_not_member(&req.run_id))?;
+            let mode = match &req.mode {
+                RequeueMode::Auto if entry.resumable => "resume",
+                RequeueMode::Auto | RequeueMode::Restart => "restart",
+                RequeueMode::Resume => "resume",
+                RequeueMode::Rerun { .. } => "rerun",
+            };
+            if req.dry_run {
+                return Ok(DlqRequeueResponse {
+                    run_id: req.run_id,
+                    mode: mode.to_owned(),
+                    new_run_id: None,
+                });
+            }
+            let now = st.tick();
+            let new_run_id = if mode == "resume" {
+                None
+            } else {
+                st.next_run += 1;
+                Some(format!("run-requeue-{:06}", st.next_run))
+            };
+            if let Some(e) = st.dlq.get_mut(&req.run_id) {
+                e.requeued_to = Some(new_run_id.clone().unwrap_or_else(|| req.run_id.clone()));
+                e.requeued_at_ms = Some(now);
+            }
+            Ok(DlqRequeueResponse {
+                run_id: req.run_id,
+                mode: mode.to_owned(),
+                new_run_id,
+            })
+        }
+
+        async fn dismiss_dlq(&self, req: DlqDismissRequest) -> Result<DlqEntry, ApiError> {
+            let mut st = self.check("dismiss_dlq")?;
+            if !st.dlq.get(&req.run_id).is_some_and(is_member) {
+                return Err(dlq_not_member(&req.run_id));
+            }
+            let now = st.tick();
+            let e = st
+                .dlq
+                .get_mut(&req.run_id)
+                .ok_or_else(|| dlq_not_member(&req.run_id))?;
+            e.dismissed_at_ms = Some(now);
+            e.dismiss_reason = Some(req.reason);
+            Ok(e.clone())
+        }
+
+        async fn create_bulk(
+            &self,
+            req: BulkCreateRequest,
+        ) -> Result<BulkCreateResponse, ApiError> {
+            let mut st = self.check("create_bulk")?;
+            st.bulk_requests.push(req.clone());
+            let matched = st.bulk_matches.len() as u64;
+            let sample: Vec<String> = st.bulk_matches.iter().take(20).cloned().collect();
+            if req.dry_run {
+                return Ok(BulkCreateResponse {
+                    job_id: None,
+                    matched_estimate: matched,
+                    sample,
+                });
+            }
+            let running = st
+                .jobs
+                .values()
+                .filter(|j| matches!(j.state.as_str(), "pending" | "running"))
+                .count();
+            if running >= FAKE_MAX_BULK_JOBS {
+                return Err(bulk_too_many_jobs(FAKE_MAX_BULK_JOBS as u64, 1_000));
+            }
+            let now = st.tick();
+            st.next_job += 1;
+            let job_id = format!("blk_{:016x}", st.next_job);
+            let rate = req.rate_per_sec.unwrap_or(20).min(500);
+            st.jobs.insert(
+                job_id.clone(),
+                BulkJobView {
+                    job_id: job_id.clone(),
+                    state: "running".to_owned(),
+                    action: action_name(&req.action).to_owned(),
+                    matched,
+                    done: 0,
+                    skipped: 0,
+                    failed: Vec::new(),
+                    failed_count: 0,
+                    rate_per_sec: rate,
+                    created_at_ms: now,
+                    started_at_ms: Some(now),
+                    finished_at_ms: None,
+                    eta_ms: Some(matched * 1_000 / u64::from(rate.max(1))),
+                },
+            );
+            Ok(BulkCreateResponse {
+                job_id: Some(job_id),
+                matched_estimate: matched,
+                sample,
+            })
+        }
+
+        async fn list_bulk(&self) -> Result<Vec<BulkJobView>, ApiError> {
+            let st = self.check("list_bulk")?;
+            Ok(st.jobs.values().cloned().collect())
+        }
+
+        async fn get_bulk(&self, job_id: String) -> Result<BulkJobView, ApiError> {
+            let st = self.check("get_bulk")?;
+            st.jobs
+                .get(&job_id)
+                .cloned()
+                .ok_or_else(|| ApiError::not_found(format!("bulk job {job_id} not found")))
+        }
+
+        async fn cancel_bulk(&self, job_id: String) -> Result<BulkJobView, ApiError> {
+            let mut st = self.check("cancel_bulk")?;
+            let now = st.tick();
+            let j = st
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| ApiError::not_found(format!("bulk job {job_id} not found")))?;
+            if matches!(
+                j.state.as_str(),
+                "pending" | "running" | "paused_backpressure"
+            ) {
+                j.state = "cancelled".to_owned();
+                j.finished_at_ms = Some(now);
+                j.eta_ms = None;
+            }
+            Ok(j.clone())
+        }
+
+        async fn limits(&self) -> Result<LimitsView, ApiError> {
+            let _st = self.check("limits")?;
+            let l = |name: &str, value: u64, unit: &str, enforced: &str, error: &str| LimitView {
+                name: name.to_owned(),
+                value,
+                unit: unit.to_owned(),
+                configurable: true,
+                enforced: enforced.to_owned(),
+                error: error.to_owned(),
+            };
+            Ok(LimitsView {
+                limits: vec![
+                    l(
+                        "max_history_events",
+                        50_000,
+                        "events",
+                        "engine",
+                        "limit_exceeded",
+                    ),
+                    l(
+                        "max_children_per_run",
+                        10_000,
+                        "children",
+                        "engine",
+                        "limit_exceeded",
+                    ),
+                    l(
+                        "max_payload_bytes",
+                        4 * 1024 * 1024,
+                        "bytes",
+                        "api",
+                        "payload_too_large",
+                    ),
+                ],
+            })
+        }
+
+        async fn get_failure_policy(&self, scope: PolicyScope) -> Result<FailurePolicy, ApiError> {
+            let st = self.check("get_failure_policy")?;
+            Ok(st
+                .policies
+                .get(&scope_key(&scope))
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn set_failure_policy(
+            &self,
+            scope: PolicyScope,
+            p: FailurePolicy,
+        ) -> Result<FailurePolicy, ApiError> {
+            let mut st = self.check("set_failure_policy")?;
+            let key = scope_key(&scope);
+            let current = st
+                .policies
+                .get(&key)
+                .and_then(|p| p.version_tag)
+                .unwrap_or(0);
+            if let Some(t) = p.version_tag
+                && t != current
+            {
+                return Err(crate::phase8::version_mismatch(
+                    "failure policy",
+                    &key,
+                    current,
+                ));
+            }
+            let stored = FailurePolicy {
+                version_tag: Some(current + 1),
+                ..p
+            };
+            st.policies.insert(key, stored.clone());
+            Ok(stored)
+        }
+    }
+
+    #[derive(Default)]
+    struct InvState {
+        errors: BTreeMap<String, ApiError>,
+        modules: Vec<ModuleSummary>,
+        queues: Vec<QueueView>,
+        partitions: Vec<PartitionView>,
+    }
+
+    /// In-memory [`InventoryApi`]: returns what [`FakeInventory::set_modules`],
+    /// [`FakeInventory::set_queues`] and [`FakeInventory::set_partitions`] seeded.
+    /// Modules are ordered by sha256; the page token is the last sha of the page.
+    #[derive(Default)]
+    pub struct FakeInventory {
+        state: Mutex<InvState>,
+    }
+
+    impl FakeInventory {
+        /// Empty fake.
+        pub fn new() -> Arc<Self> {
+            Arc::new(FakeInventory::default())
+        }
+
+        fn lock(&self) -> MutexGuard<'_, InvState> {
+            self.state.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        fn check(&self, method: &str) -> Result<MutexGuard<'_, InvState>, ApiError> {
+            let st = self.lock();
+            match st.errors.get(method) {
+                Some(e) => Err(e.clone()),
+                None => Ok(st),
+            }
+        }
+
+        /// Make `method` answer `err` (`None` clears it).
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            let mut st = self.lock();
+            match err {
+                Some(e) => st.errors.insert(method.to_owned(), e),
+                None => st.errors.remove(method),
+            };
+        }
+
+        /// Seed modules.
+        pub fn set_modules(&self, mut m: Vec<ModuleSummary>) {
+            m.sort_by(|a, b| a.sha256.cmp(&b.sha256));
+            self.lock().modules = m;
+        }
+
+        /// Seed queues.
+        pub fn set_queues(&self, q: Vec<QueueView>) {
+            self.lock().queues = q;
+        }
+
+        /// Seed partitions.
+        pub fn set_partitions(&self, p: Vec<PartitionView>) {
+            self.lock().partitions = p;
+        }
+
+        /// Fill `ext.inventory` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.inventory = Some(Arc::clone(self) as Arc<dyn InventoryApi>);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl InventoryApi for FakeInventory {
+        async fn list_modules(&self, req: ListModulesRequest) -> Result<ModulePage, ApiError> {
+            let st = self.check("list_modules")?;
+            let limit = if req.limit == 0 {
+                DEFAULT_OPS_PAGE
+            } else {
+                req.limit.min(crate::domain::MAX_PAGE_LIMIT)
+            } as usize;
+            let after = req.page_token.unwrap_or_default();
+            let mut it = st.modules.iter().filter(|m| m.sha256 > after);
+            let modules: Vec<ModuleSummary> = it.by_ref().take(limit).cloned().collect();
+            let next_page_token = if it.next().is_some() {
+                modules.last().map(|m| m.sha256.clone())
+            } else {
+                None
+            };
+            Ok(ModulePage {
+                modules,
+                next_page_token,
+            })
+        }
+
+        async fn list_queues(&self) -> Result<Vec<QueueView>, ApiError> {
+            Ok(self.check("list_queues")?.queues.clone())
+        }
+
+        async fn list_partitions(&self) -> Result<Vec<PartitionView>, ApiError> {
+            Ok(self.check("list_partitions")?.partitions.clone())
+        }
     }
 }
 

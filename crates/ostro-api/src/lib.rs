@@ -111,6 +111,11 @@ pub fn router(cp: Arc<dyn ControlPlane>, cfg: ApiConfig) -> axum::Router {
 /// `POST /hooks/{name}` (route-level body limit `ext.hook_body_limit`), run logs and the
 /// admin backup, merged via `phase8::router(ext)`; gRPC `ostro.api.v1.{Schedules,
 /// Webhooks,RunLogs}` for the slots that are present.
+///
+/// Phase 11 (11-09): the [`phase11`] REST routes (rerun, DLQ, bulk, limits, failure
+/// policies, inventory; 404 while `ext.ops` / `ext.inventory` is `None`), the payload
+/// cap `cfg.max_payload_bytes` on start / signal / token completion, and `GET /` →
+/// `303 cfg.root_redirect` when set.
 pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions) -> axum::Router {
     let (rest, _doc) = rest::api_routes(cfg.max_module_bytes).split_for_parts();
     let grpc = tonic::service::Routes::new(HealthServer::new(HealthSvc))
@@ -160,7 +165,11 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
     let objects = objects
         .with_state(cp.clone())
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes));
+    // Phase 11 (11-09): payload cap and root redirect for the core handlers.
+    let opts = phase11::RestOptions::from_config(&cfg);
     rest.with_state(cp)
+        .layer(axum::Extension(opts))
+        .merge(phase11::router(ext.clone()))
         .merge(phase8::router(ext))
         // Route-level limits (the module upload, the hook body) are inner layers and win
         // over this one.

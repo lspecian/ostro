@@ -271,11 +271,14 @@ impl TryFrom<pb::ListRunsRequest> for domain::ListRunsRequest {
             workflow: r.workflow,
             status,
             queue: r.queue,
+            tags: r.tag.clone().into_iter().collect(),
             tag: r.tag,
             created_after_ms: r.created_after_ms,
             created_before_ms: r.created_before_ms,
             limit: domain::effective_limit(r.limit),
             page_token: r.page_token,
+            order: domain::ListOrder::Oldest,
+            dlq: false,
         })
     }
 }
