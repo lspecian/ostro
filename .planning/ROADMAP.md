@@ -376,7 +376,7 @@ Plans:
 - [x] 10-12-PLAN.md — Build pipeline (input-hash cache, staging, env scrub, local validate + describe, manifest.json) + Rust builder (target/ostro/cargo, zig shim with cargo-zigbuild filtering, hermetic --no-cc) + offline fixture + ostro build (CLI-04) (W4)
 - [ ] 10-13-PLAN.md — Auto time skipping: idle detector incl. in-flight API writes, barrier-guarded re-snapshot, lease-safe manual skip, 100/1000-iteration race suite with zero-lease asserts (SDK-06) (W4)
 - [ ] 10-14-PLAN.md — Python/TS/Go zero-dependency clients with route tables, shared e2e scenario (manual dev_skip), packaging dry runs (SDK-07) (W4)
-- [ ] 10-15-PLAN.md — Python (uv + wheel, uv.lock export) and TS (Node + npm ci + jco) builders, --docker runner + build image, parity with build-guest.sh + conformance on ostro-built artefacts, template builds, docs/toolchains.md (CLI-04) (W5)
+- [x] 10-15-PLAN.md — Python (uv + wheel, uv.lock export) and TS (Node + npm ci + jco) builders, --docker runner + build image, parity with build-guest.sh + conformance on ostro-built artefacts, template builds, docs/toolchains.md (CLI-04) (W5)
 - [ ] 10-16-PLAN.md — ostro deploy builds if needed and activates idempotently (D12 .wasm form kept) + ostro dev --watch (CLI-05, CLI-08) (W5)
 - [ ] 10-17-PLAN.md — Test kits: Rust (ostro-client testing), Python pytest plugin, TS ostro-client/testing, Go ostrotest; frozen ready line; template tests pass; docs/testing.md (SDK-06, SDK-07) (W6)
 - [ ] 10-18-PLAN.md — ostro completions (presence checks) + local-verb JSON envelope snapshots + docs/cli-json.md exit-code table (CLI-03..08) (W6)

@@ -156,7 +156,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **CLI-01**: `ostro dev` starts server + executor + UI with zero config in < 1 s; `--ephemeral` keeps state in memory [FR-0]
 - [x] **CLI-02**: `ostro server` runs a single node with zero-config defaults; TOML + env overrides [FR-0.2]
 - [ ] **CLI-03**: `ostro init --lang {rust,python,ts}` scaffolds a project with pinned toolchains [FR-2.1]
-- [ ] **CLI-04**: `ostro build` produces a validated component + manifest for Rust, Python and TS with hermetic toolchains (cached downloads or `--docker`) [FR-2.2/2.3]
+- [x] **CLI-04**: `ostro build` produces a validated component + manifest for Rust, Python and TS with hermetic toolchains (cached downloads or `--docker`) [FR-2.2/2.3]
 - [ ] **CLI-05**: `ostro deploy [--activate]` builds if needed and uploads idempotently [FR-2.4]
 - [x] **CLI-06**: `ostro run/ls/inspect/history/signal/cancel/retry` with `--json` and `--dry-run` where applicable [FR-2.5]
 - [ ] **CLI-07**: `ostro replay <run|--sample N> --module new.wasm` detects non-determinism before deploy (CI gate) [FR-2.6]
@@ -348,7 +348,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | CLI-01 | Phase 4 | Complete |
 | CLI-02 | Phase 4 | Complete |
 | CLI-03 | Phase 10 | Pending |
-| CLI-04 | Phase 10 | Pending |
+| CLI-04 | Phase 10 | Complete |
 | CLI-05 | Phase 10 | Pending |
 | CLI-06 | Phase 5 | Complete (spawned-binary cli_verbs suite + --json snapshots: 05-14; order-saga happy/compensated/cancelled/kill -9 driven only by the CLI: 05-17 order_saga) |
 | CLI-07 | Phase 10 | Pending |
