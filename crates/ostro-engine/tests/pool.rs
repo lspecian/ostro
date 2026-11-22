@@ -280,9 +280,20 @@ fn epoch_ticker_runs_and_stops() {
     .expect("engine");
     let probe = engine.ticker_probe();
     let before = probe.ticks();
-    std::thread::sleep(Duration::from_millis(100));
+    // Liveness, not cadence: 5 ticks of 10 ms are due after 50 ms, but a loaded CI host
+    // (the macos-15 runner, 3 cores shared with the other tests of this binary) can starve
+    // the ticker thread; "only 1 ticks in 100 ms" was seen there. The ticker does not burst
+    // to catch up after falling behind (by design), so wait up to 2 s for the 5 ticks.
+    let started = Instant::now();
+    while probe.ticks() - before < 5 && started.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let advanced = probe.ticks() - before;
-    assert!(advanced >= 5, "only {advanced} ticks in 100 ms");
+    assert!(
+        advanced >= 5,
+        "only {advanced} ticks in {:?}",
+        started.elapsed()
+    );
     assert!(!probe.exited());
 
     let dropped = Instant::now();
