@@ -442,7 +442,8 @@ impl EngineExecutor {
     ) -> PartitionSink {
         let mut sink = PartitionSink::new(job.handle.clone(), job.run, job.token, inputs, on_renew)
             .with_resolvers(Arc::clone(&self.modules), Arc::clone(&self.policy))
-            .with_guest_logs(Arc::clone(&self.guest_logs));
+            .with_guest_logs(Arc::clone(&self.guest_logs))
+            .with_clock(Arc::clone(self.runtime.clock()));
         if let Some(b) = &self.bridge {
             sink = sink.with_bridge(Arc::clone(b));
         }

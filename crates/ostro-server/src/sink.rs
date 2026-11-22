@@ -174,6 +174,9 @@ pub struct PartitionSink<L: ReplicatedLog = PartitionLog> {
     bridge: Option<Arc<BridgeServices>>,
     /// `RunRecord.parent` `(parent run, op)` at construction (09-05 parent_event).
     parent: Option<(RunId, u64)>,
+    /// The engine clock that stamps the journal (10-10): logic-time reads compare against
+    /// journal timestamps, so they use the same clock (the dev clock under time skipping).
+    clock: Arc<dyn ostro_engine::env::Clock>,
 }
 
 impl<L: ReplicatedLog> std::fmt::Debug for PartitionSink<L> {
@@ -261,7 +264,17 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             guest_logs: None,
             bridge: None,
             parent,
+            // The engine's default clock until `with_clock` (the executor passes the
+            // runtime's clock).
+            clock: Arc::new(ostro_engine::env::SystemClock), // clock-exempt: default, replaced by with_clock
         }
+    }
+
+    /// Read logic time from `clock`, the clock that stamps this run's journal (the
+    /// runtime's clock; 10-10).
+    pub fn with_clock(mut self, clock: Arc<dyn ostro_engine::env::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// The unsupported completion input for `ev`, if it schedules an op that gets one:
@@ -530,9 +543,8 @@ impl<L: ReplicatedLog> PartitionSink<L> {
                 // An unreadable row is treated as present: never re-decide on doubt.
                 .unwrap_or(true)
         };
-        let now_ms = std::time::SystemTime::now() // clock-exempt: logic-time follow-up (10-10)
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        // The journal's own clock (10-10): retention is measured on journal timestamps.
+        let now_ms = self.clock.now_unix_nanos() / 1_000_000;
         let plan = children::plan_child_repairs(
             &self.run,
             partitions,
