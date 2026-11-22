@@ -32,7 +32,7 @@
 //! Clustered leadership changes (Phase 12) must re-subscribe on the new leader.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -56,6 +56,8 @@ type Waiters = BTreeMap<RunId, Vec<(u64, oneshot::Sender<()>)>>;
 struct Inner {
     parts: Vec<Mutex<Waiters>>,
     next_id: AtomicU64,
+    /// Result long-polls in progress (plan 10-13, [`RunWatchers::pending_waiters`]).
+    pending: AtomicUsize,
 }
 
 impl Inner {
@@ -105,6 +107,7 @@ impl RunWatchers {
                     .map(|_| Mutex::new(BTreeMap::new()))
                     .collect(),
                 next_id: AtomicU64::new(0),
+                pending: AtomicUsize::new(0),
             }),
             tasks: Mutex::new(Vec::new()),
         }
@@ -178,6 +181,19 @@ impl RunWatchers {
             .sum()
     }
 
+    /// Result long-polls in progress: [`await_result`] calls that have not answered yet
+    /// (plan 10-13, the dev clock's auto-skip trigger). One atomic load.
+    pub fn pending_waiters(&self) -> usize {
+        self.inner.pending.load(Ordering::SeqCst)
+    }
+
+    /// Count one long-poll in [`Self::pending_waiters`] until the guard drops (also when
+    /// the request future is dropped, e.g. on client disconnect).
+    pub fn pending_guard(&self) -> PendingWaiter {
+        self.inner.pending.fetch_add(1, Ordering::SeqCst);
+        PendingWaiter(Arc::clone(&self.inner))
+    }
+
     /// Wake every waiter of partition `p` (also what a `Lagged` receiver does).
     pub fn wake_partition(&self, p: PartitionId) {
         self.inner.wake_all(p);
@@ -193,6 +209,21 @@ impl RunWatchers {
         {
             t.abort();
         }
+    }
+}
+
+/// One long-poll counted in [`RunWatchers::pending_waiters`] (RAII).
+pub struct PendingWaiter(Arc<Inner>);
+
+impl std::fmt::Debug for PendingWaiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingWaiter").finish_non_exhaustive()
+    }
+}
+
+impl Drop for PendingWaiter {
+    fn drop(&mut self) {
+        self.0.pending.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -309,6 +340,8 @@ pub(crate) async fn await_result(
     r: AwaitResultRequest,
 ) -> Result<AwaitResultResponse, ApiError> {
     let wait = Duration::from_millis(effective_wait_ms(r.wait_ms));
+    // A waiting client (10-13): with `wait = 0` the call answers at once and is no waiter.
+    let _pending = (!wait.is_zero()).then(|| cp.watchers().pending_guard());
     let deadline = tokio::time::Instant::now() + wait; // clock-exempt: long-poll deadline
     let mut run = parse_run_id(cp, &r.run_id)?;
     // Bounds the chain walk (a continue-as-new chain never cycles; stay total anyway).
@@ -406,6 +439,15 @@ mod tests {
         drop(_c);
         assert_eq!(w.watched_runs(), 0, "empty vectors are removed");
         w.stop();
+        // Pending long-polls (10-13) are counted by guard, not by registration.
+        assert_eq!(w.pending_waiters(), 0);
+        let g1 = w.pending_guard();
+        let g2 = w.pending_guard();
+        assert_eq!(w.pending_waiters(), 2);
+        drop(g1);
+        assert_eq!(w.pending_waiters(), 1);
+        drop(g2);
+        assert_eq!(w.pending_waiters(), 0);
     }
 
     #[tokio::test]

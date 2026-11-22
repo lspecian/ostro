@@ -460,6 +460,35 @@ pub struct DispatcherStats {
     pub grant_fault: GrantFault,
 }
 
+/// A read-only snapshot of the dispatcher's activity counters (plan 10-13, the dev
+/// clock's idle detector): plain atomic loads, never a round trip to a dispatcher task.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IdleStats {
+    /// Leases held (*Granting* or *Executing*, an attempt-failure backoff included) over
+    /// every dispatcher sharing the stats. A new lease is reported before its grant task
+    /// is spawned, so a grant in flight is always visible here or in `granting`.
+    pub leases: u64,
+    /// Grant tasks in flight ([`DispatcherStats::granting`]).
+    pub granting: u64,
+}
+
+impl IdleStats {
+    /// Activations in flight (leases plus grants still counted).
+    pub fn busy(&self) -> u64 {
+        self.leases.max(self.granting)
+    }
+}
+
+impl DispatcherStats {
+    /// The activity counters (read-only snapshot; see [`IdleStats`]).
+    pub fn idle_stats(&self) -> IdleStats {
+        IdleStats {
+            leases: self.leases.load(Ordering::SeqCst),
+            granting: self.granting.load(Ordering::SeqCst),
+        }
+    }
+}
+
 /// `run -> inject a grant rejection` (see [`DispatcherStats::grant_fault`]).
 pub type GrantFaultFn = Arc<dyn Fn(&RunId) -> bool + Send + Sync>;
 
@@ -1301,6 +1330,10 @@ impl Dispatcher {
 
     fn dispatch(&mut self, run: RunId, entry: Entry, flow: FlowPermit, res: Reservation) {
         let generation = self.st.new_lease(run, entry, flow, res);
+        // Report the new lease before its grant task exists (10-13): the dev idle
+        // snapshot then sees every grant as a lease, a `granting` count, or both. Only the
+        // shared gauge moves earlier; the loop reports it again at the top of the turn.
+        self.report_leases();
         let h = self.ctx.handle.clone();
         let after = self.unacked.get(&run).copied();
         let floor = self.rejected.get(&run).copied();

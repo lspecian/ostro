@@ -28,8 +28,8 @@
 //! set at construction and after every skip) and `ostro_dev_time_skips_total{mode}`
 //! (counter, non-zero skips).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use ostro_api::domain::DevTimeMode;
 use tokio::sync::{RwLock, watch};
@@ -41,7 +41,16 @@ pub struct DevClock {
     mode: DevTimeMode,
     tx: watch::Sender<u64>,
     barrier: Arc<RwLock<()>>,
+    /// The idle detector (10-13), attached once by the server; weak (the server and the
+    /// auto loop hold it).
+    time: OnceLock<Weak<crate::devtime::DevTime>>,
+    /// Test hook (10-13): called with `(now_ms, target_ms)` under the write guard at the
+    /// skip instant, right before the offset moves.
+    skip_hook: Mutex<Option<SkipHook>>,
 }
+
+/// See [`DevClock::set_skip_hook`].
+pub type SkipHook = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 impl std::fmt::Debug for DevClock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,6 +71,8 @@ impl DevClock {
             mode,
             tx: watch::channel(now).0,
             barrier: Arc::new(RwLock::new(())),
+            time: OnceLock::new(),
+            skip_hook: Mutex::new(None),
         });
         metrics::gauge!("ostro_dev_time_offset_ms").set(0.0);
         c
@@ -126,9 +137,42 @@ impl DevClock {
         let _w = self.barrier.write().await;
         let now = ostro_partition::clock::Clock::now_ms(self);
         match check(now) {
-            Some(target) => self.skip_to(target),
+            Some(target) => {
+                if target > now {
+                    let hook = self
+                        .skip_hook
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if let Some(h) = hook {
+                        h(now, target);
+                    }
+                }
+                self.skip_to(target)
+            }
             None => 0,
         }
+    }
+
+    /// Attach the idle detector (10-13; the first attachment wins).
+    pub fn attach_time(&self, t: &Arc<crate::devtime::DevTime>) {
+        let _ = self.time.set(Arc::downgrade(t));
+    }
+
+    /// The idle detector, when the server attached one and it is still alive.
+    pub fn time(&self) -> Option<Arc<crate::devtime::DevTime>> {
+        self.time.get().and_then(Weak::upgrade)
+    }
+
+    /// Test hook: `f(now_ms, target_ms)` runs for every guarded skip that moves the clock,
+    /// under the barrier's write guard, right before the offset moves (`None` clears it).
+    /// The race suite asserts zero leases and grants there (D-W26).
+    #[doc(hidden)]
+    pub fn set_skip_hook(&self, f: Option<SkipHook>) {
+        *self
+            .skip_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = f;
     }
 
     /// The skip barrier (the dispatcher's grant path takes read guards).

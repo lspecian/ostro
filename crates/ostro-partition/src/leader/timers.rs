@@ -139,6 +139,26 @@ impl Window {
     }
 }
 
+/// The earliest due time in the `timers` table (plan 10-13, the dev clock's skip target),
+/// skipping `EXPIRE_OP` rows (run retention) when `exclude_expire` is set. Read-only.
+///
+/// This reads the table, not the service's window: the window only reaches
+/// `now + window_span_ms`, so a multi-day sleep is never in it, while the table is the
+/// source of truth (a fired timer's row goes away when its `TimerFired` applies). At most
+/// `scan_limit` rows are read in due order; `Ok(None)` when no qualifying row is among them
+/// (no timer, or only retention timers within the limit).
+pub fn earliest_due_ms(
+    reader: &crate::store::StoreReader,
+    exclude_expire: bool,
+    scan_limit: usize,
+) -> Result<Option<u64>, crate::store::StoreError> {
+    let rows = reader.prefix(Table::Timers, &[], scan_limit.max(1))?;
+    Ok(rows.iter().find_map(|(k, _)| {
+        let (due, _, op) = decode_timer_key(k)?;
+        (!(exclude_expire && op == ostro_types::command::EXPIRE_OP)).then_some(due)
+    }))
+}
+
 /// Start the timer service of `ctx.partition`. Runs until `ctx.shutdown` turns true.
 pub fn spawn(ctx: LeaderCtx, cfg: TimerConfig) -> tokio::task::JoinHandle<()> {
     // Subscribe before the task starts so nothing committed after spawn is missed; anything

@@ -51,6 +51,7 @@ pub mod config;
 pub mod control;
 pub mod derive;
 pub mod devclock;
+pub mod devtime;
 pub mod effect_trace;
 pub mod effects;
 pub mod executor;
