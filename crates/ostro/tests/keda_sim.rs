@@ -366,6 +366,11 @@ async fn zero_to_n_to_zero() {
     }
     let burst_at = Instant::now();
     let mut open: BTreeSet<String> = ids.iter().map(|(id, _)| id.clone()).collect();
+    let long_ids: BTreeSet<String> = ids
+        .iter()
+        .filter(|(_, long)| *long)
+        .map(|(id, _)| id.clone())
+        .collect();
 
     let mut timeline: Vec<Tick> = Vec::new();
     let mut peak = 0u32;
@@ -427,13 +432,23 @@ async fn zero_to_n_to_zero() {
             open_runs: open.len(),
         });
 
-        // Never scaled in to zero while work is open (once the pool has come up).
-        if !open.is_empty() && peak > 0 {
-            assert!(
-                current > 0,
-                "pool at 0 with {} open runs (demand {demand})",
-                open.len()
-            );
+        // Never scaled in to zero while runnable work is open (once the pool has come up).
+        // A long run evicted from its hot park by a scale-down drain finishes its sleep as a
+        // cold timer: it is neither ready nor on a worker, so demand is 0 and the scaler may
+        // legitimately reach 0 workers until the timer fires (then scale from zero). The
+        // short cpu-burn runs never park, so none of them may be open at zero workers.
+        if current == 0 && !open.is_empty() && peak > 0 {
+            let short_open: Vec<&String> =
+                open.iter().filter(|id| !long_ids.contains(*id)).collect();
+            if !short_open.is_empty() || on_workers > 0 {
+                print_timeline(&timeline);
+                panic!(
+                    "pool at 0 with {} open runs, {} of them short cpu-burn runs \
+                     (demand {demand}, on workers {on_workers}): {short_open:?}",
+                    open.len(),
+                    short_open.len()
+                );
+            }
         }
         if scaled_up_at.is_none() && burst_at.elapsed() > Duration::from_secs(5) {
             print_timeline(&timeline);
