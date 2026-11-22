@@ -52,7 +52,7 @@ Sources:
 | 41–42 | — (contingency, expected use 0) | reserved P12, **unused** (F7 landed in 05-07; verified by 12-01) |
 | 43 | RepinRun (`ostro migrate-runs`) | reserved P13 |
 | 44 | spare | reserved P13 |
-| 45 | DlqUpdate (research proposed 43, which is taken by P13 RepinRun) | reserved P11 |
+| 45 | DlqUpdate `{run_id 1, op oneof {HookStarted 2, Dismissed 3, Requeued 4}, episode_completed_at_ms 5}` (research proposed 43, which is taken by P13 RepinRun) | exists (P11, 11-02; apply 11-08) |
 | 46–49 | spare | reserved P11 |
 | 50–63 | — | unallocated |
 
@@ -71,8 +71,8 @@ Sources:
 | 28–31 | — | reserved P7 |
 | 32–35 | — (P8 declared 0 needs) | reserved P8 |
 | 36–39 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
-| 40 | rerun_prefix (repeated JournalEvent) | reserved P11 |
-| 41 | rerun_from_seq (uint64) | reserved P11 |
+| 40 | rerun_prefix (repeated JournalEvent) | exists (P11, 11-02; apply 11-07) |
+| 41 | rerun_from_seq (uint64) | exists (P11, 11-02; apply 11-07) |
 | 42–43 | spare | reserved P11 |
 | 44+ | — | unallocated |
 
@@ -85,7 +85,7 @@ Other message fields: each new field on any other message is owned by the plan t
 | outbox ChildCompleted.6 | event (same bytes, forwarded verbatim) | exists (P5, 05-01), Phase 9 PF-F1; verified in code by 09-01 (`apply/run.rs` forwards `parent_event`) |
 | AttemptGranted.3 | after_failure (durable attempt_failures, F9) | exists (P5, 05-01) |
 | RegisterWait.5 | at_ms (D21) | exists (P5, 05-01) |
-| JournalEvent.4 | attempt (fixed64, submitter-set; 0 = apply-originated; PF-11-5 apply stamping was NOT adopted) | reserved P11 |
+| JournalEvent.4 | attempt (fixed64, submitter-set; 0 = apply-originated; PF-11-5 apply stamping was NOT adopted) | exists (P11, 11-02) |
 
 State value fields (positional postcard, pre-freeze only; listed for cross-phase visibility): RunRecord gains the Phase 5 fields in 05-02, plus `continued_to` (Phase 9 PF-F2), `attempt_failures`, `status_seq` and `pause` (Phase 7 F1). Parallel phases must not add fields to the same message without first recording the field number here.
 
@@ -212,8 +212,8 @@ RejectReason 12–14 are absent in code at the Phase 7 gate (07-01, 2026-11-21: 
 | 23 | ScheduleOwnerMismatch (`ScheduleFire` applied on a partition that is not `schedule_owner(name, P)`; name chosen by 08-01) | exists (P8, 08-01) |
 | 24 | spare | reserved P8 |
 | 25–28 | — (P9 spare, incl. fallback) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
-| 29 | BadRerunPrefix | reserved P11 |
-| 30 | BadDlqUpdate | reserved P11 |
+| 29 | BadRerunPrefix | exists (P11, 11-02; emitted from 11-07) |
+| 30 | BadDlqUpdate | exists (P11, 11-02; emitted from 11-08) |
 | 31 | spare | reserved P11 |
 | 32+ | — | unallocated |
 
@@ -232,9 +232,9 @@ RejectReason 12–14 are absent in code at the Phase 7 gate (07-01, 2026-11-21: 
 | 21 | `ReservedP7_21` | P7 |
 | 22 | `ReservedP8_22`, renamed in place to `BadScheduleFire` by 08-01 | P8 |
 | 23 | `ReservedP8_23`, renamed in place to `ScheduleOwnerMismatch` by 08-01 | P8 |
-| 24 | `ReservedP8_24` | P8 |
+| 24 | `ReservedP8_24` (declared by 11-02) | P8 |
 
-Indices 25+ follow the same pattern with their owner block (e.g. `ReservedP9_25`, `ReservedP11_31`).
+Indices 25+ follow the same pattern with their owner block (e.g. `ReservedP9_25`, `ReservedP11_31`). 11-02 declared `ReservedP9_25..ReservedP9_28` below `BadRerunPrefix` (29).
 
 ## 9. Outbox `outbox_msg::Kind` tags (prost)
 
