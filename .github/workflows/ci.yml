@@ -135,6 +135,17 @@ jobs:
       # (then export OSTRO_TEST_VAULT_ADDR=http://127.0.0.1:8200 and
       #  OSTRO_TEST_VAULT_TOKEN=ostro-ci-vault-token in the export step below)
     steps:
+      - if: runner.os == 'Linux'
+        name: Free runner disk space
+        # The hosted Ubuntu image has ~14 GB free; the workspace's debug test build plus the
+        # extra gnu-leg builds (failpoints, release campaign, guests) ran it out of space
+        # ("No space left on device" from rustc and the runner itself). Drop preinstalled
+        # SDKs this workflow never uses.
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain (rust-toolchain.toml) + target
         run: |
