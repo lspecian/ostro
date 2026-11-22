@@ -590,3 +590,250 @@ async fn futures_progress(s: &P11Server, jobs: &[String]) -> Vec<u64> {
     }
     out
 }
+
+// ---------------------------------------------------------------------------------
+// Task 2
+// ---------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checkpoints_are_atomic_and_follow_the_op_cadence() {
+    let s = server(|b| {
+        b.checkpoint_ops = 10;
+        b.checkpoint_every = Duration::from_secs(3600).into();
+        b.burst = 1;
+    })
+    .await;
+    s.deploy_guest("p11-hook", None).await;
+    let mut runs = Vec::new();
+    for _ in 0..40 {
+        runs.push(
+            s.start_rest("w", json!({"input": {}, "tags": ["ck"]}))
+                .await,
+        );
+    }
+    for r in &runs {
+        s.wait_record(r, LIMIT, |rec| rec.status.is_terminal())
+            .await;
+    }
+    let id = create(
+        &s,
+        json!({"action": "pause", "filter": {"tags": ["ck"]}, "rate_per_sec": 20, "max_in_flight": 1}),
+    )
+    .await;
+    // Written at creation (synchronously).
+    let path = s.data_dir().join("bulk").join(format!("{id}.json"));
+    assert!(path.exists(), "job file at creation");
+    let mut seen = BTreeSet::new();
+    let mut reads = 0u64;
+    let deadline = Instant::now() + LIMIT;
+    loop {
+        let b = std::fs::read(&path).expect("never missing");
+        let f: Value = serde_json::from_slice(&b).expect("never a partial file");
+        reads += 1;
+        assert_eq!(f["version"], 1);
+        let progress = n(&f, "done") + n(&f, "skipped") + n(&f, "failed_count");
+        if f["state"] == "done" {
+            assert_eq!(progress, 40, "{f}");
+            break;
+        }
+        seen.insert(progress);
+        assert!(Instant::now() < deadline, "job not done");
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        seen.iter().all(|p| p % 10 == 0),
+        "running checkpoints every 10 ops: {seen:?}"
+    );
+    assert!(seen.len() >= 3, "{seen:?}");
+    eprintln!("checkpoint reads: {reads}, running progress seen: {seen:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn processed_set_survives_restart_and_finished_jobs_stay_listed() {
+    let mut s = server(|b| {
+        b.checkpoint_ops = 1;
+        b.burst = 1;
+    })
+    .await;
+    s.deploy_guest("signals", None).await;
+    signal_runs(&s, 20, "fifo", "ps").await;
+    let id = create(
+        &s,
+        json!({"action": {"signal": {"name": "x", "payload": 7}}, "filter": {"tags": ["ps"]},
+               "rate_per_sec": 4, "max_in_flight": 1}),
+    )
+    .await;
+    wait_job(&s, &id, "6 ops", |v| n(v, "done") >= 6).await;
+    let dir = s.data_dir().join("bulk");
+    s.shutdown().await;
+
+    // Re-deliver every run: the cursor restarts from the beginning.
+    let path = dir.join(format!("{id}.json"));
+    let mut f: Value = serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    assert_eq!(f["state"], "running", "{f}");
+    let processed = f["processed"].as_array().expect("processed").len();
+    assert!(processed >= 6, "{f}");
+    f["cursor"] = Value::Null;
+    f["selection_done"] = json!(false);
+    f["pending_in_page"] = json!([]);
+    std::fs::write(&path, serde_json::to_vec(&f).expect("enc")).expect("write");
+    // A file of another version is ignored (WARN).
+    let mut bogus = f.clone();
+    bogus["version"] = json!(2);
+    bogus["job_id"] = json!("blk_bogus");
+    std::fs::write(
+        dir.join("blk_bogus.json"),
+        serde_json::to_vec(&bogus).expect("enc"),
+    )
+    .expect("write");
+
+    s.restart().await;
+    s.wait_ready(Duration::from_secs(20)).await;
+    let v = s.bulk_wait(&id, LIMIT).await;
+    assert_eq!(v["state"], "done", "{v}");
+    assert_eq!(
+        (n(&v, "done"), n(&v, "skipped"), n(&v, "failed_count")),
+        (20, 0, 0),
+        "processed runs were not operated on again: {v}"
+    );
+
+    s.restart().await;
+    s.wait_ready(Duration::from_secs(20)).await;
+    let (_, l) = s.get_json("/v1/bulk").await;
+    let jobs = l["jobs"].as_array().expect("jobs");
+    assert_eq!(jobs.len(), 1, "{l}");
+    assert_eq!(jobs[0]["job_id"], id.as_str());
+    assert_eq!(jobs[0]["state"], "done");
+    assert_eq!(jobs[0]["done"], 20);
+}
+
+// ---------------------------------------------------------------------------------
+// Crash resume (feature `failpoints`, `--test-threads=1`)
+// ---------------------------------------------------------------------------------
+
+#[cfg(feature = "failpoints")]
+async fn wait_stalled(s: &P11Server, id: &str, at_least: u64) -> u64 {
+    let deadline = Instant::now() + LIMIT;
+    let mut last = (u64::MAX, Instant::now());
+    loop {
+        let v = job(s, id).await;
+        let p = n(&v, "done") + n(&v, "skipped") + n(&v, "failed_count");
+        if p != last.0 {
+            last = (p, Instant::now());
+        } else if p >= at_least && last.1.elapsed() > Duration::from_millis(500) {
+            return p;
+        }
+        assert!(Instant::now() < deadline, "job {id} did not stall: {v}");
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crash_after_op_resumes_from_the_cursor_without_duplicates() {
+    use ostro_types::journal::EventKind;
+    let scenario = fail::FailScenario::setup();
+    let mut s = server(|b| {
+        b.checkpoint_ops = 10;
+        b.burst = 1;
+    })
+    .await;
+    s.deploy_guest("signals", None).await;
+    let runs = signal_runs(&s, 60, "long_wait", "ca").await;
+    fail::cfg("bulk::after_op", "25*off->return").expect("cfg");
+    let t0 = Instant::now();
+    let id = create(
+        &s,
+        json!({"action": "cancel", "filter": {"tags": ["ca"]}, "rate_per_sec": 200, "max_in_flight": 1}),
+    )
+    .await;
+    let stalled = wait_stalled(&s, &id, 26).await;
+    let crash_phase = t0.elapsed();
+    let on_disk = job_file(&s, &id);
+    assert_eq!(on_disk["state"], "running");
+    let ckpt = n(&on_disk, "done") + n(&on_disk, "skipped");
+    assert!(
+        ckpt < stalled,
+        "the crash lost the progress after the last checkpoint"
+    );
+    fail::remove("bulk::after_op");
+    let t1 = Instant::now();
+    s.restart().await;
+    s.wait_ready(Duration::from_secs(20)).await;
+    let v = s.bulk_wait(&id, LIMIT).await;
+    let resume_phase = t1.elapsed();
+    assert_eq!(v["state"], "done", "{v}");
+    assert_eq!(n(&v, "done") + n(&v, "skipped"), 60, "{v}");
+    assert_eq!(n(&v, "failed_count"), 0, "{v}");
+    for r in &runs {
+        s.wait_record(r, LIMIT, |rec| rec.status == RunStatus::Cancelled)
+            .await;
+        let j = s.journal(r).await;
+        assert_eq!(
+            common::count(&j, EventKind::CancelRequested),
+            1,
+            "cancel journaled once for {r}"
+        );
+    }
+    eprintln!(
+        "crash after op 26 (checkpoint at {ckpt}): crash phase {crash_phase:?}, restart to done {resume_phase:?}"
+    );
+    scenario.teardown();
+}
+
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crash_before_checkpoint_keeps_one_restart_per_run() {
+    let scenario = fail::FailScenario::setup();
+    let mut s = server(|b| {
+        b.checkpoint_ops = 3;
+        b.burst = 1;
+    })
+    .await;
+    s.deploy_guest("p11-hook", None).await;
+    let sources = failed_w(&s, 12, "cb", json!({})).await;
+    // Evaluation 1 is the runner's start checkpoint; the first op checkpoint crashes.
+    fail::cfg("bulk::before_checkpoint", "1*off->return").expect("cfg");
+    let t0 = Instant::now();
+    let id = create(
+        &s,
+        json!({"action": "retry", "filter": {"tags": ["cb"]}, "rate_per_sec": 100, "max_in_flight": 1}),
+    )
+    .await;
+    let stalled = wait_stalled(&s, &id, 3).await;
+    let crash_phase = t0.elapsed();
+    assert_eq!(
+        n(&job_file(&s, &id), "done"),
+        0,
+        "nothing checkpointed after the start"
+    );
+    fail::remove("bulk::before_checkpoint");
+    let t1 = Instant::now();
+    s.restart().await;
+    s.wait_ready(Duration::from_secs(20)).await;
+    let v = s.bulk_wait(&id, LIMIT).await;
+    let resume_phase = t1.elapsed();
+    assert_eq!(
+        (v["state"].as_str(), n(&v, "done")),
+        (Some("done"), 12),
+        "{v}"
+    );
+    let mut by_source: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in s.list_all("tag=cb").await {
+        let run: RunId = r.parse().expect("id");
+        if let Some(src) = s.run_record(&run).retry_of {
+            assert_eq!(
+                String::from_utf8_lossy(&s.run_record(&run).idempotency_key),
+                format!("__bulk/{id}/{src}")
+            );
+            *by_source.entry(src.to_string()).or_default() += 1;
+        }
+    }
+    let want: std::collections::BTreeMap<String, usize> =
+        sources.iter().map(|r| (r.to_string(), 1)).collect();
+    assert_eq!(by_source, want, "exactly one restart per source run");
+    eprintln!(
+        "crash before checkpoint after {stalled} ops: crash phase {crash_phase:?}, restart to done {resume_phase:?}"
+    );
+    scenario.teardown();
+}
