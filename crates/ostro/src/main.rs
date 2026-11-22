@@ -55,6 +55,10 @@ enum Command {
         /// Data directory [default: ./.ostro]; ignored with --ephemeral.
         #[arg(long)]
         data_dir: Option<PathBuf>,
+        /// Build and deploy the project in DIR [default: .] once the server is ready, then
+        /// rebuild and redeploy on every change (10-16).
+        #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
+        watch: Option<PathBuf>,
     },
     /// Single-node server; TOML file and OSTRO_<SECTION>__<KEY> env overrides.
     Server {
@@ -121,7 +125,16 @@ fn main() -> ExitCode {
             ephemeral,
             listen,
             data_dir,
+            watch,
         }) => {
+            // 10-16: `--watch` without a project is a usage error, before any startup.
+            if let Some(dir) = &watch
+                && let Err(e) = ostro_cli::watch::check_project(dir)
+            {
+                eprintln!("ostro: error: --watch: {e}");
+                return ExitCode::from(2);
+            }
+            let watch = watch.map(ostro_cli::watch::WatchOptions::new);
             let overrides = Overrides { listen, data_dir };
             match load_layered(
                 ServerConfig::dev_defaults(),
@@ -134,7 +147,7 @@ fn main() -> ExitCode {
                     if ephemeral {
                         cfg.node.ephemeral = true;
                     }
-                    run_server("ostro dev", cfg, TlsProfile::Dev, started)
+                    run_server("ostro dev", cfg, TlsProfile::Dev, started, watch)
                 }
                 Err(e) => fail(e),
             }
@@ -167,7 +180,7 @@ fn main() -> ExitCode {
             if let Err(e) = ostro_server::tls::effective_mode(&cfg, TlsProfile::Server) {
                 return fail(e);
             }
-            run_server("ostro server", cfg, TlsProfile::Server, started)
+            run_server("ostro server", cfg, TlsProfile::Server, started, None)
         }
         Some(Command::Backup(a)) => run_backup(&a),
         Some(Command::Restore(a)) => run_restore(&a),
@@ -290,7 +303,13 @@ fn run_restore(a: &ostro_cli::commands::backup::RestoreArgs) -> ExitCode {
 }
 
 /// Start the server, print the ready line, wait for a signal, shut down.
-fn run_server(name: &str, cfg: ServerConfig, profile: TlsProfile, started: Instant) -> ExitCode {
+fn run_server(
+    name: &str,
+    cfg: ServerConfig,
+    profile: TlsProfile,
+    started: Instant,
+    watch: Option<ostro_cli::watch::WatchOptions>,
+) -> ExitCode {
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("ostro")
@@ -314,6 +333,7 @@ fn run_server(name: &str, cfg: ServerConfig, profile: TlsProfile, started: Insta
             Err(e) => return fail(e),
         };
         print_ready(name, &handle, started);
+        let stop_watch = spawn_watch(watch, &handle);
         tokio::select! {
             sig = signals.recv() => {
                 tracing::info!(signal = sig, "shutting down");
@@ -322,11 +342,36 @@ fn run_server(name: &str, cfg: ServerConfig, profile: TlsProfile, started: Insta
                 tracing::warn!("API server stopped; shutting down");
             }
         }
+        drop(stop_watch);
         match handle.shutdown().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(format!("shutdown: {e}")),
         }
     })
+}
+
+/// `ostro dev --watch` (10-16): run the watch loop against this server on its own task
+/// once the ready line is out. Dropping the returned sender stops it.
+fn spawn_watch(
+    watch: Option<ostro_cli::watch::WatchOptions>,
+    handle: &ServerHandle,
+) -> Option<tokio::sync::oneshot::Sender<()>> {
+    let watch = watch?;
+    let server = format!(
+        "{}://{}",
+        handle.client_endpoint().scheme,
+        handle.local_addr()
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let stop = async move {
+            let _ = rx.await;
+        };
+        if let Err(e) = ostro_cli::watch::run_watch(watch, server, stop).await {
+            eprintln!("ostro dev: watch stopped: {e}");
+        }
+    });
+    Some(tx)
 }
 
 /// `NAME listening on http://ADDR (data: DIR[, ephemeral]) ready in N ms`, where N is
