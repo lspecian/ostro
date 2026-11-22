@@ -463,6 +463,8 @@ pub enum MetaCommand {
     /// Phase 12 (D-P12-7; shape 12-02, apply 12-05): elect `leader` at `epoch`
     /// with the (shrunk-only) `isr`, CAS on the partition's `isr_version`.
     /// `leader = 0` marks the partition offline. Writes ext tag 80 from `info`.
+    /// Apply requires `epoch > current`, the new ISR non-empty and a subset of
+    /// the published ISR, and a non-zero `leader` in both (see `MetaState`).
     ElectLeader {
         partition: u16,
         epoch: u32,
@@ -664,7 +666,8 @@ mod phase12_tests {
     }
 
     #[test]
-    fn phase12_apply_is_stubbed_until_12_05() {
+    fn phase12_apply_is_validated_since_12_05() {
+        // The 12-02 stub (`Invalid("... 12-05")`) is gone: an unknown partition is NotFound.
         let mut st = MetaState::default();
         let r = st.apply(
             1,
@@ -675,9 +678,6 @@ mod phase12_tests {
                 isr: vec![1],
             },
         );
-        assert_eq!(
-            r,
-            MetaResult::Invalid("Phase 12: implemented in 12-05".into())
-        );
+        assert_eq!(r, MetaResult::NotFound);
     }
 }

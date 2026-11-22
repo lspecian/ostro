@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::command::{MetaCommand, MetaKey, MetaRecord, MetaResult};
+use crate::ext::ElectionInfo;
 use crate::records::{
     ActiveVersion, ApiToken, CLUSTER_FORMAT, ClusterInfo, Connection, EgressPolicy, Grant, Member,
     ModuleRecord, PartitionAssignment, QueueConfig, QueuePolicy, Schedule, SealedSecret,
@@ -40,6 +41,22 @@ pub struct MetaState {
     workflow_policies: BTreeMap<String, Versioned<WorkflowPolicy>>,
     queue_policies: BTreeMap<String, Versioned<QueuePolicy>>,
     webhooks: BTreeMap<String, Versioned<Webhook>>,
+}
+
+/// An ISR in an `ElectLeader` / `AlterIsr` command: non-empty, no node 0, no duplicates.
+fn check_isr_shape(isr: &[u64]) -> Result<(), String> {
+    if isr.is_empty() {
+        return Err("the ISR must not be empty".into());
+    }
+    if isr.contains(&0) {
+        return Err(format!("the ISR {isr:?} contains node 0"));
+    }
+    for (i, n) in isr.iter().enumerate() {
+        if isr[..i].contains(n) {
+            return Err(format!("the ISR {isr:?} lists node {n} twice"));
+        }
+    }
+    Ok(())
 }
 
 fn wrap<T: Clone>(v: &Versioned<T>, f: impl FnOnce(T) -> MetaRecord) -> Versioned<MetaRecord> {
@@ -79,12 +96,35 @@ impl MetaState {
                 leader,
                 isr,
             } => self.set_partition_leader(index, partition, epoch, leader, isr),
-            // Phase 12 (D-P12-7): shapes fixed by 12-02; validated apply lands in 12-05.
-            MetaCommand::ElectLeader { .. }
-            | MetaCommand::AlterIsr { .. }
-            | MetaCommand::ResignLeader { .. } => {
-                MetaResult::Invalid("Phase 12: implemented in 12-05".into())
-            }
+            // Phase 12 (D-P12-7, 12-05): validated at apply, independent of the controller.
+            MetaCommand::ElectLeader {
+                partition,
+                epoch,
+                leader,
+                isr,
+                expected_isr_version,
+                info,
+            } => self.elect_leader(
+                index,
+                partition,
+                epoch,
+                leader,
+                isr,
+                expected_isr_version,
+                &info,
+            ),
+            MetaCommand::AlterIsr {
+                partition,
+                epoch,
+                expected_isr_version,
+                isr,
+            } => self.alter_isr(index, partition, epoch, expected_isr_version, isr),
+            MetaCommand::ResignLeader {
+                partition,
+                epoch,
+                node,
+                info,
+            } => self.resign_leader(index, partition, epoch, node, &info),
         }
     }
 
@@ -297,6 +337,214 @@ impl MetaState {
             },
         };
         MetaResult::Ok { version: new_epoch }
+    }
+
+    /// `ElectLeader` (12-05, SC3: a leader is elected only from the published ISR).
+    ///
+    /// Checks, in order: the partition exists (`NotFound`); `epoch` exceeds the current
+    /// epoch (`StaleVersion { current: epoch }`); `expected_isr_version` equals the
+    /// current `isr_version` (`StaleVersion { current: isr_version }`); the new ISR is
+    /// non-empty, has no duplicates or 0, and is a subset of the current published ISR,
+    /// also for `leader = 0` (offline); a non-zero `leader` is in the published ISR and in
+    /// the new ISR (`Invalid`). On success the epoch (= version) becomes `epoch`,
+    /// `isr_version` is bumped and ext tag 80 is set from `info` verbatim (never
+    /// validated); `replicas`, `min_insync` and every other ext entry are kept.
+    #[allow(clippy::too_many_arguments)]
+    fn elect_leader(
+        &mut self,
+        index: u64,
+        partition: u16,
+        epoch: u32,
+        leader: u64,
+        isr: Vec<u64>,
+        expected_isr_version: u64,
+        info: &ElectionInfo,
+    ) -> MetaResult {
+        let Some(cur) = self.partitions.get(&partition) else {
+            return MetaResult::NotFound;
+        };
+        if u64::from(epoch) <= cur.version {
+            return MetaResult::StaleVersion {
+                current: cur.version,
+            };
+        }
+        if expected_isr_version != cur.value.isr_version {
+            return MetaResult::StaleVersion {
+                current: cur.value.isr_version,
+            };
+        }
+        if let Err(msg) = check_isr_shape(&isr) {
+            return MetaResult::Invalid(format!("ElectLeader p{partition}: {msg}"));
+        }
+        let published = &cur.value.isr;
+        if leader != 0 && !published.contains(&leader) {
+            return MetaResult::Invalid(format!(
+                "ElectLeader p{partition}: leader {leader} is not in the published ISR {published:?}"
+            ));
+        }
+        if let Some(n) = isr.iter().find(|n| !published.contains(n)) {
+            return MetaResult::Invalid(format!(
+                "ElectLeader p{partition}: ISR member {n} is not in the published ISR {published:?} (an election only shrinks the ISR)"
+            ));
+        }
+        if leader != 0 && !isr.contains(&leader) {
+            return MetaResult::Invalid(format!(
+                "ElectLeader p{partition}: leader {leader} is not in the new ISR {isr:?}"
+            ));
+        }
+        let Some(isr_version) = cur.value.isr_version.checked_add(1) else {
+            return MetaResult::Invalid(format!("ElectLeader p{partition}: isr_version overflow"));
+        };
+        let ext = match crate::ext::put_election_info(&cur.value.ext, info) {
+            Ok(ext) => ext,
+            Err(e) => {
+                return MetaResult::Invalid(format!(
+                    "ElectLeader p{partition}: stored ext is malformed: {e}"
+                ));
+            }
+        };
+        let cur = self.partitions.get_mut(&partition).expect("checked above");
+        let prev = std::mem::take(&mut cur.value);
+        *cur = Versioned {
+            version: u64::from(epoch),
+            updated_index: index,
+            value: PartitionAssignment {
+                partition,
+                leader,
+                epoch,
+                isr,
+                replicas: prev.replicas,
+                isr_version,
+                min_insync: prev.min_insync,
+                ext,
+            },
+        };
+        MetaResult::Ok {
+            version: u64::from(epoch),
+        }
+    }
+
+    /// `AlterIsr` (12-05): the leader publishes a new ISR without an epoch bump.
+    ///
+    /// Checks: the partition exists (`NotFound`); `epoch` equals the current epoch
+    /// (`StaleVersion { current: epoch }`); `expected_isr_version` matches
+    /// (`StaleVersion { current: isr_version }`); the ISR is non-empty, has no duplicates
+    /// or 0, is a subset of `replicas`, and contains the current leader (`Invalid`; an
+    /// offline partition, leader 0, cannot alter its ISR). On success `isr_version` is
+    /// bumped; epoch, version, leader, replicas and ext are unchanged.
+    fn alter_isr(
+        &mut self,
+        index: u64,
+        partition: u16,
+        epoch: u32,
+        expected_isr_version: u64,
+        isr: Vec<u64>,
+    ) -> MetaResult {
+        let Some(cur) = self.partitions.get_mut(&partition) else {
+            return MetaResult::NotFound;
+        };
+        if u64::from(epoch) != cur.version {
+            return MetaResult::StaleVersion {
+                current: cur.version,
+            };
+        }
+        if expected_isr_version != cur.value.isr_version {
+            return MetaResult::StaleVersion {
+                current: cur.value.isr_version,
+            };
+        }
+        if let Err(msg) = check_isr_shape(&isr) {
+            return MetaResult::Invalid(format!("AlterIsr p{partition}: {msg}"));
+        }
+        if let Some(n) = isr.iter().find(|n| !cur.value.replicas.contains(n)) {
+            return MetaResult::Invalid(format!(
+                "AlterIsr p{partition}: ISR member {n} is not a replica {:?}",
+                cur.value.replicas
+            ));
+        }
+        if !isr.contains(&cur.value.leader) {
+            return MetaResult::Invalid(format!(
+                "AlterIsr p{partition}: leader {} is not in the new ISR {isr:?}",
+                cur.value.leader
+            ));
+        }
+        let Some(isr_version) = cur.value.isr_version.checked_add(1) else {
+            return MetaResult::Invalid(format!("AlterIsr p{partition}: isr_version overflow"));
+        };
+        cur.value.isr = isr;
+        cur.value.isr_version = isr_version;
+        cur.updated_index = index;
+        MetaResult::Ok {
+            version: cur.version,
+        }
+    }
+
+    /// `ResignLeader` (12-05): `node`, the leader at `epoch`, steps down.
+    ///
+    /// Checks: the partition exists (`NotFound`); `epoch` equals the current epoch
+    /// (`StaleVersion { current: epoch }`); `node` is non-zero and the current leader
+    /// (`Invalid`). On success the partition is at `epoch + 1` with leader 0, `node` is
+    /// removed from the ISR when the ISR has other members (kept when it is the only
+    /// one), `isr_version` is bumped and ext tag 80 is set from `info` verbatim.
+    fn resign_leader(
+        &mut self,
+        index: u64,
+        partition: u16,
+        epoch: u32,
+        node: u64,
+        info: &ElectionInfo,
+    ) -> MetaResult {
+        let Some(cur) = self.partitions.get(&partition) else {
+            return MetaResult::NotFound;
+        };
+        if u64::from(epoch) != cur.version {
+            return MetaResult::StaleVersion {
+                current: cur.version,
+            };
+        }
+        if node == 0 || cur.value.leader != node {
+            return MetaResult::Invalid(format!(
+                "ResignLeader p{partition}: node {node} is not the leader (leader is {})",
+                cur.value.leader
+            ));
+        }
+        let (Some(new_epoch), Some(isr_version)) =
+            (epoch.checked_add(1), cur.value.isr_version.checked_add(1))
+        else {
+            return MetaResult::Invalid(format!("ResignLeader p{partition}: epoch overflow"));
+        };
+        let ext = match crate::ext::put_election_info(&cur.value.ext, info) {
+            Ok(ext) => ext,
+            Err(e) => {
+                return MetaResult::Invalid(format!(
+                    "ResignLeader p{partition}: stored ext is malformed: {e}"
+                ));
+            }
+        };
+        let cur = self.partitions.get_mut(&partition).expect("checked above");
+        let prev = std::mem::take(&mut cur.value);
+        let isr = if prev.isr.len() > 1 {
+            prev.isr.into_iter().filter(|&n| n != node).collect()
+        } else {
+            prev.isr
+        };
+        *cur = Versioned {
+            version: u64::from(new_epoch),
+            updated_index: index,
+            value: PartitionAssignment {
+                partition,
+                leader: 0,
+                epoch: new_epoch,
+                isr,
+                replicas: prev.replicas,
+                isr_version,
+                min_insync: prev.min_insync,
+                ext,
+            },
+        };
+        MetaResult::Ok {
+            version: u64::from(new_epoch),
+        }
     }
 
     /// The record under `key`, cloned into a [`MetaRecord`].
