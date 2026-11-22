@@ -562,3 +562,90 @@ Every ordinal below comes from `.planning/RESERVATIONS.md` (Phase 9 fallback blo
 - **Parent close.** At every terminal transition with `rec.children > 0`, `terminal::close_children` sends a graceful `CancelRun` to every row's child, deletes the rows and sets `rec.children = 0` (reason `parent_closed`; hard stops keep their own reason and their 05-09 outbox order).
 - **Duplicate StartChild (resume after close, D-P9-24).** A `StartChild` for an existing run whose `RunRecord.parent == (parent, op)`: terminal child → outbox `ChildCompleted{status, result: None, event: None}`; ContinuedAsNew with `continued_to` → the StartChild is forwarded to `continued_to`; live child, other parent, or detached → dropped. One extra point read.
 - **Deferred-expiry mark (W3, D-P9-27).** EXPIRE of a ContinuedAsNew run that has a parent and a `continued_to` deletes only its events and payloads, resets `next_seq`/`status_seq`, keeps the `RunRecord` and re-arms EXPIRE at `completed_at_ms + 2 × retention_ms`. The mark is `status == ContinuedAsNew && parent.is_some() && next_seq == 0` (`retention::is_deferred`). A `chain_done` reaching a kept record forwards it and deletes the record (cancelling the timer); otherwise it clears `continued_to`. At the bound the record is deleted fully. No field was added; the mark is derived from existing fields. The v0.1 format corpus rebuilds unchanged (`format_corpus`), and the live state of a two-partition children workload equals its rebuild from the log (`children_chain`).
+
+## Phase 11 additions (post-freeze, additive)
+
+Every ordinal below comes from the Phase 11 block of `.planning/RESERVATIONS.md` (commit de4e303); decision ids refer to `.planning/phases/11-run-operations-embedded-ui/11-DECISIONS.md`. Nothing frozen in §14 changes: the additions follow §14.2 and §14.6 rule 4 (the apply semantics of existing commands are unchanged). Phase 11 adds no `RejectReason`, `Derived` intent, journal kind, `TerminalStatus`, `TABLES` keyspace, outbox kind, meta variant or `MetaCommand`. The command-set additions (plan 11-02) default-omit in proto3, so every older command re-encodes byte-identically; golden vectors `dlq_update_*`, `start_run_rerun` and `events_appended_attempt` are appended to `crates/ostro-types/tests/golden/commands.txt`. The v0.1 format corpus opens and rebuilds unchanged.
+
+### Cmd 45 `DlqUpdate` and the `dlq` row (plans 11-02, 11-08; OPS-04, D-P11-11)
+
+**`Cmd::DlqUpdate` = tag 45** (`crates/ostro-types/src/command.rs`; tags 46–49 spare). Routed by run id (`DlqUpdate::run_id`).
+
+| Field | Number | Type | Meaning |
+|---|---|---|---|
+| `run_id` | 1 | bytes | target run (18 bytes) |
+| `op` | oneof 2/3/4 | | the mark (below) |
+| `episode_completed_at_ms` | 5 | u64 | the failure episode the mark refers to: the run's `RunRecord.completed_at_ms` of that failure (W5) |
+
+| `op` variant | Tag | Fields |
+|---|---|---|
+| `HookStarted` | 2 | `hook_run_id` bytes 1 (18 bytes): the on-failure hook run |
+| `Dismissed` | 3 | `reason` string 1 (≤ 1024 bytes, `DLQ_DISMISS_REASON_MAX`), `at_ms` u64 2 |
+| `Requeued` | 4 | `mode` u32 1 (`0` resume, `1` restart, `2` rerun: `dlq_update::REQUEUE_RESUME/RESTART/RERUN`), `new_run_id` bytes 2 (18 bytes for restart/rerun, empty for resume), `at_ms` u64 3 |
+
+**`InvalidCode` 30 `BadDlqUpdate`** (`apply/outcome.rs`; 29 is `BadRerunPrefix`, below). `InvalidCode` is declaration-indexed, so 24–28 are held by the canonical `#[doc(hidden)]` never-emitted placeholders `ReservedP8_24`, `ReservedP9_25` … `ReservedP9_28`. Every `InvalidCode` folds into the rolling hash as outcome code 26.
+
+**`dlq` row** (keyspace 11, existing since Phase 2; its first rows are written in Phase 11). Key `run_key(run)` = the 18 run-id bytes. Value `VALUE_FORMAT ‖ postcard(DlqRow)` (format byte 1, unchanged; `crates/ostro-partition/src/store/values.rs`). Positional field order, which is the format (never reordered; a future field needs a row migrator, D18):
+
+1. `hook_run: Option<[u8; 18]>`
+2. `dismissed_at_ms: Option<u64>`
+3. `dismiss_reason: Option<String>`
+4. `requeued_to: Option<[u8; 18]>` (restart / rerun target; `None` for a resume)
+5. `requeued_at_ms: Option<u64>`
+6. `requeue_mode: Option<u8>` (0 resume, 1 restart, 2 rerun)
+7. `episode_completed_at_ms: u64`
+
+The row carries no `PayloadRef` (no blob references; `store/blobrefs.rs`). **Apply writes `dlq` rows only for Cmd 45; a log without Cmd 45 produces no `dlq` rows**, so every older log applies to the same digest. Retention expiry (`EXPIRE_OP`, §13) removes the row with the run (the existing `dlq` prefix delete). The dead-letter queue itself is a view: failed / timed-out runs minus the runs whose row, for the run's current episode, carries a mark.
+
+**Apply** (`crates/ostro-partition/src/apply/dlq.rs`, 11-08). Validation first, then at most 2 reads (the run record, then the `dlq` row); no payload is decoded, no blob fetched, the `runs` row is never written; no actions; times come from the command.
+
+1. Run id not 18 bytes → `Invalid(BadDlqUpdate)` (not `BadRunId`); run on another partition → `WrongPartition`.
+2. Missing `op`, dismiss reason > 1024 bytes, hook run id not 18 bytes, `mode > 2`, restart/rerun `new_run_id` not 18 bytes, or a resume with a non-empty `new_run_id` → `Invalid(BadDlqUpdate)`.
+3. Unknown run → `RunNotFound`.
+4. `HookStarted`, `Dismissed` and `Requeued{restart|rerun}` require status `Failed` or `TimedOut`, else `Invalid(BadDlqUpdate)`. `Requeued{resume}` is accepted for any status (the `RetryRun` resume already moved the run out of `Failed`).
+5. On a `Failed`/`TimedOut` run (every op, resume included), `episode_completed_at_ms` must equal the run's `completed_at_ms` (0 when unset), else `Invalid(BadDlqUpdate)`: a stale mark of an earlier failure is refused.
+6. **Failure episode (W5).** If the stored row names a different episode than the command, the row is replaced by a fresh `DlqRow { episode_completed_at_ms: <command's episode>, .. }` before merging, so marks of an earlier failure never hide a later one.
+7. **Merge.** `HookStarted` sets `hook_run` once: the same hook run again is a no-op, a different one → `Invalid(BadDlqUpdate)`. `Dismissed` sets `dismissed_at_ms` and `dismiss_reason`. `Requeued` sets `requeued_to`, `requeued_at_ms` and `requeue_mode`. Re-applying an identical update → `Accepted` with no write; any accepted change is one blind insert of the whole row.
+
+Read budget: 0 when rejected in steps 1–2, 1 when rejected in steps 3–5, otherwise 2. Pinned by `crates/ostro-partition/tests/apply_dlq.rs` and covered by `tests/rebuild_digest.rs` (`DlqUpdate` generator, `fixed_scenario_dlq`).
+
+### StartRun 40 `rerun_prefix` / 41 `rerun_from_seq` (plans 11-02, 11-07; OPS-02, D-P11-3/6)
+
+`StartRun.rerun_prefix` = field 40 (repeated `JournalEvent`), `StartRun.rerun_from_seq` = field 41 (u64); fields 42–43 spare. The rerun path of `start_run` (`crates/ostro-partition/src/apply/rerun.rs`) applies **only when field 41 is non-zero**. A StartRun without fields 40/41 (every command written before Phase 11) applies exactly as before. `rerun_from_seq` is the cut, the first seq the rerun re-executes; a cut of 1 with an empty field 40 is valid (only the verbatim `RunStarted`). The checks run in `start_run`'s validation block, before the point read and before any write.
+
+Requirements, every violation → `Invalid(BadRerunPrefix)` (`InvalidCode` 29):
+- field 40 is empty when field 41 is 0;
+- `run_started` (field 23) is present and its event is kind `RunStarted` at seq 0;
+- the prefix seqs are contiguous from 1 and `rerun_from_seq == len(rerun_prefix) + 1`;
+- every prefix kind is in 16–127, excluding the terminal kinds 26 (`RunCompleted`), 27 (`RunFailed`), 28 (`RunContinuedAsNew`) and 71 (`RunTerminated`);
+- every prefix event has a payload, and an inline one is ≤ the inline limit (`INLINE_PAYLOAD_LIMIT`, 256 KiB);
+- the run carries exactly one tag `__ostro/rerun_from=<n>`, with `<n>` the canonical decimal of field 41.
+
+Effects: the events `0..cut` (seq 0 from `run_started`, then the prefix) are journaled verbatim, `next_seq = cut`, and `status_seq` is the seq of the last `StatusPublished` event in the prefix (if any). No payload is decoded (D21); blob references in the prefix are `PayloadRef` fields of the prost command, as §14.2 requires.
+
+### `JournalEvent.4 attempt` (plan 11-02)
+
+`JournalEvent` field 4 `attempt` (fixed64) = `epoch << 32 | n` of the attempt that produced the event. It is set by the submitter (the executor) and stored verbatim inside the prost `JournalEvent` row of `events`; apply never stamps it. It is 0 for apply-originated inputs (timers, signals, tokens, effect and child completions, `RunTerminated`) and for every event written before Phase 11. Proto3 omits it at 0, so older events re-encode byte-identically.
+
+### `x_run_index` (plan 11-05; OPS-05, D-P11-9)
+
+A derived keyspace under the frozen rule of §14.2 ("Derived keyspaces", PF-11-2), defined in `crates/ostro-partition/src/store/derived.rs`: the fjall keyspace `x_run_index` in the partition's database. It is **not** a `Table` and **never in `TABLES`, the digest, OSNP snapshots or blob GC**; older binaries ignore it. Its content is a pure function of the `runs` keyspace, so it can always be rebuilt from digest state. Apply writes it through `ApplyBatch::insert_derived/remove_derived`, in the same fjall batch as the state change (atomic with the applied offset).
+
+Keys end with the ordering suffix `sfx = !created_at_ms (u64 BE, bit-inverted) ‖ !run_uuid (the 16 uuid bytes of the run id, bit-inverted)`, so a forward scan is newest first even for non-time-ordered ids (child run ids are uuid v8, D-P9-7); the uuid breaks ties. **All values are empty** (no user payloads).
+
+| Key | Kind | Rows |
+|---|---|---|
+| `0x01 ‖ tag ‖ 0x00 ‖ sfx` | Tag | one per run tag (an empty tag is indexed under `0x01 0x00`) |
+| `0x02 ‖ workflow ‖ 0x00 ‖ sfx` | Workflow | one per run |
+| `0x03 ‖ status u8 ‖ sfx` | Status | terminal statuses only: Completed 3, Failed 4, Cancelled 5, Terminated 6, TimedOut 7, ContinuedAsNew 8 |
+| `0x04 ‖ tenant ‖ 0x00 ‖ sfx` | Tenant | one per run with a tenant |
+| `0x05 ‖ sfx` | All | one per run |
+| `0x00 'v'` | marker | `index_version u32 BE (= 1, RUN_INDEX_VERSION) ‖ built_at_applied_offset u64 BE` |
+
+A tag, workflow or tenant containing `0x00` gets no row of that kind. **Marker:** every apply commit while the index is ready rewrites it with the batch's applied offset (one insert per chunk), so `built_at_applied_offset == applied_offset` holds after any crash. **Hooks** (write-only; apply read counts are unchanged): the shared start path `start_run` (API `StartRun`, inbound `StartChild`, `CronStart`, `ScheduleFire`, the continue-as-new successor, restart-mode `RetryRun`) writes the All, Tag, Workflow and Tenant rows; `terminal::on_terminal` writes the Status row; a `RetryRun` resume deletes it; retention removes the run's rows at the actual delete point (`delete_run`, after Phase 9's deferred-EXPIRE branch). Ready/Running churn writes nothing.
+
+**Rebuild:** at open, a missing marker, another version, or `built_at_applied_offset != applied_offset` marks the index stale. On a **Leader start only** (never in `StartMode::Inspect`) a background thread removes the marker, clears the keyspace, walks `runs` in batches of 1,000 under the apply lock (lock order: apply lock, then commit gate), and finally writes the marker at the current applied offset; until then queries fall back to the budgeted scan. A fresh store writes the marker at creation (an empty index is complete). A snapshot install never carries the keyspace (OSNP holds only `TABLES`) and writes no marker, so an installed store opens stale and is rebuilt.
+
+### System tags (constants: plan 11-02)
+
+`__ostro/rerun_from=<seq>` (`RERUN_FROM_TAG`, the rerun lineage, decimal seq) and `__ostro/on_failure_of=<run>` (`ON_FAILURE_OF_TAG`, an on-failure hook run) are stored in `RunRecord.tags` like any other tag (no format change; tag limits of §12 apply). The prefix `__ostro/` (`SYSTEM_TAG_PREFIX`) is reserved: the API refuses user-supplied tags that start with it.
