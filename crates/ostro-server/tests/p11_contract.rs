@@ -223,15 +223,21 @@ async fn seam_is_wired_after_start_and_released_at_shutdown() {
     assert!(ext.ops.is_some() && ext.inventory.is_some());
     assert!(ext.schedules.is_some(), "Phase 8 slots kept");
 
-    // Controllers delegate to the control::p11_* stubs.
+    // Controllers delegate to the control::p11_* functions (11-11 implemented limits and
+    // inventory; the bulk stub still names its plan).
     let c = P11Controllers(ctx.clone());
-    let err = c.limits().await.expect_err("stub");
-    assert_eq!(err.code, ErrorCode::Unimplemented);
-    assert_eq!(err.details.as_ref().expect("details")["lands_in"], "11-11");
+    let limits = c.limits().await.expect("limits (11-11)");
+    assert!(
+        limits
+            .limits
+            .iter()
+            .any(|l| l.name == "max_history_events" && l.value == 777)
+    );
     let err = c.list_bulk().await.expect_err("stub");
-    assert_eq!(err.details.as_ref().expect("details")["lands_in"], "11-13");
-    let err = c.list_partitions().await.expect_err("stub");
     assert_eq!(err.code, ErrorCode::Unimplemented);
+    assert_eq!(err.details.as_ref().expect("details")["lands_in"], "11-13");
+    let parts = c.list_partitions().await.expect("partitions (11-11)");
+    assert_eq!(parts.len(), usize::from(s.cfg.node.partitions));
     drop((c, ext, ctx));
 
     // The UI merge shadows no existing route.

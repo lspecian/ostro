@@ -226,14 +226,23 @@ fn check_options(req: &StartRunRequest) -> Result<(), ApiError> {
     if req.workflow.is_empty() {
         return Err(ApiError::invalid_argument("workflow name is empty"));
     }
+    // D-P11-13: uniform `details{reason: limit_exceeded, limit, max, actual}` (11-11).
+    let count = |v: usize| u64::try_from(v).unwrap_or(u64::MAX);
     if req.tags.len() > MAX_RUN_TAGS {
-        return Err(ApiError::invalid_argument(format!(
-            "tags: {} exceeds the limit of {MAX_RUN_TAGS}",
-            req.tags.len()
-        )));
+        return Err(ostro_api::phase11::limit_error(
+            ostro_api::ErrorCode::InvalidArgument,
+            "tags",
+            count(MAX_RUN_TAGS),
+            count(req.tags.len()),
+        ));
     }
-    for t in &req.tags {
-        check_len("tag", t, MAX_RUN_TAG_LEN)?;
+    if let Some(t) = req.tags.iter().find(|t| t.len() > MAX_RUN_TAG_LEN) {
+        return Err(ostro_api::phase11::limit_error(
+            ostro_api::ErrorCode::InvalidArgument,
+            "tag_bytes",
+            count(MAX_RUN_TAG_LEN),
+            count(t.len()),
+        ));
     }
     if let Some(t) = &req.tenant {
         check_len("tenant", t, MAX_TENANT_LEN)?;
