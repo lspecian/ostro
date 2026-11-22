@@ -100,10 +100,16 @@ async fn guest_logs_cap_ring_endpoint_and_metrics() {
     s.deploy_guest(GUEST, None).await;
     let before = metrics_text(&s).await;
 
-    // (a) 20,000 lines in 20 activations of 1,000 (the per-activation bound) each.
+    // (a) 20,000 lines in 80 chunks of 250, separated by 50 ms durable sleeps. Chunks are
+    // a quarter of the per-activation bound (1,000 lines, engine-side, never seen by the
+    // sink): `evicting` normally runs each chunk in its own activation, but on a starved
+    // machine the 1 ms hot-wait eviction can fire after the 50 ms timer, and the next
+    // chunk then runs in the same activation. With 1,000-line chunks that second chunk
+    // was dropped as `activation_bound` before the sink (CI: run_cap 9,000, not 10,000);
+    // with 250 it still fits unless more than 4 chunks in a row share an activation.
     let run = spam(
         &s,
-        json!({"lines": 20_000, "burst": 1_000, "sleep_ms": 50, "tag": "cap", "level": "debug",
+        json!({"lines": 20_000, "burst": 250, "sleep_ms": 50, "tag": "cap", "level": "debug",
                "fields": {"suite": "a"}}),
     )
     .await;
