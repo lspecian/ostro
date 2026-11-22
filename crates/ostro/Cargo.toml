@@ -54,6 +54,10 @@ ostro-testkit = { workspace = true, features = ["mock-http", "canary"] }
 reqwest = { workspace = true, features = ["rustls", "json"] }
 rcgen.workspace = true
 x509-parser.workspace = true
+# Phase 11 (11-03, B5): 11-14's CLI tests serve the API fakes in-process
+# (ostro_api::router over FakeControlPlane + the 11-09 fakes)
+ostro-api = { path = "../ostro-api", features = ["fake"] }
+axum.workspace = true
 
 [lints]
 workspace = true

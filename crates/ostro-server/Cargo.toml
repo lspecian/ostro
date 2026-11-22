@@ -70,6 +70,8 @@ libc.workspace = true
 # Phase 12 (12-01 declares every Phase 12 dependency): cluster transport, meta peer,
 # controller, fetch and install (wired by 12-14)
 ostro-cluster = { path = "../ostro-cluster" }
+# Phase 11 (11-03): embedded UI router, merged by p11.rs (11-04/11-15)
+ostro-ui.workspace = true
 
 [features]
 # Fault injection (plan 05-18): the executor's own failpoints (executor::before_append,

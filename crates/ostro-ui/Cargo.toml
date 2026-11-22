@@ -1,0 +1,31 @@
+[package]
+name = "ostro-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Embedded operator UI (Phase 11, D-P11-14): askama templates + vendored htmx 2.0.11,
+# served by ostro-server under /ui. No Node, no rust-embed: assets are include_bytes!.
+[dependencies]
+ostro-api = { path = "../ostro-api" }
+askama.workspace = true
+axum.workspace = true
+http.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# asset ETags (11-15)
+sha2.workspace = true
+# CSRF tokens (11-15): the workspace's OS RNG, no new crypto crate
+getrandom.workspace = true
+
+[dev-dependencies]
+# FakeControlPlane (feature "fake")
+ostro-api = { path = "../ostro-api", features = ["fake"] }
+insta.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

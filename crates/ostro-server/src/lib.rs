@@ -85,6 +85,12 @@ mod phase6_dep_anchors {
     use base64 as _;
 }
 
+// Phase 11 (plan 11-03, D-P11-14): the UI crate, merged into the router by `p11.rs`
+// (11-04/11-15); anchored like the ones above until then.
+mod phase11_dep_anchors {
+    use ostro_ui as _;
+}
+
 // Phase 7 dependencies declared once by plan 07-02 (D-W17) for 07-06 (CA, TLS listener),
 // 07-09/07-12 (worker protocol), 07-10 (ACME) and 07-13 (getrusage); anchored like the
 // Phase 6/8 ones above until the owning modules consume them.

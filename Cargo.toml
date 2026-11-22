@@ -141,6 +141,14 @@ tokio-stream = { version = "0.1.19", features = ["net", "sync"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 rand = { version = "0.9.5", default-features = false, features = ["std", "std_rng"] }
+# Phase 11 (plan 11-03 declares every Phase 11 dependency once, D-P11-14). askama: exact;
+# no `config` (no basic-toml/serde in the macro); `urlencode` reuses percent-encoding (in the
+# lock via url). askama_derive uses syn 3 (already in the lock; no new duplicate).
+askama = { version = "=0.16.1", default-features = false, features = ["derive", "std", "urlencode"] }
+ostro-ui = { path = "crates/ostro-ui" }
+# already in Cargo.lock (same version as axum's): request parts / StatusCode. ostro-ui's
+# tests use the Phase 12 `tower` pin above (ServiceExt).
+http = "1"
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

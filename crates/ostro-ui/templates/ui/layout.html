@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyCacheSize":0,"selfRequestsOnly":true}'>
+<title>{{ title }} - Ostro</title>
+<link rel="stylesheet" href="/ui/assets/app.css">
+<script src="/ui/assets/vendor/htmx-2.0.11.min.js" defer></script>
+<script src="/ui/assets/app.js" defer></script>
+</head>
+<body hx-history="false">
+<main id="main">
+<h1>{{ title }}</h1>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>
