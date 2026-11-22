@@ -250,22 +250,102 @@ async fn seeding_is_refused_on_a_recovered_non_empty_log_and_for_bad_history() {
     node.shutdown().await;
 }
 
-/// Pins the conservative torn-tail rule for an anchored log (documented on
-/// `recover_partition`): with no verified record before it, a torn first record counts as
-/// above the floor only when `floor == 0`.
+/// D-P12-4 (parsed-base rule, documented on `recover_partition`): a torn first record of
+/// an anchored log whose header names `base == floor` is cut like any torn tail, leaving the
+/// log anchored and empty at the floor.
 #[tokio::test(flavor = "multi_thread")]
 async fn torn_first_record_of_anchored_log() {
     let d = tempdir();
     let w = write_batches(d.path(), P, Offset(500), &[(1, 3)]).await;
+    assert!(w[0].len / 2 > 47, "the tear keeps the base-carrying prefix");
     corrupt::truncate_at(&w[0].segment, w[0].byte_pos + w[0].len / 2).unwrap();
-    // floor > 0: the first record's offsets are unknown, so it is not provably above the
-    // floor; the open fails rather than cutting
+    let r = recover_partition(d.path(), P, Offset(500)).unwrap();
+    let torn = r.torn.expect("cut as a torn tail");
+    assert_eq!(torn.byte_pos, w[0].byte_pos);
+    assert_eq!((r.log_start, r.leo), (Offset(500), Offset(500)));
+    assert!(r.epochs.is_empty());
+    assert_eq!(
+        std::fs::metadata(&w[0].segment).unwrap().len(),
+        w[0].byte_pos
+    );
+    // The anchored log opens and appends at the floor.
+    let (node, log) = open(d.path(), Offset(500)).await;
+    lead(&log);
+    let a = log.append(Epoch(1), cmds(1)).await.unwrap();
+    assert_eq!(a.base, Offset(500));
+    log.wait_committed(a.last).await.unwrap();
+    node.shutdown().await;
+
+    // floor 0 (rebuilding state): cut as before, and the empty remainder anchors at 0.
+    let d = tempdir();
+    let w = write_batches(d.path(), P, Offset(500), &[(1, 3)]).await;
+    corrupt::truncate_at(&w[0].segment, w[0].byte_pos + w[0].len / 2).unwrap();
+    let r = recover_partition(d.path(), P, Offset::ZERO).unwrap();
+    assert!(r.torn.is_some());
+    assert_eq!((r.log_start, r.leo), (Offset::ZERO, Offset::ZERO));
+}
+
+/// D-P12-4: a torn first record whose complete header names a base other than the floor is
+/// real damage (it may hold fsynced offsets): the open fails, nothing is cut. The "state
+/// unreadable" sentinel floor never cuts either.
+#[tokio::test(flavor = "multi_thread")]
+async fn torn_first_record_header_base_mismatch_is_corrupt() {
+    for (written_at, floor) in [
+        (Offset(600), Offset(500)),
+        (Offset(400), Offset(500)),
+        (Offset(500), Offset(u64::MAX)),
+    ] {
+        let d = tempdir();
+        let w = write_batches(d.path(), P, written_at, &[(1, 3)]).await;
+        let cut_at = w[0].byte_pos + w[0].len / 2;
+        corrupt::truncate_at(&w[0].segment, cut_at).unwrap();
+        assert!(
+            matches!(
+                recover_partition(d.path(), P, floor),
+                Err(LogError::Corrupt { .. })
+            ),
+            "written at {written_at}, floor {floor}"
+        );
+        assert_eq!(
+            std::fs::metadata(&w[0].segment).unwrap().len(),
+            cut_at,
+            "nothing cut"
+        );
+    }
+}
+
+/// D-P12-4: fewer bytes than the base-carrying header prefix (47 bytes) remain: the record
+/// cannot name any offset and cannot have been fsynced whole, so it is torn and cut.
+#[tokio::test(flavor = "multi_thread")]
+async fn short_partial_header_at_anchor_is_torn() {
+    for keep in [5, 12, 20, 46] {
+        let d = tempdir();
+        let w = write_batches(d.path(), P, Offset(500), &[(1, 3)]).await;
+        corrupt::truncate_at(&w[0].segment, w[0].byte_pos + keep).unwrap();
+        let r = recover_partition(d.path(), P, Offset(500)).unwrap();
+        assert!(r.torn.is_some(), "keep {keep}");
+        assert_eq!(
+            (r.log_start, r.leo),
+            (Offset(500), Offset(500)),
+            "keep {keep}"
+        );
+    }
+    // 47 bytes: the base is readable, and here it matches the floor: still torn.
+    let d = tempdir();
+    let w = write_batches(d.path(), P, Offset(500), &[(1, 3)]).await;
+    corrupt::truncate_at(&w[0].segment, w[0].byte_pos + 47).unwrap();
+    assert!(
+        recover_partition(d.path(), P, Offset(500))
+            .unwrap()
+            .torn
+            .is_some()
+    );
+    // 47 bytes naming another base: corrupt.
+    let d = tempdir();
+    let w = write_batches(d.path(), P, Offset(501), &[(1, 3)]).await;
+    corrupt::truncate_at(&w[0].segment, w[0].byte_pos + 47).unwrap();
     assert!(matches!(
         recover_partition(d.path(), P, Offset(500)),
         Err(LogError::Corrupt { .. })
     ));
-    // floor 0 (rebuilding state): cut, and the empty remainder anchors at 0
-    let r = recover_partition(d.path(), P, Offset::ZERO).unwrap();
-    assert!(r.torn.is_some());
-    assert_eq!((r.log_start, r.leo), (Offset::ZERO, Offset::ZERO));
 }

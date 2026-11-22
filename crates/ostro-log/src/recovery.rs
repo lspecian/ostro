@@ -22,7 +22,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ostro_types::{Epoch, Offset, PartitionId};
+use ostro_types::{Epoch, Offset, PartitionId, envelope};
 use ostro_wal::WalRecord;
 use ostro_wal::truncate::{RECORD_HEADER_LEN, declared_record_size};
 use tracing::warn;
@@ -258,6 +258,48 @@ fn anchor(floor: Offset) -> Offset {
     }
 }
 
+/// Bytes from a record's start through the end of its envelope's `base` field: the 12-byte
+/// WAL frame header, topic length + topic (`"p"`), partition, payload length, then the
+/// envelope header up to and including `base` (envelope bytes 16..24). The WAL V2 frame
+/// header itself carries no offset (the frame's base/last sit in the trailer, after the
+/// payload); the envelope header is the first place a torn record names its base.
+const BASE_PREFIX_LEN: usize = RECORD_HEADER_LEN + 2 + TOPIC.len() + 4 + 4 + 24;
+
+/// The base offset a (possibly torn) record at `rest[0..]` names in its envelope header,
+/// if the prefix through that field is present and well formed: valid WAL magic/version/
+/// length, topic `"p"`, partition `pid`, envelope magic and partition. No CRC can be
+/// checked on a torn record; these structural checks are what D-P12-4 relies on.
+fn parsed_base(rest: &[u8], pid: PartitionId) -> Option<Offset> {
+    if rest.len() < BASE_PREFIX_LEN || declared_record_size(rest).is_none() {
+        return None;
+    }
+    let u16_at = |o: usize| u16::from_le_bytes([rest[o], rest[o + 1]]);
+    let u32_at = |o: usize| u32::from_le_bytes(rest[o..o + 4].try_into().expect("4 bytes"));
+    let tl = usize::from(u16_at(RECORD_HEADER_LEN));
+    let topic_at = RECORD_HEADER_LEN + 2;
+    if tl != TOPIC.len() || &rest[topic_at..topic_at + tl] != TOPIC.as_bytes() {
+        return None;
+    }
+    let part_at = topic_at + tl;
+    if i32::from_le_bytes(rest[part_at..part_at + 4].try_into().expect("4 bytes")) != pid.as_i32() {
+        return None;
+    }
+    let env = part_at + 8;
+    if u32_at(env) != envelope::MAGIC || u16_at(env + 8) != pid.0 {
+        return None;
+    }
+    let base = u64::from_le_bytes(rest[env + 16..env + 24].try_into().expect("8 bytes"));
+    Some(Offset(base))
+}
+
+/// D-P12-4 (parsed-base rule): may the first bad record of an anchored log (`floor > 0`, no
+/// verified record before it) count as above the floor? Yes iff its envelope header names
+/// `base == floor`, or fewer than [`BASE_PREFIX_LEN`] bytes remain to EOF (too short to name
+/// any base). A record naming another base, or a long but unparseable prefix, stays corrupt.
+fn anchored_first_record_is_above_floor(rest: &[u8], pid: PartitionId, floor: Offset) -> bool {
+    rest.len() < BASE_PREFIX_LEN || parsed_base(rest, pid) == Some(floor)
+}
+
 fn corrupt(pid: PartitionId, segment: &Path, pos: usize, bad: Bad) -> LogError {
     LogError::Corrupt {
         partition: pid.0,
@@ -302,12 +344,20 @@ fn corrupt(pid: PartitionId, segment: &Path, pos: usize, bad: Bad) -> LogError {
 /// "ahead of the log". A non-empty log is unaffected: its start and end come from its
 /// records, and a floor above its end stays the caller's "state ahead of log" error.
 ///
-/// The torn-tail rule is unchanged by anchoring: with no verified record before it, a bad
-/// first record counts as above the floor only when `floor == 0`. So an anchored log
-/// (`floor > 0`) whose very first record is torn by power loss before its first fsync fails
-/// with [`LogError::Corrupt`] (conservative: the offsets of an unparseable first record are
-/// unknown, and if it held offsets below the floor it was fsynced and the damage is real).
-/// `kill -9` cannot produce this shape. Phase 12 decides whether install needs more.
+/// # Torn first record of an anchored log (D-P12-4, parsed-base rule)
+///
+/// With `floor > 0` and no verified record before it, the first bad record is torn (cut, as
+/// at floor 0, leaving the log anchored empty at the floor) iff rules 1 and 3 above hold and
+/// **either** its header names base offset `== floor` **or** fewer bytes than that header
+/// prefix remain to EOF. The WAL V2 frame header carries no offset (base/last are in the
+/// trailer after the payload), so the base is read from the envelope header right after the
+/// topic, partition and payload length: the first [`BASE_PREFIX_LEN`] (47) bytes of the
+/// record. A complete prefix naming any other base, or one that does not parse, stays
+/// [`LogError::Corrupt`] (if it held offsets below the floor it was fsynced and the damage
+/// is real). Install (`reset_to`) fsyncs the emptied partition directory, so after a crash
+/// the log is either the old one or empty, and the first append after an anchor is the only
+/// way to reach this shape (power loss before its first fsync). The "state unreadable"
+/// sentinel floor never qualifies.
 ///
 /// Records after a cut are discarded even when they parse: they were in the same un-fsynced
 /// window and cannot have been acknowledged, because an fsync covering them would have made
@@ -358,7 +408,16 @@ pub fn recover_partition(
                 Err(bad) => bad,
             };
             let in_last_segment = Some(i) == last_non_empty;
-            let above_floor = scan.next.unwrap_or(Offset::ZERO) >= floor;
+            // An anchored log's first record (D-P12-4): no verified record precedes it, so
+            // its offsets are known only from its own header. The "state unreadable"
+            // sentinel floor never qualifies (nothing is cut for an unknown state).
+            let anchored_first =
+                scan.next.is_none() && floor > Offset::ZERO && anchor(floor) == floor;
+            let above_floor = if anchored_first {
+                anchored_first_record_is_above_floor(&buf[pos..], pid, floor)
+            } else {
+                scan.next.unwrap_or(Offset::ZERO) >= floor
+            };
             let torn_shape =
                 bad.reason == Corruption::Incomplete || has_zero_sector(&buf, pos, bad.declared);
             if !(in_last_segment && above_floor && torn_shape) {
