@@ -374,7 +374,7 @@ Plans:
 - [x] 10-10-PLAN.md — DevClock through the clock seam + skip barrier, dispatcher clock-change wake, manual skip, ostro dev --time-skipping (ephemeral only), ostro build-info --json, p10-time guest (SDK-06) (W3)
 - [x] 10-11-PLAN.md — Replay: 4-arg ostro_engine::replay_check + corpus loader, server replay endpoint (token key stays server-side), ostro replay remote/positional/--corpus with exit 4, SC3 gate in Rust/Python/TS, docs/replay.md (CLI-07) (W3)
 - [x] 10-12-PLAN.md — Build pipeline (input-hash cache, staging, env scrub, local validate + describe, manifest.json) + Rust builder (target/ostro/cargo, zig shim with cargo-zigbuild filtering, hermetic --no-cc) + offline fixture + ostro build (CLI-04) (W4)
-- [ ] 10-13-PLAN.md — Auto time skipping: idle detector incl. in-flight API writes, barrier-guarded re-snapshot, lease-safe manual skip, 100/1000-iteration race suite with zero-lease asserts (SDK-06) (W4)
+- [x] 10-13-PLAN.md — Auto time skipping: idle detector incl. in-flight API writes, barrier-guarded re-snapshot, lease-safe manual skip, 100/1000-iteration race suite with zero-lease asserts (SDK-06) (W4)
 - [x] 10-14-PLAN.md — Python/TS/Go zero-dependency clients with route tables, shared e2e scenario (manual dev_skip), packaging dry runs (SDK-07) (W4)
 - [x] 10-15-PLAN.md — Python (uv + wheel, uv.lock export) and TS (Node + npm ci + jco) builders, --docker runner + build image, parity with build-guest.sh + conformance on ostro-built artefacts, template builds, docs/toolchains.md (CLI-04) (W5)
 - [x] 10-16-PLAN.md — ostro deploy builds if needed and activates idempotently (D12 .wasm form kept) + ostro dev --watch (CLI-05, CLI-08) (W5)
