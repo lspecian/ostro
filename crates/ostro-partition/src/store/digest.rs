@@ -78,7 +78,7 @@ impl DigestBuilder {
 impl PartitionStore {
     /// blake3 over the logical content of every table (see module docs).
     pub fn digest(&self) -> Result<[u8; 32], StoreError> {
-        let snap = self.db.snapshot();
+        let snap = self.gate.snapshot(&self.db);
         let mut d = DigestBuilder::new();
         for t in TABLES {
             d.table_begin(t.name());

@@ -475,7 +475,7 @@ impl PartitionStore {
         created_at_ms: u64,
         opts: ExportOptions,
     ) -> Result<SnapshotInfo, SnapshotError> {
-        let snap = self.db.snapshot();
+        let snap = self.gate.snapshot(&self.db);
         let mks = self.ks(Table::Meta);
         let format = u32::from_be_bytes(fixed(
             &snap_get(&snap, mks, meta::K_FORMAT_VER)?,
@@ -1097,7 +1097,11 @@ fn open_raw(path: &Path, cfg: &StoreConfig) -> Result<PartitionStore, SnapshotEr
     let ks: [Keyspace; TABLE_COUNT] = handles
         .try_into()
         .unwrap_or_else(|_| unreachable!("one keyspace per table"));
-    Ok(PartitionStore { db, ks })
+    Ok(PartitionStore {
+        db,
+        ks,
+        gate: super::CommitGate::default(),
+    })
 }
 
 /// Installs an OSNP v1 snapshot as the state of partition `p` under `data_dir`
@@ -1253,7 +1257,9 @@ fn write_rows<R: Read>(
                 batch_bytes += k.len() + v.len() + 16;
                 batch.insert(store.ks(t), k, v);
                 if batch_bytes >= INSTALL_BATCH_BYTES {
-                    std::mem::replace(&mut batch, store.db.batch()).commit()?;
+                    store
+                        .gate
+                        .commit(std::mem::replace(&mut batch, store.db.batch()))?;
                     batch_bytes = 0;
                 }
             }
@@ -1282,7 +1288,7 @@ fn write_rows<R: Read>(
         batch.insert(mks, k, v);
     }
     batch.insert(mks, K_CHECKPOINTED, header.applied_offset.to_be_bytes());
-    batch.commit()?;
+    store.gate.commit(batch)?;
     Ok((header, info, digest))
 }
 

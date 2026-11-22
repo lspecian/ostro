@@ -174,7 +174,7 @@ impl PartitionStore {
     /// Every blob referenced by the current state, read from ONE fjall snapshot (the blob GC
     /// mark set for this partition, P8-D8).
     pub fn blob_refs_snapshot(&self) -> Result<BTreeSet<[u8; 32]>, StoreError> {
-        let snap = self.db.snapshot();
+        let snap = self.gate.snapshot(&self.db);
         let mut out = Vec::new();
         let mut set = BTreeSet::new();
         for t in TABLES {

@@ -27,8 +27,11 @@ pub mod values;
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
+use fjall::{
+    Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode, Readable, Snapshot,
+};
 use ostro_types::{Offset, PartitionCount, PartitionId};
 
 pub use batch::{ApplyBatch, MetaUpdate};
@@ -159,6 +162,43 @@ pub enum StoreError {
 pub struct PartitionStore {
     db: Database,
     ks: [Keyspace; TABLE_COUNT],
+    gate: CommitGate,
+}
+
+/// Orders fjall snapshot creation against batch commits (see [`StoreReader`]).
+///
+/// fjall 3.1 / lsm-tree 3.1 publish a batch's seqno only after its last item is in the
+/// memtables, but a memtable flush or compaction of **any** keyspace that installs a new
+/// tree version meanwhile allocates the next global seqno and raises the visible seqno past
+/// it (`SuperVersions::upgrade_version_with_seqno`: `visible_seqno.fetch_max(seqno + 1)`),
+/// i.e. past the batch still being inserted. A snapshot taken in that window sees a prefix
+/// of the batch (the torn `runs`-without-`payloads` read of
+/// `tests/store.rs::reader_never_sees_a_partial_batch`, reproduced on the musl CI leg).
+/// Commits hold the write side and snapshot creation the read side, so a snapshot is only
+/// ever taken while no batch is in flight: every seqno below the visible one then belongs
+/// to a fully inserted batch (or to a version change, which has no items), and the next
+/// batch gets a seqno at or above it. Reads themselves run outside the gate.
+#[derive(Clone, Default)]
+pub(crate) struct CommitGate(Arc<RwLock<()>>);
+
+impl CommitGate {
+    /// A fjall snapshot taken while no batch commit is in flight.
+    pub(crate) fn snapshot(&self, db: &Database) -> Snapshot {
+        let _g = self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        db.snapshot()
+    }
+
+    /// Commit `b` while no snapshot is being created.
+    pub(crate) fn commit(&self, b: OwnedWriteBatch) -> Result<(), fjall::Error> {
+        let _g = self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        b.commit()
+    }
 }
 
 impl std::fmt::Debug for PartitionStore {
@@ -196,13 +236,17 @@ impl PartitionStore {
         let ks: [Keyspace; TABLE_COUNT] = handles
             .try_into()
             .unwrap_or_else(|_| unreachable!("one keyspace per table"));
-        let store = Self { db, ks };
+        let store = Self {
+            db,
+            ks,
+            gate: CommitGate::default(),
+        };
 
         match meta::read_format_version(store.ks(Table::Meta))? {
             None => {
                 let mut b = store.db.batch();
                 meta::write_initial(&mut b, store.ks(Table::Meta), p, count);
-                b.commit()?;
+                store.gate.commit(b)?;
                 store.persist()?;
             }
             Some(meta::FORMAT_VERSION) => {}
@@ -256,6 +300,7 @@ impl PartitionStore {
         StoreReader {
             db: self.db.clone(),
             ks: self.ks.clone(),
+            gate: self.gate.clone(),
         }
     }
 
@@ -279,21 +324,30 @@ impl PartitionStore {
 /// answered `completed: true, result: null`). Through a snapshot a batch becomes
 /// visible all at once, and because published seqnos only grow, a later read sees at
 /// least everything an earlier one saw. Snapshots are dropped at the end of each call.
+/// The snapshot is created under the store's [`CommitGate`]: a concurrent flush can raise
+/// fjall's visible seqno past a batch that is still being inserted, so a snapshot is never
+/// created while a commit is in flight.
 #[derive(Clone)]
 pub struct StoreReader {
     db: Database,
     ks: [Keyspace; TABLE_COUNT],
+    gate: CommitGate,
 }
 
 impl StoreReader {
     pub fn get(&self, t: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let snap = self.db.snapshot();
+        let snap = self.gate.snapshot(&self.db);
         Ok(snap.get(&self.ks[t.idx()], key)?.map(|v| v.to_vec()))
     }
 
     /// Up to `limit` rows whose key starts with `prefix`, in key order.
     pub fn prefix(&self, t: Table, prefix: &[u8], limit: usize) -> Result<Rows, StoreError> {
-        collect(self.db.snapshot().prefix(&self.ks[t.idx()], prefix), limit)
+        collect(
+            self.gate
+                .snapshot(&self.db)
+                .prefix(&self.ks[t.idx()], prefix),
+            limit,
+        )
     }
 
     /// Up to `limit` rows with `from <= key < to`, in key order.
@@ -304,7 +358,12 @@ impl StoreReader {
         to: &[u8],
         limit: usize,
     ) -> Result<Rows, StoreError> {
-        collect(self.db.snapshot().range(&self.ks[t.idx()], from..to), limit)
+        collect(
+            self.gate
+                .snapshot(&self.db)
+                .range(&self.ks[t.idx()], from..to),
+            limit,
+        )
     }
 }
 

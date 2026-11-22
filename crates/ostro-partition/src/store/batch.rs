@@ -127,7 +127,7 @@ impl ApplyBatch<'_> {
         fail::fail_point!("state::commit", |_| Err(StoreError::Injected(
             "state::commit"
         )));
-        b.commit()?;
+        store.gate.commit(b)?;
         Ok(())
     }
 }
