@@ -8,6 +8,7 @@
 //! (already the journal's frozen encoding).
 
 use ostro_engine::error::{AttemptFailure, EvictReason, NonDeterminism};
+use ostro_engine::run_limits::{LIMIT_CHILDREN, LIMIT_HISTORY, LIMIT_PAYLOAD};
 use ostro_engine::sink::ActivationOutcome;
 use ostro_types::journal::{Continuation, Failure, Payload};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,13 @@ pub enum WireAttemptFailure {
     GuestExit(u32),
     ProtocolViolation(String),
     Trap(String),
+    /// Run-limit breach (11-06, D-P11-13). Appended last: earlier variant indices, and so
+    /// every existing encoding, are unchanged.
+    LimitExceeded {
+        limit: String,
+        max: u64,
+        actual: u64,
+    },
 }
 
 /// Mirror of [`ActivationOutcome`]; the `Done.outcome` bytes are `postcard(WireOutcome)`.
@@ -108,6 +116,11 @@ impl From<&AttemptFailure> for WireAttemptFailure {
             AttemptFailure::GuestExit(code) => Self::GuestExit(*code),
             AttemptFailure::ProtocolViolation(m) => Self::ProtocolViolation(m.clone()),
             AttemptFailure::Trap(m) => Self::Trap(m.clone()),
+            AttemptFailure::LimitExceeded { limit, max, actual } => Self::LimitExceeded {
+                limit: (*limit).to_owned(),
+                max: *max,
+                actual: *actual,
+            },
         }
     }
 }
@@ -132,6 +145,19 @@ impl WireAttemptFailure {
             Self::GuestExit(code) => AttemptFailure::GuestExit(code),
             Self::ProtocolViolation(m) => AttemptFailure::ProtocolViolation(m),
             Self::Trap(m) => AttemptFailure::Trap(m),
+            // The engine names limits with `&'static str` constants; a name this leader does
+            // not know (a newer worker) cannot be carried and is reported as a violation.
+            Self::LimitExceeded { limit, max, actual } => {
+                match [LIMIT_HISTORY, LIMIT_CHILDREN, LIMIT_PAYLOAD]
+                    .into_iter()
+                    .find(|l| *l == limit)
+                {
+                    Some(limit) => AttemptFailure::LimitExceeded { limit, max, actual },
+                    None => AttemptFailure::ProtocolViolation(format!(
+                        "worker reported unknown limit {limit:?} ({actual} > {max})"
+                    )),
+                }
+            }
         }
     }
 }

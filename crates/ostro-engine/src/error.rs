@@ -100,6 +100,14 @@ pub enum AttemptFailure {
     GuestExit(u32),
     ProtocolViolation(String),
     Trap(String),
+    /// A live append past a run limit (11-06, D-P11-13; see [`crate::run_limits`]).
+    /// Not retryable: the executor fails the run resumably, so an operator can raise the
+    /// limit and retry (resume) it.
+    LimitExceeded {
+        limit: &'static str,
+        max: u64,
+        actual: u64,
+    },
 }
 
 impl AttemptFailure {
@@ -114,13 +122,18 @@ impl AttemptFailure {
             Self::GuestExit(_) => "guest_exit",
             Self::ProtocolViolation(_) => "protocol_violation",
             Self::Trap(_) => "trap",
+            Self::LimitExceeded { .. } => "limit_exceeded",
         }
     }
 
     /// Whether a new attempt may succeed. Nondeterminism and protocol violations are
-    /// properties of the code and never fixed by retrying.
+    /// properties of the code and never fixed by retrying; a run-limit breach recurs on
+    /// every attempt until the limit is raised.
     pub fn retryable(&self) -> bool {
-        !matches!(self, Self::NonDeterminism(_) | Self::ProtocolViolation(_))
+        !matches!(
+            self,
+            Self::NonDeterminism(_) | Self::ProtocolViolation(_) | Self::LimitExceeded { .. }
+        )
     }
 
     /// Human-readable dead-letter reason.
@@ -133,6 +146,9 @@ impl AttemptFailure {
             Self::GuestExit(code) => format!("guest_exit: code={code}"),
             Self::ProtocolViolation(msg) => format!("protocol_violation: {msg}"),
             Self::Trap(msg) => format!("trap: {msg}"),
+            Self::LimitExceeded { limit, max, actual } => {
+                format!("limit_exceeded: {limit} {actual} > {max}")
+            }
             other => other.reason_code().to_string(),
         }
     }
@@ -169,6 +185,14 @@ mod tests {
             "nondeterminism: seq=3 expected=step \"a\" actual=sleep"
         );
         assert!(!AttemptFailure::ProtocolViolation("x".into()).retryable());
+        let le = AttemptFailure::LimitExceeded {
+            limit: "history_events",
+            max: 20,
+            actual: 21,
+        };
+        assert!(!le.retryable());
+        assert_eq!(le.reason_code(), "limit_exceeded");
+        assert_eq!(le.dlq_reason(), "limit_exceeded: history_events 21 > 20");
         assert_eq!(
             EvictReason::StepBackoff { retry_at_nanos: 7 }.code(),
             "step_backoff"

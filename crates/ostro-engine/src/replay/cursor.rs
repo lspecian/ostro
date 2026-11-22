@@ -64,6 +64,7 @@ use ostro_types::journal::{
 
 use crate::env::{Clock, RandomStream};
 use crate::error::{NonDeterminism, ProtocolViolation};
+use crate::run_limits::{LimitBreach, RunLimits, check_live_append};
 
 use super::rng::{ChaChaStream, RngStreams, insecure_seed, step_seed, uuid_v7};
 use super::wait::completion_target;
@@ -108,6 +109,9 @@ pub enum ReplayError {
     /// The journal or a delivered input batch is malformed.
     #[error("bad journal: {0}")]
     BadJournal(String),
+    /// A live append would exceed a run limit (11-06; never raised on replay).
+    #[error(transparent)]
+    LimitExceeded(LimitBreach),
 }
 
 pub(super) fn protocol(msg: impl Into<String>) -> ReplayError {
@@ -186,6 +190,10 @@ pub struct ReplayState {
     /// The guest has been handed the run's cancellation (D25, see the module doc).
     pub(super) cancel_observed: bool,
     pub(super) clock: Arc<dyn Clock>,
+    /// Run limits checked on every live append (11-06; default [`RunLimits::default`]).
+    pub(super) limits: RunLimits,
+    /// `ChildStarted` events in the journal (recorded and live), for the children limit.
+    pub(super) children: u64,
 }
 
 impl std::fmt::Debug for ReplayState {
@@ -231,6 +239,10 @@ impl ReplayState {
             }
         }
         let max_ts = journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
+        let children = journal
+            .iter()
+            .filter(|e| matches!(e.body, EventBody::ChildStarted(_)))
+            .count() as u64;
         let mut completions = BTreeMap::new();
         for ev in &journal {
             if let Some(op) = completion_target(&ev.body) {
@@ -254,7 +266,15 @@ impl ReplayState {
             run,
             journal,
             clock,
+            limits: RunLimits::default(),
+            children,
         })
+    }
+
+    /// Set the run limits checked on live appends (11-06). Replayed events are never
+    /// checked, so any limit is safe for any journal.
+    pub fn set_run_limits(&mut self, limits: RunLimits) {
+        self.limits = limits;
     }
 
     /// The run's `RunStarted` record.
@@ -351,8 +371,20 @@ impl ReplayState {
     }
 
     /// Append a live guest-command event at the next seq; returns `(seq, ts)`.
-    pub(super) fn append_live(&mut self, seq: u64, body: EventBody) -> (u64, u64) {
+    ///
+    /// Every live append funnels through here, and only live appends do, so this is
+    /// where the run limits are checked (11-06): a breach appends nothing.
+    pub(super) fn append_live(
+        &mut self,
+        seq: u64,
+        body: EventBody,
+    ) -> Result<(u64, u64), ReplayError> {
         debug_assert_eq!(seq, self.next_seq);
+        check_live_append(&self.limits, seq, self.children, &body)
+            .map_err(ReplayError::LimitExceeded)?;
+        if matches!(body, EventBody::ChildStarted(_)) {
+            self.children += 1;
+        }
         // Logical time never moves backwards, even if the wall clock does or lags the
         // timestamps of committed inputs (timer fire time, a skewed leader's commit ts).
         let ts = self
@@ -373,7 +405,7 @@ impl ReplayState {
         self.max_ts = ts;
         self.last_cmd_ts = ts;
         self.last_cmd_seq = seq;
-        (seq, ts)
+        Ok((seq, ts))
     }
 
     /// Record `ev` in the completion index if it completes an op not completed yet.
@@ -413,7 +445,7 @@ impl ReplayState {
         let seq = self.next_seq;
         let body = live(seq);
         Self::check_live_body(kind, &body)?;
-        let (seq, ts_nanos) = self.append_live(seq, body);
+        let (seq, ts_nanos) = self.append_live(seq, body)?;
         Ok(CommandResult::Live { seq, ts_nanos })
     }
 
@@ -453,7 +485,7 @@ impl ReplayState {
                     },
                     change_id: change_id.to_owned(),
                 });
-                self.append_live(seq, body);
+                self.append_live(seq, body)?;
                 true
             }
         };
@@ -583,7 +615,7 @@ impl ReplayState {
             )));
         };
         let retry_at = f.retry_at_nanos;
-        self.append_live(seq, body);
+        self.append_live(seq, body)?;
         // D22: the next attempt (in-activation after the host's sleep, or requeued and
         // resumed through `begin_step`) observes max(this failure's ts, retry_at).
         self.raise_to_retry_at(retry_at);
@@ -628,8 +660,8 @@ impl ReplayState {
                 body.summary()
             )));
         }
+        self.append_live(seq, body)?;
         self.close_step();
-        self.append_live(seq, body);
         Ok(())
     }
 

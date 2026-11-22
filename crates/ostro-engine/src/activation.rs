@@ -50,6 +50,7 @@ use crate::host::journal::StepInterrupt;
 use crate::host::state::{HostState, HotWait, RunReturn, run_return_from_wit};
 use crate::limits::{Breach, HasLimits};
 use crate::replay::ReplayError;
+use crate::run_limits::LimitBreach;
 use crate::runtime::{Prepared, Runtime};
 use crate::sink::{
     Activate, ActivationOutcome, ActivationSink, AppendError, GuestLogRecord, RunRef,
@@ -69,7 +70,7 @@ pub enum Classified {
 
 /// Classify a `call_run` error.
 ///
-/// Order: [`NonDeterminism`] → [`Evict`] → [`Fenced`] → [`ProtocolViolation`] → [`GuestExit`] →
+/// Order: [`NonDeterminism`] → run-limit [`LimitBreach`] (`LimitExceeded`) → [`Evict`] → [`Fenced`] → [`ProtocolViolation`] → [`GuestExit`] →
 /// unattributed [`StepTimedOut`] (`Timeout`) →
 /// limiter breach (`Breach::Memory`/`Table` → `MemoryExceeded`; a memory cap breach
 /// is a limiter error, not a [`Trap`]) → `Trap::OutOfFuel` → `FuelExhausted`,
@@ -79,6 +80,9 @@ pub enum Classified {
 pub fn classify(e: &wasmtime::Error, breach: Option<Breach>, stderr_tail: &str) -> Classified {
     if let Some(nd) = e.downcast_ref::<NonDeterminism>() {
         return Classified::Failure(AttemptFailure::NonDeterminism(nd.clone()));
+    }
+    if let Some(b) = e.downcast_ref::<LimitBreach>() {
+        return Classified::Failure((*b).into());
     }
     if let Some(ev) = e.downcast_ref::<Evict>() {
         return Classified::Evict(ev.reason);
@@ -156,6 +160,7 @@ fn replay_failure(e: ReplayError) -> AttemptFailure {
         ReplayError::BadJournal(m) => {
             AttemptFailure::ProtocolViolation(format!("bad journal: {m}"))
         }
+        ReplayError::LimitExceeded(b) => b.into(),
     }
 }
 
@@ -362,6 +367,8 @@ async fn execute(
             }));
         }
     };
+    // Run limits (11-06): checked by the cursor on live appends only.
+    state.replay.set_run_limits(cfg.run_limits.clone());
     // Step retries due within the hot-wait window sleep in-activation (WF-02).
     state.set_step_retry(cfg.hot_wait, Some(cancel.clone()));
     let (workflow, input) = {
@@ -522,6 +529,18 @@ mod tests {
             Classified::Failure(AttemptFailure::ProtocolViolation("twice".into()))
         );
         assert_eq!(class(wasmtime::Error::new(Fenced)), Classified::Fenced);
+        assert_eq!(
+            class(wasmtime::Error::new(LimitBreach {
+                limit: crate::run_limits::LIMIT_HISTORY,
+                max: 20,
+                actual: 21
+            })),
+            Classified::Failure(AttemptFailure::LimitExceeded {
+                limit: "history_events",
+                max: 20,
+                actual: 21
+            })
+        );
         assert_eq!(
             class(wasmtime::Error::new(GuestExit(7))),
             Classified::Failure(AttemptFailure::GuestExit(7))

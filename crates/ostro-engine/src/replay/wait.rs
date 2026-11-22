@@ -124,7 +124,7 @@ impl ReplayState {
                 },
                 completed: completed.clone(),
             }),
-        );
+        )?;
         self.note_cancel_observed(&completed);
         Ok(WaitOutcome::Resolved(completed))
     }

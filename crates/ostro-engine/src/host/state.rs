@@ -487,6 +487,7 @@ pub(crate) fn trap(e: ReplayError) -> wasmtime::Error {
         ReplayError::BadJournal(m) => {
             wasmtime::Error::new(ProtocolViolation(format!("bad journal: {m}")))
         }
+        ReplayError::LimitExceeded(b) => wasmtime::Error::new(b),
     }
 }
 
