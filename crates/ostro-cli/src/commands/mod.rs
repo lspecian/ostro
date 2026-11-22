@@ -98,7 +98,7 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: lifecycle::TokenCommand,
     },
-    /// Upload a Wasm component (no build) and optionally activate its workflows.
+    /// Upload a Wasm component, or build (if needed) and deploy a project directory.
     Deploy(deploy::DeployArgs),
     /// Manage cron schedules (ls, get, create, update, delete, pause, resume, trigger).
     Schedules {

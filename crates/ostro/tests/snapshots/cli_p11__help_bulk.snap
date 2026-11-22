@@ -9,7 +9,7 @@ Usage: ostro bulk <COMMAND>
 Commands:
   cancel     Cancel the selected runs, or (`bulk cancel <JOB>`) cancel a bulk job
   terminate  Terminate the selected runs
-  retry      Retry (resume) the selected failed runs
+  retry      Retry the selected failed runs (resume in place or restart as a new linked run)
   rerun      Rerun the selected runs from a cut
   requeue    Requeue the selected DLQ members
   pause      Pause the selected runs

@@ -31,7 +31,7 @@ pub enum BulkCommand {
     Cancel(BulkCancelArgs),
     /// Terminate the selected runs.
     Terminate(BulkTerminateArgs),
-    /// Retry (resume) the selected failed runs.
+    /// Retry the selected failed runs (resume in place or restart as a new linked run).
     Retry(BulkPlainArgs),
     /// Rerun the selected runs from a cut.
     Rerun(BulkRerunArgs),
