@@ -29,6 +29,11 @@ pub mod bulk;
 pub mod dlq;
 pub mod limits;
 pub mod rerun;
+// Phase 10 (10-03): local verbs (stubs; one later plan owns each file).
+pub mod build;
+pub mod init;
+pub mod replay;
+pub mod toolchain;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -151,11 +156,54 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: bulk::BulkCommand,
     },
+    /// Scaffold a workflow project (rust, python or ts).
+    Init(init::InitArgs),
+    /// Build a workflow project into a Wasm component.
+    Build(build::BuildArgs),
+    /// Manage the hermetic build toolchains (install, list, prune).
+    Toolchain(toolchain::ToolchainArgs),
+    /// Check the build environment and toolchains.
+    Doctor(toolchain::DoctorArgs),
+    /// Replay recorded runs against a module and report divergence (exit 4).
+    Replay(replay::ReplayArgs),
 }
 
 /// Run a verb to completion on a current-thread runtime.
+///
+/// Phase 10 local verbs (`init`, `build`, `toolchain`, `doctor`, `replay`) run outside
+/// any runtime (they may start their own with [`block_on`]).
 pub fn run(cmd: ClientCommand) -> Outcome {
-    block_on(dispatch(cmd))
+    match local(&cmd) {
+        Some(run_local) => run_local(),
+        None => block_on(dispatch(cmd)),
+    }
+}
+
+/// The synchronous runner of a Phase 10 local verb, `None` for a REST verb.
+fn local(cmd: &ClientCommand) -> Option<Box<dyn FnOnce() -> Outcome + Send>> {
+    Some(match cmd {
+        ClientCommand::Init(a) => {
+            let a = a.clone();
+            Box::new(move || init::run(&a))
+        }
+        ClientCommand::Build(a) => {
+            let a = a.clone();
+            Box::new(move || build::run(&a))
+        }
+        ClientCommand::Toolchain(a) => {
+            let a = a.clone();
+            Box::new(move || toolchain::run(&a))
+        }
+        ClientCommand::Doctor(a) => {
+            let a = a.clone();
+            Box::new(move || toolchain::doctor(&a))
+        }
+        ClientCommand::Replay(a) => {
+            let a = a.clone();
+            Box::new(move || replay::run(&a))
+        }
+        _ => return None,
+    })
 }
 
 /// Drive `fut` on a fresh current-thread runtime (one per CLI invocation).
@@ -190,7 +238,15 @@ pub fn report(out: Out, e: &CallError) -> Outcome {
 }
 
 /// Dispatch one verb.
+///
+/// A Phase 10 local verb runs on the blocking pool (its runner may start its own
+/// runtime).
 pub async fn dispatch(cmd: ClientCommand) -> Outcome {
+    if let Some(run_local) = local(&cmd) {
+        return tokio::task::spawn_blocking(run_local)
+            .await
+            .unwrap_or(Outcome::Error);
+    }
     let conn = match &cmd {
         ClientCommand::Run(a) => a.conn(),
         ClientCommand::Ls(a) => &a.conn,
@@ -216,6 +272,11 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Dlq { command } => command.conn(),
         ClientCommand::Limits(a) => &a.conn,
         ClientCommand::Bulk { command } => command.conn(),
+        ClientCommand::Init(_)
+        | ClientCommand::Build(_)
+        | ClientCommand::Toolchain(_)
+        | ClientCommand::Doctor(_)
+        | ClientCommand::Replay(_) => unreachable!("local verbs return above"),
     };
     let out = conn.out();
     let client = match conn.client() {
@@ -250,6 +311,11 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Dlq { command } => dlq::run(&client, out, command).await,
         ClientCommand::Limits(a) => limits::limits(&client, out, a).await,
         ClientCommand::Bulk { command } => bulk::run(&client, out, command).await,
+        ClientCommand::Init(_)
+        | ClientCommand::Build(_)
+        | ClientCommand::Toolchain(_)
+        | ClientCommand::Doctor(_)
+        | ClientCommand::Replay(_) => unreachable!("local verbs return above"),
     };
     match res {
         Ok(o) => o,
@@ -453,5 +519,206 @@ pub(crate) mod tests {
         assert_eq!(parse(&["inspect"]).unwrap_err().exit_code(), 2);
         assert_eq!(parse(&["signal", "r1"]).unwrap_err().exit_code(), 2);
         assert_eq!(parse(&["token"]).unwrap_err().exit_code(), 2);
+    }
+}
+
+/// Phase 10 (10-03): the local verbs' flag sets and selector rules.
+#[cfg(test)]
+mod p10_tests {
+    use std::path::PathBuf;
+
+    use super::tests::parse;
+    use super::*;
+
+    fn usage(args: &[&str]) {
+        let e = parse(args).expect_err(&format!("{args:?} must not parse"));
+        assert_eq!(e.exit_code(), 2, "{args:?}: {e}");
+    }
+
+    #[test]
+    fn init_flags() {
+        let ClientCommand::Init(a) = parse(&["init"]).unwrap() else {
+            panic!("init")
+        };
+        assert!(a.dir.is_none() && a.lang.is_none() && a.name.is_none());
+        assert!(!a.force && !a.json);
+        let ClientCommand::Init(a) = parse(&[
+            "init", "proj", "--lang", "python", "--name", "n", "--force", "--json",
+        ])
+        .unwrap() else {
+            panic!("init")
+        };
+        assert_eq!(a.dir, Some(PathBuf::from("proj")));
+        assert_eq!(a.lang, Some(init::InitLang::Python));
+        assert_eq!(a.name.as_deref(), Some("n"));
+        assert!(a.force && a.json);
+        for l in ["rust", "ts"] {
+            assert!(parse(&["init", "--lang", l]).is_ok(), "{l}");
+        }
+        usage(&["init", "--lang", "go"]);
+        usage(&["init", "a", "b"]);
+    }
+
+    #[test]
+    fn build_flags() {
+        let ClientCommand::Build(a) = parse(&["build"]).unwrap() else {
+            panic!("build")
+        };
+        assert_eq!(a.mode(), build::ToolchainMode::Auto);
+        assert!(!a.offline && !a.json && !a.in_container && a.dir.is_none());
+        let ClientCommand::Build(a) = parse(&[
+            "build",
+            "p",
+            "--toolchain",
+            "hermetic",
+            "--offline",
+            "--json",
+            "--in-container",
+        ])
+        .unwrap() else {
+            panic!("build")
+        };
+        assert_eq!(a.mode(), build::ToolchainMode::Hermetic);
+        assert!(a.offline && a.json && a.in_container);
+        assert_eq!(a.dir, Some(PathBuf::from("p")));
+        let ClientCommand::Build(a) = parse(&["build", "--docker"]).unwrap() else {
+            panic!("build")
+        };
+        assert_eq!(a.mode(), build::ToolchainMode::Docker);
+        for t in ["auto", "system", "docker"] {
+            assert!(parse(&["build", "--toolchain", t]).is_ok(), "{t}");
+        }
+        usage(&["build", "--toolchain", "nix"]);
+        usage(&["build", "--docker", "--toolchain", "system"]);
+    }
+
+    #[test]
+    fn toolchain_and_doctor_flags() {
+        use toolchain::{ToolchainCommand as T, ToolchainLang};
+        let ClientCommand::Toolchain(a) =
+            parse(&["toolchain", "install", "--lang", "rust", "--json"]).unwrap()
+        else {
+            panic!("toolchain")
+        };
+        let T::Install(i) = a.command else {
+            panic!("install")
+        };
+        assert_eq!(i.lang, Some(ToolchainLang::Rust));
+        assert!(!i.all && i.json);
+        let ClientCommand::Toolchain(a) = parse(&["toolchain", "install", "--all"]).unwrap() else {
+            panic!("toolchain")
+        };
+        assert!(matches!(a.command, T::Install(ref i) if i.all && i.lang.is_none()));
+        assert!(parse(&["toolchain", "install"]).is_ok());
+        usage(&["toolchain", "install", "--lang", "ts", "--all"]);
+        let ClientCommand::Toolchain(a) = parse(&["toolchain", "list", "--json"]).unwrap() else {
+            panic!("toolchain")
+        };
+        assert!(matches!(a.command, T::List(ref l) if l.json));
+        let ClientCommand::Toolchain(a) = parse(&["toolchain", "prune", "--state"]).unwrap() else {
+            panic!("toolchain")
+        };
+        assert!(matches!(a.command, T::Prune(ref p) if p.state && !p.json));
+        usage(&["toolchain"]);
+        usage(&["toolchain", "bogus"]);
+
+        let ClientCommand::Doctor(d) = parse(&["doctor", "--json"]).unwrap() else {
+            panic!("doctor")
+        };
+        assert!(d.json);
+        usage(&["doctor", "extra"]);
+    }
+
+    fn replay(args: &[&str]) -> replay::ReplayArgs {
+        let mut v = vec!["replay"];
+        v.extend_from_slice(args);
+        match parse(&v) {
+            Ok(ClientCommand::Replay(a)) => a,
+            other => panic!("{v:?}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_run_ids_merge_positional_and_flag() {
+        let a = replay(&["r1", "r2", "--module", "m.wasm"]);
+        assert_eq!(a.run_ids(), ["r1", "r2"]);
+        assert_eq!(a.module, Some(PathBuf::from("m.wasm")));
+        let a = replay(&["--run", "r3", "--run", "r4", "--module", "m.wasm"]);
+        assert_eq!(a.run_ids(), ["r3", "r4"]);
+        let a = replay(&["r1", "--run", "r2", "--module", "m.wasm", "--allow-missing"]);
+        assert_eq!(a.run_ids(), ["r1", "r2"]);
+        assert!(a.allow_missing && !a.conn.json);
+        let a = replay(&[
+            "r1",
+            "--module",
+            "m.wasm",
+            "--json",
+            "--server",
+            "http://h:1",
+        ]);
+        assert!(a.conn.json);
+        assert_eq!(a.conn.server, "http://h:1");
+    }
+
+    #[test]
+    fn replay_sample_and_corpus() {
+        let a = replay(&[
+            "--sample",
+            "5",
+            "--workflow",
+            "w",
+            "--status",
+            "completed",
+            "--module",
+            "m.wasm",
+        ]);
+        assert_eq!(a.sample, Some(5));
+        assert_eq!(a.workflow.as_deref(), Some("w"));
+        assert_eq!(a.status, Some(StatusArg::Completed));
+        assert!(a.run_ids().is_empty());
+        let a = replay(&["--corpus", "dir"]);
+        assert_eq!(a.corpus, Some(PathBuf::from("dir")));
+        assert!(a.module.is_none());
+        let a = replay(&["--corpus", "dir", "--module", "new.wasm"]);
+        assert_eq!(a.module, Some(PathBuf::from("new.wasm")));
+    }
+
+    #[test]
+    fn replay_selector_rules() {
+        // exactly one selector kind
+        usage(&["replay", "r1", "--sample", "3", "--module", "x.wasm"]);
+        usage(&[
+            "replay", "--run", "r1", "--sample", "3", "--module", "x.wasm",
+        ]);
+        usage(&["replay", "r1", "--corpus", "d"]);
+        usage(&["replay", "--run", "r1", "--corpus", "d"]);
+        usage(&["replay", "--sample", "3", "--corpus", "d"]);
+        // a selector is required
+        usage(&["replay", "--module", "x.wasm"]);
+        usage(&["replay"]);
+        // --module required unless --corpus
+        usage(&["replay", "r1"]);
+        usage(&["replay", "--sample", "2"]);
+        // --workflow / --status only with --sample
+        usage(&["replay", "r1", "--workflow", "w", "--module", "x.wasm"]);
+        usage(&["replay", "r1", "--status", "failed", "--module", "x.wasm"]);
+        usage(&["replay", "--sample", "x", "--module", "x.wasm"]);
+        usage(&["replay", "--corpus", "d", "--workflow", "w"]);
+        usage(&["replay", "--workflow", "w", "--module", "x.wasm"]);
+    }
+
+    #[test]
+    fn local_stubs_exit_2() {
+        for args in [
+            &["init"][..],
+            &["build"],
+            &["toolchain", "list"],
+            &["doctor"],
+            &["replay", "r1", "--module", "m.wasm"],
+        ] {
+            let cmd = parse(args).unwrap();
+            assert_eq!(run(cmd.clone()), Outcome::Usage, "{args:?}");
+            assert_eq!(block_on(dispatch(cmd)), Outcome::Usage, "{args:?}");
+        }
     }
 }

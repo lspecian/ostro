@@ -24,15 +24,19 @@ pub enum Outcome {
     Usage,
     /// `run --wait` / `result --wait` ended in a status other than `completed`.
     NotCompleted,
+    /// Phase 10 (D-P10-7): `ostro replay` found a diverged or skipped run.
+    Diverged,
 }
 
-/// The single exit-code mapping: 0 ok, 1 API/server error, 2 usage, 3 not completed.
+/// The single exit-code mapping: 0 ok, 1 API/server error, 2 usage, 3 not completed,
+/// 4 replay divergence (Phase 10, D-P10-10).
 pub fn exit_code(o: Outcome) -> u8 {
     match o {
         Outcome::Ok => 0,
         Outcome::Error => 1,
         Outcome::Usage => 2,
         Outcome::NotCompleted => 3,
+        Outcome::Diverged => 4,
     }
 }
 
@@ -130,6 +134,38 @@ pub fn token_prefix(token: &str) -> String {
     format!("{prefix}...")
 }
 
+/// The `--json` envelope of a **local** verb (D-P10-10: init, build, toolchain, doctor,
+/// replay, the build half of deploy), pretty-printed: an object whose first two keys are
+/// `"kind": "ostro.<kind>.result"` and `"version": 1`, followed by the fields of `body`
+/// in their order. A `kind` / `version` field inside `body` is dropped (the envelope
+/// owns them); a non-object `body` is placed under `"result"`.
+///
+/// serde_json's `preserve_order` feature is not enabled in this workspace (its map
+/// sorts keys), so the object is written by hand to keep the key order.
+pub fn local_json(kind: &str, body: &Value) -> String {
+    let kind = Value::String(format!("ostro.{kind}.result"));
+    let mut fields: Vec<(String, &Value)> = Vec::new();
+    match body {
+        Value::Object(m) => {
+            for (k, v) in m {
+                if k != "kind" && k != "version" {
+                    fields.push((k.clone(), v));
+                }
+            }
+        }
+        other => fields.push(("result".to_owned(), other)),
+    }
+    let mut out = format!("{{\n  \"kind\": {kind},\n  \"version\": 1");
+    for (k, v) in fields {
+        let pretty = serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string());
+        // JSON strings never contain a raw newline, so indenting by line is safe.
+        let indented = pretty.replace('\n', "\n  ");
+        out.push_str(&format!(",\n  {}: {indented}", Value::String(k)));
+    }
+    out.push_str("\n}");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +176,44 @@ mod tests {
         assert_eq!(exit_code(Outcome::Error), 1);
         assert_eq!(exit_code(Outcome::Usage), 2);
         assert_eq!(exit_code(Outcome::NotCompleted), 3);
+        assert_eq!(exit_code(Outcome::Diverged), 4);
+    }
+
+    #[test]
+    fn local_json_kind_and_version_first() {
+        let body = serde_json::json!({
+            "artifacts": [{"path": "a.wasm", "n": 1}],
+            "kind": "ignored",
+            "version": 99,
+            "a": "x\ny",
+        });
+        let s = local_json("build", &body);
+        assert!(
+            s.starts_with("{\n  \"kind\": \"ostro.build.result\",\n  \"version\": 1,\n"),
+            "{s}"
+        );
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["kind"], "ostro.build.result");
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["artifacts"][0]["path"], "a.wasm");
+        assert_eq!(v["a"], "x\ny");
+        assert_eq!(v.as_object().unwrap().len(), 4);
+        // body order preserved after the envelope keys (BTreeMap order: a, artifacts)
+        let ia = s.find("\"a\":").unwrap();
+        let ib = s.find("\"artifacts\":").unwrap();
+        assert!(s.find("\"version\"").unwrap() < ia && ia < ib, "{s}");
+
+        let empty = local_json("doctor", &serde_json::json!({}));
+        assert_eq!(
+            empty,
+            "{\n  \"kind\": \"ostro.doctor.result\",\n  \"version\": 1\n}"
+        );
+        let scalar: Value =
+            serde_json::from_str(&local_json("init", &serde_json::json!(3))).unwrap();
+        assert_eq!(
+            scalar,
+            serde_json::json!({"kind": "ostro.init.result", "version": 1, "result": 3})
+        );
     }
 
     #[test]
