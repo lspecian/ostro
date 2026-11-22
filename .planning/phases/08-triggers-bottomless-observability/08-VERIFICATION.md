@@ -1,8 +1,8 @@
 ---
 phase: 08-triggers-bottomless-observability
 verified: 2026-11-21T00:56:00Z
-status: human_needed
-score: 5/5 success criteria verified (SC3 closed by 08-23); 10/10 requirements satisfied in code; 10k campaign pending
+status: passed
+score: 5/5 success criteria verified (SC3 closed by 08-23); 10/10 requirements satisfied in code; 10k campaign PASS (2026-11-22)
 re_verification:
   previous_status: gaps_found
   previous_score: 4/5 (SC3 partial on its RPO bound)
@@ -153,3 +153,8 @@ Phase 8 is not marked passed until the restarted 10,000-fault campaign finishes 
 
 _Verified: 2026-11-21T00:56:00Z (re-verification after 08-23; previous: 2026-11-20T23:29:19Z, gaps_found)_
 _Verifier: Claude (gsd-verifier)_
+
+
+## Closure (2026-11-22, coordinator)
+
+Both human-verification items are done: the restarted 10,000-kill campaign reports  (kills=10000, 0 lost acked runs/signals, 0 duplicates, 0 non-terminal, 0 wrong results, restore_checked on 20/20 shards) after the user-approved crashtest checker fix (dd23bcc: wait winner read from the journal, new LostWake check; 21 late-signal false positives removed, 0 lost wakes) and a clean shard-10 rerun (500 kills, no Node::open timeout); evidence in 08-VALIDATION.md (d1f3119). Quiet-machine restore_rpo: loss window p50 460 ms, max 712 ms (<= 1,000 ms seal). Phase 8 marked complete.

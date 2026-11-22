@@ -39,7 +39,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 5: Workflow Semantics & Core Hardening** - Timers, signals, concurrency, cancel, patching, timeouts; crash-injection harness, replay corpus, retention, WIT 0.1 freeze
 - [x] **Phase 6: Effects Bridge, Connectors & Secrets** - HTTP/SQL/object-store effects with idempotency semantics, origin-bound secrets, SSRF-hardened egress
 - [x] **Phase 7: Workers, Placement & Flow Control** - mTLS stateless workers, embedded/workers/auto placement, KEDA demand, keyed concurrency/throttle/rate limits, pause, fencing chaos
-- [ ] **Phase 8: Triggers, Bottomless & Observability** - Webhooks and cron, object-storage backup/restore with a single snapshot format, OTel traces, Prometheus metrics, guest logs
+- [x] **Phase 8: Triggers, Bottomless & Observability** - Webhooks and cron, object-storage backup/restore with a single snapshot format, OTel traces, Prometheus metrics, guest logs
 - [ ] **Phase 9: Polyglot SDKs & Conformance** - Python and TypeScript SDKs with SDK-owned event loops and reseeding, cross-language children, saga helper, three-SDK conformance
 - [ ] **Phase 10: Developer CLI & Test Kits** - `ostro init/build/deploy/replay/dev --watch` with hermetic toolchains, time-skipping test harnesses, thin client libraries
 - [ ] **Phase 11: Run Operations & Embedded UI** - Rerun-from-step, bulk ops, DLQ with `on_failure`, tags/search, published limits, and an embedded UI with actions

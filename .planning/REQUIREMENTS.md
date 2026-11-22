@@ -308,9 +308,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | API-06 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
 | API-07 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
 | API-08 | Phase 13 | Pending |
-| TRIG-01 | Phase 8 | Pending |
-| TRIG-02 | Phase 8 | Pending |
-| TRIG-03 | Phase 8 | Pending |
+| TRIG-01 | Phase 8 | Complete |
+| TRIG-02 | Phase 8 | Complete |
+| TRIG-03 | Phase 8 | Complete |
 | FX-01 | Phase 6 | Complete |
 | FX-02 | Phase 6 | Complete |
 | FX-03 | Phase 6 | Complete |
@@ -327,10 +327,10 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | WORK-04 | Phase 7 | Complete |
 | WORK-05 | Phase 7 | Partial (KEDA simulator 0→N→0 verified locally; real KEDA human_needed) |
 | WORK-06 | Phase 7 | Complete |
-| BACK-01 | Phase 8 | Pending |
-| BACK-02 | Phase 8 | Pending |
-| BACK-03 | Phase 8 | Pending |
-| BACK-04 | Phase 8 | Pending |
+| BACK-01 | Phase 8 | Complete |
+| BACK-02 | Phase 8 | Complete |
+| BACK-03 | Phase 8 | Complete |
+| BACK-04 | Phase 8 | Complete |
 | OPS-01 | Phase 7 | Complete |
 | OPS-02 | Phase 11 | Pending |
 | OPS-03 | Phase 11 | Pending |
@@ -356,9 +356,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | UI-01 | Phase 11 | Pending |
 | UI-02 | Phase 11 | Pending |
 | UI-03 | Phase 11 | Pending |
-| OBS-01 | Phase 8 | Pending |
-| OBS-02 | Phase 8 | Pending |
-| OBS-03 | Phase 8 | Pending |
+| OBS-01 | Phase 8 | Complete |
+| OBS-02 | Phase 8 | Complete |
+| OBS-03 | Phase 8 | Complete |
 | SEC-01 | Phase 7 | Partial (self-signed/files/ACME-Pebble verified locally; Let's Encrypt staging human_needed) |
 | SEC-02 | Phase 14 | Pending |
 | SEC-03 | Phase 14 | Pending |
