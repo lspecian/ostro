@@ -622,6 +622,9 @@ async fn shared_input_blob_survives_gc_after_the_source_expires() {
     let orphan = blobs
         .put(b"orphan blob for the rerun gc test")
         .expect("put");
+    // The pass's cutoff is `now_ms` truncated to whole milliseconds while the blob's
+    // mtime is finer: let the mtime fall strictly before the cutoff.
+    tokio::time::sleep(Duration::from_millis(20)).await;
     let gc = BlobGc::new(
         Arc::clone(&blobs),
         s.data_dir().to_path_buf(),
