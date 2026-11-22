@@ -13,6 +13,9 @@
 //!   `{"ok": <value>}` or `{"error": <failure>}`; failures are
 //!   `{"type": "retryable" | "non_retryable" | "timeout" | "cancelled", "kind", "message"}`.
 //!
+//! - `attempt`: the stored `JournalEvent.attempt` (`epoch << 32 | n`, D-P11-18); `0`
+//!   (apply-originated, or written before Phase 11) is `None` ([`attempt_of`]).
+//!
 //! The page size is `effective_limit(limit)` (default 100, max 1000); `next_from_seq` is
 //! the seq of the first event not returned.
 
@@ -206,6 +209,76 @@ pub fn details(body: &EventBody) -> Value {
     }
 }
 
+/// The API view of a stored `JournalEvent.attempt`: 0 (unset) is `None`.
+pub fn attempt_of(stored: u64) -> Option<u64> {
+    (stored != 0).then_some(stored)
+}
+
+/// `seq -> JournalEvent.attempt` of the rows [`query::journal_rows`] returns for the same
+/// arguments. `query` exposes only `(seq, kind, payload)`, and this crate has no prost
+/// dependency, so the two fields are read from the protobuf encoding directly
+/// ([`event_seq_and_attempt`]).
+fn journal_attempts(
+    reader: &ostro_partition::store::StoreReader,
+    run: &ostro_types::RunId,
+    from_seq: u64,
+    limit: usize,
+) -> Result<std::collections::HashMap<u64, u64>, ostro_partition::StoreError> {
+    let from = ostro_partition::store::keys::event_key(run, from_seq);
+    let mut to = run.as_bytes().to_vec();
+    to.extend_from_slice(&[0xff; 9]);
+    let rows = reader.range(ostro_partition::store::Table::Events, &from, &to, limit)?;
+    Ok(rows
+        .iter()
+        .filter_map(|(_, v)| event_seq_and_attempt(v))
+        .collect())
+}
+
+/// `(seq, attempt)` of an encoded `JournalEvent` (field 1 varint, field 4 fixed64; other
+/// fields skipped by wire type). `None` when the bytes are not a well-formed message.
+pub fn event_seq_and_attempt(mut b: &[u8]) -> Option<(u64, u64)> {
+    fn varint(b: &mut &[u8]) -> Option<u64> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let (&x, rest) = b.split_first()?;
+            *b = rest;
+            v |= u64::from(x & 0x7f) << shift;
+            if x & 0x80 == 0 {
+                return Some(v);
+            }
+        }
+        None
+    }
+    fn skip(b: &mut &[u8], n: usize) -> Option<()> {
+        *b = b.get(n..)?;
+        Some(())
+    }
+    let mut seq = 0;
+    let mut attempt = 0;
+    while !b.is_empty() {
+        let key = varint(&mut b)?;
+        match (key >> 3, key & 7) {
+            (1, 0) => seq = varint(&mut b)?,
+            (4, 1) => {
+                let raw: [u8; 8] = b.get(..8)?.try_into().ok()?;
+                attempt = u64::from_le_bytes(raw);
+                skip(&mut b, 8)?;
+            }
+            (_, 0) => {
+                varint(&mut b)?;
+            }
+            (_, 1) => skip(&mut b, 8)?,
+            (_, 2) => {
+                let n = usize::try_from(varint(&mut b)?).ok()?;
+                skip(&mut b, n)?;
+            }
+            (_, 5) => skip(&mut b, 4)?,
+            _ => return None,
+        }
+    }
+    Some((seq, attempt))
+}
+
 pub(crate) async fn run_history(
     cp: &ServerControlPlane,
     req: HistoryRequest,
@@ -219,14 +292,16 @@ pub(crate) async fn run_history(
         if query::run_record(&reader, &run)?.is_none() {
             return Ok(None);
         }
-        query::journal_rows(&reader, &run, from, limit + 1).map(Some)
+        let rows = query::journal_rows(&reader, &run, from, limit + 1)?;
+        let attempts = journal_attempts(&reader, &run, from, limit + 1)?;
+        Ok(Some((rows, attempts)))
     })
     .await
     .map_err(task_error)?
     .map_err(store_error)?
     .ok_or_else(|| not_found(&req.run_id))?;
 
-    let mut rows = rows;
+    let (mut rows, attempts) = rows;
     let next_from_seq = (rows.len() > limit).then(|| rows[limit].0);
     rows.truncate(limit);
     let mut events = Vec::with_capacity(rows.len());
@@ -243,7 +318,7 @@ pub(crate) async fn run_history(
             ts_ms: ms(ev.ts_nanos),
             summary: ev.body.summary(),
             details_json: details(&ev.body).to_string().into_bytes(),
-            attempt: None,
+            attempt: attempts.get(&seq).copied().and_then(attempt_of),
         });
     }
     Ok(HistoryPage {
@@ -255,6 +330,27 @@ pub(crate) async fn run_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attempt_is_read_from_the_encoded_journal_event() {
+        // seq = 300 (varint 0xac 0x02), kind = 7, payload = 3 bytes, attempt = (2 << 32) | 5.
+        let attempt: u64 = (2 << 32) | 5;
+        let mut b = vec![0x08, 0xac, 0x02, 0x10, 0x07, 0x1a, 0x03, 1, 2, 3, 0x21];
+        b.extend_from_slice(&attempt.to_le_bytes());
+        assert_eq!(event_seq_and_attempt(&b), Some((300, attempt)));
+        // Without field 4 (pre-Phase 11 or apply-originated): 0 -> None.
+        assert_eq!(event_seq_and_attempt(&b[..10]), Some((300, 0)));
+        assert_eq!(attempt_of(0), None);
+        assert_eq!(attempt_of(attempt), Some(attempt));
+        // Unknown fields of every wire type are skipped.
+        let mut u = vec![
+            0x08, 0x01, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0x35, 0, 0, 0, 0, 0x21,
+        ];
+        u.extend_from_slice(&9u64.to_le_bytes());
+        assert_eq!(event_seq_and_attempt(&u), Some((1, 9)));
+        // Truncated input.
+        assert_eq!(event_seq_and_attempt(&b[..b.len() - 1]), None);
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {

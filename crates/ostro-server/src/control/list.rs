@@ -24,8 +24,10 @@
 //! empty pages with tokens until the scan reaches the end. Reads happen in
 //! `spawn_blocking`, [`REFILL`] rows per partition at a time.
 //!
-//! Filters are applied in memory: workflow, status, queue, tag (the run carries it) and the
-//! creation range `created_after_ms <= created_at_ms < created_before_ms`.
+//! Filters are applied in memory: workflow, status, queue, tag (the run carries it), every
+//! entry of `tags` (AND), `dlq` (failed or timed out) and the creation range
+//! `created_after_ms <= created_at_ms < created_before_ms`. Newest-first and DLQ listings
+//! are served by `p11_search` (the run index) and use this scan only as their fallback.
 
 use std::collections::VecDeque;
 
@@ -92,16 +94,26 @@ struct Stream {
     done: bool,
 }
 
-fn matches(req: &ListRunsRequest, rec: &RunRecord) -> bool {
+/// The in-memory filters of a listing. Phase 11 (11-11): every entry of `tags` must be
+/// carried (AND), and `dlq` keeps only failed / timed-out runs (the indexed path refines
+/// this with `p11_dlq::is_dlq_member`).
+pub(crate) fn matches(req: &ListRunsRequest, rec: &RunRecord) -> bool {
     req.workflow.as_ref().is_none_or(|w| *w == rec.workflow)
         && req.status.is_none_or(|s| s == status(rec.status))
         && req.queue.as_ref().is_none_or(|q| *q == rec.queue)
         && req.tag.as_ref().is_none_or(|t| rec.tags.contains(t))
+        && req.tags.iter().all(|t| rec.tags.contains(t))
+        && (!req.dlq
+            || matches!(
+                rec.status,
+                ostro_partition::store::values::RunStatus::Failed
+                    | ostro_partition::store::values::RunStatus::TimedOut
+            ))
         && req.created_after_ms.is_none_or(|a| rec.created_at_ms >= a)
         && req.created_before_ms.is_none_or(|b| rec.created_at_ms < b)
 }
 
-fn summary(run: RunId, rec: RunRecord) -> RunSummary {
+pub(crate) fn summary(run: RunId, rec: RunRecord) -> RunSummary {
     RunSummary {
         run_id: run.to_string(),
         workflow: rec.workflow,
@@ -153,6 +165,21 @@ pub async fn list_runs_with_budget(
     req: ListRunsRequest,
     budget: usize,
 ) -> Result<RunPage, ApiError> {
+    list_runs_scan(cp, req, budget, &|_, _| Ok(true)).await
+}
+
+/// Extra per-run predicate of [`list_runs_scan`] (Phase 11: DLQ membership).
+pub(crate) type Keep = dyn Fn(&RunId, &RunRecord) -> Result<bool, ApiError> + Send + Sync;
+
+/// The budgeted oldest-first scan with an extra predicate `keep` on top of [`matches`]
+/// (11-11: the fallback of `p11_search` while the run index is rebuilding, and DLQ
+/// listings in oldest order).
+pub(crate) async fn list_runs_scan(
+    cp: &ServerControlPlane,
+    req: ListRunsRequest,
+    budget: usize,
+    keep: &Keep,
+) -> Result<RunPage, ApiError> {
     let budget = budget.max(1);
     let count = cp.partition_count();
     let limit = effective_limit(req.limit) as usize;
@@ -193,7 +220,7 @@ pub async fn list_runs_with_budget(
         let (run, rec) = streams[i].buf.pop_front().expect("front exists");
         scanned += 1;
         last = k;
-        if matches(&req, &rec) {
+        if matches(&req, &rec) && keep(&run, &rec)? {
             runs.push(summary(run, rec));
         }
         if runs.len() >= limit || scanned >= budget {
