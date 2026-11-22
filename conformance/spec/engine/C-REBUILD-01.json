@@ -1,0 +1,16 @@
+{
+  "id": "C-REBUILD-01",
+  "title": "journals recorded on one build replay with 0 appended events and no non-determinism on an independently rebuilt module",
+  "leg": "engine",
+  "workflow": "conf_steps",
+  "expect": {
+    "status": "completed",
+    "rebuild": {
+      "runner": "crates/ostro-conformance/tests/rebuild.rs",
+      "build_a": "langs::module_for (polyglot cache / target/guests)",
+      "build_b": "fresh build of the same source: build-guest.sh into a new temp dir (py, ts), cargo into target/rebuild-rust (rust)",
+      "scenarios": "every engine-leg scenario (kind scenario) allowed for the language: its journals from build A replay on build B with 0 appended events and no NonDeterminism; a non_determinism scenario (C-NDET-01) must stay non_determinism on build B",
+      "setorder": "conformance/fixtures/py-setorder (set of 20 str iterated into steps): same step order on both builds when the str hash secret is pinned at pre-init; otherwise the replay of build A's journal on build B must end in NonDeterminism"
+    }
+  }
+}

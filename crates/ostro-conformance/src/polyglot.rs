@@ -2,7 +2,10 @@
 //!
 //! The cache key is sha256 over the mode, `build-guest.sh`, the toolchain lock, the bundle
 //! config, the frozen WIT, and every file of the guest dir and of the mode's SDK dir (when
-//! present), sorted by relative path (`node_modules`, `__pycache__` and `.venv` excluded).
+//! present), sorted by relative path (`node_modules`, `__pycache__` and `.venv` excluded),
+//! plus, for Python, the componentize-py selection (`OSTRO_COMPONENTIZE_PY`: path, size and
+//! mtime of the fork binary, 09-17), so the released wheel and the D-P9-3 fork never share
+//! cache entries.
 //! Components land in `$OSTRO_POLYGLOT_CACHE` or `<repo>/target/polyglot-guests`. A
 //! process-wide mutex serialises builds (a guest build can take ~0.5 GB, Pitfall 10).
 
@@ -137,6 +140,28 @@ pub fn cache_key(mode: Mode, guest_dir: &Path) -> Result<String, String> {
         "runtime.wit",
         &root.join("wit/ostro-runtime-0.1.0/runtime.wit"),
     )?;
+    if mode == Mode::Py {
+        match std::env::var_os("OSTRO_COMPONENTIZE_PY").filter(|v| !v.is_empty()) {
+            Some(bin) => {
+                let meta = std::fs::metadata(&bin)
+                    .map_err(|e| format!("OSTRO_COMPONENTIZE_PY {}: {e}", bin.to_string_lossy()))?;
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                h.update(
+                    format!(
+                        "componentize-py:{}:{}:{mtime}\0",
+                        bin.to_string_lossy(),
+                        meta.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+            None => h.update(b"componentize-py:released-0.25.1\0"),
+        }
+    }
     hash_tree(&mut h, "guest", guest_dir)?;
     let sdk = mode.sdk_dir();
     if sdk.is_dir() {

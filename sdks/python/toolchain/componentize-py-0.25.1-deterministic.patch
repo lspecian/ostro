@@ -1,0 +1,227 @@
+diff --git a/src/deterministic.rs b/src/deterministic.rs
+new file mode 100644
+index 0000000..25b149b
+--- /dev/null
++++ b/src/deterministic.rs
+@@ -0,0 +1,100 @@
++//! Deterministic pre-initialization (reproducible builds).
++//!
++//! Pre-init snapshots the guest's memory, so anything the interpreter reads
++//! from the host while initializing ends up in the output: random bytes (the
++//! str hash secret, `random` seeding), clock readings and the mtimes of the
++//! files it imports (cached by importlib).  Pin all of them so the same inputs
++//! produce the same component bytes.
++
++use std::{
++    fs::{self, File, FileTimes},
++    path::Path,
++    sync::atomic::{AtomicU64, Ordering},
++    time::{Duration, SystemTime},
++};
++
++use anyhow::Result;
++use wasmtime_wasi::{
++    Deterministic, WasiCtxBuilder,
++    clocks::{HostMonotonicClock, HostWallClock},
++};
++
++/// `SOURCE_DATE_EPOCH` (seconds) when set, else 0.
++fn epoch() -> u64 {
++    std::env::var("SOURCE_DATE_EPOCH")
++        .ok()
++        .and_then(|v| v.trim().parse().ok())
++        .unwrap_or(0)
++}
++
++fn bytes() -> Vec<u8> {
++    (0u32..256)
++        .map(|i| (i.wrapping_mul(167).wrapping_add(13) & 0xff) as u8)
++        .collect()
++}
++
++/// A wall clock starting at `SOURCE_DATE_EPOCH` that advances 1 µs per read.
++struct FixedWall {
++    base: Duration,
++    reads: AtomicU64,
++}
++
++impl HostWallClock for FixedWall {
++    fn resolution(&self) -> Duration {
++        Duration::from_micros(1)
++    }
++    fn now(&self) -> Duration {
++        self.base + Duration::from_micros(self.reads.fetch_add(1, Ordering::Relaxed))
++    }
++}
++
++/// A monotonic clock that advances 1 µs per read.
++struct FixedMonotonic {
++    reads: AtomicU64,
++}
++
++impl HostMonotonicClock for FixedMonotonic {
++    fn resolution(&self) -> u64 {
++        1_000
++    }
++    fn now(&self) -> u64 {
++        self.reads.fetch_add(1, Ordering::Relaxed) * 1_000
++    }
++}
++
++/// Fixed random sources and clocks for the pre-init WASI context.
++pub fn configure(wasi: &mut WasiCtxBuilder) {
++    wasi.secure_random(Deterministic::new(bytes()))
++        .insecure_random(Deterministic::new(bytes()))
++        .insecure_random_seed(0x6f73_7472_6f2d_7265_7072_6f2d_7365_6564)
++        .wall_clock(FixedWall {
++            base: Duration::from_secs(epoch()),
++            reads: AtomicU64::new(0),
++        })
++        .monotonic_clock(FixedMonotonic {
++            reads: AtomicU64::new(0),
++        });
++}
++
++/// Sets the access and modification times of `path` and everything below it to
++/// `SOURCE_DATE_EPOCH` (the status-change/birth time cannot be set from user space).
++pub fn pin_mtimes(path: &Path) -> Result<()> {
++    let t = SystemTime::UNIX_EPOCH + Duration::from_secs(epoch());
++    pin(path, t)
++}
++
++fn pin(path: &Path, t: SystemTime) -> Result<()> {
++    let meta = fs::symlink_metadata(path)?;
++    if meta.is_dir() {
++        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
++        entries.sort_by_key(|e| e.file_name());
++        for entry in entries {
++            pin(&entry.path(), t)?;
++        }
++    } else if !meta.is_file() {
++        return Ok(());
++    }
++    // Directories last, after their children were touched.
++    File::open(path)?.set_times(FileTimes::new().set_accessed(t).set_modified(t))?;
++    Ok(())
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index c0b52fe..a6974a7 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -43,6 +43,7 @@ mod link;
+ mod prelink;
+ #[cfg(feature = "pyo3")]
+ mod python;
++mod deterministic;
+ mod stubwasi;
+ mod summary;
+ #[cfg(test)]
+@@ -677,6 +678,8 @@ impl ComponentGenerator<'_> {
+             .stderr(stderr.clone())
+             .env("PYTHONUNBUFFERED", "1")
+             .env("PYTHONHOME", "/python")
++            .env("PYTHONHASHSEED", "0")
++            .env("PYTHONDONTWRITEBYTECODE", "1")
+             .preopened_dir(
+                 embedded_python_standard_lib.path(),
+                 "python",
+@@ -699,6 +702,8 @@ impl ComponentGenerator<'_> {
+         // specifies where generated bindings for that package should be placed,
+         // generate the bindings and place them as indicated.
+ 
++        deterministic::configure(&mut wasi);
++
+         let mut world_dir_mounts = Vec::new();
+         let mut locations = Locations::default();
+ 
+@@ -777,6 +782,13 @@ impl ComponentGenerator<'_> {
+             replace(embedded_helper_utils.path(), "wit_world", module)?;
+         };
+ 
++        // Generated bindings and the rewritten helpers carry this build's
++        // mtimes; pin them (and the tempdir roots) before pre-init reads them.
++        deterministic::pin_mtimes(embedded_helper_utils.path())?;
++        for (_, world_dir) in world_dir_mounts.iter() {
++            deterministic::pin_mtimes(world_dir.path())?;
++        }
++
+         for (mounts, world_dir) in world_dir_mounts.iter() {
+             for mount in mounts {
+                 if DEBUG_PYTHON_BINDINGS {
+diff --git a/src/prelink.rs b/src/prelink.rs
+index 3aac57a..5eec3bf 100644
+--- a/src/prelink.rs
++++ b/src/prelink.rs
+@@ -1,7 +1,7 @@
+ #![deny(warnings)]
+ 
+ use std::{
+-    collections::{HashMap, HashSet},
++    collections::{BTreeMap, HashSet},
+     fs::{self},
+     io::Cursor,
+     ops::Deref,
+@@ -40,6 +40,8 @@ pub fn embedded_python_standard_library() -> Result<TempDir> {
+     .unpack(stdlib.path())
+     .unwrap();
+ 
++    crate::deterministic::pin_mtimes(stdlib.path())?;
++
+     Ok(stdlib)
+ }
+ 
+@@ -54,6 +56,8 @@ pub fn embedded_helper_utils() -> Result<TempDir> {
+     .unpack(bundled.path())
+     .unwrap();
+ 
++    crate::deterministic::pin_mtimes(bundled.path())?;
++
+     Ok(bundled)
+ }
+ 
+@@ -209,7 +213,7 @@ pub fn search_for_libraries_and_configs<'a>(
+                     },
+                 ))
+             })
+-            .collect::<Result<HashMap<_, _>>>()?;
++            .collect::<Result<BTreeMap<_, _>>>()?;
+ 
+         let mut ordered = IndexMap::new();
+         for &(module, worlds) in module_worlds {
+diff --git a/src/stubwasi.rs b/src/stubwasi.rs
+index 70366f6..666a5a5 100644
+--- a/src/stubwasi.rs
++++ b/src/stubwasi.rs
+@@ -1,4 +1,4 @@
+-use std::collections::HashMap;
++use std::collections::BTreeMap;
+ 
+ use anyhow::{Error, bail};
+ use wasm_encoder::{
+@@ -12,7 +12,7 @@ use crate::Library;
+ type LinkedStubModules = Option<(Vec<u8>, Box<dyn Fn(u32) -> u32>)>;
+ 
+ pub fn link_stub_modules(libraries: Vec<Library>) -> Result<LinkedStubModules, Error> {
+-    let mut wasi_imports = HashMap::new();
++    let mut wasi_imports = BTreeMap::new();
+     let mut linker = wit_component::Linker::default()
+         .validate(true)
+         .use_built_in_libdl(true);
+@@ -68,7 +68,7 @@ pub fn link_stub_modules(libraries: Vec<Library>) -> Result<LinkedStubModules, E
+ 
+ fn add_wasi_imports<'a>(
+     module: &'a [u8],
+-    imports: &mut HashMap<&'a str, HashMap<&'a str, FuncType>>,
++    imports: &mut BTreeMap<&'a str, BTreeMap<&'a str, FuncType>>,
+ ) -> Result<(), Error> {
+     let mut types = Vec::new();
+     for payload in Parser::new(0).parse_all(module) {
+@@ -109,7 +109,7 @@ fn add_wasi_imports<'a>(
+     Ok(())
+ }
+ 
+-fn make_stub_adapter(_module: &str, stubs: &HashMap<&str, FuncType>) -> Vec<u8> {
++fn make_stub_adapter(_module: &str, stubs: &BTreeMap<&str, FuncType>) -> Vec<u8> {
+     let mut types = TypeSection::new();
+     let mut functions = FunctionSection::new();
+     let mut exports = ExportSection::new();

@@ -4,7 +4,9 @@
 #   build-guest.sh <py|ts|ts-sm> <guest_dir> <out.wasm>
 #
 #   py     componentize-py 0.25.1 --stub-wasi; entry module app.py; sdks/python/ostro is
-#          staged next to it when present.
+#          staged next to it when present. The released 0.25.1 wheel runs via uv, unless
+#          OSTRO_COMPONENTIZE_PY names a componentize-py binary (the D-P9-3 step-2 fork built
+#          by build-componentize-py-fork.sh; docs/sdk-builds.md).
 #   ts     jco 1.42.0, QuickJS backend (sync export, WASI stubbed); entry index.ts;
 #          sdks/ts is staged as node_modules/ostro when present.
 #   ts-sm  jco 1.42.0 + componentize-js 0.23.0, StarlingMonkey backend, --disable all.
@@ -91,14 +93,19 @@ pin_mtimes() {
 }
 
 build_py() {
-    require_uv
+    [ -n "${OSTRO_COMPONENTIZE_PY:-}" ] || require_uv
     stage_copy "$GUEST_DIR" "$STAGE/src"
     if [ -d "$ROOT/sdks/python/ostro" ]; then
         stage_copy "$ROOT/sdks/python/ostro" "$STAGE/src/ostro"
     fi
     [ -f "$STAGE/src/app.py" ] || die "$GUEST_DIR has no app.py"
     pin_mtimes
-    (cd "$STAGE/src" && uv tool run --from componentize-py==0.25.1 componentize-py \
+    local cpy=(uv tool run --from componentize-py==0.25.1 componentize-py)
+    if [ -n "${OSTRO_COMPONENTIZE_PY:-}" ]; then
+        [ -x "$OSTRO_COMPONENTIZE_PY" ] || die "OSTRO_COMPONENTIZE_PY is not executable: $OSTRO_COMPONENTIZE_PY"
+        cpy=("$OSTRO_COMPONENTIZE_PY")
+    fi
+    (cd "$STAGE/src" && "${cpy[@]}" \
         -d "$WIT" -w ostro:runtime/workflow@0.1.0 \
         componentize --stub-wasi -p "$STAGE/src" app -o "$OUT")
 }
