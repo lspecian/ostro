@@ -26,9 +26,10 @@ use ostro_partition::{
     ApplyOutcome, MachineConfig, Node, NodeConfig, PartitionSlot, StartMode, Table, query,
 };
 use ostro_types::command::{
-    AttemptTokenMsg, CompleteRun, Derived, EventsAppended, JournalEvent, MAX_RUN_TAGS,
-    MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg, ScheduleTimer, SendMessage,
-    Signal, StartRun, TerminalStatus, derived, outbox_msg,
+    AttemptTokenMsg, CompleteRun, DLQ_DISMISS_REASON_MAX, Derived, DlqUpdate, EventsAppended,
+    JournalEvent, MAX_RUN_TAGS, MAX_TENANT_LEN, MAX_TRACEPARENT_LEN, MODULE_SHA_LEN, OutboxMsg,
+    RetryRun, ScheduleTimer, SendMessage, Signal, StartRun, TerminalStatus, derived, dlq_update,
+    outbox_msg,
 };
 use ostro_types::{
     AttemptToken, Command, INLINE_PAYLOAD_LIMIT, PartitionCount, PartitionId, PayloadRef, RunId,
@@ -117,6 +118,65 @@ enum Op {
     /// Plan 07-04: pause/resume commands from `common::gen_pause` (with inputs, timeouts,
     /// terminate and RetryRun around them).
     Pause(Option<PauseOp>),
+    /// Plan 11-08: `DlqUpdate` (Cmd 45) marks around failing / timed-out runs.
+    Dlq(DlqOp),
+}
+
+/// Plan 11-08: one dead-letter mark on driver run `i` of partition `p`, optionally after
+/// ending the run (`fail`: `Some(false)` Failed, `Some(true)` Completed, a non-DLQ status) and
+/// optionally followed by a `RetryRun` (so a later failure opens a new episode).
+#[derive(Clone, Debug)]
+struct DlqOp {
+    p: u16,
+    i: usize,
+    fail: Option<bool>,
+    /// 0 HookStarted, 1 Dismissed, 2 Requeued.
+    kind: u8,
+    /// Requeue mode 0..=3 (3 is invalid).
+    mode: u32,
+    /// 0 the run's current episode, 1 a stale one (current - 1), 2 zero.
+    episode: u8,
+    /// A malformation: 0 17-byte run id, 1 no op, 2 reason too long, 3 bad hook / target id.
+    bad: Option<u8>,
+    hook: u8,
+    twice: bool,
+    retry: bool,
+}
+
+/// Accepted `DlqUpdate`s across the test binary (coverage check of `fixed_scenario_dlq`).
+static DLQ_ACCEPTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn dlq_strategy() -> impl Strategy<Value = DlqOp> {
+    (
+        (
+            0..P,
+            any::<usize>(),
+            proptest::option::weighted(0.6, proptest::bool::weighted(0.2)),
+            0u8..3,
+            0u32..4,
+        ),
+        (
+            prop_oneof![6 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)],
+            proptest::option::weighted(0.15, 0u8..4),
+            0u8..3,
+            proptest::bool::weighted(0.3),
+            proptest::bool::weighted(0.3),
+        ),
+    )
+        .prop_map(
+            |((p, i, fail, kind, mode), (episode, bad, hook, twice, retry))| DlqOp {
+                p,
+                i,
+                fail,
+                kind,
+                mode,
+                episode,
+                bad,
+                hook,
+                twice,
+                retry,
+            },
+        )
 }
 
 fn cfg_strategy() -> impl Strategy<Value = Cfg> {
@@ -173,6 +233,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         2 => common::gen_effects::strategy().prop_map(Op::Effects),
         // Plan 07-04 generator hook.
         2 => common::gen_pause::strategy().prop_map(Op::Pause),
+        // Plan 11-08: DLQ marks (weighted low).
+        1 => dlq_strategy().prop_map(Op::Dlq),
     ]
 }
 
@@ -545,10 +607,134 @@ async fn drive(dir: &Path, sc: &Scenario) {
                     submit_all(&node, common::gen_pause::commands(o, &view, n)).await;
                 }
             }
+            Op::Dlq(d) => drive_dlq(&node, &mut runs, d, n).await,
         }
     }
     settle(&node).await;
     node.shutdown().await.expect("shutdown");
+}
+
+/// Plan 11-08: ends the run (optionally), submits the mark (optionally twice), then
+/// (optionally) resumes it. Outcomes are free: rejections are deterministic too.
+async fn drive_dlq(node: &Node, runs: &mut [Vec<RunModel>], d: &DlqOp, n: usize) {
+    let pi = usize::from(d.p);
+    if runs[pi].is_empty() {
+        return;
+    }
+    let k = d.i % runs[pi].len();
+    let r = &mut runs[pi][k];
+    if let Some(completed) = d.fail {
+        r.next_seq = live_next_seq(node, d.p, &r.id, r.next_seq);
+        let t = r.token.unwrap_or(AttemptToken {
+            epoch: ostro_types::Epoch(1),
+            n: 1,
+        });
+        let status = if completed {
+            TerminalStatus::Completed
+        } else {
+            TerminalStatus::Failed
+        };
+        let c = Command::events_appended(EventsAppended {
+            run_id: r.id.as_bytes().to_vec(),
+            token: Some(AttemptTokenMsg {
+                epoch: t.epoch.0,
+                n: t.n,
+            }),
+            from_seq: r.next_seq,
+            events: vec![JournalEvent {
+                seq: r.next_seq,
+                kind: 16,
+                payload: inline(b"e"),
+                ..Default::default()
+            }],
+            derived: vec![intent(derived::Intent::CompleteRun(CompleteRun {
+                status: status as i32,
+                result: inline(b"out"),
+                // Unique per op: a later failure is a new episode.
+                completed_at_ms: 1_000 + n as u64,
+                resumable: true,
+                parent_event: None,
+            }))],
+        });
+        if submit(node, d.p, c).await == ApplyOutcome::Accepted {
+            r.next_seq += 1;
+        }
+    }
+    let current = node
+        .handle(PartitionId(d.p))
+        .expect("ready")
+        .read_run(&r.id)
+        .ok()
+        .flatten()
+        .and_then(|rec| rec.completed_at_ms)
+        .unwrap_or(0);
+    let episode = match d.episode {
+        0 => current,
+        1 => current.saturating_sub(1),
+        _ => 0,
+    };
+    let other = run_on(d.p);
+    let target = if d.bad == Some(3) {
+        vec![1u8; 17]
+    } else {
+        other.as_bytes().to_vec()
+    };
+    let op = match d.kind {
+        0 => dlq_update::Op::HookStarted(dlq_update::HookStarted {
+            hook_run_id: if d.bad == Some(3) {
+                target
+            } else {
+                // A small set of hook ids, so a second, different hook happens.
+                let mut b = *r.id.as_bytes();
+                b[17] ^= 0x80 | d.hook;
+                b.to_vec()
+            },
+        }),
+        1 => dlq_update::Op::Dismissed(dlq_update::Dismissed {
+            reason: if d.bad == Some(2) {
+                "r".repeat(DLQ_DISMISS_REASON_MAX + 1)
+            } else {
+                format!("reason {}", d.hook)
+            },
+            at_ms: 2_000 + n as u64,
+        }),
+        _ => dlq_update::Op::Requeued(dlq_update::Requeued {
+            mode: d.mode,
+            new_run_id: if d.mode == dlq_update::REQUEUE_RESUME && d.bad != Some(3) {
+                Vec::new()
+            } else {
+                target
+            },
+            at_ms: 3_000 + n as u64,
+        }),
+    };
+    let run_id = if d.bad == Some(0) {
+        r.id.as_bytes()[..17].to_vec()
+    } else {
+        r.id.as_bytes().to_vec()
+    };
+    let c = Command::dlq_update(DlqUpdate {
+        run_id,
+        op: (d.bad != Some(1)).then_some(op),
+        episode_completed_at_ms: episode,
+    });
+    if submit(node, d.p, c.clone()).await == ApplyOutcome::Accepted {
+        DLQ_ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if d.twice {
+        submit(node, d.p, c).await;
+    }
+    if d.retry {
+        submit(
+            node,
+            d.p,
+            Command::retry_run(RetryRun {
+                run_id: r.id.as_bytes().to_vec(),
+                requested_at_ms: 4_000 + n as u64,
+            }),
+        )
+        .await;
+    }
 }
 
 /// Outboxes empty and no log growth for 150 ms (shuffler and timers idle).
@@ -994,6 +1180,70 @@ fn fixed_scenario_pause() {
         rebuild_chunks: (1, 1024),
     };
     rt().block_on(check(sc)).expect("live == rebuilt");
+}
+
+/// Plan 11-08: a fixed DLQ scenario: runs granted, failed (and some completed), all three marks
+/// (valid, repeated, stale-episode, malformed), RetryRun resumes and re-failures (new
+/// episodes), a restart; rebuilt with chunk 1 and 1024.
+#[test]
+fn fixed_scenario_dlq() {
+    let tiny = Cfg {
+        max_chunk_cmds: 1,
+        checkpoint_batches: 1,
+        checkpoint_every: Duration::from_millis(1),
+    };
+    let mut ops = Vec::new();
+    for i in 0..24usize {
+        let p = (i % 2) as u16;
+        ops.push(Op::Start {
+            p,
+            key: None,
+            oversize: false,
+            delayed: false,
+        });
+        ops.push(Op::Grant { p, i });
+        for (j, kind) in [0u8, 1, 2].into_iter().enumerate() {
+            ops.push(Op::Dlq(DlqOp {
+                p,
+                i,
+                fail: (j == 0).then_some(i % 7 == 6),
+                kind,
+                mode: ((i + j) % 4) as u32,
+                episode: if (i + j) % 5 == 4 { 1 } else { 0 },
+                bad: ((i + j) % 6 == 5).then_some(((i + j) % 4) as u8),
+                hook: (i % 3) as u8,
+                twice: (i + j) % 3 == 0,
+                retry: j == 2 && i % 2 == 0,
+            }));
+        }
+        // A second failure episode on the resumed runs (re-granted first).
+        if i % 2 == 0 {
+            ops.push(Op::Grant { p, i });
+            ops.push(Op::Dlq(DlqOp {
+                p,
+                i,
+                fail: Some(false),
+                kind: 0,
+                mode: 0,
+                episode: 0,
+                bad: None,
+                hook: ((i + 1) % 3) as u8,
+                twice: false,
+                retry: false,
+            }));
+        }
+        if i == 12 {
+            ops.push(Op::Restart(tiny.clone()));
+        }
+    }
+    let sc = Scenario {
+        initial: tiny,
+        ops,
+        rebuild_chunks: (1, 1024),
+    };
+    rt().block_on(check(sc)).expect("live == rebuilt");
+    let accepted = DLQ_ACCEPTED.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(accepted >= 10, "only {accepted} DlqUpdate accepted");
 }
 
 // ---------------------------------------------------------------------- schedule workloads

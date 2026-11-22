@@ -158,7 +158,7 @@ fn dispatch(
         // Phase 7 (07-03 routing stubs; implemented in 07-04): pause / resume (`pause.rs`).
         Cmd::PauseRun(p) => pause::apply_pause_run(b, cur, p, actions),
         Cmd::ResumeRun(r) => pause::apply_resume_run(b, cur, r, actions),
-        // Phase 11 (11-02 stub; implemented in 11-08): dead-letter marks (`dlq.rs`).
+        // Phase 11 (11-02 contract, 11-08 semantics): dead-letter marks (`dlq.rs`).
         Cmd::DlqUpdate(d) => dlq::apply_dlq_update(b, cur, d, actions),
     }
 }

@@ -25,7 +25,7 @@
 //! | `dedupe` | none (run id) |
 //! | `outbox` | prost `OutboxMsg`: `StartChild.start` / `CronStart.start` / `StartRun` (`input`, `run_started.payload`), `ChildCompleted.result` and `.event`, `Signal.payload`; `CancelRun` none |
 //! | `inbound_seen`, `children` | none |
-//! | `dlq` | none (no rows written) |
+//! | `dlq` | none (postcard `DlqRow`: run ids, times, reason; Phase 11) |
 //! | `effects` | none (Phase 6 `EffectRow{kind, scheduled_at_ms}` carries no payload; RESERVATIONS §6) |
 //! | `running`, `waits`, `signal_seen` | none |
 //! | `schedule_state` | `0x01` rows: `ScheduleStateRow.buffered.start` (prost `StartRun`: `input`, `run_started.payload`); `0x02` rows none |

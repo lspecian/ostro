@@ -327,6 +327,31 @@ pub enum InboxMsg {
     },
 }
 
+/// Value of a `dlq` row (keyspace 11, key `run_key(run)`; Phase 11, 11-08, OPS-04, D-P11-11).
+///
+/// The dead-letter queue is a view (failed/timed-out runs minus these marks); only
+/// `Cmd::DlqUpdate` (45) writes the row. The marks belong to one failure episode (W5:
+/// `episode_completed_at_ms` = the run's `completed_at_ms` of that failure); a mark for a newer
+/// episode resets the row. **Field order is the postcard format: never reorder; future fields
+/// need a row migrator (D18).**
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DlqRow {
+    /// The on-failure hook run.
+    pub hook_run: Option<[u8; 18]>,
+    /// Dismiss time (ms).
+    pub dismissed_at_ms: Option<u64>,
+    /// Dismiss reason (≤ 1024 bytes).
+    pub dismiss_reason: Option<String>,
+    /// The restart / rerun target run (None for a resume, which keeps the run id).
+    pub requeued_to: Option<[u8; 18]>,
+    /// Requeue time (ms).
+    pub requeued_at_ms: Option<u64>,
+    /// Requeue mode: 0 resume, 1 restart, 2 rerun.
+    pub requeue_mode: Option<u8>,
+    /// The failure episode (the run's `completed_at_ms`) these marks belong to.
+    pub episode_completed_at_ms: u64,
+}
+
 /// `VALUE_FORMAT ‖ postcard(v)`.
 pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     let mut out = vec![VALUE_FORMAT];

@@ -1,7 +1,7 @@
 //! Phase 11 format contract (plan 11-02; OPS-02, OPS-04): `InvalidCode::BadRerunPrefix` (29)
 //! and `BadDlqUpdate` (30) above the canonical placeholders, and apply routing of
-//! `Cmd::DlqUpdate` (45) to the `apply/dlq.rs` stub (implemented by 11-08), which rejects it
-//! `Invalid(NotImplemented)` without touching state.
+//! `Cmd::DlqUpdate` (45) to `apply/dlq.rs` (semantics: 11-08, `tests/apply_dlq.rs`): on a run
+//! that is not failed, or an unknown run, it is rejected without touching state.
 
 use bytes::Bytes;
 use ostro_partition::apply::{
@@ -126,9 +126,6 @@ fn dlq_ops(id: &RunId) -> Vec<Command> {
         .collect()
 }
 
-const NOT_IMPLEMENTED: ApplyOutcome =
-    ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::NotImplemented));
-
 #[test]
 fn phase11_invalid_codes_sit_at_29_and_30() {
     assert_eq!(InvalidCode::BadRerunPrefix as usize, 29);
@@ -144,25 +141,32 @@ fn phase11_invalid_codes_sit_at_29_and_30() {
 }
 
 #[test]
-fn dlq_update_routes_to_the_not_implemented_stub_and_changes_nothing() {
+fn dlq_update_routes_to_apply_dlq_and_rejections_change_nothing() {
     let mut h = H::new();
     let r = rid(1);
     assert_eq!(h.apply(&start(&r)).out, ApplyOutcome::Accepted);
     let row = h.run_row(&r);
-    for c in dlq_ops(&r).iter().chain(dlq_ops(&rid(2)).iter()) {
+    let bad = ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::BadDlqUpdate));
+    let ops = dlq_ops(&r).into_iter().map(|c| (c, bad.clone())).chain(
+        dlq_ops(&rid(2))
+            .into_iter()
+            .map(|c| (c, ApplyOutcome::Rejected(RejectReason::RunNotFound))),
+    );
+    for (c, want) in ops {
+        let c = &c;
         let prev = h.cur.hash;
         let off = h.cur.next;
         let a = h.apply(c);
-        assert_eq!(a.out, NOT_IMPLEMENTED, "{c:?}");
+        assert_eq!(a.out, want, "{c:?}");
         // No overlay entry: only the cursor (applied offset, rolling hash) moves, as for every
         // rejection.
         assert_eq!(a.writes, 0, "a rejection writes nothing");
-        assert_eq!(a.reads, 0, "the stub reads nothing");
+        assert_eq!(a.reads, 1, "the run record only");
         assert!(a.actions.is_empty());
         assert_eq!(
             h.cur.hash,
-            fold_hash(&prev, off, NOT_IMPLEMENTED.code(), &encode_command(c)),
-            "folded into the rolling hash with code 26"
+            fold_hash(&prev, off, want.code(), &encode_command(c)),
+            "folded into the rolling hash"
         );
     }
     assert_eq!(h.run_row(&r), row, "run record untouched");
