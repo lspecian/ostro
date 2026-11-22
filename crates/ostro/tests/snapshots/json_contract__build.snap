@@ -1,0 +1,21 @@
+---
+source: crates/ostro/tests/json_contract.rs
+expression: "pretty(&redact(&v, &tmp))"
+---
+{
+  "bytes": "[SIZE]",
+  "kind": "ostro.build.result",
+  "lang": "rust",
+  "manifest": "[PATH]",
+  "name": "hello-offline",
+  "sha256": "[SHA]",
+  "up_to_date": false,
+  "version": 1,
+  "wasm": "[PATH]",
+  "workflows": [
+    {
+      "name": "hello",
+      "version": 1
+    }
+  ]
+}

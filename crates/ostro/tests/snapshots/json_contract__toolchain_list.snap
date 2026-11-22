@@ -1,0 +1,50 @@
+---
+source: crates/ostro/tests/json_contract.rs
+expression: "pretty(&redact(&v, &tmp))"
+---
+{
+  "action": "list",
+  "cache_root": "[PATH]",
+  "kind": "ostro.toolchain.result",
+  "platform": "[PLATFORM]",
+  "toolchain_set": "[ID]",
+  "tools": [
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "uv",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "componentize-py",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "node",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "rustup-init",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "zig",
+      "version": "[VER]"
+    }
+  ],
+  "unknown": [],
+  "version": 1
+}

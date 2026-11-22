@@ -1,0 +1,54 @@
+---
+source: crates/ostro/tests/json_contract.rs
+expression: "pretty(&redact(&v, &tmp))"
+---
+{
+  "activated": [
+    {
+      "active_version": 1,
+      "name": "hello",
+      "record_version": "[N]",
+      "versions": [
+        {
+          "default_queue": null,
+          "module_sha256": "[SHA]",
+          "run_timeout_ms": null,
+          "version": 1
+        }
+      ]
+    }
+  ],
+  "build": {
+    "bytes": "[SIZE]",
+    "lang": "rust",
+    "manifest": "[PATH]",
+    "name": "hello-offline",
+    "sha256": "[SHA]",
+    "up_to_date": false,
+    "wasm": "[PATH]",
+    "workflows": [
+      {
+        "name": "hello",
+        "version": 1
+      }
+    ]
+  },
+  "kind": "ostro.deploy.result",
+  "upload": {
+    "created": true,
+    "module": {
+      "language": null,
+      "sha256": "[SHA]",
+      "size_bytes": "[SIZE]",
+      "uploaded_at": "[TIMESTAMP]",
+      "uploaded_at_ms": "[MS]",
+      "workflows": [
+        {
+          "name": "hello",
+          "version": 1
+        }
+      ]
+    }
+  },
+  "version": 1
+}

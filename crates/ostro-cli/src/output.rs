@@ -166,6 +166,17 @@ pub fn local_json(kind: &str, body: &Value) -> String {
     out
 }
 
+/// The exit-code table (10-18): every code a verb can exit with and its meaning, in
+/// order. docs/cli-json.md copies it (a test in `crates/ostro/tests/json_contract.rs`
+/// compares the two).
+pub const EXIT_CODES: &[(i32, &str)] = &[
+    (0, "ok"),
+    (1, "API, server or build error"),
+    (2, "usage error"),
+    (3, "--wait ended in a status other than completed"),
+    (4, "replay divergence (ostro replay)"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +188,22 @@ mod tests {
         assert_eq!(exit_code(Outcome::Usage), 2);
         assert_eq!(exit_code(Outcome::NotCompleted), 3);
         assert_eq!(exit_code(Outcome::Diverged), 4);
+    }
+
+    #[test]
+    fn exit_codes_match_table() {
+        let all = [
+            Outcome::Ok,
+            Outcome::Error,
+            Outcome::Usage,
+            Outcome::NotCompleted,
+            Outcome::Diverged,
+        ];
+        assert_eq!(all.len(), EXIT_CODES.len());
+        for (o, (code, meaning)) in all.into_iter().zip(EXIT_CODES) {
+            assert_eq!(i32::from(exit_code(o)), *code, "{o:?}");
+            assert!(!meaning.is_empty());
+        }
     }
 
     #[test]

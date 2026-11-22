@@ -1,0 +1,24 @@
+---
+source: crates/ostro/tests/json_contract.rs
+expression: "pretty(&redact(&v, &tmp))"
+---
+{
+  "kind": "ostro.replay.result",
+  "module_sha256": "[SHA]",
+  "summary": {
+    "diverged": 0,
+    "error": 0,
+    "ok": 1,
+    "ok_frontier": 0,
+    "skipped": 0
+  },
+  "verdicts": [
+    {
+      "appended": 0,
+      "run_id": "[RUN_ID]",
+      "verdict": "ok",
+      "workflow": "replay_demo"
+    }
+  ],
+  "version": 1
+}

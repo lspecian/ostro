@@ -1,0 +1,62 @@
+---
+source: crates/ostro/tests/json_contract.rs
+expression: pretty(&v)
+---
+{
+  "cache_root": "[PATH]",
+  "cache_writable": true,
+  "cc": {
+    "path": "[PATH]",
+    "present": "[BOOL]"
+  },
+  "docker": {
+    "path": "[PATH]",
+    "present": "[BOOL]"
+  },
+  "glibc": "[VER]",
+  "kind": "ostro.doctor.result",
+  "mirror": null,
+  "musl": "[BOOL]",
+  "offline": false,
+  "platform": "[PLATFORM]",
+  "toolchain_set": "[ID]",
+  "tools": [
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "uv",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "componentize-py",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "node",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "rustup-init",
+      "version": "[VER]"
+    },
+    {
+      "entry": "[ID]",
+      "installed": false,
+      "path": "[PATH]",
+      "tool": "zig",
+      "version": "[VER]"
+    }
+  ],
+  "version": 1,
+  "warnings": "[WARNINGS]"
+}

@@ -1,0 +1,21 @@
+---
+source: crates/ostro/tests/json_contract.rs
+expression: "pretty(&redact(&v, &tmp))"
+---
+{
+  "dir": "[PATH]",
+  "files": [
+    "Cargo.toml",
+    "README.md",
+    ".gitignore",
+    "ostro.toml",
+    "rust-toolchain.toml",
+    "src/lib.rs",
+    "tests/workflow.rs"
+  ],
+  "kind": "ostro.init.result",
+  "lang": "rust",
+  "name": "proj",
+  "sdk_bundle": "[ID]",
+  "version": 1
+}
