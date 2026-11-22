@@ -370,7 +370,7 @@ Plans:
 - [ ] 10-06-PLAN.md — Clock-exempt sweep: comment-only `// clock-exempt:` annotations in partition/server real-time sites so the F5 clock gate passes (SDK-06) (W2)
 - [x] 10-07-PLAN.md — Hermetic toolchain cache: pinned toolchains.toml, verified fetch with timeouts/size cap, hardened extraction, async-safe locking, tools/state namespacing, offline/mirror, ostro toolchain/doctor (CLI-04) (W3)
 - [ ] 10-08-PLAN.md — Deterministic embedded SDK bundle, ostro.toml project model, rust/python/ts templates, ostro init (CLI-03) (W3)
-- [ ] 10-09-PLAN.md — ostro-client crate (client moved from ostro-cli, typed surface) + four-client OpenAPI route-coverage contract test (SDK-07) (W3)
+- [x] 10-09-PLAN.md — ostro-client crate (client moved from ostro-cli, typed surface) + four-client OpenAPI route-coverage contract test (SDK-07) (W3)
 - [ ] 10-10-PLAN.md — DevClock through the clock seam + skip barrier, dispatcher clock-change wake, manual skip, ostro dev --time-skipping (ephemeral only), ostro build-info --json, p10-time guest (SDK-06) (W3)
 - [ ] 10-11-PLAN.md — Replay: 4-arg ostro_engine::replay_check + corpus loader, server replay endpoint (token key stays server-side), ostro replay remote/positional/--corpus with exit 4, SC3 gate in Rust/Python/TS, docs/replay.md (CLI-07) (W3)
 - [ ] 10-12-PLAN.md — Build pipeline (input-hash cache, staging, env scrub, local validate + describe, manifest.json) + Rust builder (target/ostro/cargo, zig shim with cargo-zigbuild filtering, hermetic --no-cc) + offline fixture + ostro build (CLI-04) (W4)
