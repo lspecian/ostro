@@ -551,6 +551,11 @@ jobs:
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: "0.7.15"
+      # Phase 10 (10-02): clients/go (same pin as the acme-pebble job)
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.23.x"
+          cache: false
       - name: Polyglot toolchains present
         run: |
           node --version | grep -q '^v24\.'
@@ -581,3 +586,45 @@ jobs:
         # Rust must be bit-identical; Python / TS differ within the residuals accepted in
         # docs/sdk-builds.md (RESIDUAL-ACCEPTED markers)
         run: bash sdks/scripts/repro-check.sh all
+      # Phase 10 (10-02): client test kits + ostro-build polyglot. Keep in sync with
+      # scripts/ci-local.sh (check_clients_*, check_ostro_build_polyglot). Until 10-04 lands a
+      # client directory its step prints "scaffold pending (10-04)"; 10-20 removes that path.
+      - name: Build the debug ostro binary (client tests spawn it)
+        run: |
+          cargo build -p ostro --locked
+          echo "OSTRO_BIN=$GITHUB_WORKSPACE/target/debug/ostro" >> "$GITHUB_ENV"
+      - name: Clients python
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          if [ ! -f clients/python/pyproject.toml ]; then echo "SKIP clients python: scaffold pending (10-04)"; exit 0; fi
+          cd clients/python
+          uv run --no-project --python 3.12 --with pytest==8.4.2 python -m pytest tests -q
+      - name: Clients ts
+        run: |
+          if [ ! -f clients/ts/package.json ]; then echo "SKIP clients ts: scaffold pending (10-04)"; exit 0; fi
+          out="$(node --test --test-reporter=tap 'clients/ts/test/**/*.test.js' 2>&1)" || { echo "$out"; exit 1; }
+          grep -E '^# (tests|pass|fail)' <<<"$out"
+          grep -Eq '^# pass [1-9][0-9]*$' <<<"$out"
+          grep -Eq '^# fail 0$' <<<"$out"
+      - name: Clients go
+        run: |
+          if [ ! -f clients/go/go.mod ]; then echo "SKIP clients go: scaffold pending (10-04)"; exit 0; fi
+          go version
+          cd clients/go
+          go vet ./...
+          go test ./...
+      - name: ostro-build polyglot
+        # the ostro crate runs only its polyglot targets (parity, replay_cli,
+        # template_tests) as later Phase 10 plans add them, not every spawned-binary suite
+        run: |
+          cargo clippy -p ostro-build --features polyglot --all-targets --locked -- -D warnings
+          cargo clippy -p ostro --features polyglot --all-targets --locked -- -D warnings
+          cargo test -p ostro-build --features polyglot --locked -- --test-threads=2
+          targets=()
+          for t in parity replay_cli template_tests; do
+            if [ -f "crates/ostro/tests/$t.rs" ]; then targets+=(--test "$t"); else echo "ostro polyglot target $t: not present yet"; fi
+          done
+          if [ "${#targets[@]}" -gt 0 ]; then
+            cargo test -p ostro --features polyglot "${targets[@]}" --locked -- --test-threads=1
+          fi

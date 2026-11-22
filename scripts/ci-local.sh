@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Local CI gate: mirrors .github/workflows/ci.yml (lint job + linux-x86_64-musl leg).
 #
-# Usage: bash scripts/ci-local.sh [--no-musl] [--no-musl-test] [--no-polyglot]
+# Usage: bash scripts/ci-local.sh [--no-musl] [--no-musl-test] [--no-polyglot] [--no-go]
 #   --no-musl       skip the cargo-zigbuild x86_64 musl leg entirely
 #   --no-musl-test  build the musl release binary but skip `cargo-zigbuild test`
 #   --no-polyglot   skip the Python/TypeScript SDK + polyglot conformance block (SKIP rows)
+#                   (also the Python/TS client tests and the ostro-build polyglot step, 10-02)
+#   --no-go         skip the Go client tests (clients/go, 10-02); otherwise Go must be on PATH
 #
 # Requires: rustup toolchain from rust-toolchain.toml, cargo-deny 0.21.0, jq,
 # cargo-zigbuild 0.24.1 + zig 0.17.1 (on PATH or via `pip install ziglang`).
 # Polyglot block (09-17): Node 24 + npm, uv 0.7.15 and a Python 3.12 that `uv python find`
 # sees (skip only with --no-polyglot).
+# Clients (10-02): Go 1.23+ for clients/go (skip only with --no-go).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,12 +21,14 @@ cd "$ROOT"
 RUN_MUSL=1
 RUN_MUSL_TEST=1
 RUN_POLYGLOT=1
+RUN_GO=1
 for arg in "$@"; do
   case "$arg" in
     --no-musl) RUN_MUSL=0 ;;
     --no-musl-test) RUN_MUSL_TEST=0 ;;
     --no-polyglot) RUN_POLYGLOT=0 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --no-go) RUN_GO=0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -399,6 +404,81 @@ check_polyglot_clippy() {
   cargo clippy -p ostro-conformance --features polyglot --all-targets --locked -- -D warnings
 }
 
+# Phase 10 clients + ostro-build polyglot (plan 10-02). Keep in sync with the "Clients ..." and
+# "ostro-build polyglot" steps of the `polyglot` job in .github/workflows/ci.yml. Until 10-04
+# lands a client directory its step records a visible SKIP "scaffold pending (10-04)"; 10-20
+# asserts no such SKIP remains. The client tests spawn the debug `ostro` binary (OSTRO_BIN).
+ostro_debug_bin() {
+  local dir="${CARGO_TARGET_DIR:-target}"
+  [[ "$dir" == /* ]] || dir="$ROOT/$dir"
+  cargo build -p ostro --locked >&2 || return 1
+  echo "$dir/debug/ostro"
+}
+
+check_clients_python() {
+  local bin
+  bin="$(ostro_debug_bin)" || return 1
+  (cd clients/python && OSTRO_BIN="$bin" PYTHONDONTWRITEBYTECODE=1 \
+    uv run --no-project --python 3.12 --with pytest==8.4.2 python -m pytest tests -q)
+}
+
+check_clients_ts() {
+  local bin out v
+  v="$(node --version 2>/dev/null)" || { echo "node not found (need Node 24)"; return 1; }
+  [[ "$v" == v24.* ]] || { echo "need Node 24 (found $v)"; return 1; }
+  bin="$(ostro_debug_bin)" || return 1
+  # A directory argument only works with a test/index.js (as sdks/ts has); the glob does not
+  # need one (Node expands it itself).
+  out="$(OSTRO_BIN="$bin" node --test --test-reporter=tap 'clients/ts/test/**/*.test.js' 2>&1)" || { echo "$out"; return 1; }
+  grep -E '^# (tests|pass|fail)' <<<"$out"
+  grep -Eq '^# pass [1-9][0-9]*$' <<<"$out" && grep -Eq '^# fail 0$' <<<"$out"
+}
+
+check_clients_go() {
+  local bin
+  if ! command -v go >/dev/null 2>&1; then
+    echo "###################################################################"
+    echo "go not found: clients/go needs Go 1.23+ (or pass --no-go)"
+    echo "###################################################################"
+    return 1
+  fi
+  go version
+  bin="$(ostro_debug_bin)" || return 1
+  (cd clients/go && go vet ./... && OSTRO_BIN="$bin" go test ./...)
+}
+
+# `cargo test -p ostro --features polyglot` would re-run every spawned-binary suite of the
+# `ostro` crate single-threaded, so only its polyglot targets run here (parity, replay_cli,
+# template_tests, added by later Phase 10 plans); a target not yet present is reported.
+OSTRO_POLYGLOT_TESTS=(parity replay_cli template_tests)
+
+check_ostro_build_polyglot() {
+  local t
+  local -a targets=()
+  cargo clippy -p ostro-build --features polyglot --all-targets --locked -- -D warnings || return 1
+  cargo clippy -p ostro --features polyglot --all-targets --locked -- -D warnings || return 1
+  cargo test -p ostro-build --features polyglot --locked -- --test-threads=2 || return 1
+  for t in "${OSTRO_POLYGLOT_TESTS[@]}"; do
+    if [[ -f "crates/ostro/tests/$t.rs" ]]; then
+      targets+=(--test "$t")
+    else
+      echo "ostro polyglot target $t: not present yet"
+    fi
+  done
+  if [[ "${#targets[@]}" -gt 0 ]]; then
+    cargo test -p ostro --features polyglot "${targets[@]}" --locked -- --test-threads=1 || return 1
+  fi
+}
+
+# client_step <name> <marker file> <fn>: the step, or the 10-04 pending SKIP.
+client_step() {
+  if [[ -f "$2" ]]; then
+    step "$1" "$3"
+  else
+    skip "$1" "scaffold pending (10-04)"
+  fi
+}
+
 # "Phase 6 external services" banner (06-18): one loud SKIP line per unset variable, each
 # also recorded as a SKIP row in the summary. Variable names match ci.yml.
 external_services_banner() {
@@ -450,6 +530,21 @@ else
   skip "ts sdk tests" "--no-polyglot"
   skip "polyglot conformance" "--no-polyglot"
   skip "clippy (polyglot feature)" "--no-polyglot"
+fi
+# Phase 10 (10-02): client test kits and the ostro-build polyglot tests.
+if [[ "$RUN_POLYGLOT" -eq 1 ]]; then
+  client_step "clients python" clients/python/pyproject.toml check_clients_python
+  client_step "clients ts" clients/ts/package.json check_clients_ts
+  step "ostro-build polyglot" check_ostro_build_polyglot
+else
+  skip "clients python" "--no-polyglot"
+  skip "clients ts" "--no-polyglot"
+  skip "ostro-build polyglot" "--no-polyglot"
+fi
+if [[ "$RUN_GO" -eq 1 ]]; then
+  client_step "clients go" clients/go/go.mod check_clients_go
+else
+  skip "clients go" "--no-go"
 fi
 step "semantics sleepers (serial)" check_sleepers
 step "failpoint list sync (ci.yml)" check_failpoint_sync
