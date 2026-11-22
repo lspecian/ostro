@@ -1,0 +1,48 @@
+{
+  "id": "C-CRASH-01",
+  "title": "a TS -> Python -> Rust child chain completes with the correct nested result under kill -9 and child failpoints",
+  "leg": "crash",
+  "workflow": "conf_parent_chain",
+  "input": {
+    "next": [
+      "wf:conf_parent_chain",
+      "wf2:conf_leaf_echo"
+    ]
+  },
+  "script": [
+    {"input": "kill", "at": "random"},
+    {"input": "kill", "at": "child::start_child_after_flush"},
+    {"input": "kill", "at": "child::parent_event_before_flush"},
+    {"input": "kill", "at": "child::detached_after_flush"}
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "child": {
+        "child": {
+          "echo": {
+            "next": []
+          }
+        }
+      }
+    },
+    "roles": ["ts", "py", "rust"],
+    "iterations": {
+      "env": "OSTRO_CRASH_CHAIN_ITERS",
+      "default": 20,
+      "gate": 100
+    },
+    "modes": {
+      "rotation": "iteration % 6: random, start_child_after_flush, random, parent_event_before_flush, random, all three child:: failpoints armed",
+      "random": "1..=3 kill -9, each after a delay from the start ack or the previous restart: uniform 0..1500 ms, half of the draws 0..80 ms (the chain's in-flight window)",
+      "failpoint": "restart armed before the root starts; start_child_after_flush=pause, kill -9 once the root journal shows child_started (the sink is blocked at the site); otherwise <site>=1*print(crash-leg hit <site>), kill -9 as soon as the line is logged; restart unarmed. child::detached_after_flush is unreachable from an attached chain and is only armed in the all-three mode"
+    },
+    "checks": [
+      "root completed with the nested echo within 60 s of the last restart",
+      "root and Python run journal exactly one child_started and one child_completed",
+      "child ids are the deterministic child_run_id(parent, op) (D-P9-7)",
+      "the server lists exactly one py_conf_parent_chain and one rs_conf_leaf_echo run per root",
+      "every run journals exactly one run_started and one terminal event; no run is left non-terminal"
+    ]
+  }
+}
