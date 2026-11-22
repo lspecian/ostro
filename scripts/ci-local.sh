@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Local CI gate: mirrors .github/workflows/ci.yml (lint job + linux-x86_64-musl leg).
 #
-# Usage: bash scripts/ci-local.sh [--no-musl] [--no-musl-test]
+# Usage: bash scripts/ci-local.sh [--no-musl] [--no-musl-test] [--no-polyglot]
 #   --no-musl       skip the cargo-zigbuild x86_64 musl leg entirely
 #   --no-musl-test  build the musl release binary but skip `cargo-zigbuild test`
+#   --no-polyglot   skip the Python/TypeScript SDK + polyglot conformance block (SKIP rows)
 #
 # Requires: rustup toolchain from rust-toolchain.toml, cargo-deny 0.21.0, jq,
 # cargo-zigbuild 0.24.1 + zig 0.17.1 (on PATH or via `pip install ziglang`).
+# Polyglot block (09-17): Node 24 + npm, uv 0.7.15 and a Python 3.12 that `uv python find`
+# sees (skip only with --no-polyglot).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,11 +17,13 @@ cd "$ROOT"
 
 RUN_MUSL=1
 RUN_MUSL_TEST=1
+RUN_POLYGLOT=1
 for arg in "$@"; do
   case "$arg" in
     --no-musl) RUN_MUSL=0 ;;
     --no-musl-test) RUN_MUSL_TEST=0 ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    --no-polyglot) RUN_POLYGLOT=0 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -34,8 +39,9 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 # `ostro:<target>` entries are the spawned-binary Phase 6 crash tests (06-17 fx_redrive,
 # 06-18 fx_sql_crash); the crate is linted once (check_failpoints de-duplicates).
 # Phase 12 (12-01): ostro-cluster (repl::/fetch::/isr::/install:: sites) and ostro-repl-conformance
-# (mutant matrix, fault legs) are appended last.
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance)
+# (mutant matrix, fault legs) are appended last. 09-17 appends ostro-server:children_failpoints
+# (09-08's child:: failpoints).
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance ostro-server:children_failpoints)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)
@@ -336,6 +342,63 @@ check_musl_test() {
   cargo-zigbuild test --workspace --locked --target "$MUSL_TARGET"
 }
 
+# Polyglot block (plan 09-17, D-P9-12/D-P9-28): Python and TypeScript SDK host tests plus
+# the polyglot conformance suites. Keep in sync with the `polyglot` job of
+# .github/workflows/ci.yml. `cargo test -p ostro-conformance --features polyglot` runs every
+# test target of the crate, i.e. polyglot_smoke, polyglot_engine, py_sdk_build,
+# ts_sdk_build, polyglot_python (09-14), polyglot_ts (09-15), polyglot_cross (09-16, whose
+# full_table re-runs every py/ts scenario; kept although it overlaps the two per-language
+# targets, for the cross-language table) and rebuild (C-REBUILD-01, 09-17). The crash leg
+# (09-18) and the resource measurements (09-19) stay #[ignore]. Gate-only commands:
+#   bash sdks/scripts/repro-check.sh all          # 3 builds per language, sha256 (ci.yml runs it)
+#   OSTRO_COMPONENTIZE_PY="$(bash sdks/scripts/build-componentize-py-fork.sh --print)" \
+#     bash sdks/scripts/repro-check.sh py         # after building the D-P9-3 fork (docs/sdk-builds.md)
+#   cargo test -p ostro-conformance --features polyglot -- --ignored   # crash leg + resources
+check_polyglot_toolchains() {
+  local v ok=0
+  if command -v node >/dev/null 2>&1; then
+    v="$(node --version)"; echo "node $v"
+    [[ "$v" == v24.* ]] || { echo "need Node 24 (found $v)"; ok=1; }
+  else
+    echo "node not found (need Node 24)"; ok=1
+  fi
+  if command -v npm >/dev/null 2>&1; then echo "npm $(npm --version)"; else echo "npm not found"; ok=1; fi
+  if command -v uv >/dev/null 2>&1; then
+    v="$(uv --version | awk '{print $2}')"; echo "uv $v"
+    [[ "$v" == "0.7.15" ]] || { echo "need uv 0.7.15 exactly (D-P9-28, found $v)"; ok=1; }
+    uv python find 3.12 || { echo "uv finds no Python 3.12 (uv python install 3.12)"; ok=1; }
+  else
+    echo "uv not found (need uv 0.7.15)"; ok=1
+  fi
+  return "$ok"
+}
+
+check_python_sdk() {
+  (cd sdks/python && PYTHONDONTWRITEBYTECODE=1 uv run --no-project --python 3.12 --with pytest==8.4.2 python -m pytest tests -q)
+}
+
+# Node 24's default reporter prints "ℹ pass N"; the TAP reporter prints "# pass N".
+check_ts_sdk() {
+  local out
+  # sdks/ts has no dependencies (nothing to install); the pinned build toolchain is
+  # installed when missing or older than its lock (as build-guest.sh does).
+  local stamp="sdks/scripts/toolchain/node_modules/.package-lock.json"
+  if [[ ! -f "$stamp" || "sdks/scripts/toolchain/package-lock.json" -nt "$stamp" ]]; then
+    (cd sdks/scripts/toolchain && npm ci --silent --no-audit --no-fund) || return 1
+  fi
+  out="$(node --test --test-reporter=tap sdks/ts/test/ 2>&1)" || { echo "$out"; return 1; }
+  grep -E '^# (tests|pass|fail)' <<<"$out"
+  grep -Eq '^# pass [1-9][0-9]*$' <<<"$out" && grep -Eq '^# fail 0$' <<<"$out"
+}
+
+check_polyglot_conformance() {
+  cargo test -p ostro-conformance --features polyglot --locked -- --test-threads=2
+}
+
+check_polyglot_clippy() {
+  cargo clippy -p ostro-conformance --features polyglot --all-targets --locked -- -D warnings
+}
+
 # "Phase 6 external services" banner (06-18): one loud SKIP line per unset variable, each
 # also recorded as a SKIP row in the summary. Variable names match ci.yml.
 external_services_banner() {
@@ -375,6 +438,19 @@ step "guests build (wasm32-wasip2)" check_guests
 step "order-saga example" check_order_saga
 external_services_banner
 step "cargo test" cargo test --workspace --locked
+if [[ "$RUN_POLYGLOT" -eq 1 ]]; then
+  step "polyglot toolchains present" check_polyglot_toolchains
+  step "python sdk tests" check_python_sdk
+  step "ts sdk tests" check_ts_sdk
+  step "polyglot conformance" check_polyglot_conformance
+  step "clippy (polyglot feature)" check_polyglot_clippy
+else
+  skip "polyglot toolchains present" "--no-polyglot"
+  skip "python sdk tests" "--no-polyglot"
+  skip "ts sdk tests" "--no-polyglot"
+  skip "polyglot conformance" "--no-polyglot"
+  skip "clippy (polyglot feature)" "--no-polyglot"
+fi
 step "semantics sleepers (serial)" check_sleepers
 step "failpoint list sync (ci.yml)" check_failpoint_sync
 step "failpoint suites" check_failpoints

@@ -286,6 +286,7 @@ jobs:
           cargo test -p ostro-worker --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-cluster --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-repl-conformance --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro-server --features failpoints --test children_failpoints --locked -- --test-threads=1
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Phase 7 failpoint legs + manifests
         # keep in sync with check_phase7 in scripts/ci-local.sh (07-22): the SIGSTOP zombie
@@ -506,3 +507,73 @@ jobs:
           kubectl -n ostro logs statefulset/ostro --tail 200 || true
           kubectl -n ostro logs deploy/ostro-worker-heavy --tail 200 || true
           kubectl -n keda logs deploy/keda-operator --tail 200 || true
+
+  # ---------------------------------------------------------------------------------
+  # Phase 9 polyglot job (09-17): Python / TypeScript SDK host tests, the polyglot
+  # conformance suites and the reproducible-build check. Keep in sync with the polyglot
+  # block of scripts/ci-local.sh. Toolchains pinned per D-P9-28 (uv 0.7.15 exactly,
+  # Node 24.13.0, Python 3.12). Publishing packages is never done here (D-P9-19).
+  # ---------------------------------------------------------------------------------
+
+  polyglot:
+    name: polyglot (python + typescript)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free runner disk space
+        # same as the test job: the conformance test build plus three guest toolchains
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/share/swift
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml, incl. wasm32-wasip2)
+        run: |
+          rustup toolchain install
+          rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: polyglot
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.13.0"
+          cache: npm
+          cache-dependency-path: |
+            sdks/scripts/toolchain/package-lock.json
+            sdks/ts/package-lock.json
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version: "0.7.15"
+      - name: Polyglot toolchains present
+        run: |
+          node --version | grep -q '^v24\.'
+          npm --version
+          test "$(uv --version | awk '{print $2}')" = 0.7.15
+          uv python find 3.12
+      - name: Python SDK tests
+        working-directory: sdks/python
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: uv run --no-project --python 3.12 --with pytest==8.4.2 python -m pytest tests -q
+      - name: TypeScript SDK tests
+        # sdks/ts has no dependencies; the TAP reporter prints "# pass N" (Node 24's
+        # default reporter prints "ℹ pass N")
+        run: |
+          (cd sdks/scripts/toolchain && npm ci --no-audit --no-fund)
+          out="$(node --test --test-reporter=tap sdks/ts/test/ 2>&1)" || { echo "$out"; exit 1; }
+          grep -E '^# (tests|pass|fail)' <<<"$out"
+          grep -Eq '^# pass [1-9][0-9]*$' <<<"$out"
+          grep -Eq '^# fail 0$' <<<"$out"
+      - name: Polyglot conformance (ostro-conformance --features polyglot)
+        # every test target incl. polyglot_python / polyglot_ts / polyglot_cross and
+        # rebuild (C-REBUILD-01); the crash leg and resources stay #[ignore]
+        run: cargo test -p ostro-conformance --features polyglot --locked -- --test-threads=2
+      - name: clippy (polyglot feature)
+        run: cargo clippy -p ostro-conformance --features polyglot --all-targets --locked -- -D warnings
+      - name: Reproducible builds (repro-check, D-P9-3)
+        # Rust must be bit-identical; Python / TS differ within the residuals accepted in
+        # docs/sdk-builds.md (RESIDUAL-ACCEPTED markers)
+        run: bash sdks/scripts/repro-check.sh all
