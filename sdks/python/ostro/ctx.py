@@ -19,7 +19,9 @@ from ._host import CANCELLATION_OP, ChildOptions, LogLevel, RunInfo
 from .errors import ProtocolError
 from .json import check_str, dumps, encode_payload
 from .loop import OstroLoop, _shielded
+from .effects import HttpClient, ObjectClient, SqlBuilder, idempotency_key_for
 from .ops import Op
+from .saga import Saga
 
 __all__ = ["ContinueAsNew", "Ctx", "Duration", "duration_ms", "f64_from_u64"]
 
@@ -240,6 +242,30 @@ class Ctx:
         """``async with ctx.shielded():`` ops awaited inside (and in tasks created inside)
         are not failed by run cancellation (D11)."""
         return _Shield()
+
+    # -- effects builders, idempotency key, saga (09-12) ---------------------------------
+
+    @property
+    def http(self) -> HttpClient:
+        """HTTP effect builders: ``await ctx.http.post(url).json(body).send()``."""
+        return HttpClient(self._loop)
+
+    def sql(self, connection: str) -> SqlBuilder:
+        """SQL statements against `connection`: ``await ctx.sql("db").query(stmt, params)``."""
+        return SqlBuilder(connection, self._loop)
+
+    def object(self, connection: str) -> ObjectClient:
+        """Object-store operations against `connection`: ``await ctx.object("s3").get(key)``."""
+        return ObjectClient(connection, self._loop)
+
+    def idempotency_key(self, name: str) -> str:
+        """The semantic idempotency key for `name` in this run (P-11; equal across SDKs,
+        stable across replay and attempts, different per run)."""
+        return idempotency_key_for(self.info().run_id, name)
+
+    def saga(self) -> Saga:
+        """A new, empty `Saga` for this run (D-P9-18)."""
+        return Saga(self)
 
     @property
     def cancelled(self) -> bool:

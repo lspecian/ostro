@@ -22,6 +22,16 @@ imported for the first time during ``run`` traps, so the import must happen at p
 from . import _determinism
 from ._host import RunInfo
 from .ctx import Ctx, f64_from_u64
+from .effects import (
+    HttpBuilder,
+    HttpClient,
+    ObjectClient,
+    ObjectHead,
+    ObjectPutInfo,
+    SqlBuilder,
+    idempotency_key_for,
+    sql_value,
+)
 from .errors import (
     Cancelled,
     Deadlock,
@@ -35,6 +45,7 @@ from .errors import (
 from .export import WorkflowMeta, export, workflow
 from .loop import OstroLoop
 from .ops import ChildRun, Op
+from .saga import CompensationFailure, Saga, SagaReport
 from .step import Retry, step
 
 __version__ = "0.1.0"
@@ -42,10 +53,16 @@ __version__ = "0.1.0"
 __all__ = [
     "Cancelled",
     "ChildRun",
+    "CompensationFailure",
     "Ctx",
     "Deadlock",
+    "HttpBuilder",
+    "HttpClient",
     "InvalidString",
     "NonRetryable",
+    "ObjectClient",
+    "ObjectHead",
+    "ObjectPutInfo",
     "Op",
     "OstroError",
     "OstroLoop",
@@ -53,11 +70,16 @@ __all__ = [
     "Retry",
     "Retryable",
     "RunInfo",
+    "Saga",
+    "SagaReport",
+    "SqlBuilder",
     "Timeout",
     "WorkflowMeta",
     "__version__",
     "export",
     "f64_from_u64",
+    "idempotency_key_for",
+    "sql_value",
     "step",
     "workflow",
 ]
