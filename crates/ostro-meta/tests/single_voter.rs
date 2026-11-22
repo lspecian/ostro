@@ -41,9 +41,13 @@ async fn start_and_propose(dir: &std::path::Path, data: &[u8]) -> u64 {
     )
     .expect("driver starts");
     let h = driver.handle();
-    let leader = tokio::time::timeout(Duration::from_secs(5), h.wait_for_leader())
+    // No `campaign()` here (MetaHandle::start calls it): the driver must elect itself on its
+    // randomized election timeout, election_tick 20 x 100 ms = 2..4 s of *ticks*. Ticks
+    // stretch on a loaded host (the macos-15 runner missed a 5 s bound), so allow 30 s, the
+    // same hang guard the vendored driver's own election tests use.
+    let leader = tokio::time::timeout(Duration::from_secs(30), h.wait_for_leader())
         .await
-        .expect("leader within 5 s")
+        .expect("leader within 30 s")
         .expect("leader elected");
     assert_eq!(leader, 1);
     let applied = h.propose(data.to_vec()).await.expect("proposal applied");
