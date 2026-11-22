@@ -246,7 +246,7 @@ fn check_start_extras(s: &StartRun) -> Check<StartExtras> {
 
 /// Checks an optional pre-encoded `RunStarted` (`StartRun.run_started`, 05-16) without
 /// decoding its payload.
-fn check_run_started(ev: &JournalEvent) -> Check<()> {
+pub(crate) fn check_run_started(ev: &JournalEvent) -> Check<()> {
     if ev.seq != 0 {
         return Err(invalid(InvalidCode::EventsNotContiguous));
     }
@@ -297,6 +297,10 @@ pub(crate) fn start_run(
     };
     if oversize(&s.input) {
         return reject(RejectReason::PayloadTooLarge);
+    }
+    // 11-07 (OPS-02): rerun fields 40/41 and the rerun tag; Ok for a non-rerun start.
+    if let Err(r) = super::rerun::check(s) {
+        return reject(r);
     }
     if let Some(ev) = &s.run_started
         && let Err(r) = check_run_started(ev)
@@ -377,7 +381,11 @@ pub(crate) fn start_run(
             input.encode_to_vec(),
         );
     }
-    if let Some(ev) = &s.run_started {
+    if s.rerun_from_seq != 0 {
+        // 11-07 (W14): a rerun journals run_started + the prefix (0..cut) verbatim.
+        super::rerun::journal_prefix(b, &run, &mut rec, s);
+        waits::on_first_events(b, &run, &mut rec, actions)?;
+    } else if let Some(ev) = &s.run_started {
         // Validated above: seq 0, kind RunStarted, inline <= 256 KiB or a blob ref.
         put_event(b, &run, ev);
         rec.next_seq = 1;
