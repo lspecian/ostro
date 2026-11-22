@@ -14,6 +14,12 @@
 //!   effects carry `idempotency_key_for(root, a|b|refund-b|refund-a)` in that order (the
 //!   compensations run in reverse), and the mock saw exactly one request and one charge
 //!   per key.
+//! - `values_cross_language` (C-VAL-01): `random_u64` (decimal), `random_f64`, `uuid_v7` and
+//!   `idempotency_key("x")` are byte-equal (canonical JSON) across Rust, Python, TS on
+//!   QuickJS and TS on StarlingMonkey, for the spec's pinned seed/run id and two more.
+//! - `full_table`: every engine and server catalogue scenario in every catalogue language
+//!   (all roles in that language; ts-sm where listed; C-CHILD-08 also TS -> Python -> Rust),
+//!   each compared with Rust, printed as the scenario x language table (SC1 evidence).
 //!
 //! Run with `--test-threads=2` at most (guest builds serialise in `polyglot::build`).
 #![cfg(feature = "polyglot")]
@@ -240,4 +246,267 @@ async fn saga_http() {
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+// ---------------------------------------------------------------------------------
+// C-VAL-01 across SDKs and JS backends
+// ---------------------------------------------------------------------------------
+
+/// The value-probe backends: Rust, Python, TS on QuickJS (jco) and TS on StarlingMonkey.
+const VALUE_LANGS: [Lang; 4] = [Lang::Rust, Lang::Py, Lang::Ts, Lang::TsSm];
+
+/// Extra (seed, run id) pairs beyond the spec's pinned seed 42, so the equality is not an
+/// artefact of one input.
+const EXTRA_VALUE_INPUTS: [(&str, &str); 2] = [
+    ("7", "01890000-0000-7000-8000-0000000000aa"),
+    (
+        "18446744073709551557",
+        "0193a1b2-c3d4-7e5f-9a0b-1c2d3e4f5a6b",
+    ),
+];
+
+#[test]
+fn values_cross_language() {
+    let pinned = load("C-VAL-01");
+    let mut inputs = vec![pinned.clone()];
+    for (seed, run_id) in EXTRA_VALUE_INPUTS {
+        let mut s = pinned.clone();
+        s.seed = Some(seed.to_string());
+        s.run_id = Some(run_id.to_string());
+        // Only the pinned seed has spec values; the extra inputs are compared across
+        // languages (byte-equal to Rust) rather than against constants.
+        s.expect.result = None;
+        inputs.push(s);
+    }
+    let mut failures = Vec::new();
+    let mut per_input = Vec::new();
+    for s in &inputs {
+        let seed = s.seed.clone().unwrap_or_default();
+        let run_id = s.run_id.clone().unwrap_or_default();
+        let mut reference: Option<String> = None;
+        for lang in VALUE_LANGS {
+            let r = match ostro_conformance::engine_leg::run_spec(s, lang) {
+                Ok(r) => r,
+                Err(e) => {
+                    failures.push(e.to_string());
+                    continue;
+                }
+            };
+            let v = r.result.as_ref().expect("C-VAL-01 result");
+            for k in ["random_u64", "random_f64", "uuid_v7", "idempotency_key"] {
+                assert!(
+                    v.get(k).is_some(),
+                    "[{}] missing {k}: {v}",
+                    langs::name(lang)
+                );
+            }
+            let text = ostro_conformance::canon::canonical(v);
+            eprintln!(
+                "C-VAL-01 seed={seed} run_id={run_id} [{}] {text}",
+                langs::name(lang)
+            );
+            match &reference {
+                None => reference = Some(text),
+                Some(want) if *want == text => {}
+                Some(want) => failures.push(format!(
+                    "C-VAL-01 seed={seed} run_id={run_id} [{}]: {text}\n  rust: {want}",
+                    langs::name(lang)
+                )),
+            }
+        }
+        per_input.push(reference.unwrap_or_default());
+    }
+    // The extra inputs really produce values other than the pinned ones.
+    per_input.sort();
+    per_input.dedup();
+    assert_eq!(per_input.len(), inputs.len(), "distinct values per input");
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// Scenario x language table
+// ---------------------------------------------------------------------------------
+
+/// Table columns: one per language with all roles in it, then the cross-language chain.
+const COLUMNS: [&str; 5] = ["rust", "py", "ts", "ts-sm", "ts->py->rust"];
+
+#[derive(Default)]
+struct Row {
+    leg: &'static str,
+    status: String,
+    cells: [&'static str; 5],
+    secs: f64,
+}
+
+fn col(lang: Lang) -> usize {
+    match lang {
+        Lang::Rust => 0,
+        Lang::Py => 1,
+        Lang::Ts => 2,
+        Lang::TsSm => 3,
+    }
+}
+
+fn new_row(leg: &'static str) -> Row {
+    Row {
+        leg,
+        cells: ["-"; 5],
+        ..Row::default()
+    }
+}
+
+#[test]
+fn full_table() {
+    let started = Instant::now();
+    let mut rows: Vec<(String, Row)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    // Engine leg: every scenario x every catalogue language, each compared with Rust.
+    for entry in spec::scenarios(spec::Leg::Engine) {
+        let t = Instant::now();
+        let mut row = new_row("engine");
+        let s = load(&entry.id);
+        let reference = match ostro_conformance::engine_leg::run_spec(&s, Lang::Rust) {
+            Ok(r) => r,
+            Err(e) => {
+                failures.push(format!("rust: {e}"));
+                row.cells[0] = "FAIL";
+                rows.push((entry.id.clone(), row));
+                continue;
+            }
+        };
+        row.status.clone_from(&reference.status);
+        row.cells[0] = "pass";
+        for lang in entry.languages.iter().copied().filter(|l| *l != Lang::Rust) {
+            let ok = match ostro_conformance::engine_leg::run_spec(&s, lang) {
+                Ok(r) => match ostro_conformance::engine_leg::cross_compare(&reference, &r) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        failures.push(format!("cross-language vs rust: {e}"));
+                        false
+                    }
+                },
+                Err(e) => {
+                    failures.push(e.to_string());
+                    false
+                }
+            };
+            row.cells[col(lang)] = if ok { "pass" } else { "FAIL" };
+        }
+        row.secs = t.elapsed().as_secs_f64();
+        rows.push((entry.id.clone(), row));
+    }
+
+    // Server leg: every scenario with all roles in each catalogue language, compared with
+    // the Rust run on the same server; C-CHILD-08 also with its TS -> Python -> Rust roles.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        let h = ServerHarness::start().await.expect("server harness");
+        for entry in spec::scenarios(spec::Leg::Server) {
+            let t = Instant::now();
+            let mut row = new_row("server");
+            let s = load(&entry.id);
+            let mut reference: Option<RunReport> = None;
+            let mut runs: Vec<(usize, Vec<Lang>)> = entry
+                .languages
+                .iter()
+                .map(|l| (col(*l), vec![*l; 3]))
+                .collect();
+            if entry.id == "C-CHILD-08" {
+                runs.push((4, CHAIN.to_vec()));
+            }
+            for (c, roles) in runs {
+                let lang = roles[0];
+                let ok = match h.run_spec(&s, &roles).await {
+                    Ok(r) => {
+                        let mut ok = true;
+                        if entry.id == "C-SAGA-03"
+                            && let Err(e) = saga_checks(&h, lang, &r).await
+                        {
+                            failures.push(format!("C-SAGA-03 [{}]: {e}", langs::name(lang)));
+                            ok = false;
+                        }
+                        match &reference {
+                            None => {
+                                row.status.clone_from(&r.status);
+                                reference = Some(r);
+                            }
+                            Some(rf) => {
+                                if let Err(e) = server_cross_compare(rf, &r) {
+                                    failures.push(format!(
+                                        "[{}] cross-language vs rust: {e}",
+                                        roles_name(&roles)
+                                    ));
+                                    ok = false;
+                                }
+                            }
+                        }
+                        ok
+                    }
+                    Err(e) => {
+                        failures.push(format!("[{}] {e}", roles_name(&roles)));
+                        false
+                    }
+                };
+                row.cells[c] = if ok { "pass" } else { "FAIL" };
+            }
+            row.secs = t.elapsed().as_secs_f64();
+            rows.push((entry.id.clone(), row));
+        }
+        match h.check_children_unique().await {
+            Ok(n) => {
+                eprintln!("server leg: exactly one child run per (parent, op) for {n} child starts")
+            }
+            Err(e) => failures.push(format!("one child per (parent, op): {e}")),
+        }
+        h.shutdown().await.expect("shutdown");
+    });
+
+    let mut table = String::from("| Scenario | Leg | Status |");
+    for c in COLUMNS {
+        table.push_str(&format!(" {c} |"));
+    }
+    table.push_str(" Time |\n|---|---|---|");
+    table.push_str(&"---|".repeat(COLUMNS.len()));
+    table.push_str("---|\n");
+    for (id, r) in &rows {
+        table.push_str(&format!("| {id} | {} | {} |", r.leg, r.status));
+        for c in r.cells {
+            table.push_str(&format!(" {c} |"));
+        }
+        table.push_str(&format!(" {:.1} s |\n", r.secs));
+    }
+    let cells: usize = rows
+        .iter()
+        .map(|(_, r)| r.cells.iter().filter(|c| **c != "-").count())
+        .sum();
+    let passed: usize = rows
+        .iter()
+        .map(|(_, r)| r.cells.iter().filter(|c| **c == "pass").count())
+        .sum();
+    eprintln!(
+        "scenario x language table ({} scenarios, {passed}/{cells} cells pass, {:.1?}):\n{table}",
+        rows.len(),
+        started.elapsed()
+    );
+    // Every catalogue scenario of both legs has a row.
+    let expected =
+        spec::scenarios(spec::Leg::Engine).count() + spec::scenarios(spec::Leg::Server).count();
+    assert_eq!(rows.len(), expected);
+    assert!(
+        failures.is_empty(),
+        "{} failure(s):\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+    assert_eq!(passed, cells);
 }
