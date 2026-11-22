@@ -32,6 +32,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use ostro_engine::config::EngineConfig;
 use ostro_engine::replay_check::{ReplayVerdict, journaled_outcome, replay_check};
+use ostro_engine::replay_corpus::load_corpus_entry;
 use ostro_engine::runtime::{Runtime, RuntimeOptions};
 use ostro_engine::sink::{ActivationOutcome, RunRef};
 use ostro_engine::testkit::FakeClock;
@@ -187,76 +188,45 @@ fn encode_journal(journal: &[Event]) -> Vec<u8> {
 }
 
 /// Read and verify an entry directory: file set, toml, sha256s, event count, journal codec.
+///
+/// The checks are the library loader's ([`ostro_engine::replay_corpus::load_corpus_entry`],
+/// plan 10-11, shared with `ostro replay --corpus`). On top of it this test parses the
+/// metadata strictly (`deny_unknown_fields`) and decodes the same bytes independently
+/// with prost: the two decoders must agree, and the metadata must match the library's.
 fn load(dir: &Path) -> Result<Loaded, String> {
-    let mut files: Vec<String> = std::fs::read_dir(dir)
-        .map_err(|e| format!("read dir: {e}"))?
-        .map(|e| {
-            e.expect("dir entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    files.sort();
-    if files != ENTRY_FILES {
-        return Err(format!("entry files are {files:?}, want {ENTRY_FILES:?}"));
-    }
+    let lib = load_corpus_entry(dir)?;
     let toml_text =
         std::fs::read_to_string(dir.join("entry.toml")).map_err(|e| format!("entry.toml: {e}"))?;
     let entry: Entry = toml::from_str(&toml_text).map_err(|e| format!("entry.toml: {e}"))?;
-    let dir_name = dir.file_name().map(|n| n.to_string_lossy().into_owned());
-    if dir_name.as_deref() != Some(entry.name.as_str()) {
-        return Err(format!(
-            "entry.toml name {:?} != directory {dir_name:?}",
-            entry.name
-        ));
-    }
-    let module = std::fs::read(dir.join("module.wasm")).map_err(|e| format!("module: {e}"))?;
-    let got = sha_hex(&module);
-    if got != entry.module_sha256 {
-        return Err(format!(
-            "module_sha256 mismatch: file {got}, entry.toml {}",
-            entry.module_sha256
-        ));
-    }
     let bin = std::fs::read(dir.join("journal.bin")).map_err(|e| format!("journal: {e}"))?;
-    let got = sha_hex(&bin);
-    if got != entry.journal_sha256 {
-        return Err(format!(
-            "journal_sha256 mismatch: file {got}, entry.toml {}",
-            entry.journal_sha256
-        ));
-    }
     let journal = decode_journal(&bin)?;
-    if journal.len() as u64 != entry.journal_events {
-        return Err(format!(
-            "journal_events mismatch: file {}, entry.toml {}",
-            journal.len(),
-            entry.journal_events
-        ));
+    if journal != lib.journal {
+        return Err("the library journal decoder disagrees with prost".to_owned());
     }
-    unhex32(&entry.token_key_hex).map_err(|e| format!("token_key_hex: {e}"))?;
-    match journal.first().map(|e| &e.body) {
-        Some(EventBody::RunStarted(rs)) if rs.workflow == entry.workflow => {
-            if let Some(input) = &entry.input_json
-                && input.as_bytes() != rs.input.data.as_slice()
-            {
-                return Err(format!(
-                    "input_json {input:?} != RunStarted input {:?}",
-                    String::from_utf8_lossy(&rs.input.data)
-                ));
-            }
-        }
-        other => {
-            return Err(format!(
-                "seq 0 must be RunStarted of workflow {:?}, got {other:?}",
-                entry.workflow
-            ));
-        }
+    if (
+        entry.name.as_str(),
+        entry.workflow.as_str(),
+        entry.expected.as_str(),
+        entry.partition,
+        entry.run_id.as_str(),
+    ) != (
+        lib.name.as_str(),
+        lib.workflow.as_str(),
+        lib.expected.as_str(),
+        lib.run.partition,
+        lib.run.run_id.as_str(),
+    ) || unhex32(&entry.token_key_hex)? != lib.token_key
+        || entry.module_sha256 != sha_hex(&lib.module)
+        || entry.journal_sha256 != sha_hex(&bin)
+        || entry.input_json.as_ref().is_some_and(|i| {
+            !matches!(&journal[0].body, EventBody::RunStarted(rs) if rs.input.data == i.as_bytes())
+        })
+    {
+        return Err("the library entry.toml reader disagrees with toml".to_owned());
     }
     Ok(Loaded {
         entry,
-        module,
+        module: lib.module,
         journal,
     })
 }
