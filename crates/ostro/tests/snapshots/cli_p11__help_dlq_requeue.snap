@@ -1,0 +1,54 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"dlq\", \"requeue\"])"
+---
+Requeue an entry: resume in place, restart with the same input, or rerun from a cut
+
+Usage: ostro dlq requeue [OPTIONS] <RUN>
+
+Arguments:
+  <RUN>
+          DLQ member (run id)
+
+Options:
+      --mode <MODE>
+          How to requeue
+
+          Possible values:
+          - auto:    Resume when the run is resumable, else restart (server default)
+          - resume:  Resume the run in place
+          - restart: Start a new run with the same input
+          - rerun:   Rerun from a cut (`--from-step` / `--from-seq`)
+          
+          [default: auto]
+
+      --from-step <NAME[#N]>
+          Cut before the N-th (1-based, default 1) execution of step NAME: `NAME` or `NAME#N`
+
+      --from-seq <N>
+          Cut at journal sequence number N (events before N are copied)
+
+      --dry-run
+          Validate only: report the mode that would be used, requeue nothing
+
+      --server <SERVER>
+          Server URL
+          
+          [env: OSTRO_SERVER=]
+          [default: http://127.0.0.1:7700]
+
+      --json
+          Print the REST response body as JSON
+
+      --timeout <TIMEOUT>
+          Per-request timeout (friendly duration; a long-poll adds its wait)
+          
+          [default: 30s]
+
+      --ca-file <PEM>
+          PEM CA certificate to trust for an https:// server instead of the platform roots (e.g. the cluster CA `<data_dir>/tls/ca.crt` behind a self-signed listener)
+          
+          [env: OSTRO_CA_FILE=]
+
+  -h, --help
+          Print help (see a summary with '-h')

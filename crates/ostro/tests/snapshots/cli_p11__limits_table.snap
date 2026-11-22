@@ -1,0 +1,19 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: out
+---
+NAME                    VALUE     UNIT                            CONFIGURABLE  ENFORCED                                                                                                     ERROR
+max_history_events      50000     events per run                  yes           engine, live appends only                                                                                    run failed (resumable), reason limit_exceeded
+max_children_per_run    10000     ChildStarted per run            yes           engine, live appends only                                                                                    run failed (resumable), reason limit_exceeded
+max_payload_bytes       4194304   bytes                           yes           engine, live appends only; API (start input, signal and token payloads)                                      engine: run failed (resumable), reason limit_exceeded; API: 413 payload_too_large / gRPC RESOURCE_EXHAUSTED
+max_request_bytes       4194304   bytes                           yes           API (REST body, gRPC message)                                                                                413 payload_too_large / gRPC RESOURCE_EXHAUSTED
+max_module_bytes        67108864  bytes                           yes           API (module upload)                                                                                          413 payload_too_large / gRPC RESOURCE_EXHAUSTED
+MAX_CONTEXT_BYTES       65536     bytes                           no            engine (set-status JSON and random-bytes length)                                                             attempt fails protocol_violation
+MAX_RUN_TAGS            64        tags per run                    no            API and apply (StartRun)                                                                                     400 invalid_argument
+MAX_RUN_TAG_LEN         128       bytes per tag                   no            API and apply (StartRun)                                                                                     400 invalid_argument
+MAX_SIGNAL_NAME_LEN     256       bytes                           no            API and apply                                                                                                400 invalid_argument
+MAX_REASON_LEN          1024      bytes                           no            API and apply                                                                                                400 invalid_argument
+MAX_REQUEST_ID_LEN      64        bytes                           no            API and apply                                                                                                400 invalid_argument
+MAX_PAGE_LIMIT          1000      items per page                  no            API (list endpoints)                                                                                         none: a larger page size is capped
+MAX_RESULT_WAIT_MS      60000     milliseconds                    no            API (result long-poll)                                                                                       none: a longer wait is capped
+MAX_RERUN_PREFIX_BYTES  3670016   bytes (encoded rerun StartRun)  no            API (rerun, after offloading copied payloads over 1 KiB to blobs; prefix also capped at max_history_events)  413 payload_too_large, details.reason rerun_prefix_too_large

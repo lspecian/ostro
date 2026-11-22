@@ -1,0 +1,32 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"rerun\"])"
+---
+Rerun a terminal run from a cut (a new run; effects after the cut re-execute)
+
+Usage: ostro rerun [OPTIONS] <--from-step <NAME[#N]>|--from-seq <N>> <RUN>
+
+Arguments:
+  <RUN>  Source run id (terminal)
+
+Options:
+      --from-step <NAME[#N]>
+          Cut before the N-th (1-based, default 1) execution of step NAME: `NAME` or `NAME#N`
+      --from-seq <N>
+          Cut at journal sequence number N (events before N are copied)
+      --version <active|source|N>
+          Version to execute: `active` (server default), `source` or a number
+      --idempotency-key <IDEMPOTENCY_KEY>
+          Dedupe key: the same key returns the same rerun
+      --dry-run
+          Validate only: the server runs the cut analysis and replay check, starts nothing
+      --server <SERVER>
+          Server URL [env: OSTRO_SERVER=] [default: http://127.0.0.1:7700]
+      --json
+          Print the REST response body as JSON
+      --timeout <TIMEOUT>
+          Per-request timeout (friendly duration; a long-poll adds its wait) [default: 30s]
+      --ca-file <PEM>
+          PEM CA certificate to trust for an https:// server instead of the platform roots (e.g. the cluster CA `<data_dir>/tls/ca.crt` behind a self-signed listener) [env: OSTRO_CA_FILE=]
+  -h, --help
+          Print help

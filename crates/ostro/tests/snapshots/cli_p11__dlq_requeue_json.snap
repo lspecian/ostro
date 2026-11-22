@@ -1,0 +1,9 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "redacted(&r, &[(b.as_str(), \"[run_b]\"), (new.as_str(), \"[new_run]\")])"
+---
+{
+  "mode": "restart",
+  "new_run_id": "[new_run]",
+  "run_id": "[run_id]"
+}

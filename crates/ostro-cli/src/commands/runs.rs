@@ -212,9 +212,15 @@ pub struct LsArgs {
     /// Queue filter.
     #[arg(long)]
     pub queue: Option<String>,
-    /// Tag filter.
+    /// Tag filter (repeatable; every tag must match, at most 8).
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Newest runs first (default: oldest first).
     #[arg(long)]
-    pub tag: Option<String>,
+    pub newest: bool,
+    /// Only DLQ members (failed / timed-out runs not dismissed or requeued).
+    #[arg(long)]
+    pub dlq: bool,
     /// Page size (server default 100, max 1000).
     #[arg(long)]
     pub limit: Option<u32>,
@@ -238,8 +244,18 @@ impl LsArgs {
         if let Some(x) = &self.queue {
             q.push(("queue", x.clone()));
         }
-        if let Some(t) = &self.tag {
-            q.push(("tag", t.clone()));
+        // One tag keeps the pre-Phase-11 `tag` parameter; several use the repeatable
+        // `tags` (11-11; the server ANDs `tag` and every `tags`).
+        match self.tags.as_slice() {
+            [] => {}
+            [t] => q.push(("tag", t.clone())),
+            many => q.extend(many.iter().map(|t| ("tags", t.clone()))),
+        }
+        if self.newest {
+            q.push(("order", "newest".to_owned()));
+        }
+        if self.dlq {
+            q.push(("dlq", "true".to_owned()));
         }
         if let Some(l) = self.limit {
             q.push(("limit", l.to_string()));
@@ -528,6 +544,21 @@ mod tests {
         assert_eq!(
             parse(&["ls", "--status", "done"]).unwrap_err().exit_code(),
             2
+        );
+        // 11-14: repeatable --tag, --newest, --dlq.
+        let ClientCommand::Ls(a) =
+            parse(&["ls", "--tag", "blue", "--tag", "big", "--newest", "--dlq"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            a.query(),
+            vec![
+                ("tags", "blue".to_owned()),
+                ("tags", "big".to_owned()),
+                ("order", "newest".to_owned()),
+                ("dlq", "true".to_owned()),
+            ]
         );
     }
 

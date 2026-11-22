@@ -1,0 +1,7 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "mask_times(&mask(&out, &subst))"
+---
+RUN ID                         WORKFLOW  VERSION  STATUS  QUEUE    REASON                     RESUMABLE  FAILED                STATE
+[run_b]                        pipeline  1        failed  default  workflow_failed: s2 fails  no         [time]                dlq
+[run_a]                        pipeline  1        failed  default  workflow_failed: s3 fails  no         [time]                dlq

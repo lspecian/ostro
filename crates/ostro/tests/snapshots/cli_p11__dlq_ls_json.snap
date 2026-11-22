@@ -1,0 +1,34 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "redacted(&v, &subst)"
+---
+{
+  "entries": [
+    {
+      "failed_at_ms": "[ms]",
+      "queue": "default",
+      "reason": "workflow_failed: s2 fails",
+      "resumable": false,
+      "run_id": "[run_id]",
+      "status": "failed",
+      "tags": [
+        "team=b"
+      ],
+      "version": 1,
+      "workflow": "pipeline"
+    },
+    {
+      "failed_at_ms": "[ms]",
+      "queue": "default",
+      "reason": "workflow_failed: s3 fails",
+      "resumable": false,
+      "run_id": "[run_id]",
+      "status": "failed",
+      "tags": [
+        "team=a"
+      ],
+      "version": 1,
+      "workflow": "pipeline"
+    }
+  ]
+}

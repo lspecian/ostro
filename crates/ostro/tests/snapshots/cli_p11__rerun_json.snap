@@ -1,0 +1,14 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "redacted(&r, &[(src.as_str(), \"[source]\"), (new.as_str(), \"[new_run]\")])"
+---
+{
+  "copied_events": 3,
+  "cut_seq": 3,
+  "existing": false,
+  "new_run_id": "[new_run]",
+  "source_run_id": "[source]",
+  "verdict": "ok_frontier",
+  "version": 2,
+  "workflow": "pipeline"
+}

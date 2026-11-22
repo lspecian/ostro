@@ -24,6 +24,10 @@ pub mod runs;
 pub mod schedules;
 pub mod webhooks;
 pub mod worker_tokens;
+// Phase 11 (11-14): run operations.
+pub mod dlq;
+pub mod limits;
+pub mod rerun;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -131,6 +135,15 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: pause::WorkflowCommand,
     },
+    /// Rerun a terminal run from a cut (a new run; effects after the cut re-execute).
+    Rerun(rerun::RerunArgs),
+    /// Dead-letter queue of failed runs (ls, requeue, dismiss).
+    Dlq {
+        #[command(subcommand)]
+        command: dlq::DlqCommand,
+    },
+    /// Show the published engine and API limits.
+    Limits(limits::LimitsArgs),
 }
 
 /// Run a verb to completion on a current-thread runtime.
@@ -192,6 +205,9 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Egress { command } => command.conn(),
         ClientCommand::Queue { command } => command.conn(),
         ClientCommand::Workflow { command } => command.conn(),
+        ClientCommand::Rerun(a) => &a.conn,
+        ClientCommand::Dlq { command } => command.conn(),
+        ClientCommand::Limits(a) => &a.conn,
     };
     let out = conn.out();
     let client = match conn.client() {
@@ -222,6 +238,9 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Egress { command } => bridge::run_egress(&client, out, command).await,
         ClientCommand::Queue { command } => queues::run(&client, out, command).await,
         ClientCommand::Workflow { command } => pause::workflow(&client, out, command).await,
+        ClientCommand::Rerun(a) => rerun::rerun(&client, out, a).await,
+        ClientCommand::Dlq { command } => dlq::run(&client, out, command).await,
+        ClientCommand::Limits(a) => limits::limits(&client, out, a).await,
     };
     match res {
         Ok(o) => o,

@@ -1,0 +1,120 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "serde_json::to_string_pretty(&lim).unwrap()"
+---
+{
+  "limits": [
+    {
+      "configurable": true,
+      "enforced": "engine, live appends only",
+      "error": "run failed (resumable), reason limit_exceeded",
+      "name": "max_history_events",
+      "unit": "events per run",
+      "value": 50000
+    },
+    {
+      "configurable": true,
+      "enforced": "engine, live appends only",
+      "error": "run failed (resumable), reason limit_exceeded",
+      "name": "max_children_per_run",
+      "unit": "ChildStarted per run",
+      "value": 10000
+    },
+    {
+      "configurable": true,
+      "enforced": "engine, live appends only; API (start input, signal and token payloads)",
+      "error": "engine: run failed (resumable), reason limit_exceeded; API: 413 payload_too_large / gRPC RESOURCE_EXHAUSTED",
+      "name": "max_payload_bytes",
+      "unit": "bytes",
+      "value": 4194304
+    },
+    {
+      "configurable": true,
+      "enforced": "API (REST body, gRPC message)",
+      "error": "413 payload_too_large / gRPC RESOURCE_EXHAUSTED",
+      "name": "max_request_bytes",
+      "unit": "bytes",
+      "value": 4194304
+    },
+    {
+      "configurable": true,
+      "enforced": "API (module upload)",
+      "error": "413 payload_too_large / gRPC RESOURCE_EXHAUSTED",
+      "name": "max_module_bytes",
+      "unit": "bytes",
+      "value": 67108864
+    },
+    {
+      "configurable": false,
+      "enforced": "engine (set-status JSON and random-bytes length)",
+      "error": "attempt fails protocol_violation",
+      "name": "MAX_CONTEXT_BYTES",
+      "unit": "bytes",
+      "value": 65536
+    },
+    {
+      "configurable": false,
+      "enforced": "API and apply (StartRun)",
+      "error": "400 invalid_argument",
+      "name": "MAX_RUN_TAGS",
+      "unit": "tags per run",
+      "value": 64
+    },
+    {
+      "configurable": false,
+      "enforced": "API and apply (StartRun)",
+      "error": "400 invalid_argument",
+      "name": "MAX_RUN_TAG_LEN",
+      "unit": "bytes per tag",
+      "value": 128
+    },
+    {
+      "configurable": false,
+      "enforced": "API and apply",
+      "error": "400 invalid_argument",
+      "name": "MAX_SIGNAL_NAME_LEN",
+      "unit": "bytes",
+      "value": 256
+    },
+    {
+      "configurable": false,
+      "enforced": "API and apply",
+      "error": "400 invalid_argument",
+      "name": "MAX_REASON_LEN",
+      "unit": "bytes",
+      "value": 1024
+    },
+    {
+      "configurable": false,
+      "enforced": "API and apply",
+      "error": "400 invalid_argument",
+      "name": "MAX_REQUEST_ID_LEN",
+      "unit": "bytes",
+      "value": 64
+    },
+    {
+      "configurable": false,
+      "enforced": "API (list endpoints)",
+      "error": "none: a larger page size is capped",
+      "name": "MAX_PAGE_LIMIT",
+      "unit": "items per page",
+      "value": 1000
+    },
+    {
+      "configurable": false,
+      "enforced": "API (result long-poll)",
+      "error": "none: a longer wait is capped",
+      "name": "MAX_RESULT_WAIT_MS",
+      "unit": "milliseconds",
+      "value": 60000
+    },
+    {
+      "configurable": false,
+      "enforced": "API (rerun, after offloading copied payloads over 1 KiB to blobs; prefix also capped at max_history_events)",
+      "error": "413 payload_too_large, details.reason rerun_prefix_too_large",
+      "name": "MAX_RERUN_PREFIX_BYTES",
+      "unit": "bytes (encoded rerun StartRun)",
+      "value": 3670016
+    }
+  ]
+}

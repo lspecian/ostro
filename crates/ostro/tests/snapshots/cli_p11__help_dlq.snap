@@ -1,0 +1,16 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"dlq\"])"
+---
+Dead-letter queue of failed runs (ls, requeue, dismiss)
+
+Usage: ostro dlq <COMMAND>
+
+Commands:
+  ls       List DLQ entries (newest failures first)
+  requeue  Requeue an entry: resume in place, restart with the same input, or rerun from a cut
+  dismiss  Dismiss an entry (it leaves the default view; `dlq ls --all` still shows it)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help

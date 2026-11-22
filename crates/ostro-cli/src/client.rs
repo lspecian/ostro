@@ -392,6 +392,67 @@ impl Client {
     }
 }
 
+// --- Phase 11 (11-14) ---------------------------------------------------------------
+// Run operations (OPS-02..05, OPS-07): rerun, DLQ, bulk jobs, limits. One contiguous
+// block so Phase 10's client extraction (10-09) can move it verbatim.
+
+impl Client {
+    /// `POST /v1/runs/{id}/rerun` `{from, version, idempotency_key, dry_run}` (201 new
+    /// run; 200 dry run or `existing`).
+    pub async fn rerun(&self, run_id: &str, body: &Value) -> Result<Response, CallError> {
+        self.post(&["v1", "runs", run_id, "rerun"], body).await
+    }
+
+    /// `GET /v1/runs/{id}/rerun-cuts`.
+    pub async fn rerun_cuts(&self, run_id: &str) -> Result<Response, CallError> {
+        self.get(&["v1", "runs", run_id, "rerun-cuts"], &[]).await
+    }
+
+    /// `GET /v1/dlq?workflow&queue&reason&tags*&include_dismissed&limit&page_token`.
+    pub async fn list_dlq(&self, query: &[(&str, String)]) -> Result<Response, CallError> {
+        self.get(&["v1", "dlq"], query).await
+    }
+
+    /// `POST /v1/dlq/{id}/requeue` `{mode, dry_run}`.
+    pub async fn requeue_dlq(&self, run_id: &str, body: &Value) -> Result<Response, CallError> {
+        self.post(&["v1", "dlq", run_id, "requeue"], body).await
+    }
+
+    /// `POST /v1/dlq/{id}/dismiss` `{reason}`.
+    pub async fn dismiss_dlq(&self, run_id: &str, body: &Value) -> Result<Response, CallError> {
+        self.post(&["v1", "dlq", run_id, "dismiss"], body).await
+    }
+
+    /// `POST /v1/bulk` `{action, filter, rate_per_sec, max_in_flight, dry_run}` (201 job;
+    /// 200 dry run).
+    pub async fn create_bulk(&self, body: &Value) -> Result<Response, CallError> {
+        self.post(&["v1", "bulk"], body).await
+    }
+
+    /// `GET /v1/bulk`.
+    pub async fn list_bulk(&self) -> Result<Response, CallError> {
+        self.get(&["v1", "bulk"], &[]).await
+    }
+
+    /// `GET /v1/bulk/{job_id}`.
+    pub async fn get_bulk(&self, job_id: &str) -> Result<Response, CallError> {
+        self.get(&["v1", "bulk", job_id], &[]).await
+    }
+
+    /// `POST /v1/bulk/{job_id}/cancel`.
+    pub async fn cancel_bulk(&self, job_id: &str) -> Result<Response, CallError> {
+        self.post(&["v1", "bulk", job_id, "cancel"], &json!({}))
+            .await
+    }
+
+    /// `GET /v1/limits`.
+    pub async fn limits(&self) -> Result<Response, CallError> {
+        self.get(&["v1", "limits"], &[]).await
+    }
+}
+
+// --- end Phase 11 (11-14) -----------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,14 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"limits\"])"
+---
+Show the published engine and API limits
+
+Usage: ostro limits [OPTIONS]
+
+Options:
+      --server <SERVER>    Server URL [env: OSTRO_SERVER=] [default: http://127.0.0.1:7700]
+      --json               Print the REST response body as JSON
+      --timeout <TIMEOUT>  Per-request timeout (friendly duration; a long-poll adds its wait) [default: 30s]
+      --ca-file <PEM>      PEM CA certificate to trust for an https:// server instead of the platform roots (e.g. the cluster CA `<data_dir>/tls/ca.crt` behind a self-signed listener) [env: OSTRO_CA_FILE=]
+  -h, --help               Print help

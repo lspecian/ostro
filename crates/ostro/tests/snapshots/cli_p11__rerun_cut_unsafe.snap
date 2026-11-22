@@ -1,0 +1,16 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "redacted(&body, &[(src.as_str(), \"[source]\")])"
+---
+{
+  "error": {
+    "code": "conflict",
+    "details": {
+      "detail": "terminal_or_out_of_range",
+      "nearest_safe_seq": 4,
+      "reason": "rerun_cut_unsafe",
+      "seq": 5
+    },
+    "message": "seq 5 is not a safe rerun cut: terminal_or_out_of_range"
+  }
+}

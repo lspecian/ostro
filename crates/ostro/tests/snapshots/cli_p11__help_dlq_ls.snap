@@ -1,0 +1,21 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"dlq\", \"ls\"])"
+---
+List DLQ entries (newest failures first)
+
+Usage: ostro dlq ls [OPTIONS]
+
+Options:
+      --workflow <WORKFLOW>  Workflow filter
+      --queue <QUEUE>        Queue filter
+      --reason <REASON>      Failure reason prefix (e.g. `run_timeout`, `workflow_failed`)
+      --tag <TAGS>           Tag filter (repeatable; every tag must match)
+      --all                  Include dismissed and requeued entries
+      --limit <LIMIT>        Page size (server default 100)
+      --page <PAGE>          Page token from a previous listing
+      --server <SERVER>      Server URL [env: OSTRO_SERVER=] [default: http://127.0.0.1:7700]
+      --json                 Print the REST response body as JSON
+      --timeout <TIMEOUT>    Per-request timeout (friendly duration; a long-poll adds its wait) [default: 30s]
+      --ca-file <PEM>        PEM CA certificate to trust for an https:// server instead of the platform roots (e.g. the cluster CA `<data_dir>/tls/ca.crt` behind a self-signed listener) [env: OSTRO_CA_FILE=]
+  -h, --help                 Print help
