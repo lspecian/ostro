@@ -1,8 +1,11 @@
-// TypeScript/JavaScript client for the Ostro REST API.
+// TypeScript/JavaScript client for the Ostro REST API (SDK-07).
 //
-// Scaffold (plan 10-04). The typed client and the route table (`routes.js`, checked by
-// crates/ostro-client/tests/contract.rs) arrive with plan 10-14; the node:test kit with plan
-// 10-17. Node built-ins only: no runtime dependencies.
+// Node built-ins only (fetch, AbortController, node:crypto): no runtime dependencies. The
+// route table (routes.js) is checked against the server's OpenAPI document by
+// crates/ostro-client/tests/contract.rs.
 
 /** Package version. */
 export const VERSION = "0.1.0";
+
+export { Client, OstroError, DEFAULT_SERVER, parseDuration, sha256Hex } from "./client.js";
+export { ROUTES } from "./routes.js";

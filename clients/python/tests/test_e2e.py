@@ -26,7 +26,11 @@ def test_shared_scenario(ostro_server, p10_time_wasm):
     started = c.start_run("signal_then_sleep", {})
     run_id = started["run_id"]
     assert started["created"] is True
-    assert c.get_run(run_id)["status"] == "running"
+    # The run is live: `running`, or `scheduled`/`ready` between activations (a run parked
+    # on its signal wait is reported either way).
+    run = c.get_run(run_id)
+    assert run["status"] in ("running", "scheduled", "ready"), run
+    assert run["workflow"] == "signal_then_sleep", run
 
     sig = c.signal(run_id, "go", {"ok": True})
     assert sig["accepted"] is True, sig
