@@ -256,8 +256,11 @@ fn json_envelope() {
     assert_eq!(v["lang"], "ts");
     assert_eq!(v["name"], "wf");
     assert_eq!(v["sdk_bundle"], sdk_bundle::bundle_id());
+    // the same directory: macOS temp dirs sit behind the /var -> /private/var symlink
     assert_eq!(
-        Path::new(v["dir"].as_str().unwrap()),
+        Path::new(v["dir"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
         dir.canonicalize().unwrap()
     );
     let files: Vec<&str> = v["files"]
