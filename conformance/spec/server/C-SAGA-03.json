@@ -1,0 +1,21 @@
+{
+  "id": "C-SAGA-03",
+  "title": "a saga with HTTP compensations against the MockProvider compensates in reverse order with one charge per key (conf_saga_http)",
+  "leg": "server",
+  "workflow": "conf_saga_http",
+  "input": {
+    "url": "$MOCK"
+  },
+  "expect": {
+    "status": "failed",
+    "failure_kind": "book_c_failed",
+    "projection": [
+      "effect:http#1",
+      "effect:http#2",
+      "step:book_c",
+      "effect:http#3",
+      "effect:http#4",
+      "terminal:failed"
+    ]
+  }
+}

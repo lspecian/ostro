@@ -1,0 +1,108 @@
+{
+  "id": "C-CHILD-08",
+  "title": "a TS parent starts a Python child which starts a Rust grandchild; the nested result reaches the root and cancelling the root cancels both descendants",
+  "leg": "server",
+  "workflow": "conf_parent_chain",
+  "input": {
+    "next": [
+      "wf:conf_parent_chain",
+      "wf2:conf_leaf_echo"
+    ]
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "child": {
+        "child": {
+          "echo": {
+            "next": []
+          }
+        }
+      }
+    },
+    "projection": [
+      "child:conf_parent_chain#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "completed",
+        "parent": true,
+        "result": {
+          "child": {
+            "echo": {
+              "next": []
+            }
+          }
+        },
+        "projection": [
+          "child:conf_leaf_echo#1",
+          "terminal:completed"
+        ]
+      },
+      "child.child": {
+        "status": "completed",
+        "parent": true,
+        "result": {
+          "echo": {
+            "next": []
+          }
+        },
+        "projection": [
+          "terminal:completed"
+        ]
+      }
+    },
+    "variants": [
+      {
+        "title": "cancelling the root once the grandchild sleeps cancels all three levels; the grandchild's cleanup runs",
+        "input": {
+          "next": [
+            "wf:conf_parent_chain",
+            "wf2:conf_leaf_sleep"
+          ]
+        },
+        "script": [
+          {
+            "input": "api",
+            "op": "wait_fact",
+            "target": "child.child",
+            "fact": "timer#1"
+          },
+          {
+            "input": "api",
+            "op": "cancel",
+            "target": "root",
+            "reason": "conformance"
+          }
+        ],
+        "expect": {
+          "status": "cancelled",
+          "projection": [
+            "child:conf_parent_chain#1",
+            "terminal:cancelled"
+          ],
+          "descendants": {
+            "child": {
+              "status": "cancelled",
+              "parent": true,
+              "projection": [
+                "child:conf_leaf_sleep#1",
+                "terminal:cancelled"
+              ]
+            },
+            "child.child": {
+              "status": "cancelled",
+              "parent": true,
+              "projection": [
+                "timer#1",
+                "step:cleanup",
+                "terminal:cancelled"
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}
