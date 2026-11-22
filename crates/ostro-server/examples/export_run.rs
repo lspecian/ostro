@@ -180,6 +180,62 @@ fn journal_event_bytes(seq: u64, kind: u32, payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `JournalEvent.attempt` (field 4, fixed64; RESERVATIONS `JournalEvent.4`, Phase 11) of a
+/// stored `Events` row, 0 when absent. Since 11-07 the submitter stamps it on command
+/// events (and a rerun copies it with its prefix), so `journal.bin` carries it too: the
+/// records stay the exact bytes of the `Events` rows. A minimal protobuf field walk (no
+/// prost dependency here).
+fn row_attempt(raw: &[u8]) -> Result<u64, String> {
+    fn take_varint(b: &[u8], i: &mut usize) -> Result<u64, String> {
+        let mut v = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = *b.get(*i).ok_or("truncated varint")?;
+            *i += 1;
+            v |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(v);
+            }
+        }
+        Err("varint too long".to_owned())
+    }
+    let mut i = 0usize;
+    let mut attempt = 0u64;
+    while i < raw.len() {
+        let key = take_varint(raw, &mut i)?;
+        let skip = match key & 7 {
+            0 => {
+                take_varint(raw, &mut i)?;
+                0
+            }
+            1 => 8,
+            2 => usize::try_from(take_varint(raw, &mut i)?).map_err(|e| e.to_string())?,
+            5 => 4,
+            w => return Err(format!("wire type {w}")),
+        };
+        let end = i
+            .checked_add(skip)
+            .filter(|e| *e <= raw.len())
+            .ok_or("truncated field")?;
+        if key == (4 << 3 | 1) {
+            let b: [u8; 8] = raw[i..end].try_into().map_err(|_| "attempt width")?;
+            attempt = u64::from_le_bytes(b);
+        }
+        i = end;
+    }
+    Ok(attempt)
+}
+
+/// [`journal_event_bytes`] followed by `attempt` (field 4, fixed64) when it is not 0, in
+/// prost's tag order.
+fn journal_event_bytes_with_attempt(seq: u64, kind: u32, payload: &[u8], attempt: u64) -> Vec<u8> {
+    let mut out = journal_event_bytes(seq, kind, payload);
+    if attempt != 0 {
+        out.push(0x21);
+        out.extend_from_slice(&attempt.to_le_bytes());
+    }
+    out
+}
+
 /// TOML basic string.
 fn toml_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -355,18 +411,19 @@ async fn read_run_on(node: &Node, run: RunId) -> Result<Exported, String> {
         if (ev.seq, k) != (*seq, *kind) {
             return Err(format!("seq {seq}: row/event mismatch"));
         }
-        let msg = journal_event_bytes(ev.seq, k, &bytes);
+        let raw = h
+            .reader()
+            .get(Table::Events, &event_key(&run, *seq))
+            .map_err(|e| format!("events row {seq}: {e}"))?
+            .ok_or_else(|| format!("events row {seq} missing"))?;
+        let attempt = row_attempt(&raw).map_err(|e| format!("events row {seq}: {e}"))?;
+        let msg = journal_event_bytes_with_attempt(ev.seq, k, &bytes, attempt);
         if let Some(payload_ref::Kind::Inline(stored)) = &payload.kind {
             if stored.as_ref() != bytes.as_slice() {
                 return Err(format!(
                     "seq {seq}: stored event bytes do not re-encode identically"
                 ));
             }
-            let raw = h
-                .reader()
-                .get(Table::Events, &event_key(&run, *seq))
-                .map_err(|e| format!("events row {seq}: {e}"))?
-                .ok_or_else(|| format!("events row {seq} missing"))?;
             if raw != msg {
                 return Err(format!(
                     "seq {seq}: journal.bin record != stored Events row"

@@ -172,8 +172,17 @@ re-run it over an existing entry.
 | `fx-sql-exactly-once` | fx-sql (server export, 06-20, PostgreSQL 14) | exactly-once `INSERT … RETURNING` on a `sql-postgres` connection with a templated password: tagged `text`/`int8` cells, `rows_affected` 1 | completed |
 | `fx-object-local` | fx-object (server export, 06-20) | local object connection: put → get → head → presign-get (Ostro HMAC route URL) → delete → get `not_found` (W7 encodings) | completed |
 | `fx-canary-scrubbed` | fx-canary (server export, 06-20) | `X-Api-Key: {{secret:canary-key}}` towards an echo provider: the echoed header is `[REDACTED]`; a canary scan of the entry (raw, base64 at 3 alignments, hex, percent) found 0 hits | completed |
+| `rerun-fixed-from-step` | p11-rerun → p11-rerun-v2 (server export, 11-18) | fix-and-rerun: the source failed at `s3` on v1; `ostro rerun --from-step s3` on v2 copies events 0..3 (with their Phase 11 `attempt` stamps) and completes `s3`..`s5` live | completed |
+| `rerun-rearmed-timer` | p11-rerun → p11-rerun-v2 (server export, 11-18) | `sleep_between_ms` 300, source failed at `s3`; rerun `--from-seq` = TimerStarted + 1 copies the open timer, which the executor re-arms (11-07) and which fires in the rerun | completed |
 
 05-20 adds the final entries (order-saga and crash-campaign samples) at the freeze.
+
+11-18 (Phase 11 gate) adds the two `rerun-*` entries, exported from a throwaway `ostro dev`
+data dir with both guests built by `scripts/corpus-guest-build.sh`. They are the first
+entries whose `journal.bin` records carry `JournalEvent.attempt` (field 4, fixed64, set by the
+submitter since 11-07 and copied by a rerun): the records are still the exact bytes of the
+`Events` rows, and the replay ignores the field. `export_run` reads the field from each row
+(11-18).
 
 06-20 (Phase 6 gate) adds the `fx-*` effect entries. They were exported from throwaway
 `ostro server` data dirs against a loopback mock provider and a private PostgreSQL 14 cluster,

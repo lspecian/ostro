@@ -1,0 +1,21 @@
+# QA-02 replay-corpus entry. Never edit or re-record; see ../README.md.
+# Exported from a dev/test data dir: token_key_hex is that dir's ephemeral key.
+name = "rerun-rearmed-timer"
+workflow = "pipeline"
+input_json = "{\"fail_at\":3,\"sleep_between_ms\":300}"
+expected = "completed"
+partition = 3
+run_id = "001g38g3z4c0wwz0hq8wt56pwt8gr"
+token_key_hex = "3e438425897d8af5951c2c84f4347176fab710bb123ea0953358d430d3fac5e5"
+terminal_payload_sha256 = "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d"
+journal_events = 10
+module_sha256 = "b74bd53aa6548b67a568be2973e173754f4ef3206470de520f950aa1ea1e48d0"
+journal_sha256 = "19d256ab8c160fa04cf4a822e70dbea6bb81e89f9e0f71ebf09315613dd0dc15"
+
+[recorded_with]
+ostro = "wit/ostro-runtime-v0.1.0-412-g6d3a561ac68e-dirty"
+wasmtime = "50.0.2"
+target = "x86_64-unknown-linux-gnu"
+date = "2026-11-22"
+tool = "export_run"
+command = "export_run --run 001g38g3z4c0wwz0hq8wt56pwt8gr --entry rerun-rearmed-timer"
