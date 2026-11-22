@@ -186,8 +186,7 @@ impl RaftHandle {
         let _ = self.tx.send(Event::SnapshotFailed(peer));
     }
 
-    /// Start an election now instead of waiting for the election timeout.
-    /// On the leader: this node plus every peer it heard from within
+    /// On the leader: this node plus every voter or learner it heard from within
     /// `within`. `None` on a follower, whose view of liveness is not the
     /// cluster's. A sample, not a verdict: callers accumulate over a window.
     pub async fn sample_live(&self, within: Duration) -> Option<Vec<u64>> {
@@ -196,6 +195,7 @@ impl RaftHandle {
         rx.await.ok().flatten()
     }
 
+    /// Start an election now instead of waiting for the election timeout.
     pub fn campaign(&self) {
         let _ = self.tx.send(Event::Campaign);
     }
@@ -478,8 +478,9 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
                     self.fatal = Some(format!(
                         "leader {} has committed through {} but this node's catalog log ends at {}: \
                          this node lost raft state it had acknowledged (data wiped or restored). \
-                         Remove it from the cluster (cluster remove-node {} --force), add it back \
-                         (cluster add-node), and start it with CHRONIK_CLUSTER_JOIN=true.",
+                         Node {}'s metadata Raft log is missing or blank while it is a configured voter: \
+                         restore the meta dir from backup, or wipe the whole data dir. Node removal and \
+                         rejoin arrive with `ostro cluster remove` / `ostro cluster join` in Phase 13.",
                         msg.from, msg.commit, self.node.raft.raft_log.last_index(), self.id
                     ));
                     return false; // the loop reports `fatal` and stops
@@ -501,13 +502,18 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
             Event::SampleLive { within, reply } => {
                 let live = (self.node.raft.state == StateRole::Leader).then(|| {
                     let mut ids = vec![self.id];
-                    let voters = self.node.raft.prs().conf().voters().ids();
-                    for id in voters.iter() {
+                    // Ostro: voters ∪ learners (raft heartbeats reach learners too), so the
+                    // controller sees a dead learner node. See VENDORED.md.
+                    let conf = self.node.raft.prs().conf();
+                    let cs = conf.to_conf_state();
+                    let voters = conf.voters().ids();
+                    for id in voters.iter().chain(cs.learners.iter().copied()).chain(cs.learners_next.iter().copied()) {
                         if id != self.id && self.last_heard.get(&id).map(|t| t.elapsed() <= within).unwrap_or(false) {
                             ids.push(id);
                         }
                     }
                     ids.sort_unstable();
+                    ids.dedup();
                     ids
                 });
                 let _ = reply.send(live);
@@ -1096,6 +1102,96 @@ mod tests {
         assert_eq!(c.h(leader).sample_live(window).await, Some(want));
     }
 
+    /// Ostro: `sample_live` covers learners as well as voters (a dead learner node must be
+    /// visible to the controller). Also records what the first sample of a newly elected
+    /// leader contains: `last_heard` survives role changes, so it still holds contacts from
+    /// the node's follower days (a just-killed old leader appears in a wide window), and
+    /// learners appear only once they answered the new leader's first heartbeat.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sample_live_includes_learners() {
+        use raft::eraftpb::{ConfChangeSingle, ConfChangeType};
+
+        async fn until(what: &str, mut f: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !f() {
+                assert!(Instant::now() < deadline, "timed out waiting for {}", what);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        async fn sample(h: &RaftHandle, within: Duration) -> Vec<u64> {
+            h.sample_live(within).await.unwrap_or_default()
+        }
+        fn start_learner(c: &mut Cluster, id: u64) {
+            let sm = Names::default();
+            let d = RaftDriver::start(c.dirs[&id].path(), config(id), &[], sm.clone(), c.router.outbox(id)).unwrap();
+            c.router.register(id, d.handle());
+            c.sms.insert(id, sm);
+            c.drivers.insert(id, d);
+        }
+
+        let window = Duration::from_millis(300);
+        let mut c = Cluster::new(&[1, 2, 3], config);
+        let leader = c.leader().await;
+        c.dirs.insert(4, TempDir::new().unwrap());
+        start_learner(&mut c, 4);
+        let mut single = ConfChangeSingle::default();
+        single.set_change_type(ConfChangeType::AddLearnerNode);
+        single.node_id = 4;
+        let mut cc = ConfChangeV2::default();
+        cc.changes = vec![single];
+        c.h(leader).propose_conf_change(cc).await.unwrap();
+        // The status is published after the apply cycle that resolved the proposal.
+        until("learner 4 in the leader's status", || c.h(leader).status().learners == vec![4]).await;
+
+        // The learner answers heartbeats, so it shows up in the leader's samples.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if sample(&c.h(leader), window).await.contains(&4) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "learner never sampled live");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(sample(&c.h(leader), window).await, vec![1, 2, 3, 4]);
+
+        // Stopped, it drops out once `within` has passed.
+        c.stop(4);
+        tokio::time::sleep(window * 2).await;
+        assert_eq!(sample(&c.h(leader), window).await, vec![1, 2, 3]);
+
+        // Back, then the leader dies: the new leader's first samples.
+        start_learner(&mut c, 4);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !sample(&c.h(leader), window).await.contains(&4) {
+            assert!(Instant::now() < deadline, "restarted learner never sampled live");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        c.stop(leader);
+        let voters: Vec<u64> = c.ids.iter().copied().filter(|&i| i != leader).collect();
+        let mut new = 0;
+        until("a new leader", || {
+            new = voters.iter().copied().find(|&i| c.h(i).status().is_leader).unwrap_or(0);
+            new != 0
+        })
+        .await;
+        let wide = sample(&c.h(new), Duration::from_secs(10)).await;
+        let narrow = sample(&c.h(new), window).await;
+        eprintln!("first samples on new leader {}: wide(10s) {:?}, narrow(300ms) {:?}", new, wide, narrow);
+        let other = *voters.iter().find(|&&i| i != new).unwrap();
+        // The surviving voter granted its vote moments ago.
+        assert!(wide.contains(&new) && wide.contains(&other), "{:?}", wide);
+        assert!(narrow.contains(&new) && narrow.contains(&other), "{:?}", narrow);
+        // Follower-era contact: the dead old leader is still "heard" within a wide window.
+        assert!(wide.contains(&leader), "{:?}", wide);
+        assert!(!narrow.contains(&leader), "{:?}", narrow);
+        // The learner joins the new leader's samples after answering its heartbeats.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !sample(&c.h(new), window).await.contains(&4) {
+            assert!(Instant::now() < deadline, "learner never sampled live by the new leader");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// A voter whose log was wiped must stop with the remedy, not abort the
     /// process (raft-rs panics when a heartbeat commits beyond its log).
     #[tokio::test(flavor = "multi_thread")]
@@ -1123,7 +1219,11 @@ mod tests {
         .await
         .expect("the wiped node never reported a failure");
         assert!(failed.contains("lost raft state"), "{}", failed);
-        assert!(failed.contains("CHRONIK_CLUSTER_JOIN"), "{}", failed);
+        // Ostro: the remedy is Ostro's (no Chronik commands or env vars).
+        assert!(failed.contains("metadata Raft log is missing or blank while it is a configured voter"), "{}", failed);
+        assert!(failed.contains("restore the meta dir from backup, or wipe the whole data dir"), "{}", failed);
+        assert!(failed.contains("ostro cluster remove"), "{}", failed);
+        assert!(!failed.contains("CHRONIK") && !failed.contains(concat!("remove", "-node")), "{}", failed);
         // The rest of the cluster keeps working.
         create(&c.h(leader), "after-wipe").await.unwrap();
     }
