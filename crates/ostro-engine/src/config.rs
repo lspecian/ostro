@@ -13,19 +13,58 @@ const MIB: usize = 1024 * KIB;
 const GIB: u64 = 1024 * 1024 * 1024;
 
 /// Guest language class. Drives per-instance pool sizing (S2 measurements).
+///
+/// `Mixed` (plan 09-07) sizes the pool for the largest class (Python) so any mix of
+/// languages fits; admission is weighted by each module's measured core-instance count
+/// ([`crate::core_budget`]), so a Rust instance never reserves Python's share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageClass {
     Rust,
     Python,
     TypeScript,
+    Mixed,
+}
+
+/// `engine.class` value that is not one of [`LanguageClass::NAMES`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown engine class {0:?}: expected one of rust, python, typescript, mixed")]
+pub struct UnknownLanguageClass(pub String);
+
+impl std::str::FromStr for LanguageClass {
+    type Err = UnknownLanguageClass;
+
+    /// `rust` | `python` | `typescript` | `mixed` (config spelling).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "rust" => Ok(Self::Rust),
+            "python" => Ok(Self::Python),
+            "typescript" => Ok(Self::TypeScript),
+            "mixed" => Ok(Self::Mixed),
+            other => Err(UnknownLanguageClass(other.to_string())),
+        }
+    }
 }
 
 impl LanguageClass {
-    /// Core module instances per component instance (S2: Rust 3, Python 38, TS 3).
+    /// Config spellings, in declaration order.
+    pub const NAMES: [&'static str; 4] = ["rust", "python", "typescript", "mixed"];
+
+    /// The config spelling (inverse of `from_str`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::TypeScript => "typescript",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    /// Core module instances per component instance (S2: Rust 3, Python 38, TS 3; Mixed
+    /// takes Python's).
     pub fn core_instances_per_instance(self) -> u32 {
         match self {
             Self::Rust => 3,
-            Self::Python => 38,
+            Self::Python | Self::Mixed => 38,
             Self::TypeScript => 3,
         }
     }
@@ -39,7 +78,7 @@ impl LanguageClass {
     pub fn min_memory_bytes(self) -> u64 {
         match self {
             Self::Rust => 1_114_112,
-            Self::Python => 13_172_736,
+            Self::Python | Self::Mixed => 13_172_736,
             Self::TypeScript => 9_502_720,
         }
     }
@@ -68,6 +107,10 @@ pub struct PoolConfig {
     pub max_unused_warm_slots: u32,
     /// `engine.pool.fallback`: behaviour when the reservation fails (default on-demand).
     pub fallback: Fallback,
+    /// `engine.pool.total_core_instances`: override for the pool's core-instance total
+    /// (default `None`: `total_instances × class.core_instances_per_instance()`). Also the
+    /// capacity of the weighted admission budget ([`crate::core_budget`]).
+    pub total_core_instances: Option<u32>,
 }
 
 impl Default for PoolConfig {
@@ -78,6 +121,7 @@ impl Default for PoolConfig {
             max_memory_bytes: 256 * MIB as u64,
             max_unused_warm_slots: 100,
             fallback: Fallback::OnDemand,
+            total_core_instances: None,
         }
     }
 }
@@ -100,6 +144,13 @@ pub struct EngineConfig {
     /// `engine.activation_timeout`: wall-clock limit per activation (default 60 s).
     pub activation_timeout: Duration,
     /// `engine.activation_fuel`: fuel per activation (default 10,000,000,000).
+    ///
+    /// Fuel counts Wasm instructions of the guest *runtime*, not of the workflow source:
+    /// an interpreted language burns far more per line. S9 (docs/spikes/S9-polyglot.md,
+    /// fresh instance, one-step `hello`): Python 185k (asyncio prototype) / 417k (raw
+    /// bindings), i.e. 0.0018% / 0.0042% of this default; QuickJS 0.78M; StarlingMonkey
+    /// 2.54M; a Python `describe` about 120k. Step bodies are bounded separately by
+    /// `step-options.fuel`, which must be chosen per language (PF-W6).
     pub activation_fuel: u64,
     /// `engine.parallel_compilation`: compile functions in parallel (default true).
     pub parallel_compilation: bool,
@@ -135,6 +186,16 @@ impl Default for EngineConfig {
 }
 
 impl EngineConfig {
+    /// Core instances the pool can hold at once: `engine.pool.total_core_instances` when
+    /// set, else `total_instances × class.core_instances_per_instance()`.
+    pub fn effective_total_core_instances(&self) -> u32 {
+        self.pool.total_core_instances.unwrap_or_else(|| {
+            self.pool
+                .total_instances
+                .saturating_mul(self.class.core_instances_per_instance())
+        })
+    }
+
     /// Effective per-instance memory cap: `engine.pool.max_memory_bytes` raised to the
     /// language class floor.
     pub fn effective_max_memory(&self) -> u64 {
@@ -171,7 +232,7 @@ pub fn pooling_allocation_config(c: &EngineConfig) -> PoolingAllocationConfig {
     let class = c.class;
     let mut p = PoolingAllocationConfig::default();
     p.total_component_instances(n)
-        .total_core_instances(n.saturating_mul(class.core_instances_per_instance()))
+        .total_core_instances(c.effective_total_core_instances())
         .total_memories(n)
         .total_tables(n.saturating_mul(class.tables_per_instance()))
         .total_stacks(n)
@@ -253,5 +314,30 @@ mod tests {
             ..EngineConfig::default()
         };
         assert_eq!(py.effective_max_memory(), 13_172_736);
+        assert_eq!(LanguageClass::Mixed.core_instances_per_instance(), 38);
+        assert_eq!(LanguageClass::Mixed.min_memory_bytes(), 13_172_736);
+    }
+
+    #[test]
+    fn language_class_names_round_trip() {
+        for name in LanguageClass::NAMES {
+            let c: LanguageClass = name.parse().expect("parse");
+            assert_eq!(c.as_str(), name);
+        }
+        let e = "go".parse::<LanguageClass>().unwrap_err();
+        assert!(
+            e.to_string().contains("rust, python, typescript, mixed"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn core_instance_total_override() {
+        let mut c = EngineConfig::default();
+        assert_eq!(c.effective_total_core_instances(), 3_000);
+        c.class = LanguageClass::Mixed;
+        assert_eq!(c.effective_total_core_instances(), 38_000);
+        c.pool.total_core_instances = Some(50_000);
+        assert_eq!(c.effective_total_core_instances(), 50_000);
     }
 }

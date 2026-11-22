@@ -10,12 +10,22 @@
 //! [`Runtime::activate`] runs one activation through [`crate::activation`];
 //! [`Runtime::live_activations`] counts the activations running right now (WF-04: a
 //! sleeping run holds no activation, so the gauge is 0 once every run has evicted).
+//!
+//! Core-instance admission (plan 09-07, ENG-2): every instantiation (activation,
+//! `describe`, warm probe) first acquires the module's core-instance weight from the
+//! node's [`CoreBudget`] (sized to the pool's `total_core_instances`; unbounded with the
+//! on-demand allocator). The weight is the static count from validation
+//! ([`crate::validate::count_core_instances`]) raised, once per prepared module, by a
+//! calibration instantiation that counts what Wasmtime really creates (its fused adapter
+//! modules are invisible statically: QuickJS has 11 static entries but needs 13, S9). `activate` holds the permit around the whole activation, hot-wait
+//! parking included, and evicts with `BudgetPressure` (re-activated by the executor) when
+//! the budget stays exhausted until the activation deadline.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ostro_types::journal::{Event, EventBody, Payload, RngSeed, RunStarted};
 use sha2::{Digest, Sha256};
@@ -25,19 +35,25 @@ use wasmtime::component::{Component, Linker};
 use crate::cache::{AotCache, CacheStatsSnapshot, load_or_create_key, module_sha};
 
 use crate::config::EngineConfig;
-use crate::engine::{OstroEngine, configure_store};
+use crate::core_budget::{CoreBudget, CorePermit};
+use crate::engine::{OstroEngine, PoolMode, configure_store};
 use crate::env::{Clock, SystemClock};
-use crate::error::EngineError;
+use crate::error::{EngineError, EvictReason};
 use crate::host::bindings::WorkflowPre;
 use crate::host::state::{HostInit, HostState, HotWait, build_linker};
 use crate::limits::ParkedRegistry;
 use crate::sink::{Activate, ActivationOutcome, ActivationSink, RunRef};
-use crate::validate::{
-    ValidatedComponent, reject_core_module, validate_component, validate_loaded,
-};
+use crate::validate::{ValidatedComponent, reject_core_module, validate_loaded};
 
 /// Default L2 `InstancePre` cache capacity (prepared modules kept per node).
 pub const DEFAULT_INSTANCE_PRE_CAPACITY: usize = 256;
+
+/// How long `describe` / `instantiate_probe` wait for core-instance slots (09-07).
+pub const BUDGET_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Extra core instances (over the static count) a calibration may find; also the margin
+/// of the conservative weight used when a calibration cannot run (09-07).
+pub const CALIBRATION_MARGIN: u32 = 16;
 
 /// Node-level runtime options.
 pub struct RuntimeOptions {
@@ -87,6 +103,8 @@ pub struct Runtime {
     l2: Mutex<InstancePreLru>,
     /// Activations currently inside [`Runtime::activate`] (see [`LiveGuard`]).
     live: AtomicU64,
+    /// Weighted core-instance admission (plan 09-07).
+    core_budget: CoreBudget,
     pub(crate) opts: RuntimeOptions,
 }
 
@@ -161,6 +179,12 @@ pub struct Prepared {
     pub sha: [u8; 32],
     /// Lowercase hex of [`Self::sha`] (reported in `run-info.module-hash`).
     pub module_hash_hex: String,
+    /// Static core-instance count from validation (a lower bound of the admission
+    /// weight, see [`Runtime::core_weight`]) (09-07).
+    pub core_instances: u32,
+    /// Calibrated weight, measured once (09-07).
+    weight: tokio::sync::OnceCell<u32>,
+    component: Component,
     pub(crate) pre: WorkflowPre<HostState>,
 }
 
@@ -168,6 +192,7 @@ impl std::fmt::Debug for Prepared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Prepared")
             .field("module_hash_hex", &self.module_hash_hex)
+            .field("core_instances", &self.core_instances)
             .finish_non_exhaustive()
     }
 }
@@ -216,6 +241,10 @@ impl Runtime {
             }
             None => None,
         };
+        let core_budget = CoreBudget::new(match engine.pool_mode() {
+            PoolMode::Pooling => engine.config().effective_total_core_instances(),
+            PoolMode::OnDemand { .. } => CoreBudget::UNBOUNDED,
+        });
         Ok(Self {
             engine,
             linker,
@@ -223,8 +252,101 @@ impl Runtime {
             aot,
             l2: Mutex::new(InstancePreLru::default()),
             live: AtomicU64::new(0),
+            core_budget,
             opts,
         })
+    }
+
+    /// The node's core-instance admission budget (plan 09-07).
+    pub fn core_budget(&self) -> &CoreBudget {
+        &self.core_budget
+    }
+
+    /// Core-instance capacity a module must fit in (`None`: on-demand, unbounded).
+    fn max_core_instances(&self) -> Option<u32> {
+        match self.engine.pool_mode() {
+            PoolMode::Pooling => Some(self.core_budget.capacity()),
+            PoolMode::OnDemand { .. } => None,
+        }
+    }
+
+    /// Permit for one short-lived instantiation (`describe`, warm probe).
+    async fn probe_permit(&self, p: &Prepared) -> Result<CorePermit, EngineError> {
+        let deadline = Instant::now() + BUDGET_PROBE_TIMEOUT;
+        let weight = self.core_weight_by(p, deadline).await;
+        self.core_budget
+            .acquire(weight, deadline)
+            .await
+            .map_err(|e| EngineError::Wasmtime(wasmtime::format_err!("{e}")))
+    }
+
+    /// Admission weight of `p`: the core instances one instantiation really creates.
+    ///
+    /// With the pooling allocator this is calibrated once per prepared module (see the
+    /// module doc); until a calibration succeeds (it needs `static + margin` free slots
+    /// and a successful instantiation) the conservative `static + CALIBRATION_MARGIN` is
+    /// used. Capped at the budget capacity (a module above it fails at instantiation with
+    /// Wasmtime's pool error, as before). On-demand: the static count (no pool limit).
+    pub async fn core_weight(&self, p: &Prepared) -> u32 {
+        self.core_weight_by(p, Instant::now() + BUDGET_PROBE_TIMEOUT)
+            .await
+    }
+
+    async fn core_weight_by(&self, p: &Prepared, deadline: Instant) -> u32 {
+        let cap = self.core_budget.capacity();
+        if self.max_core_instances().is_none() {
+            return p.core_instances.min(cap);
+        }
+        if let Some(w) = p.weight.get() {
+            return (*w).min(cap);
+        }
+        let fallback = p.core_instances.saturating_add(CALIBRATION_MARGIN).min(cap);
+        let calibrated = p
+            .weight
+            .get_or_try_init(|| async {
+                let _permit = self
+                    .core_budget
+                    .acquire(fallback, deadline)
+                    .await
+                    .map_err(|_| ())?;
+                self.calibrate(p, fallback).await.ok_or(())
+            })
+            .await;
+        calibrated.map_or(fallback, |w| (*w).min(cap))
+    }
+
+    /// Instantiate `p` once in a throwaway store whose instance limit starts at the static
+    /// count and grows until instantiation succeeds; returns that limit (the number of core
+    /// instances Wasmtime created). `None` on any other error or past `max`.
+    async fn calibrate(&self, p: &Prepared, max: u32) -> Option<u32> {
+        use wasmtime::{StoreLimits, StoreLimitsBuilder};
+        let engine = self.engine.engine();
+        let mut linker: Linker<StoreLimits> = Linker::new(engine);
+        linker.define_unknown_imports_as_traps(&p.component).ok()?;
+        for limit in p.core_instances.max(1)..=max {
+            let limits = StoreLimitsBuilder::new().instances(limit as usize).build();
+            let mut store = Store::new(engine, limits);
+            store.limiter(|l| l);
+            store.set_fuel(u64::MAX).ok()?;
+            store.set_epoch_deadline(u64::MAX);
+            match linker.instantiate_async(&mut store, &p.component).await {
+                Ok(_) => {
+                    metrics::histogram!("ostro_module_core_instances").record(f64::from(limit));
+                    return Some(limit);
+                }
+                Err(e) if format!("{e:#}").contains("instance count too high") => continue,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "ostro::engine",
+                        module = %p.module_hash_hex,
+                        error = %format!("{e:#}"),
+                        "core-instance calibration failed; using the conservative weight"
+                    );
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     fn l2(&self) -> std::sync::MutexGuard<'_, InstancePreLru> {
@@ -250,7 +372,13 @@ impl Runtime {
                 EngineError::Validation(vec![format!("not a valid Wasm component: {e:#}")])
             })?,
         };
-        let validated = validate_loaded(self.engine.engine(), &self.linker, &component)?;
+        let validated = validate_loaded(
+            self.engine.engine(),
+            &self.linker,
+            &component,
+            wasm,
+            self.max_core_instances(),
+        )?;
         let prepared = Arc::new(self.pre_instantiate(sha, &validated)?);
         Ok(self.l2().insert(prepared, self.opts.instance_pre_capacity))
     }
@@ -281,6 +409,9 @@ impl Runtime {
         Ok(Prepared {
             sha,
             module_hash_hex: hex(&sha),
+            core_instances: validated.core_instances,
+            weight: tokio::sync::OnceCell::new(),
+            component: validated.component.clone(),
             pre,
         })
     }
@@ -320,6 +451,7 @@ impl Runtime {
         run: RunRef,
         journal: Vec<Event>,
     ) -> Result<(), EngineError> {
+        let _permit = self.probe_permit(p).await?;
         let state = HostState::new(self.host_init(p, run, 1, journal, None, None))
             .map_err(|e| EngineError::Wasmtime(wasmtime::format_err!("probe state: {e}")))?;
         let mut store = Store::new(self.engine.engine(), state);
@@ -348,13 +480,24 @@ impl Runtime {
     /// Validate `wasm` against the production linker and pre-instantiate it.
     pub fn prepare(&self, wasm: &[u8]) -> Result<Prepared, EngineError> {
         let sha: [u8; 32] = Sha256::digest(wasm).into();
-        let validated = validate_component(self.engine.engine(), &self.linker, wasm)?;
+        reject_core_module(wasm)?;
+        let component = Component::from_binary(self.engine.engine(), wasm).map_err(|e| {
+            EngineError::Validation(vec![format!("not a valid Wasm component: {e:#}")])
+        })?;
+        let validated = validate_loaded(
+            self.engine.engine(),
+            &self.linker,
+            &component,
+            wasm,
+            self.max_core_instances(),
+        )?;
         self.pre_instantiate(sha, &validated)
     }
 
     /// Call the component's `describe()` in a throwaway store (synthetic journal with a
     /// zero seed; nothing is journaled).
     pub async fn describe(&self, p: &Prepared) -> Result<Vec<WorkflowMeta>, EngineError> {
+        let _permit = self.probe_permit(p).await?;
         let cfg = self.engine.config();
         let now = self.opts.clock.now_unix_nanos();
         let started = Event {
@@ -422,6 +565,28 @@ impl Runtime {
     ) -> ActivationOutcome {
         let _live = LiveGuard::enter(&self.live);
         self.publish_gauges();
+        // 09-07 (ENG-2): admit by core-instance weight; the permit is held across the
+        // whole activation (instantiate, run, hot-wait parking) and released on return.
+        let deadline = Instant::now() + self.engine.config().activation_timeout;
+        let permit = tokio::select! {
+            r = async {
+                let weight = self.core_weight_by(p, deadline).await;
+                self.core_budget.acquire(weight, deadline).await
+            } => r.ok(),
+            () = act.cancel.cancelled() => None,
+        };
+        let Some(_permit) = permit else {
+            let reason = if act.cancel.is_cancelled() {
+                EvictReason::External
+            } else {
+                EvictReason::BudgetPressure
+            };
+            metrics::counter!("ostro_core_budget_evictions_total").increment(1);
+            let outcome = ActivationOutcome::Evicted { reason };
+            sink.done(&act.run, act.attempt, outcome.clone()).await;
+            self.publish_gauges();
+            return outcome;
+        };
         let outcome = crate::activation::run_activation(self, p, act, sink).await;
         self.publish_gauges();
         outcome

@@ -204,6 +204,14 @@ pub struct EngineSection {
     pub continue_as_new_events: u64,
     /// `engine.pool.total_instances` (default 1000).
     pub pool_total_instances: u32,
+    /// `engine.class` (plan 09-07): guest language class sizing the pool, `rust` (default),
+    /// `python`, `typescript` or `mixed`.
+    pub class: EngineClass,
+    /// `engine.pool.total_core_instances` (plan 09-07): override of the pool's core-instance
+    /// total and of the weighted admission budget (default: `pool_total_instances` × the
+    /// class's core instances per instance).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_total_core_instances: Option<u32>,
 }
 
 impl Default for EngineSection {
@@ -217,6 +225,8 @@ impl Default for EngineSection {
             node_memory_budget: e.node_memory_budget,
             continue_as_new_events: e.continue_as_new_events,
             pool_total_instances: e.pool.total_instances,
+            class: EngineClass::default(),
+            pool_total_core_instances: e.pool.total_core_instances,
         }
     }
 }
@@ -227,7 +237,9 @@ impl EngineSection {
         let d = EngineConfig::default();
         let mut pool = d.pool.clone();
         pool.total_instances = self.pool_total_instances;
+        pool.total_core_instances = self.pool_total_core_instances;
         EngineConfig {
+            class: self.class.into(),
             hot_wait: self.hot_wait.get(),
             activation_timeout: self.activation_timeout.get(),
             activation_fuel: self.activation_fuel,
@@ -236,6 +248,43 @@ impl EngineSection {
             continue_as_new_events: self.continue_as_new_events,
             pool,
             ..d
+        }
+    }
+}
+
+/// `[engine] class` values (plan 09-07); an unknown value is a config error listing these.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineClass {
+    #[default]
+    Rust,
+    Python,
+    Typescript,
+    Mixed,
+}
+
+impl<'de> Deserialize<'de> for EngineClass {
+    /// From the config spelling; the error names the allowed values (the `config` crate's
+    /// own enum error does not).
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use ostro_engine::config::LanguageClass as L;
+        let s = String::deserialize(d)?;
+        Ok(match s.parse::<L>().map_err(serde::de::Error::custom)? {
+            L::Rust => Self::Rust,
+            L::Python => Self::Python,
+            L::TypeScript => Self::Typescript,
+            L::Mixed => Self::Mixed,
+        })
+    }
+}
+
+impl From<EngineClass> for ostro_engine::config::LanguageClass {
+    fn from(c: EngineClass) -> Self {
+        match c {
+            EngineClass::Rust => Self::Rust,
+            EngineClass::Python => Self::Python,
+            EngineClass::Typescript => Self::TypeScript,
+            EngineClass::Mixed => Self::Mixed,
         }
     }
 }

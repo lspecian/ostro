@@ -6,18 +6,25 @@
 //! (`Runtime::prepare`), describe `hello` v1, run `hello` to `Completed` on the testkit
 //! sink with the journal `[RunStarted, StepCompleted("greet"), RunCompleted]`, and replay
 //! that journal identically.
+//!
+//! ENG-2: the calibrated admission weight equals S9's pool minimum (py-min 38, QuickJS
+//! 13). A raw Python guest that sleeps (`py-sleep`, written below) parks hot: with
+//! `class = "python"` 100 instances are live at once; with the default class (3,000 core
+//! instances, room for 78 Python instances) 100 concurrent runs still all complete because
+//! the 79th..100th wait for core-instance permits instead of failing to instantiate.
 #![cfg(feature = "polyglot")]
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use ostro_conformance::polyglot::{Mode, build};
 use ostro_conformance::repo_root;
-use ostro_engine::config::EngineConfig;
+use ostro_engine::config::{EngineConfig, LanguageClass};
 use ostro_engine::runtime::{Prepared, Runtime, RuntimeOptions};
-use ostro_engine::sink::{ActivationOutcome, RunRef};
+use ostro_engine::sink::{Activate, ActivationOutcome, RunRef};
 use ostro_engine::testkit::{
-    DEFAULT_ACCEPTED_AT, FakeClock, RunSpec, Script, drive_to_completion, replay_journal,
+    DEFAULT_ACCEPTED_AT, FakeClock, FakeSink, RunSpec, Script, drive_to_completion, replay_journal,
 };
 use ostro_types::journal::{EventBody, EventKind};
 
@@ -111,4 +118,151 @@ async fn ts_min_validates_and_runs() {
         .prepare(&wasm)
         .expect("ts-min must pass deploy validation");
     hello_runs(rt(), &p, "ts-min").await;
+}
+
+#[tokio::test]
+async fn calibrated_weights_match_pool_minimum() {
+    for (mode, name, want) in [(Mode::Py, "py-min", 38), (Mode::Ts, "ts-min", 13)] {
+        let p = rt().prepare(&fixture_wasm(mode, name)).expect("prepare");
+        let w = rt().core_weight(&p).await;
+        println!(
+            "{name}: static core instances {}, admission weight {w}",
+            p.core_instances
+        );
+        assert_eq!(w, want, "{name}");
+    }
+}
+
+/// Raw-binding Python guest: workflow `nap` v1 sleeps 1 s (logical) and completes with
+/// its input. With a long hot wait it parks hot inside the activation.
+const PY_SLEEP: &str = r#"
+from wit_world import exports
+from wit_world.exports import workflows
+from wit_world.imports import effects, types
+
+
+class Workflows(exports.Workflows):
+    def describe(self) -> list[workflows.WorkflowMeta]:
+        return [workflows.WorkflowMeta(name="nap", version=1, default_queue=None, run_timeout_ms=None)]
+
+    def run(self, name: str, input: types.Payload) -> workflows.RunResult:
+        op = effects.sleep(1000)
+        effects.wait([op], effects.WaitMode.ANY)
+        return workflows.RunResult_Completed(input)
+"#;
+
+fn py_sleep_wasm() -> Vec<u8> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.py"), PY_SLEEP).expect("write app.py");
+    let path = build(Mode::Py, dir.path()).unwrap_or_else(|e| panic!("build py-sleep: {e}"));
+    std::fs::read(&path).expect("read py-sleep")
+}
+
+fn parking_runtime(class: LanguageClass) -> Arc<Runtime> {
+    Arc::new(runtime(EngineConfig {
+        class,
+        hot_wait: Duration::from_secs(60),
+        // Soft accounting only; keep parked instances from being LRU-evicted.
+        node_memory_budget: 64 << 30,
+        ..EngineConfig::default()
+    }))
+}
+
+async fn wait_until(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !cond() {
+        assert!(start.elapsed() < timeout, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn python_class_holds_100_live_instances() {
+    let rt = parking_runtime(LanguageClass::Python);
+    let p = Arc::new(rt.prepare(&py_sleep_wasm()).expect("prepare py-sleep"));
+    let sink = Arc::new(FakeSink::new());
+    let mut running = Vec::new();
+    for i in 0..100 {
+        let run = run_ref(&format!("py-live-{i}"));
+        let spec = RunSpec::new(run.clone(), "nap", b"1");
+        sink.seed(
+            run.clone(),
+            vec![spec.run_started_event(&p.module_hash_hex)],
+            1,
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let act = Activate {
+            run: run.clone(),
+            attempt: 1,
+            module_sha: p.sha,
+            journal: sink.journal(&run),
+            inputs: Some(rx),
+            cancel: Default::default(),
+        };
+        let cancel = act.cancel.clone();
+        let (rt2, p2, sink2) = (rt.clone(), p.clone(), sink.clone());
+        let h = tokio::spawn(async move { rt2.activate(&p2, act, sink2).await });
+        running.push((h, cancel, tx));
+    }
+    wait_until(
+        "100 parked Python instances",
+        Duration::from_secs(120),
+        || rt.parked().parked_count() == 100,
+    )
+    .await;
+    assert_eq!(rt.core_budget().in_use(), 100 * 38);
+    assert!(sink.outcomes().is_empty(), "{:?}", sink.outcomes());
+    for (h, cancel, _tx) in running {
+        cancel.cancel();
+        let out = h.await.expect("join");
+        assert!(matches!(out, ActivationOutcome::Evicted { .. }), "{out:?}");
+    }
+    assert_eq!(rt.core_budget().in_use(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn default_class_admits_100_python_runs_by_waiting() {
+    let rt = parking_runtime(LanguageClass::Rust);
+    assert_eq!(rt.core_budget().capacity(), 3_000);
+    let p = Arc::new(rt.prepare(&py_sleep_wasm()).expect("prepare py-sleep"));
+    let mut handles = Vec::new();
+    for i in 0..100 {
+        let (rt2, p2) = (rt.clone(), p.clone());
+        handles.push(tokio::spawn(async move {
+            drive_to_completion(
+                &rt2,
+                &p2,
+                RunSpec::new(run_ref(&format!("py-wait-{i}")), "nap", b"1"),
+                // Timers fire 300 ms after they start, so parked runs hold their permits
+                // long enough for the 79th..100th to queue.
+                Script::new().live(Duration::from_millis(300)),
+            )
+            .await
+        }));
+    }
+    let mut peak = 0;
+    while handles.iter().any(|h| !h.is_finished()) {
+        peak = peak.max(rt.core_budget().in_use());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for h in handles {
+        let d = h.await.expect("join");
+        assert!(
+            matches!(d.outcome, ActivationOutcome::Completed { .. }),
+            "{:?} (outcomes {:?})",
+            d.outcome,
+            d.outcomes
+        );
+        assert!(
+            !d.outcomes
+                .iter()
+                .any(|o| matches!(o, ActivationOutcome::AttemptFailed(_))),
+            "{:?}",
+            d.outcomes
+        );
+    }
+    println!("peak core-instance slots in use: {peak} / 3000");
+    assert!(peak <= 3_000);
+    assert!(peak >= 78 * 38, "budget never filled (peak {peak})");
+    assert_eq!(rt.core_budget().in_use(), 0);
 }

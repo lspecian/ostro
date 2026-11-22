@@ -6,6 +6,8 @@
 pub mod activation;
 pub mod cache;
 pub mod config;
+/// Weighted core-instance admission (plan 09-07, ENG-2).
+pub mod core_budget;
 /// Effect I/O seam (Phase 6, plan 06-06): `EffectDriver`.
 pub mod effects_driver;
 pub mod engine;

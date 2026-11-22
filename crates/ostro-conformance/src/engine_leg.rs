@@ -171,7 +171,7 @@ fn runtime(lang: Lang) -> &'static Runtime {
     let class = langs::class(lang);
     let cell = match class {
         LanguageClass::Rust => &RUST,
-        LanguageClass::Python => &PY,
+        LanguageClass::Python | LanguageClass::Mixed => &PY,
         LanguageClass::TypeScript => &TS,
     };
     cell.get_or_init(|| new_runtime(class))

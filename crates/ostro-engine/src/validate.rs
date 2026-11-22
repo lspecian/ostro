@@ -9,8 +9,10 @@
 //! Every violation is collected (not first-fail) and returned in
 //! [`EngineError::Validation`], each message naming the offending interface.
 
-// 09-02 anchor; 09-07 replaces it with the export-shape check.
-use wasmparser as _;
+use wasmparser::{
+    ComponentAlias, ComponentExternalKind, ComponentInstance, ComponentOuterAliasKind,
+    ComponentTypeRef, Encoding, Instance, Parser, Payload,
+};
 use wasmtime::Engine;
 use wasmtime::component::types::{ComponentItem, Type};
 use wasmtime::component::{Component, Linker};
@@ -201,6 +203,9 @@ pub struct ValidatedComponent {
     pub imports: Vec<String>,
     /// Full export names, in component order.
     pub exports: Vec<String>,
+    /// Core instances one instantiation creates ([`count_core_instances`]): the weight of
+    /// the module in the core-instance admission budget (ENG-2).
+    pub core_instances: u32,
 }
 
 impl std::fmt::Debug for ValidatedComponent {
@@ -208,6 +213,7 @@ impl std::fmt::Debug for ValidatedComponent {
         f.debug_struct("ValidatedComponent")
             .field("imports", &self.imports)
             .field("exports", &self.exports)
+            .field("core_instances", &self.core_instances)
             .finish_non_exhaustive()
     }
 }
@@ -250,6 +256,121 @@ fn is_required_export(name: &str) -> bool {
     base == REQUIRED_EXPORT && version_matches(ver, "0.1")
 }
 
+/// Core instances one instantiation of the component creates (plan 09-07, ENG-2).
+///
+/// Counts core `instantiate` entries only (a `from-exports` bag allocates nothing, S9 Q5),
+/// with nested components flattened the way Wasmtime inlines them: a component
+/// instantiation costs its component's own count, every time it is instantiated. The
+/// component index space follows the binary: nested definitions, imported components
+/// (unknown cost 0: Ostro components import none), outer aliases (the outer entry's cost)
+/// and component re-exports. Wasmtime-generated adapter modules are not visible here;
+/// `tests/core_budget.rs` pins the result against the pool limit for every guest class.
+pub fn count_core_instances(wasm: &[u8]) -> Result<u32, String> {
+    #[derive(Default)]
+    struct Scope {
+        total: u64,
+        comps: Vec<u64>,
+    }
+    // `None` marks an open core module.
+    let mut stack: Vec<Option<Scope>> = Vec::new();
+    let mut root: Option<u64> = None;
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = payload.map_err(|e| format!("parse: {e}"))?;
+        match payload {
+            Payload::Version { encoding, .. } => match encoding {
+                Encoding::Component => stack.push(Some(Scope::default())),
+                Encoding::Module => stack.push(None),
+            },
+            Payload::End(_) => match stack.pop() {
+                Some(Some(scope)) => match stack.last_mut() {
+                    Some(Some(parent)) => parent.comps.push(scope.total),
+                    Some(None) => return Err("component nested in a core module".into()),
+                    None => root = Some(scope.total),
+                },
+                Some(None) => {}
+                None => return Err("unbalanced end".into()),
+            },
+            Payload::InstanceSection(reader) => {
+                let Some(Some(scope)) = stack.last_mut() else {
+                    continue;
+                };
+                for inst in reader {
+                    if let Instance::Instantiate { .. } = inst.map_err(|e| format!("{e}"))? {
+                        scope.total += 1;
+                    }
+                }
+            }
+            Payload::ComponentInstanceSection(reader) => {
+                let Some(Some(scope)) = stack.last_mut() else {
+                    continue;
+                };
+                for inst in reader {
+                    if let ComponentInstance::Instantiate {
+                        component_index, ..
+                    } = inst.map_err(|e| format!("{e}"))?
+                    {
+                        let cost = scope.comps.get(component_index as usize).copied();
+                        scope.total += cost.unwrap_or(0);
+                    }
+                }
+            }
+            Payload::ComponentImportSection(reader) => {
+                let Some(Some(scope)) = stack.last_mut() else {
+                    continue;
+                };
+                for imp in reader {
+                    if let ComponentTypeRef::Component(_) = imp.map_err(|e| format!("{e}"))?.ty {
+                        scope.comps.push(0);
+                    }
+                }
+            }
+            Payload::ComponentExportSection(reader) => {
+                let Some(Some(scope)) = stack.last_mut() else {
+                    continue;
+                };
+                for exp in reader {
+                    let exp = exp.map_err(|e| format!("{e}"))?;
+                    if exp.kind == ComponentExternalKind::Component {
+                        let cost = scope.comps.get(exp.index as usize).copied();
+                        scope.comps.push(cost.unwrap_or(0));
+                    }
+                }
+            }
+            Payload::ComponentAliasSection(reader) => {
+                for alias in reader {
+                    let alias = alias.map_err(|e| format!("{e}"))?;
+                    let cost = match alias {
+                        ComponentAlias::Outer {
+                            kind: ComponentOuterAliasKind::Component,
+                            count,
+                            index,
+                        } => {
+                            let depth = stack.len().checked_sub(1 + count as usize);
+                            Some(
+                                depth
+                                    .and_then(|d| stack[d].as_ref())
+                                    .and_then(|s| s.comps.get(index as usize).copied())
+                                    .unwrap_or(0),
+                            )
+                        }
+                        ComponentAlias::InstanceExport {
+                            kind: ComponentExternalKind::Component,
+                            ..
+                        } => Some(0),
+                        _ => None,
+                    };
+                    if let (Some(cost), Some(Some(scope))) = (cost, stack.last_mut()) {
+                        scope.comps.push(cost);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let total = root.ok_or_else(|| "not a component".to_string())?;
+    u32::try_from(total).map_err(|_| format!("{total} core instances"))
+}
+
 /// Validate a deployed module against the Ostro WIT/WASI allow-list and `linker`.
 ///
 /// Steps: (1) must be a component, not a core module; (2) every import allowed;
@@ -264,7 +385,7 @@ pub fn validate_component<T: 'static>(
     reject_core_module(bytes)?;
     let component = Component::from_binary(engine, bytes)
         .map_err(|e| EngineError::Validation(vec![format!("not a valid Wasm component: {e:#}")]))?;
-    validate_loaded(engine, linker, &component)
+    validate_loaded(engine, linker, &component, bytes, None)
 }
 
 /// Step (1) of [`validate_component`]: reject a core module (by its header) before any
@@ -283,10 +404,17 @@ pub fn reject_core_module(bytes: &[u8]) -> Result<(), EngineError> {
 /// Steps (2)-(4) of [`validate_component`] on an already loaded component (e.g. one
 /// deserialized from the AOT cache): validation runs on every load, never skipped on
 /// cache hits.
+///
+/// `bytes` are the component's binary (the core-instance count is read from it,
+/// [`count_core_instances`]); `max_core_instances` is the node's core-instance capacity
+/// (`EngineConfig::effective_total_core_instances` with the pool enabled): a component
+/// needing more could never be instantiated and is a violation.
 pub fn validate_loaded<T: 'static>(
     engine: &Engine,
     linker: &Linker<T>,
     component: &Component,
+    bytes: &[u8],
+    max_core_instances: Option<u32>,
 ) -> Result<ValidatedComponent, EngineError> {
     let component = component.clone();
     let ty = component.component_type();
@@ -328,6 +456,22 @@ pub fn validate_loaded<T: 'static>(
     if !has_required {
         violations.push(format!("missing required export {REQUIRED_EXPORT}@0.1.*"));
     }
+    let core_instances = match count_core_instances(bytes) {
+        Ok(n) => n,
+        Err(e) => {
+            violations.push(format!("cannot count core instances: {e}"));
+            0
+        }
+    };
+    if let Some(max) = max_core_instances
+        && core_instances > max
+    {
+        violations.push(format!(
+            "component needs {core_instances} core instances per instance, more than the \
+             node's pool holds ({max}, engine.pool_total_core_instances): it could never \
+             be instantiated"
+        ));
+    }
 
     if violations.is_empty()
         && let Err(e) = linker.instantiate_pre(&component)
@@ -340,6 +484,7 @@ pub fn validate_loaded<T: 'static>(
             component,
             imports,
             exports,
+            core_instances,
         })
     } else {
         Err(EngineError::Validation(violations))
