@@ -168,7 +168,8 @@ jobs:
       - if: matrix.zig
         name: cargo-zigbuild test
         # the zigbuild test runner is `cargo-zigbuild test` (`cargo zigbuild` only builds)
-        run: cargo-zigbuild test --workspace --locked --target "$T"
+        # --no-fail-fast: report every failing test binary in one run, not just the first
+        run: cargo-zigbuild test --workspace --locked --no-fail-fast --target "$T"
       - if: matrix.zig
         name: cargo zigbuild --release (ostro)
         run: cargo zigbuild --release --locked -p ostro --target "$T"
@@ -227,7 +228,8 @@ jobs:
           } >> "$GITHUB_ENV"
       - if: ${{ !matrix.zig }}
         name: cargo test
-        run: cargo test --workspace --locked
+        # --no-fail-fast: report every failing test binary in one run, not just the first
+        run: cargo test --workspace --locked --no-fail-fast
       - if: matrix.name == 'linux-x86_64-gnu'
         name: ostro-objstore S3 conformance (SeaweedFS)
         # 08-03: conformance + conditional PUT (If-None-Match / If-Match, incl. the 412-on-
