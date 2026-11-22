@@ -65,9 +65,9 @@ async fn dev_routes_409_and_replay_501() {
             .expect("POST replay"),
     )
     .await;
-    assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{v}");
-    assert_eq!(v["error"]["code"], "unimplemented", "{v}");
-    assert_eq!(v["error"]["details"]["method"], "replay_module");
+    // 10-11 implemented replay: an unknown module is a plain 404 (tests/replay_endpoint.rs).
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"]["code"], "not_found", "{v}");
 
     // Edge validation runs before the control plane.
     let (st, v) = decode(

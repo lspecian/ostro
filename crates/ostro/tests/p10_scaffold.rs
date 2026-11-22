@@ -91,24 +91,16 @@ fn verb_help_exits_0() {
 #[test]
 fn stubs_exit_2_naming_their_plan() {
     let dir = tempfile::tempdir().expect("tempdir");
-    for (args, verb, plan) in [
-        (&["build", "--json"][..], "build", "10-12"),
-        (
-            &["replay", "r1", "r2", "--module", "m.wasm"],
-            "replay",
-            "10-11",
-        ),
-        (&["replay", "--corpus", "corpus"], "replay", "10-11"),
-    ] {
-        let (code, out, err) = run_cli_in(dir.path(), args, &[]);
-        assert_eq!(code, 2, "{args:?}: {out}{err}");
-        assert_eq!(
-            err.trim_end(),
-            format!("ostro: error: {verb} is not yet implemented ({plan})"),
-            "{args:?}"
-        );
-        assert!(out.is_empty(), "{args:?}: {out}");
-    }
+    // `replay` is implemented (10-11, tests/replay_cli.rs).
+    let (args, verb, plan) = (&["build", "--json"][..], "build", "10-12");
+    let (code, out, err) = run_cli_in(dir.path(), args, &[]);
+    assert_eq!(code, 2, "{args:?}: {out}{err}");
+    assert_eq!(
+        err.trim_end(),
+        format!("ostro: error: {verb} is not yet implemented ({plan})"),
+        "{args:?}"
+    );
+    assert!(out.is_empty(), "{args:?}: {out}");
     // the stub created nothing in the cwd
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }

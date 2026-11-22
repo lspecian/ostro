@@ -709,10 +709,10 @@ mod p10_tests {
 
     #[test]
     fn local_stubs_exit_2() {
-        for args in [&["build"][..], &["replay", "r1", "--module", "m.wasm"]] {
-            let cmd = parse(args).unwrap();
-            assert_eq!(run(cmd.clone()), Outcome::Usage, "{args:?}");
-            assert_eq!(block_on(dispatch(cmd)), Outcome::Usage, "{args:?}");
-        }
+        // `replay` is implemented (10-11): replay.rs tests its exit codes.
+        let args = &["build"][..];
+        let cmd = parse(args).unwrap();
+        assert_eq!(run(cmd.clone()), Outcome::Usage, "{args:?}");
+        assert_eq!(block_on(dispatch(cmd)), Outcome::Usage, "{args:?}");
     }
 }
