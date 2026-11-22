@@ -453,6 +453,45 @@ impl Client {
 
 // --- end Phase 11 (11-14) -----------------------------------------------------------
 
+// --- Phase 10 (10-05) ---------------------------------------------------------------
+// REST-only tooling (D-P10-18): the dev clock (SDK-06) and server-side replay (CLI-07).
+// One contiguous block so the client extraction (10-09) can move it verbatim.
+
+/// Extra time a replay request may take on top of the client timeout (the server
+/// replays up to 1000 journals per request).
+pub const REPLAY_EXTRA_TIMEOUT: Duration = Duration::from_secs(300);
+
+impl Client {
+    /// `GET /v1/dev/time` (409 `time_skipping_disabled` unless the server runs
+    /// `ostro dev --ephemeral --time-skipping`).
+    pub async fn dev_time(&self) -> Result<Response, CallError> {
+        self.get(&["v1", "dev", "time"], &[]).await
+    }
+
+    /// `POST /v1/dev/time/skip` `{by}` or `{to_ms}`.
+    pub async fn dev_skip(&self, body: &Value) -> Result<Response, CallError> {
+        self.post(&["v1", "dev", "time", "skip"], body).await
+    }
+
+    /// `POST /v1/modules/{sha}/replay` `{runs | sample, workflow, status, allow_missing}`,
+    /// with [`REPLAY_EXTRA_TIMEOUT`] on top of the client timeout.
+    pub async fn replay_module(&self, sha: &str, body: &Value) -> Result<Response, CallError> {
+        let rb = self
+            .http
+            .post(self.replay_url(sha))
+            .timeout(self.timeout + REPLAY_EXTRA_TIMEOUT)
+            .json(body);
+        self.send(rb).await
+    }
+
+    /// The replay route of module `sha` (one path segment).
+    fn replay_url(&self, sha: &str) -> Url {
+        self.url(&["v1", "modules", sha, "replay"], &[])
+    }
+}
+
+// --- end Phase 10 (10-05) -----------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +542,24 @@ mod tests {
         );
         let u = c.url(&["v1", "runs"], &[]);
         assert_eq!(u.as_str(), "http://h:1/prefix/v1/runs");
+    }
+
+    #[test]
+    fn phase10_urls() {
+        let c = Client::new("http://h:1/prefix", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            c.url(&["v1", "dev", "time", "skip"], &[]).as_str(),
+            "http://h:1/prefix/v1/dev/time/skip"
+        );
+        assert_eq!(
+            c.replay_url(&"ab".repeat(32)).as_str(),
+            format!("http://h:1/prefix/v1/modules/{}/replay", "ab".repeat(32))
+        );
+        // A hostile sha stays one segment.
+        assert_eq!(
+            c.replay_url("../x?y").as_str(),
+            "http://h:1/prefix/v1/modules/..%2Fx%3Fy/replay"
+        );
     }
 
     #[test]

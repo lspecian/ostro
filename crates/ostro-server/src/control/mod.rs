@@ -81,6 +81,7 @@ pub use watch::RunWatchers;
 
 pub mod admin;
 pub mod bridge;
+pub mod dev;
 pub mod history;
 pub mod lifecycle;
 pub mod list;
@@ -95,6 +96,7 @@ pub mod p7_flow;
 pub mod p7_pause;
 pub mod p7_workers;
 pub mod policy;
+pub mod replay;
 pub mod run_logs;
 pub mod runs;
 pub mod schedules;
@@ -474,6 +476,26 @@ impl ControlPlane for ServerControlPlane {
 
     async fn join_worker(&self, req: JoinRequest) -> Result<JoinResponse, ApiError> {
         p7_workers::join_worker(self, req).await
+    }
+
+    // --- Phase 10 (10-05): see [`dev`] (10-10) and [`replay`] (10-11) ---
+
+    async fn dev_time(&self) -> Result<ostro_api::domain::DevTimeInfo, ApiError> {
+        dev::dev_time(self).await
+    }
+
+    async fn dev_skip(
+        &self,
+        s: ostro_api::domain::DevSkip,
+    ) -> Result<ostro_api::domain::DevSkipResult, ApiError> {
+        dev::dev_skip(self, s).await
+    }
+
+    async fn replay_module(
+        &self,
+        r: ostro_api::domain::ReplayRequest,
+    ) -> Result<ostro_api::domain::ReplayResult, ApiError> {
+        replay::replay_module(self, r).await
     }
 
     /// Serving, meta has a leader, and every partition slot is `Ready` and not failed.
