@@ -407,7 +407,18 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | gRPC services | `ostro.api.v1.RunOps`, `ostro.api.v1.Inventory` | P11 |
 | Dedupe namespaces | `__rerun/`, `__onfail/`, `__bulk/`, `__dlq/` | P11 |
 | System run tag | `__ostro/rerun_from=<seq>` (zero-format rerun lineage, PF-11-4 fallback) | P11 |
+| System run tag | `__ostro/on_failure_of=<run>` (on-failure hook runs: the failed run they handle; D-P11-25) | P11 (11-01) |
 | Error kinds | `limit_exceeded`, `payload_too_large` (documented in WIT by 05-20) | P11 |
+| Config sections | `[limits]`, `[ui]`, `[bulk]`, `[dlq]` (D-P11-25) | P11 (11-01) |
+| Env var | `OSTRO_UI_ALLOWED_HOSTS` (D-P11-25) | P11 (11-01) |
+| Metric prefixes | `ostro_bulk_`, `ostro_rerun_`, `ostro_ui_`; `ostro_dlq_` is shared with P8 (`ostro_dlq_total` exists, P8): Phase 11 adds the series `ostro_dlq_hooks_total`, `ostro_dlq_requeues_total` (D-P11-25) | P11 (11-01) |
+| Failpoint prefixes | `bulk::`, `rerun::`, `dlq::` (D-P11-25) | P11 (11-01) |
+| Id prefix | `blk_` (bulk jobs) (D-P11-25) | P11 (11-01) |
+| Guest names | `p11-limits`, `p11-rerun`, `p11-rerun-v2`, `p11-hook` (D-P11-25) | P11 (11-01) |
+| UI cookie / header | cookie `ostro_csrf`, header `X-Ostro-Csrf` (D-P11-25) | P11 (11-01) |
+| API error `details.reason` values | `run_not_terminal`, `rerun_cut_unsafe`, `rerun_nondeterministic`, `rerun_prefix_too_large`, `dlq_not_member`, `bulk_too_many_jobs`, `bulk_too_many_matches`, `limit_exceeded` (documented API vocabulary, not a registry space; D-P11-25) | P11 (11-01) |
+| Engine module | `run_limits` (run limits; the existing ENG-05 `limits.rs` is untouched) (D-P11-25) | P11 (11-01) |
+| REST paths | `GET\|PUT /v1/workflows/{name}/failure-policy`, `GET\|PUT /v1/queues/{name}/failure-policy`, `GET /v1/runs/{id}/rerun-cuts` (D-P11-29) | P11 (11-01) |
 | Crates | `ostro-worker`, `ostro-worker-proto` | P7 (07-02) |
 | Config sections | `[workers]`, `[worker]`, `[cluster]` (P7 creates; P12 extends with `[[cluster.peers]]`, `replication_listen`), `[cluster.tls]`, `[api.tls]`, `[flow]` | P7 (07-02) |
 | gRPC services | `ostro.worker.v1.Execute` (cluster listener, mTLS); `ostro.api.v1.Queues`, `ostro.api.v1.Workers` | P7 (07-02 / 07-11) |
