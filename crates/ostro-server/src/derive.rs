@@ -32,10 +32,13 @@
 //! | `OpCancelled{op}`, `op` a signal / token wait | `CancelWait{op}` |
 //! | `EffectScheduled{request}` (06-14) | `RegisterEffect{op: s, kind: EffectKind::from_request, scheduled_at_ms: ceil(t / 1e6)}` |
 //! | `OpCancelled{op}`, `op` an `EffectScheduled` (06-14) | `CancelEffect{op}` |
-//! | `OpCancelled{op}`, `op` anything else (children) | none |
-//! | `RunCompleted{output}` | `CompleteRun{Completed, result, completed_at_ms: ceil(t / 1e6)}` |
-//! | `RunFailed{Cancelled}` | `CompleteRun{Cancelled, result: failure JSON}` |
-//! | `RunFailed{failure}` | `CompleteRun{Failed, result: failure JSON}` |
+//! | `OpCancelled{op}`, `op` anything else (children: 09-08) | none |
+//! | `ChildStarted` at `s`, target resolved (09-05) | `SendMessage(StartChild(StartRun{child_run_id(run, s, P), …, parent: ParentRef{run, s}}))` + `ChildJournal{child}` |
+//! | `ChildStarted` at `s`, detached, resolved (09-05) | `SendMessage(StartChild(StartRun{…, parent: None}))` |
+//! | `ChildStarted`, target unresolvable | none (the sink journals `unknown_workflow`) |
+//! | `RunCompleted{output}` | `CompleteRun{Completed, result, completed_at_ms: ceil(t / 1e6), parent_event}` |
+//! | `RunFailed{Cancelled}` | `CompleteRun{Cancelled, result: failure JSON, parent_event}` |
+//! | `RunFailed{failure}` | `CompleteRun{Failed, result: failure JSON, parent_event}` |
 //! | `RunContinuedAsNew` | `SendMessage(StartRun(successor))` + `CompleteRun{ContinuedAsNew, {"next_run_id"}}` |
 //! | `RunContinuedAsNew`, no successor (resolution failed) | `CompleteRun{Failed, result}` |
 //! | everything else | none |
@@ -51,8 +54,15 @@
 //! `CancelTimer`, exactly one `SendMessage(StartRun)`, then `CompleteRun{ContinuedAsNew}`.
 //!
 //! `StepAttemptFailed` maps to nothing: the executor (04-16) submits its own `EnqueueReady`
-//! after `Evicted{StepBackoff}`. Children map to nothing here; the sink adds the Phase 4
-//! "unsupported" completion ([`crate::sink`]) until Phase 9.
+//! after `Evicted{StepBackoff}`.
+//!
+//! **Children (09-05).** [`derive_with_children`] takes the child `StartRun`s the sink
+//! resolved and prepared ([`ChildCtx::starts`], built with [`crate::children::child_start`])
+//! and the child's own `parent_event` ([`ChildCtx::parent_event`], set only when the run
+//! has a parent and ends with `RunCompleted` / `RunFailed`; a continue-as-new reports
+//! through its successor, PF-F2). Every attached start is followed by the opt-in
+//! `ChildJournal` marker (Derived tag 19), so apply journals the child's completion as a
+//! kind-67 event; v0.1 commands without it keep their legacy inbox semantics.
 //!
 //! **Effects (06-14).** `RegisterEffect` records the in-flight `effects` row the bridge's
 //! gate and the leader-start wake rely on; like waits it is left out of terminal batches
@@ -77,8 +87,8 @@
 
 use ostro_partition::store::values::RunRecord;
 use ostro_types::command::{
-    CancelTimer, CompleteRun, Derived, OutboxMsg, ParentRef, ScheduleTimer, SendMessage, StartRun,
-    TerminalStatus, WaitKind, derived::Intent,
+    CancelTimer, CompleteRun, Derived, OutboxMsg, ParentRef, ScheduleTimer, SendMessage,
+    StartChild, StartRun, TerminalStatus, WaitKind, derived::Intent, outbox_msg,
 };
 use ostro_types::journal::{CANCELLATION_OP, Continuation, Event, EventBody, Failure};
 use ostro_types::live::EffectKind;
@@ -111,6 +121,10 @@ pub enum DeriveError {
     /// `OpCancelled{op}` where `op` is neither in the batch nor known to the lookup.
     #[error("OpCancelled at seq {seq} names unknown op {op}")]
     UnknownOp { seq: u64, op: u64 },
+    /// A prepared parent event, but the batch does not end with `RunCompleted` /
+    /// `RunFailed` (09-05).
+    #[error("parent event but no guest terminal in the batch")]
+    UnexpectedParentEvent,
 }
 
 /// Nanoseconds -> milliseconds, rounded up.
@@ -279,13 +293,43 @@ fn schedule_timer(op: u64, fire_at_nanos: u64) -> Derived {
     }))
 }
 
-/// Map one appended batch to its intents (see the module docs).
+/// Child inputs of [`derive_with_children`] resolved by the caller (09-05).
+pub struct ChildCtx<'a> {
+    /// The prepared child `StartRun` of the `ChildStarted` at seq `op`; `None` = the target
+    /// could not be resolved (no intent; the sink journals `unknown_workflow`).
+    pub starts: &'a dyn Fn(u64) -> Option<StartRun>,
+    /// The prepared `CompleteRun.parent_event` of a child run's guest terminal (PF-F1).
+    pub parent_event: Option<PayloadRef>,
+}
+
+/// Map one appended batch to its intents (see the module docs), without children: every
+/// `ChildStarted` maps to nothing.
 pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, DeriveError> {
+    derive_with_children(
+        events,
+        ctx,
+        ChildCtx {
+            starts: &|_| None,
+            parent_event: None,
+        },
+    )
+}
+
+/// Map one appended batch to its intents (see the module docs), children included (09-05).
+pub fn derive_with_children(
+    events: &[Event],
+    ctx: DeriveCtx<'_>,
+    kids: ChildCtx<'_>,
+) -> Result<Vec<Derived>, DeriveError> {
     let DeriveCtx {
         prior,
         mut result,
         mut successor,
     } = ctx;
+    let ChildCtx {
+        starts,
+        mut parent_event,
+    } = kids;
     let terminal_batch = events.last().is_some_and(is_terminal);
     let mut out = Vec::new();
     let mut done = false;
@@ -299,7 +343,13 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
                 .ok_or(DeriveError::MissingResult { seq: ev.seq })?;
             match (guest_terminal(ev), successor.take()) {
                 (Some(_), Some(_)) => return Err(DeriveError::UnexpectedSuccessor),
-                (Some((status, _)), None) => out.push(complete(status, r, ev.ts_nanos)),
+                (Some((status, _)), None) => {
+                    let mut c = complete(status, r, ev.ts_nanos);
+                    if let Some(Intent::CompleteRun(cr)) = &mut c.intent {
+                        cr.parent_event = parent_event.take();
+                    }
+                    out.push(c);
+                }
                 (None, Some(start)) => {
                     out.push(Derived::new(Intent::SendMessage(SendMessage {
                         msg: Some(OutboxMsg::start_run(start)),
@@ -313,6 +363,22 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
         }
         match &ev.body {
             EventBody::TimerStarted(t) => out.push(schedule_timer(ev.seq, t.fire_at_nanos)),
+            EventBody::ChildStarted(_) => {
+                if let Some(start) = starts(ev.seq) {
+                    let attached = start.parent.is_some();
+                    let child = RunId::from_bytes(&start.run_id).ok();
+                    out.push(Derived::new(Intent::SendMessage(SendMessage {
+                        msg: Some(OutboxMsg {
+                            kind: Some(outbox_msg::Kind::StartChild(StartChild {
+                                start: Some(start),
+                            })),
+                        }),
+                    })));
+                    if attached && let Some(child) = child {
+                        out.push(Derived::child_journal(&child));
+                    }
+                }
+            }
             EventBody::SignalWaitStarted(_) | EventBody::AwaitTokenCreated(_) => {
                 if !terminal_batch && let Some(d) = register_wait(ev) {
                     out.push(d);
@@ -356,8 +422,7 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
             }
             // No intent: RunStarted (seq 0, written by the executor), StepCompleted,
             // StepAttemptFailed (the executor requeues itself, 04-16), PatchMarker,
-            // StatusPublished, WaitResolved, ChildStarted (the sink adds the unsupported
-            // completion), and inputs (journaled by apply, or by the
+            // StatusPublished, WaitResolved, and inputs (journaled by apply, or by the
             // executor's first-activation CancelRequested).
             _ => {}
         }
@@ -367,6 +432,9 @@ pub fn derive(events: &[Event], ctx: DeriveCtx<'_>) -> Result<Vec<Derived>, Deri
     }
     if successor.is_some() {
         return Err(DeriveError::UnexpectedSuccessor);
+    }
+    if parent_event.is_some() {
+        return Err(DeriveError::UnexpectedParentEvent);
     }
     Ok(out)
 }
@@ -413,6 +481,12 @@ pub struct ResolvedWorkflow {
 pub trait ModuleResolver: Send + Sync {
     /// `version` `None` = the workflow's active version. `None` = unknown.
     fn resolve(&self, workflow: &str, version: Option<u32>) -> Option<ResolvedWorkflow>;
+
+    /// The module-local default queue of `(workflow, version)` from its `describe()`
+    /// (09-05 child starts); `None` = none known (the API default applies).
+    fn default_queue(&self, _workflow: &str, _version: u32) -> Option<String> {
+        None
+    }
 }
 
 /// Resolves a new run's `(retention_ms, schedule_to_start_ms)` for `(workflow, queue)`, both
@@ -579,6 +653,13 @@ impl ModuleResolver for MetaModules {
                 module_sha: w.value.module_sha256,
                 run_timeout_ms: w.value.run_timeout_ms,
             })
+        })
+    }
+
+    fn default_queue(&self, workflow: &str, version: u32) -> Option<String> {
+        self.0.read(|s| {
+            s.workflow(workflow, version)
+                .and_then(|w| w.value.default_queue.clone())
         })
     }
 }

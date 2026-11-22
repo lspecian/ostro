@@ -17,7 +17,7 @@ use ostro_partition::{ApplyOutcome, Node, NodeConfig, PartitionHandle, Table, qu
 use ostro_server::derive;
 use ostro_server::journal_io::{JournalReadError, read_journal};
 use ostro_server::run_started::{build_run_started, input_payload};
-use ostro_server::sink::{CHILDREN_UNSUPPORTED, EFFECTS_UNSUPPORTED, PartitionSink, RenewFn};
+use ostro_server::sink::{EFFECTS_UNSUPPORTED, PartitionSink, RenewFn};
 use ostro_types::command::{
     AttemptTokenMsg, ConflictPolicy, Derived, EventsAppended, JournalEvent, StartRun,
 };
@@ -449,8 +449,10 @@ async fn effect_gets_unsupported_completion_input() {
     );
 }
 
+/// 09-05: children are no longer `unsupported`; without a resolver (NoModules) the target
+/// is unresolvable and completes `unknown_workflow` through the same post-flush path.
 #[tokio::test]
-async fn child_gets_unsupported_completion_input() {
+async fn child_gets_unknown_workflow_completion_input() {
     let mut f = Fixture::new().await;
     let child = ev(
         1,
@@ -476,7 +478,7 @@ async fn child_gets_unsupported_completion_input() {
         panic!("seq 3 is {:?}", j[3].body)
     };
     assert_eq!(c.op, 1);
-    assert_unsupported(&c.outcome, CHILDREN_UNSUPPORTED);
+    assert_unknown_workflow(&c.outcome);
     let EventBody::EffectCompleted(e) = &j[4].body else {
         panic!("seq 4 is {:?}", j[4].body)
     };
@@ -701,6 +703,16 @@ async fn raw_append(f: &Fixture, from: u64, events: &[Event]) {
     assert_eq!(o, ApplyOutcome::Accepted);
 }
 
+fn assert_unknown_workflow(outcome: &ostro_types::journal::RecordedResult) {
+    let r: Result<OpOutput, Failure> = decode_result(outcome).expect("decode outcome");
+    match r {
+        Err(Failure::NonRetryable(i)) => {
+            assert_eq!(i.kind, ostro_server::children::UNKNOWN_WORKFLOW_KIND)
+        }
+        other => panic!("expected unknown_workflow, got {other:?}"),
+    }
+}
+
 fn child(seq: u64) -> Event {
     ev(
         seq,
@@ -738,9 +750,10 @@ async fn bridge_repair_leaves_inflight_effect_alone() {
     b.stop().await;
 }
 
-/// B1: children keep their unsupported completion with the bridge enabled.
+/// B1 (09-05): with the bridge enabled, repair completes an unresolvable child
+/// (`unknown_workflow`, no longer `unsupported`) and leaves the effect alone.
 #[tokio::test]
-async fn bridge_repair_still_completes_children() {
+async fn bridge_repair_completes_unresolvable_children() {
     let f = Fixture::new().await;
     let b = BridgeFx::new().await;
     raw_append(&f, 1, &[effect(1), child(2)]).await;
@@ -754,7 +767,7 @@ async fn bridge_repair_still_completes_children() {
         panic!("seq 3 is {:?}", j[3].body)
     };
     assert_eq!(c.op, 2);
-    assert_unsupported(&c.outcome, CHILDREN_UNSUPPORTED);
+    assert_unknown_workflow(&c.outcome);
     b.stop().await;
 }
 

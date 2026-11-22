@@ -25,7 +25,7 @@ use ostro_server::derive::{
 };
 use ostro_server::journal_io::read_journal;
 use ostro_server::run_started::{build_run_started, input_payload};
-use ostro_server::sink::{CHILDREN_UNSUPPORTED, EFFECTS_UNSUPPORTED, PartitionSink};
+use ostro_server::sink::{EFFECTS_UNSUPPORTED, PartitionSink};
 use ostro_types::command::{
     CancelTimer, CompleteRun, ConflictPolicy, Derived, OutboxMsg, ParentRef, ScheduleTimer,
     SendMessage, SignalRun, StartRun, TerminalStatus, WaitKind, derived::Intent, outbox_msg,
@@ -832,8 +832,10 @@ async fn guest_cancel_completes_the_run_cancelled() {
     assert_eq!(f.result_json().await["reason_code"], "cancelled");
 }
 
+/// 09-05: effects (no bridge) still complete `unsupported`; an unresolvable child
+/// (NoModules) completes `unknown_workflow` through the same post-flush path.
 #[tokio::test]
-async fn effects_and_children_still_complete_unsupported() {
+async fn effects_unsupported_and_unresolvable_children_complete() {
     let f = Fx::new(|_| {}).await;
     let far = 4_102_444_800_000 * MS;
     assert_eq!(
@@ -847,24 +849,25 @@ async fn effects_and_children_still_complete_unsupported() {
     let msgs: Vec<String> = j[3..]
         .iter()
         .map(|e| match &e.body {
-            EventBody::EffectCompleted(c) => decode(&c.outcome),
-            EventBody::ChildCompleted(c) => decode(&c.outcome),
+            EventBody::EffectCompleted(c) => decode(&c.outcome, "unsupported"),
+            EventBody::ChildCompleted(c) => decode(&c.outcome, "unknown_workflow"),
             other => panic!("unexpected {other:?}"),
         })
         .collect();
-    assert_eq!(msgs, vec![EFFECTS_UNSUPPORTED, CHILDREN_UNSUPPORTED]);
+    assert_eq!(msgs[0], EFFECTS_UNSUPPORTED);
+    assert!(msgs[1].contains("not registered"), "{}", msgs[1]);
     assert!(!f.sink.is_terminal());
 }
 
-fn decode(r: &ostro_types::journal::RecordedResult) -> String {
+fn decode(r: &ostro_types::journal::RecordedResult, kind: &str) -> String {
     let out: Result<ostro_types::journal::OpOutput, Failure> =
         ostro_types::journal::decode_result(r).expect("decode");
     match out {
         Err(Failure::NonRetryable(i)) => {
-            assert_eq!(i.kind, "unsupported");
+            assert_eq!(i.kind, kind);
             i.message
         }
-        other => panic!("not unsupported: {other:?}"),
+        other => panic!("not {kind}: {other:?}"),
     }
 }
 

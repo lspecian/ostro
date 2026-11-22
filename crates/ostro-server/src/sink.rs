@@ -43,23 +43,39 @@
 //! effect as `unsupported`. Without a bridge (tests, bare nodes) `RegisterEffect` /
 //! `CancelEffect` are stripped and effects keep the Phase 4 path below.
 //!
-//! # Phase 4 "unsupported" completions (locked decision; Phase 6/9 replace this)
+//! # Children (09-05)
 //!
-//! Child workflows (and, without a bridge, effects) are not implemented yet. Instead of
-//! hanging, the run gets an immediate non-retryable failure (await tokens are real since
-//! Phase 5: `RegisterWait`):
+//! Each `ChildStarted{seq s}` of a batch is resolved before the append
+//! ([`children::resolve_child`] through the same [`ModuleResolver`] as continue-as-new):
+//! the input is prepared (blob > 256 KiB), a fresh OS-random seed drawn, and the child
+//! `StartRun` built with the deterministic id [`children::child_run_id`]`(run, s, P)`;
+//! derive turns it into `SendMessage(StartChild)` + the opt-in `ChildJournal` marker. An
+//! unresolvable target journals `ChildCompleted{s, Err(non-retryable unknown_workflow)}`
+//! right after the flush (the completion mechanism below). A child run's terminal batch
+//! (`RunRecord.parent`, read at construction) carries `CompleteRun.parent_event`: the
+//! submitter-encoded kind-67 `ChildCompleted{op: parent op, outcome}`
+//! ([`children::parent_event_bytes`], prepared like any payload). Children never complete
+//! as `unsupported` any more. On journal load, [`PartitionSink::repair_unsupported`] also
+//! applies the child repair rule ([`children::plan_child_repairs`], W1): a children row =
+//! delivered, skip; else re-send the StartChild (intents-only `EventsAppended`) if the
+//! target resolves now, or journal `unknown_workflow` once.
+//!
+//! # Post-flush completions (Phase 4 mechanism)
+//!
+//! Without a bridge, effects are not executed. Instead of hanging, the run gets an
+//! immediate non-retryable failure (await tokens are real since Phase 5: `RegisterWait`):
 //!
 //! - `EffectScheduled{seq s}` -> input `EffectCompleted{op: s, outcome: Err(NonRetryable{kind:
-//!   "unsupported"})}`; `ChildStarted` -> `ChildCompleted` likewise. They are journaled with
-//!   the **same token** in a second `EventsAppended` right after the scheduling append
-//!   succeeded, and sent on the activation's `inputs` channel (hot wait). The engine's own
-//!   next append then usually conflicts (`AppendConflict` -> re-activation), which is
-//!   correct: the re-activation replays the completion.
+//!   "unsupported"})}`; an unresolvable `ChildStarted` -> `ChildCompleted{unknown_workflow}`.
+//!   They are journaled with the **same token** in a second `EventsAppended` right after
+//!   the scheduling append succeeded, and sent on the activation's `inputs` channel (hot
+//!   wait). The engine's own next append then usually conflicts (`AppendConflict` ->
+//!   re-activation), which is correct: the re-activation replays the completion.
 //!
 //! Completions are skipped when the batch itself ends the run. If journaling them fails
 //! with an unavailable partition, `append` returns `Unavailable` although the scheduling
 //! events are committed; the executor calls [`PartitionSink::repair_unsupported`] on the
-//! journal it loads for the next activation so no effect is left without a completion.
+//! journal it loads for the next activation so no op is left without a completion.
 //!
 //! # Guest logs (08-17)
 //!
@@ -75,18 +91,19 @@ use bytes::Bytes;
 use ostro_engine::sink::{ActivationOutcome, ActivationSink, AppendError, GuestLogRecord, RunRef};
 use ostro_log::{ReplicatedLog, Rf1Log};
 use ostro_partition::apply::InvalidCode;
-use ostro_partition::{ApplyOutcome, PartitionHandle, RejectReason};
+use ostro_partition::store::keys::children_key;
+use ostro_partition::{ApplyOutcome, PartitionHandle, RejectReason, Table};
 use ostro_types::command::{
-    AttemptTokenMsg, Derived, EventsAppended, JournalEvent, derived::Intent,
+    AttemptTokenMsg, Derived, EventsAppended, JournalEvent, StartRun, derived::Intent,
 };
 use ostro_types::journal::{
-    ChildCompleted, EffectCompleted, ErrorInfo, Event, EventBody, Failure, OpOutput, encode_event,
-    encode_result,
+    EffectCompleted, ErrorInfo, Event, EventBody, Failure, OpOutput, encode_event, encode_result,
 };
 use ostro_types::{AttemptToken, Command, PayloadRef, RunId};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::bridge_services::BridgeServices;
+use crate::children::{self, ChildRepair};
 use crate::derive::{self, InheritPolicy, ModuleResolver, NoModules, PolicyResolver};
 use crate::journal_io;
 use crate::services::guest_logs::GuestLogSink;
@@ -95,7 +112,8 @@ use crate::services::guest_logs::GuestLogSink;
 pub const UNSUPPORTED_KIND: &str = "unsupported";
 /// Message of the unsupported effect completion.
 pub const EFFECTS_UNSUPPORTED: &str = "effects arrive in Phase 6";
-/// Message of the unsupported child completion.
+/// Message of the former unsupported child completion (no longer produced since 09-05;
+/// kept for journals written before).
 pub const CHILDREN_UNSUPPORTED: &str = "child workflows arrive in Phase 6/9";
 
 /// Attempts to journal unsupported completions when the journal end moves underneath
@@ -121,6 +139,8 @@ pub struct PartitionSink<L: ReplicatedLog = Rf1Log> {
     guest_logs: Option<Arc<GuestLogSink>>,
     /// The effects bridge (06-14); `None` keeps the Phase 4 unsupported path for effects.
     bridge: Option<Arc<BridgeServices>>,
+    /// `RunRecord.parent` `(parent run, op)` at construction (09-05 parent_event).
+    parent: Option<(RunId, u64)>,
 }
 
 impl<L: ReplicatedLog> std::fmt::Debug for PartitionSink<L> {
@@ -159,13 +179,7 @@ fn unsupported_completion(ev: &Event, bridge: bool) -> Option<EventBody> {
                 outcome: encode_result(&out),
             }))
         }
-        EventBody::ChildStarted(_) => {
-            out = Err(unsupported_failure(CHILDREN_UNSUPPORTED));
-            Some(EventBody::ChildCompleted(ChildCompleted {
-                op: ev.seq,
-                outcome: encode_result(&out),
-            }))
-        }
+        // Children are bridged since 09-05 (never `unsupported`).
         _ => None,
     }
 }
@@ -194,11 +208,11 @@ impl<L: ReplicatedLog> PartitionSink<L> {
         inputs: Option<UnboundedSender<Event>>,
         on_renew: Option<RenewFn>,
     ) -> Self {
-        let next = handle
-            .read_run(&run)
-            .ok()
-            .flatten()
-            .map_or(0, |r| r.next_seq);
+        let rec = handle.read_run(&run).ok().flatten();
+        let next = rec.as_ref().map_or(0, |r| r.next_seq);
+        let parent = rec
+            .and_then(|r| r.parent)
+            .and_then(|(id, op)| RunId::from_bytes(&id).ok().map(|id| (id, op)));
         Self {
             run_str: run.to_string(),
             handle,
@@ -213,11 +227,12 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             policy: Arc::new(InheritPolicy),
             guest_logs: None,
             bridge: None,
+            parent,
         }
     }
 
     /// The unsupported completion input for `ev`, if it schedules an op that gets one:
-    /// `ChildStarted` always; `EffectScheduled` only without a bridge (B1).
+    /// `EffectScheduled` only without a bridge (B1); never `ChildStarted` (09-05).
     pub fn unsupported_input(&self, ev: &Event) -> Option<EventBody> {
         unsupported_completion(ev, self.bridge.is_some())
     }
@@ -423,7 +438,7 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             }
         }
         Err(AppendError::Unavailable(format!(
-            "journal end kept moving while journaling {} unsupported completion(s)",
+            "journal end kept moving while journaling {} post-flush completion(s)",
             bodies.len()
         )))
     }
@@ -453,7 +468,177 @@ impl<L: ReplicatedLog> PartitionSink<L> {
             .filter_map(|e| self.unsupported_input(e))
             .collect();
         let ts = journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
-        self.journal_inputs(bodies, ts).await
+        self.journal_inputs(bodies, ts).await?;
+        self.repair_children(journal).await
+    }
+
+    /// The child repair rule on journal load (09-05, W1; module docs).
+    async fn repair_children(&self, journal: &[Event]) -> Result<(), AppendError> {
+        if !journal
+            .iter()
+            .any(|e| matches!(e.body, EventBody::ChildStarted(_)))
+        {
+            return Ok(());
+        }
+        let rec = self.parent_record()?;
+        let partitions = self.partitions()?;
+        let reader = self.handle.reader();
+        let has_row = |child: &RunId| {
+            reader
+                .get(Table::Children, &children_key(&self.run, child))
+                .map(|r| r.is_some())
+                // An unreadable row is treated as present: never re-decide on doubt.
+                .unwrap_or(true)
+        };
+        let plan = children::plan_child_repairs(
+            &self.run,
+            partitions,
+            rec.tenant.as_deref(),
+            journal,
+            &has_row,
+            &*self.modules,
+        );
+        let mut resend = Vec::new();
+        let mut unknown = Vec::new();
+        for r in plan {
+            match r {
+                ChildRepair::Resend { op, target } => {
+                    let Some(ev) = journal.iter().find(|e| e.seq == op) else {
+                        continue;
+                    };
+                    let EventBody::ChildStarted(c) = &ev.body else {
+                        continue;
+                    };
+                    let start = self.child_start(&rec, partitions, ev, c, &target).await?;
+                    let child = children::child_run_id(&self.run, op, partitions);
+                    resend.push(Derived::new(Intent::SendMessage(
+                        ostro_types::command::SendMessage {
+                            msg: Some(ostro_types::command::OutboxMsg {
+                                kind: Some(ostro_types::command::outbox_msg::Kind::StartChild(
+                                    ostro_types::command::StartChild { start: Some(start) },
+                                )),
+                            }),
+                        },
+                    )));
+                    resend.push(Derived::child_journal(&child));
+                }
+                ChildRepair::UnknownWorkflow { op, message } => {
+                    tracing::warn!(run = %self.run_str, op, %message, "child target unresolvable");
+                    unknown.push(children::unknown_workflow_completion(op, &message));
+                }
+            }
+        }
+        if !resend.is_empty() {
+            // Intents-only EventsAppended (apply accepts `events = []`, D-P9-25).
+            match self.submit_intents(resend).await {
+                Ok(_) | Err(AppendError::Fenced) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let ts = journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
+        self.journal_inputs(unknown, ts).await
+    }
+
+    /// The run's own record (children need its tenant, priority and traceparent).
+    fn parent_record(&self) -> Result<ostro_partition::store::values::RunRecord, AppendError> {
+        self.handle
+            .read_run(&self.run)
+            .map_err(unavailable)?
+            .ok_or_else(|| unavailable(format!("run {} has no record", self.run_str)))
+    }
+
+    /// The node's partition count (child run ids route over it, D-P9-7).
+    fn partitions(&self) -> Result<u16, AppendError> {
+        Ok(self
+            .handle
+            .store()
+            .read_meta()
+            .map_err(unavailable)?
+            .count
+            .get())
+    }
+
+    /// The child `StartRun` of the `ChildStarted` `ev` (input prepared, fresh seed).
+    async fn child_start(
+        &self,
+        rec: &ostro_partition::store::values::RunRecord,
+        partitions: u16,
+        ev: &Event,
+        c: &ostro_types::journal::ChildStarted,
+        target: &children::ChildTarget,
+    ) -> Result<StartRun, AppendError> {
+        let mut rng_seed = [0u8; 32];
+        getrandom::fill(&mut rng_seed).map_err(unavailable)?;
+        let input = self.prepare(c.input.data.clone()).await?;
+        let parts = children::ChildParts {
+            parent_id: self.run,
+            parent: rec,
+            op: ev.seq,
+            ts_nanos: ev.ts_nanos,
+            detached: c.options.detached,
+            run_id: children::child_run_id(&self.run, ev.seq, partitions),
+            rng_seed,
+            input,
+        };
+        Ok(children::child_start(target, parts, &*self.policy))
+    }
+
+    /// Child starts of `events` (09-05): prepared `StartRun`s by op, and the
+    /// `unknown_workflow` completions of unresolvable targets (by op).
+    async fn prepare_children(
+        &self,
+        events: &[Event],
+    ) -> Result<(BTreeMap<u64, StartRun>, BTreeMap<u64, EventBody>), AppendError> {
+        let mut starts = BTreeMap::new();
+        let mut unknown = BTreeMap::new();
+        if !events
+            .iter()
+            .any(|e| matches!(e.body, EventBody::ChildStarted(_)))
+        {
+            return Ok((starts, unknown));
+        }
+        let rec = self.parent_record()?;
+        let partitions = self.partitions()?;
+        for ev in events {
+            let EventBody::ChildStarted(c) = &ev.body else {
+                continue;
+            };
+            match children::resolve_child(
+                &*self.modules,
+                rec.tenant.as_deref(),
+                &c.workflow,
+                &c.options,
+            ) {
+                Ok(target) => {
+                    let start = self.child_start(&rec, partitions, ev, c, &target).await?;
+                    starts.insert(ev.seq, start);
+                }
+                Err(e) => {
+                    tracing::warn!(run = %self.run_str, op = ev.seq, error = %e, "child target unresolvable");
+                    unknown.insert(
+                        ev.seq,
+                        children::unknown_workflow_completion(ev.seq, &e.to_string()),
+                    );
+                }
+            }
+        }
+        Ok((starts, unknown))
+    }
+
+    /// The prepared `CompleteRun.parent_event` of a child run's guest terminal batch
+    /// (PF-F1, D-P9-9); `None` for top-level runs, continue-as-new and other batches.
+    async fn parent_event(&self, events: &[Event]) -> Result<Option<PayloadRef>, AppendError> {
+        let Some((_, op)) = self.parent else {
+            return Ok(None);
+        };
+        let Some((ev, outcome)) = events
+            .last()
+            .and_then(|ev| children::parent_outcome(ev).map(|o| (ev, o)))
+        else {
+            return Ok(None);
+        };
+        let bytes = children::parent_event_bytes(op, outcome, ev.ts_nanos);
+        Ok(Some(self.prepare(bytes).await?))
     }
 
     /// The successor start and result bytes of a continue-as-new batch (module docs).
@@ -547,14 +732,21 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
             Some(b) => Some(self.prepare(b).await?),
             None => None,
         };
+        // Children (09-05): resolved/prepared starts, unresolvable targets, parent event.
+        let (starts, mut unknown_children) = self.prepare_children(&events).await?;
+        let parent_event = self.parent_event(&events).await?;
         // 2. Intents (pure).
         let prior = self.prior_events(&events).await?;
-        let derived = derive::derive(
+        let derived = derive::derive_with_children(
             &events,
             derive::DeriveCtx {
                 prior: &|op| prior.get(&op).cloned(),
                 result,
                 successor,
+            },
+            derive::ChildCtx {
+                starts: &|op| starts.get(&op).cloned(),
+                parent_event,
             },
         )
         .map_err(unavailable)?;
@@ -592,12 +784,16 @@ impl<L: ReplicatedLog> ActivationSink for PartitionSink<L> {
                 b.bridge().cancel(run.partition, &run.run_id, op);
             }
         }
-        // Phase 4: unsupported completions of children (and effects without a bridge),
-        // after the scheduling append (same token).
+        // Post-flush completions after the scheduling append (same token): unsupported
+        // effects without a bridge, then unresolvable children (09-05).
         if !self.is_terminal() {
+            // In op order, like the scheduling events.
             let bodies: Vec<EventBody> = events
                 .iter()
-                .filter_map(|e| self.unsupported_input(e))
+                .filter_map(|e| {
+                    self.unsupported_input(e)
+                        .or_else(|| unknown_children.remove(&e.seq))
+                })
                 .collect();
             self.journal_inputs(bodies, max_ts).await?;
         }

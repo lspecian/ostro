@@ -36,6 +36,7 @@
 //! fixed signatures until their plans (07-06 .. 07-16) fill them.
 
 pub mod bridge_services;
+pub mod children;
 pub mod config;
 pub mod control;
 pub mod derive;

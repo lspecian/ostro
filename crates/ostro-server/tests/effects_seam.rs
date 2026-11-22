@@ -9,7 +9,8 @@
 //!   response, with the secret scrubbed in both;
 //! - **B2**: a 1 MiB response completes through a blob `PayloadRef` and the guest receives
 //!   every byte; replay yields the stored output;
-//! - **children**: a child start still completes `unsupported`;
+//! - **children**: an unresolvable child start completes `unknown_workflow` (09-05; it was
+//!   `unsupported` before children were bridged);
 //! - **replay**: a journal that already holds `EffectCompleted` replays without I/O;
 //! - **B1**: after a crash, an uncompleted effect is re-driven with the same
 //!   `Idempotency-Key`, never repaired as `unsupported` (failpoint variant);
@@ -39,7 +40,7 @@ use ostro_engine::sink::ActivationOutcome;
 use ostro_engine::testkit::replay_journal;
 use ostro_partition::query;
 use ostro_partition::store::values::RunStatus;
-use ostro_server::sink::{CHILDREN_UNSUPPORTED, UNSUPPORTED_KIND};
+use ostro_server::sink::UNSUPPORTED_KIND;
 use ostro_testkit::mock_provider::MockProvider;
 use ostro_types::RunId;
 use ostro_types::journal::{Event, EventBody, EventKind, Failure, OpOutput, decode_result};
@@ -571,10 +572,11 @@ async fn large_outcome_blob() {
     assert_eq!(mock.requests_to("/big"), 1, "replay contacted the provider");
 }
 
-/// A child start still completes with `unsupported`; effects of the same run go through
-/// the bridge and are never completed `unsupported`.
+/// A child start of an undeployed workflow completes `unknown_workflow` (09-05: children
+/// are bridged, never `unsupported`); effects of the same run go through the bridge and are
+/// never completed `unsupported`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn children_still_unsupported() {
+async fn unresolvable_child_completes_unknown_workflow() {
     let s = server().await;
     s.deploy_guest("wit-surface", None).await;
     let run = s.start_rest("surface", json!({})).await;
@@ -596,8 +598,8 @@ async fn children_still_unsupported() {
     let r: Result<OpOutput, Failure> = decode_result(outcome).expect("decode");
     match r {
         Err(Failure::NonRetryable(i)) => {
-            assert_eq!(i.kind, UNSUPPORTED_KIND);
-            assert_eq!(i.message, CHILDREN_UNSUPPORTED);
+            assert_eq!(i.kind, ostro_server::children::UNKNOWN_WORKFLOW_KIND);
+            assert!(i.message.contains("child-wf"), "{}", i.message);
         }
         other => panic!("child outcome {other:?}"),
     }
