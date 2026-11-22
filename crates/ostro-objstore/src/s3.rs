@@ -4,7 +4,8 @@
 //!   every attempt, then sent with reqwest (rustls; TLS roots per [`TlsRoots`]).
 //! - Conditional headers (`if-none-match: *`, `if-match: <etag>`) are inserted through
 //!   `headers_mut()` **before signing**, so they are part of `X-Amz-SignedHeaders`, and the
-//!   request carries the same value.
+//!   request carries the same value. A failed condition is 412 (409 for a concurrent
+//!   conditional write; `404 NoSuchKey` for `if-match` on a missing object).
 //! - Retries: exponential backoff with jitter on 5xx, 429, timeouts and connection errors, at
 //!   most `max_retries` (5) retries; never on 412 or any other 4xx.
 //! - `put_multipart` buffers up to `multipart_threshold` (64 MiB); a shorter body is one PUT,
@@ -322,6 +323,15 @@ impl S3Store {
             StatusCode::PRECONDITION_FAILED => Ok(Conditional::PreconditionFailed),
             // A concurrent conditional write to the same key (AWS ConditionalRequestConflict).
             StatusCode::CONFLICT if condition.is_some() => Ok(Conditional::PreconditionFailed),
+            // `If-Match` on a missing object: AWS and SeaweedFS answer 404 NoSuchKey (others
+            // 412). Either way the precondition failed (the trait contract); a 404 for any
+            // other reason (NoSuchBucket, ...) stays an error.
+            StatusCode::NOT_FOUND
+                if matches!(condition, Some(("if-match", _)))
+                    && resp.body.windows(9).any(|w| w == b"NoSuchKey") =>
+            {
+                Ok(Conditional::PreconditionFailed)
+            }
             _ => Err(resp.into_status_error("put", key)),
         }
     }
