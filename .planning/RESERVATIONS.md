@@ -282,9 +282,9 @@ Appending a `MetaCommand` variant changes no existing encoding and needs **no ME
 | 1 | Put | exists (P4) |
 | 2 | Delete | exists (P4) |
 | 3 | SetPartitionLeader | exists (P4) |
-| 4 | ElectLeader | planned P12 (12-02 shape, 12-05 apply) |
-| 5 | AlterIsr | planned P12 (12-02 shape, 12-05 apply) |
-| 6 | ResignLeader | planned P12 (12-02 shape, 12-05 apply) |
+| 4 | ElectLeader | exists (P12, 12-02 shape; apply planned 12-05) |
+| 5 | AlterIsr | exists (P12, 12-02 shape; apply planned 12-05) |
+| 6 | ResignLeader | exists (P12, 12-02 shape; apply planned 12-05) |
 | 7 | spare | reserved P12 |
 | 8 | AlterReplicas | reserved P13 |
 | 9–11 | spare | reserved P13 |
@@ -307,7 +307,7 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 32–47 | reserved P7 | — |
 | 48–63 | reserved P8 | — |
 | 64–79 | reserved P9 | — (unused at Phase 9 end; fallback not needed) |
-| 80 | `PartitionAssignment` ElectionInfo `{reason u8: 0 Bootstrap 1 Startup 2 Failover 3 Resign 4 Offline, elected_at_ms u64, prev_leader u64}` | planned P12 (12-02) |
+| 80 | `PartitionAssignment` ElectionInfo `{reason u8: 0 Bootstrap 1 Startup 2 Failover 3 Resign 4 Offline, elected_at_ms u64, prev_leader u64}` | exists (P12, 12-02: `ext::EXT_ELECTION_INFO`, `ElectionInfo`) |
 | 81–95 | spare (Member, PartitionAssignment, cluster) | reserved P12 |
 | 96 | `Member` NodeVersion `{ostro_version, level_min, level_max, wasmtime, event_codec_ver, wit_lines, reported_at_ms}` | reserved P13 |
 | 97 | `Member` MemberState `{state: Joining/Active/Draining/Removed, changed_at_ms}` (tombstone; node ids never reused) | reserved P13 |
@@ -394,11 +394,11 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | node.toml keys | `node_id`, `cluster_id` (0 = no-leader sentinel; mismatch fatal), next to P8's `incarnation`/`restored_from` | P12 |
 | Data-dir temp prefix | `snapshots/pNNNN/.incoming-*` | P12 |
 | Crate | `ostro-cluster` (replication, ISR, election, metadata peer transport) | P12 (12-01) |
-| Proto file + services | `ostro/cluster/v1/cluster.proto`: `Replication {Fetch, FetchSnapshot, FetchBlob, PushBlob}`, `MetaPeer {Raft, Propose, ReportSuspect}` | planned P12 (12-02) |
-| Config keys | `[replication]`: `session_timeout`, `replica_lag_max`, `meta_tick_interval`, `meta_election_tick`, `meta_heartbeat_tick`, `fetch_max_wait`, `fetch_read_timeout`, `fetch_max_bytes`, `rf`, `min_insync` | planned P12 (12-02) |
-| Config keys | inside P7's `[cluster]`: `cluster_id`, `replication_listen`, `[[cluster.peers]] {id, addr, repl_addr}`, `[cluster.tls] ca_cert_file, ca_key_file` | planned P12 (12-02) |
+| Proto file + services | `ostro/cluster/v1/cluster.proto`: `Replication {Fetch, FetchSnapshot, FetchBlob, PushBlob}`, `MetaPeer {Raft, Propose, ReportSuspect}` | exists (P12, 12-02) |
+| Config keys | `[replication]`: `session_timeout`, `replica_lag_max`, `meta_tick_interval`, `meta_election_tick`, `meta_heartbeat_tick`, `fetch_max_wait`, `fetch_read_timeout`, `fetch_max_bytes`, `rf`, `min_insync` | exists (P12, 12-02) |
+| Config keys | inside P7's `[cluster]`: `cluster_id`, `replication_listen`, `[[cluster.peers]] {id, addr, repl_addr}`, `[cluster.tls] ca_cert_file, ca_key_file` | exists (P12, 12-02) |
 | REST path | `GET /v1/admin/replication` (server-local route) | planned P12 |
-| Failpoints | `repl::mutant::{isr_from_assignment, hw_leader_leo, count_nondurable_leo, skip_epoch_check, no_truncate, unclean_election, ignore_min_insync, shrink_before_commit, upload_above_hw, rf1_bypass}` | planned P12 |
+| Failpoints | `repl::mutant::{isr_from_assignment, hw_leader_leo, count_nondurable_leo, skip_epoch_check, no_truncate, unclean_election, ignore_min_insync, shrink_before_commit, upload_above_hw, rf1_bypass}` | names exist (P12, 12-02 `ostro_log::mutants`); sites planned P12 |
 | Failpoints | `install::{after_log_reset, before_rename, after_rename}`, `fetch::{before_append, before_durable}`, `isr::before_alter`, `elect::before_propose` | planned P12 |
 | Object key (bottomless layout) | `p/<pppp>/head` | planned P12 |
 | Metrics | `ostro_repl_*`, incl. `ostro_repl_upload_fenced{partition}` and `ostro_repl_self_demotions_total` | planned P12 |
