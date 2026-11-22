@@ -196,6 +196,14 @@ pub async fn limits(ctx: &P11Ctx) -> Result<LimitsView, ApiError> {
                 "API (result long-poll)",
                 "none: a longer wait is capped",
             ),
+            row(
+                "MAX_RERUN_PREFIX_BYTES",
+                n(super::p11_rerun::MAX_RERUN_PREFIX_BYTES),
+                "bytes (encoded rerun StartRun)",
+                false,
+                "API (rerun, after offloading copied payloads over 1 KiB to blobs; prefix also capped at max_history_events)",
+                "413 payload_too_large, details.reason rerun_prefix_too_large",
+            ),
         ],
     })
 }

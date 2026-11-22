@@ -209,6 +209,17 @@ pub fn details(body: &EventBody) -> Value {
     }
 }
 
+/// [`details`] plus, on `RunStarted`, the run's `retry_of` (`StartRun.retry_of` from the
+/// run record: the source of a restart or rerun, 11-10) when it has one. The key is
+/// omitted otherwise, so histories of ordinary runs are unchanged.
+fn run_details(body: &EventBody, retry_of: Option<&ostro_types::RunId>) -> Value {
+    let mut d = details(body);
+    if let (EventBody::RunStarted(_), Some(src), Value::Object(m)) = (body, retry_of, &mut d) {
+        m.insert("retry_of".to_owned(), Value::String(src.to_string()));
+    }
+    d
+}
+
 /// The API view of a stored `JournalEvent.attempt`: 0 (unset) is `None`.
 pub fn attempt_of(stored: u64) -> Option<u64> {
     (stored != 0).then_some(stored)
@@ -289,19 +300,19 @@ pub(crate) async fn run_history(
     let reader = handle.reader();
     let from = req.from_seq;
     let rows = tokio::task::spawn_blocking(move || {
-        if query::run_record(&reader, &run)?.is_none() {
+        let Some(rec) = query::run_record(&reader, &run)? else {
             return Ok(None);
-        }
+        };
         let rows = query::journal_rows(&reader, &run, from, limit + 1)?;
         let attempts = journal_attempts(&reader, &run, from, limit + 1)?;
-        Ok(Some((rows, attempts)))
+        Ok(Some((rows, attempts, rec.retry_of)))
     })
     .await
     .map_err(task_error)?
     .map_err(store_error)?
     .ok_or_else(|| not_found(&req.run_id))?;
 
-    let (mut rows, attempts) = rows;
+    let (mut rows, attempts, retry_of) = rows;
     let next_from_seq = (rows.len() > limit).then(|| rows[limit].0);
     rows.truncate(limit);
     let mut events = Vec::with_capacity(rows.len());
@@ -317,7 +328,9 @@ pub(crate) async fn run_history(
             kind: kind_name(ev.body.kind()).to_owned(),
             ts_ms: ms(ev.ts_nanos),
             summary: ev.body.summary(),
-            details_json: details(&ev.body).to_string().into_bytes(),
+            details_json: run_details(&ev.body, retry_of.as_ref())
+                .to_string()
+                .into_bytes(),
             attempt: attempts.get(&seq).copied().and_then(attempt_of),
         });
     }

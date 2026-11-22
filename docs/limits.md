@@ -24,6 +24,7 @@ constant. Column 2 is an integer default, and its unit is in column 3.
 | `MAX_REQUEST_ID_LEN` | 64 | bytes | no | API and apply | 400 `invalid_argument` | n/a |
 | `MAX_PAGE_LIMIT` | 1000 | items per page | no | API (list endpoints) | none: a larger page size is capped | n/a |
 | `MAX_RESULT_WAIT_MS` | 60000 | milliseconds | no | API (result long-poll) | none: a longer wait is capped | n/a |
+| `MAX_RERUN_PREFIX_BYTES` | 3670016 | bytes (encoded rerun `StartRun`) | no | API (rerun, after offloading copied payloads over 1 KiB to blobs); the prefix is also capped at `max_history_events` events | 413 `payload_too_large`, `details{reason: rerun_prefix_too_large, limit, max, actual}` | n/a (start only) |
 
 ## How a run past a limit behaves
 

@@ -3,7 +3,7 @@
 //!
 //! The doc table has one row per limit: column 1 is the name in backticks, column 2 the
 //! integer default. Status and context share one constant (`MAX_CONTEXT_BYTES`), so they
-//! are one row (13 rows in all).
+//! are one row (14 rows in all, with 11-10's rerun prefix bound).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod common;
@@ -87,13 +87,17 @@ fn constants() -> BTreeMap<&'static str, u64> {
             u64::from(ostro_api::domain::MAX_PAGE_LIMIT),
         ),
         ("MAX_RESULT_WAIT_MS", ostro_api::domain::MAX_RESULT_WAIT_MS),
+        (
+            "MAX_RERUN_PREFIX_BYTES",
+            n(ostro_server::control::p11_rerun::MAX_RERUN_PREFIX_BYTES),
+        ),
     ])
 }
 
 #[test]
 fn doc_table_equals_code_constants() {
     let doc = doc_rows();
-    assert_eq!(doc.len(), 13, "one row per limit: {doc:?}");
+    assert_eq!(doc.len(), 14, "one row per limit: {doc:?}");
     let consts = constants();
     let doc_map: BTreeMap<&str, u64> = doc.iter().map(|(k, v)| (k.as_str(), *v)).collect();
     assert_eq!(doc_map.len(), doc.len(), "duplicate doc rows: {doc:?}");
