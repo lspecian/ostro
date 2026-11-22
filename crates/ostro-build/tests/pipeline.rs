@@ -563,20 +563,37 @@ fn source_date_epoch_from_env_reaches_the_stage() {
     );
 }
 
+/// 10-15: Python and TypeScript route to their hermetic steps; offline with an empty
+/// cache, the first tool (uv / node) is reported as not cached.
 #[test]
-fn python_and_ts_steps_are_not_implemented_yet() {
-    let d = tempfile::tempdir().unwrap();
-    write(
-        d.path(),
-        "ostro.toml",
-        "[project]\nname = \"p\"\nlang = \"python\"\n",
-    );
-    write(d.path(), "app.py", "x = 1\n");
-    let home = tempfile::tempdir().unwrap();
-    let host = host_env(home.path());
-    let err = build_with(&opts(d.path()), &host, &pipeline::step_for).unwrap_err();
-    assert!(
-        matches!(err, BuildError::NotImplemented("10-15")),
-        "{err:?}"
-    );
+fn python_and_ts_steps_need_their_toolchains_offline() {
+    for (lang, src, entry, tool) in [
+        ("python", "app.py", "x = 1\n", "uv"),
+        ("ts", "src/index.ts", "export const x = 1;\n", "node"),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "ostro.toml",
+            &format!("[project]\nname = \"p\"\nlang = \"{lang}\"\n"),
+        );
+        write(d.path(), src, entry);
+        let home = tempfile::tempdir().unwrap();
+        let base = host_env(home.path());
+        let host = move |k: &str| {
+            if k == "OSTRO_OFFLINE" {
+                Some("1".to_owned())
+            } else {
+                base(k)
+            }
+        };
+        let err = build_with(&opts(d.path()), &host, &pipeline::step_for).unwrap_err();
+        let msg = err.to_string();
+        // Musl / old-glibc hosts stop before the toolchain with the --docker hint.
+        assert!(
+            (msg.starts_with(&format!("{tool} ")) && msg.contains("is offline and not cached"))
+                || msg.contains("--docker"),
+            "{lang}: {msg}"
+        );
+    }
 }

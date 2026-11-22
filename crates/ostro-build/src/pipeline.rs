@@ -216,26 +216,16 @@ pub trait LangStep {
     fn run(&self, ctx: &StepCtx) -> Result<(), BuildError>;
 }
 
-/// The step of `lang` in the resolved `mode`. Python, TypeScript and Docker mode return
-/// [`BuildError::NotImplemented`] until 10-15 plugs `lang::python`, `lang::ts` and
-/// `lang::docker` in here.
+/// The step of `lang` in the resolved `mode`: Docker mode runs the whole build in the
+/// `ostro-build` image ([`crate::lang::docker`], 10-15); otherwise Rust
+/// ([`crate::lang::rust`]), Python ([`crate::lang::python`]) or TypeScript
+/// ([`crate::lang::ts`]).
 pub fn step_for(lang: Lang, mode: ToolchainMode) -> Box<dyn LangStep> {
     match (lang, mode) {
-        (_, ToolchainMode::Docker) | (Lang::Python, _) | (Lang::Ts, _) => Box::new(NotYet),
+        (_, ToolchainMode::Docker) => Box::new(crate::lang::docker::DockerStep),
+        (Lang::Python, _) => Box::new(crate::lang::python::PythonStep),
+        (Lang::Ts, _) => Box::new(crate::lang::ts::TsStep),
         (Lang::Rust, m) => Box::new(crate::lang::rust::RustStep { mode: m }),
-    }
-}
-
-/// The placeholder step of the languages 10-15 implements.
-struct NotYet;
-
-impl LangStep for NotYet {
-    fn tool_ids(&self, _ctx: &StepCtx) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn run(&self, _ctx: &StepCtx) -> Result<(), BuildError> {
-        Err(BuildError::NotImplemented("10-15"))
     }
 }
 
@@ -404,7 +394,12 @@ pub fn build_with(
         },
     };
     let bundle_id = sdk_bundle::bundle_id();
-    let input = input_hash(&project, mode, &set.id, &bundle_id)?;
+    // The componentize-py override (D-P9-30) selects another builder: hash it with the set.
+    let set_key = match host("OSTRO_COMPONENTIZE_PY").filter(|v| !v.is_empty()) {
+        Some(bin) if lang == Lang::Python => format!("{}+OSTRO_COMPONENTIZE_PY={bin}", set.id),
+        _ => set.id.clone(),
+    };
+    let input = input_hash(&project, mode, &set_key, &bundle_id)?;
 
     let out = project::output_dir(&project);
     let name = project.manifest.project.name.clone();
@@ -484,7 +479,7 @@ pub fn build_with(
     let sha256 = sha256_hex(&bytes);
     // The step may have created a lockfile (cargo without Cargo.lock): record the hash of
     // the sources as they are after the build, so the next run is up to date.
-    let input = input_hash(&project, mode, &set.id, &bundle_id).inspect_err(|_| {
+    let input = input_hash(&project, mode, &set_key, &bundle_id).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp_wasm);
     })?;
     std::fs::rename(&tmp_wasm, &wasm_path).map_err(|e| {
