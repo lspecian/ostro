@@ -175,10 +175,7 @@ fn build_stub_answers_not_implemented() {
         err,
         ostro_build::BuildError::NotImplemented("10-12")
     ));
-    assert_eq!(
-        ostro_build::sdk_bundle::SDK_BUNDLE.len(),
-        1024,
-        "10-02 build.rs stub writes an empty tar"
-    );
+    // 10-08 replaced the empty-tar build.rs stub with the real bundle (tests/sdk_bundle.rs)
+    assert!(ostro_build::sdk_bundle::SDK_BUNDLE.len() > 1024);
     assert!(ostro_build::pipeline::IGNORE.contains(&"node_modules/"));
 }
