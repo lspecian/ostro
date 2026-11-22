@@ -242,6 +242,32 @@ async fn running_runs(api: &P7Api, queue: &str) -> u64 {
     v["runs"].as_array().map_or(0, |a| a.len() as u64)
 }
 
+/// One `(embedded running, running on workers)` sample of `queue`, or `None` when no
+/// consistent pair was read.
+///
+/// The two sources are separate requests, so a worker run that finishes (or starts)
+/// between them skews the difference: `running` 4 read before a worker run ended and
+/// `running_on_workers` 1 read after it gave a phantom "3 embedded" on CI. The pair is
+/// therefore read as worker / running / worker / running and kept only when both reads
+/// of each agree (nothing moved in between); up to 5 tries.
+async fn occupancy(api: &P7Api, queue: &str) -> Option<(u64, u64)> {
+    let on_workers = || async move {
+        api.demand(queue).await["running_on_workers"]
+            .as_u64()
+            .unwrap_or(0)
+    };
+    for _ in 0..5 {
+        let w1 = on_workers().await;
+        let r1 = running_runs(api, queue).await;
+        let w2 = on_workers().await;
+        let r2 = running_runs(api, queue).await;
+        if w1 == w2 && r1 == r2 {
+            return Some((r1.saturating_sub(w1), w1));
+        }
+    }
+    None
+}
+
 /// Poll until `f` holds (or panic with `what` after `limit`).
 async fn until<F, Fut>(limit: Duration, what: &str, mut f: F)
 where
@@ -554,12 +580,10 @@ async fn sustained_overload() {
             ids.push(id);
         }
         let (to_s, to_e, gauge) = transitions(&c.api, "burst").await;
-        if to_s == 1 {
-            let running = running_runs(&c.api, "burst").await;
-            let on_w = c.api.demand("burst").await["running_on_workers"]
-                .as_u64()
-                .unwrap_or(0);
-            occ.push((running.saturating_sub(on_w), on_w));
+        if to_s == 1
+            && let Some(sample) = occupancy(&c.api, "burst").await
+        {
+            occ.push(sample);
         }
         samples += 1;
         assert_eq!(to_e, 0, "left Spilling under sustained overload");
