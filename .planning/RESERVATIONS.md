@@ -16,6 +16,7 @@
      **Phase 8 gate 2026-11-20 (08-22):** every Phase 8 ordinal in code was re-verified against this file (`08-22-rescheck.py`: every Cmd tag, keyspace and InvalidCode in code is `exists` or a placeholder; RESERVATIONS CHECK: PASS). The ordinal rows were flipped by 08-01 (Cmd 27 `ScheduleFire`, keyspace 16 `schedule_state`, InvalidCode 22 `BadScheduleFire` / 23 `ScheduleOwnerMismatch`) and are confirmed; the §11 Phase 8 names that shipped now read `exists (P8, <plan>)`. Unused Phase 8 slots stay `reserved P8`: Cmd 28–33, StartRun 32–35, Intent 17–18, EventKind 88–95, RejectReason 18–19, InvalidCode 24, Outbox kind 10, MetaKind 21, meta ext tags 48–63, and the `cron::` failpoint prefix.
      **Phase 7 gate 2026-11-21 (07-01):** the code was re-verified against this file before any Phase 7 code (`07-01-rescheck.py`, output in 07-01-SUMMARY: every Cmd tag, intent, outbox kind, TerminalStatus, StartRun field, journal kind, keyspace, RejectReason, InvalidCode and MetaRecord in code is `exists` or a canonical placeholder; every Phase 7 block is empty in code apart from the `ReservedP7_18..21` InvalidCode placeholders; RESERVATIONS CHECK: PASS). Phase 5 F1/F2/F3/F4/F7/F8 landed, so Phase 7 needs 0 keyspaces and 0 meta variants. Phase 7 allocations: Cmd 20/21, RejectReason 15 and the §11 Phase 7 names (D-W18).
      **Phase 9 gate 2026-11-21 (09-01):** the code was re-verified against this file before any Phase 9 code (`09-01-rescheck.py`, output in 09-01-SUMMARY: every Cmd tag, intent, outbox kind, TerminalStatus, StartRun field, journal kind, keyspace, RejectReason, InvalidCode and MetaRecord in code is `exists` or a canonical placeholder; RESERVATIONS CHECK: PASS). PF-F1 (`CompleteRun.parent_event` 5, outbox `ChildCompleted.event` 6) and PF-F2 (`RunRecord.continued_to`, CancelRun forwarding) landed in Phase 5, so Phase 9 allocates **no ordinal** (D-P9-6): every P9 row (Cmd 34–40, StartRun 36–39, Intent 19–22, EventKind 98–105, TerminalStatus 10–11, keyspace 19 `p9_a`, RejectReason 20–22, InvalidCode 25–28, Outbox 11–12, MetaRecord 22–23, meta ext tags 64–79) is empty in code and stays reserved, unused (fallback only). Phase 9 names: §11 (D-P9-6 rows plus the D-P9-20 rows added by 09-01).
+     **Phase 12 gate 2026-11-22 (12-01):** the code was re-verified against this file before any Phase 12 code (`12-01-rescheck.py`, output in 12-01-SUMMARY: every Cmd tag, StartRun field, intent, outbox kind, TerminalStatus, journal kind, keyspace, RejectReason, InvalidCode, MetaRecord/MetaKind, MetaCommand and ext tag in code is `exists` or a canonical placeholder; MetaCommand is exactly 0–3; Cmd 41–42, MetaRecord 26 and ext tags 80–95 are empty; RESERVATIONS CHECK: PASS). F7 landed in 05-07, so Cmd 41–42 and MetaRecord 26 stay **unused**. Phase 12 allocations: MetaCommand 4 `ElectLeader`, 5 `AlterIsr`, 6 `ResignLeader` (7 spare), ext tag 80 `ElectionInfo` (81–95 spare) and the §11 Phase 12 names (D-P12-11/12).
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -48,7 +49,7 @@ Sources:
 | 27 | ScheduleFire | exists (P8, 08-01) |
 | 28–33 | spare | reserved P8 |
 | 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
-| 41–42 | — (contingency, expected use 0) | reserved P12 |
+| 41–42 | — (contingency, expected use 0) | reserved P12, **unused** (F7 landed in 05-07; verified by 12-01) |
 | 43 | RepinRun (`ostro migrate-runs`) | reserved P13 |
 | 44 | spare | reserved P13 |
 | 45 | DlqUpdate (research proposed 43, which is taken by P13 RepinRun) | reserved P11 |
@@ -265,7 +266,7 @@ Rules (D20):
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
 | 22–23 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) |
 | 24–25 | — (fallback only if Phase 14 F2/F3/F4 had not landed pre-freeze) | reserved P14 |
-| 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12 |
+| 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12, **unused** (F7 landed in 05-07: `PartitionAssignment.{replicas, isr_version, min_insync}`, `MemberRecord.{cluster_addr, repl_addr}`; verified by 12-01). No Phase 12 META_FORMAT bump. |
 | 27+ | — | unallocated |
 
 META_FORMAT: bumped once pre-freeze by 05-07. **Frozen baseline: `META_FORMAT = 2`** (verified by 05-20 at the freeze, 2026-11-19; `crates/ostro-meta/src/command.rs`, golden `crates/ostro-meta/tests/golden/meta_v2.txt` pinned in `golden_frozen.rs`; format 1 = pre-Phase-5 dev format, rejected). Each post-freeze bump is recorded here with its phase.
@@ -280,7 +281,10 @@ Appending a `MetaCommand` variant changes no existing encoding and needs **no ME
 | 1 | Put | exists (P4) |
 | 2 | Delete | exists (P4) |
 | 3 | SetPartitionLeader | exists (P4) |
-| 4–7 | ElectLeader, AlterIsr, ResignLeader, spare | reserved P12 |
+| 4 | ElectLeader | planned P12 (12-02 shape, 12-05 apply) |
+| 5 | AlterIsr | planned P12 (12-02 shape, 12-05 apply) |
+| 6 | ResignLeader | planned P12 (12-02 shape, 12-05 apply) |
+| 7 | spare | reserved P12 |
 | 8 | AlterReplicas | reserved P13 |
 | 9–11 | spare | reserved P13 |
 | 12+ | — | unallocated |
@@ -302,7 +306,8 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 32–47 | reserved P7 | — |
 | 48–63 | reserved P8 | — |
 | 64–79 | reserved P9 | — |
-| 80–95 | reserved P12 (Member, PartitionAssignment, cluster) | — |
+| 80 | `PartitionAssignment` ElectionInfo `{reason u8: 0 Bootstrap 1 Startup 2 Failover 3 Resign 4 Offline, elected_at_ms u64, prev_leader u64}` | planned P12 (12-02) |
+| 81–95 | spare (Member, PartitionAssignment, cluster) | reserved P12 |
 | 96 | `Member` NodeVersion `{ostro_version, level_min, level_max, wasmtime, event_codec_ver, wit_lines, reported_at_ms}` | reserved P13 |
 | 97 | `Member` MemberState `{state: Joining/Active/Draining/Removed, changed_at_ms}` (tombstone; node ids never reused) | reserved P13 |
 | 98 | `ClusterInfo` ClusterVersion `{finalized, hold: Option<u32>, finalized_at_ms}` (the 1.0 binary must already read it; absent = baseline level) | reserved P13 |
@@ -387,6 +392,16 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Metric prefix | `ostro_repl_` | P12 |
 | node.toml keys | `node_id`, `cluster_id` (0 = no-leader sentinel; mismatch fatal), next to P8's `incarnation`/`restored_from` | P12 |
 | Data-dir temp prefix | `snapshots/pNNNN/.incoming-*` | P12 |
+| Crate | `ostro-cluster` (replication, ISR, election, metadata peer transport) | P12 (12-01) |
+| Proto file + services | `ostro/cluster/v1/cluster.proto`: `Replication {Fetch, FetchSnapshot, FetchBlob, PushBlob}`, `MetaPeer {Raft, Propose, ReportSuspect}` | planned P12 (12-02) |
+| Config keys | `[replication]`: `session_timeout`, `replica_lag_max`, `meta_tick_interval`, `meta_election_tick`, `meta_heartbeat_tick`, `fetch_max_wait`, `fetch_read_timeout`, `fetch_max_bytes`, `rf`, `min_insync` | planned P12 (12-02) |
+| Config keys | inside P7's `[cluster]`: `cluster_id`, `replication_listen`, `[[cluster.peers]] {id, addr, repl_addr}`, `[cluster.tls] ca_cert_file, ca_key_file` | planned P12 (12-02) |
+| REST path | `GET /v1/admin/replication` (server-local route) | planned P12 |
+| Failpoints | `repl::mutant::{isr_from_assignment, hw_leader_leo, count_nondurable_leo, skip_epoch_check, no_truncate, unclean_election, ignore_min_insync, shrink_before_commit, upload_above_hw, rf1_bypass}` | planned P12 |
+| Failpoints | `install::{after_log_reset, before_rename, after_rename}`, `fetch::{before_append, before_durable}`, `isr::before_alter`, `elect::before_propose` | planned P12 |
+| Object key (bottomless layout) | `p/<pppp>/head` | planned P12 |
+| Metrics | `ostro_repl_*`, incl. `ostro_repl_upload_fenced{partition}` and `ostro_repl_self_demotions_total` | planned P12 |
+| Env vars | `OSTRO_REPL_RED_RUN`, `OSTRO_REPL_REQUIRE_ALL`, `OSTRO_FAILOVER_ITERS`, `OSTRO_FAILOVER_ASSERT`, `OSTRO_FAILOVER_SWEEP`, `OSTRO_CAMPAIGN_FAULTS` (shared with the P5 campaign knob), `OSTRO_REPL_BENCH_SECS`, `OSTRO_PROC_ITERS`, `OSTRO_FAILPOINT_BIN`, `OSTRO_PROC_BUILD` | planned P12 |
 | Crate / dirs | `ostro-ui` (`crates/ostro-ui/{templates,assets}`), `<data>/bulk/` | P11 |
 | REST | `/ui/*`, `GET /v1/dlq`, `POST /v1/dlq/{run}/requeue\|dismiss`, `POST /v1/runs/{id}/rerun`, `GET\|POST /v1/bulk`, `GET /v1/bulk/{id}`, `POST /v1/bulk/{id}/cancel`, list endpoints `GET /v1/modules`, `GET /v1/queues`, `GET /v1/partitions`, `GET /v1/limits` | P11 |
 | gRPC services | `ostro.api.v1.RunOps`, `ostro.api.v1.Inventory` | P11 |
