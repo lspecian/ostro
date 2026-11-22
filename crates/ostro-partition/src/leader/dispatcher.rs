@@ -105,6 +105,16 @@
 //! Delayed `ready_at` values are wall-clock ms from [`LeaderCtx::clock`]; the sleep is
 //! computed from them once per loop turn. A [`ManualClock`](crate::clock::ManualClock) that
 //! is advanced does not wake the loop by itself (the timer service polls; this does not).
+//! A clock that offers [`Clock::subscribe_changes`](crate::clock::Clock::subscribe_changes)
+//! (the Phase 10 dev clock, plan 10-10) wakes the loop on every jump, so delayed entries,
+//! step backoffs and flow-control `until`s are re-evaluated against the new time.
+//!
+//! **Dev skip barrier (10-10, W1).** With a clock that has a
+//! [`Clock::skip_barrier`](crate::clock::Clock::skip_barrier), every grant task holds a
+//! read guard while it appends `AttemptGranted` and counts itself in
+//! [`DispatcherStats::granting`] (from inside the guard until the task ends); a skip takes
+//! the write guard, so it either happens before the grant is visible or sees
+//! `granting > 0`. Production clocks have no barrier.
 //!
 //! # Dispatch (pipelined grant, plan 05-16)
 //!
@@ -440,6 +450,10 @@ pub struct DispatcherStats {
     pub leases: AtomicU64,
     /// Pipelined grants whose ack showed apply rejected them (lease dropped, job revoked).
     pub grants_rejected: AtomicU64,
+    /// Gauge (plan 10-10): grant tasks in flight (counted from inside the dev skip
+    /// barrier's read guard until the task ends; see the module docs). The dev clock's
+    /// idle snapshot (10-13) reads it.
+    pub granting: AtomicU64,
     /// Test hook (plan 05-16): when it returns `true` for a run, the next pipelined grant is
     /// submitted with a stale epoch so apply rejects it (`StaleEpoch`).
     #[doc(hidden)]
@@ -1291,10 +1305,23 @@ impl Dispatcher {
         let after = self.unacked.get(&run).copied();
         let floor = self.rejected.get(&run).copied();
         let fault = self.stats.grant_fault.fires(&run);
+        let barrier = self.ctx.clock.skip_barrier();
+        let stats = Arc::clone(&self.stats);
         let id = self
             .joins
             .spawn(async move {
+                // Dev skip barrier (10-10, W1): hold the read guard while the grant is
+                // counted and appended. No nested acquisition: nothing under this guard
+                // may await the barrier again or anything that takes it (a dev clock
+                // skip). tokio's RwLock is write-preferring, so a queued skip blocks new
+                // readers and a nested read would deadlock against it.
+                let skip_guard = match barrier {
+                    Some(b) => Some(b.read_owned().await),
+                    None => None,
+                };
+                let _granting = Granting::new(stats);
                 let res = pipelined_grant(&h, run, after, floor, fault).await;
+                drop(skip_guard);
                 Done::Granted {
                     run,
                     generation,
@@ -1623,6 +1650,8 @@ impl Dispatcher {
         let mut revoked = l.revoked.subscribe();
         let h = self.ctx.handle.clone();
         let after = self.unacked.get(&run).copied();
+        let barrier = self.ctx.clock.skip_barrier();
+        let stats = Arc::clone(&self.stats);
         let id = self
             .joins
             .spawn(async move {
@@ -1630,7 +1659,16 @@ impl Dispatcher {
                     if let Some(off) = after {
                         h.machine().wait_applied(off).await?;
                     }
-                    let token = grant_after_failure(&h, run).await?;
+                    // Dev skip barrier (10-10, W1), around the grant only (never across
+                    // the backoff); no nested acquisition (see `dispatch`).
+                    let token = {
+                        let _skip_guard = match barrier {
+                            Some(b) => Some(b.read_owned().await),
+                            None => None,
+                        };
+                        let _granting = Granting::new(stats);
+                        grant_after_failure(&h, run).await?
+                    };
                     tokio::select! {
                         () = tokio::time::sleep(Duration::from_millis(after_ms)) => {}
                         _ = revoked.wait_for(|v| *v) => {}
@@ -1696,9 +1734,10 @@ impl Dispatcher {
         .flatten()
         .min();
         // Clock ms -> a tokio deadline (the sleep waits for a deadline computed from the
-        // injected clock).
+        // injected clock). A clock that jumps (the dev clock, 10-10) wakes the loop through
+        // `subscribe_changes`, and the deadline is recomputed from the new time.
         let ready = at_clock
-            .map(|at| Instant::now() + Duration::from_millis(at.saturating_sub(self.now_ms()))); // clock-exempt: logic-time follow-up (10-10)
+            .map(|at| Instant::now() + Duration::from_millis(at.saturating_sub(self.now_ms()))); // clock-exempt: real-time sleep bridge; clock jumps wake the loop (10-10)
         let lease = self
             .st
             .checks
@@ -1764,6 +1803,8 @@ impl Dispatcher {
             lease_ttl_ms = self.st.ttl_ms(),
             "dispatcher started"
         );
+        // Dev time skipping (10-10, Pitfall 8): `None` for production clocks.
+        let mut clock_rx = self.ctx.clock.subscribe_changes();
         loop {
             if *shutdown.borrow() {
                 break;
@@ -1841,6 +1882,15 @@ impl Dispatcher {
                     if let Ok(p) = p {
                         self.held_slot = Some(p);
                         self.st.fair.unpark_queues();
+                    }
+                    Flow::Continue
+                },
+                r = clock_changed(&mut clock_rx) => {
+                    // The clock jumped: the top of the loop promotes due delayed entries
+                    // (step backoffs, delayed starts), unparks keys and recomputes the
+                    // deadline from the new time.
+                    if r.is_err() {
+                        clock_rx = None;
                     }
                     Flow::Continue
                 },
@@ -2049,6 +2099,34 @@ async fn grant_after_failure(
         ApplyOutcome::Duplicate { .. } => Err(PartitionError::Rejected(RejectReason::Fenced {
             current: None,
         })),
+    }
+}
+
+/// Counts one grant task in [`DispatcherStats::granting`] until dropped (also on panic or
+/// cancellation).
+struct Granting(Arc<DispatcherStats>);
+
+impl Granting {
+    fn new(stats: Arc<DispatcherStats>) -> Self {
+        stats.granting.fetch_add(1, Ordering::SeqCst);
+        Self(stats)
+    }
+}
+
+impl Drop for Granting {
+    fn drop(&mut self) {
+        self.0.granting.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The next clock jump of a clock with [`Clock::subscribe_changes`](crate::clock::Clock::subscribe_changes);
+/// pending forever without one.
+async fn clock_changed(
+    rx: &mut Option<watch::Receiver<u64>>,
+) -> Result<(), watch::error::RecvError> {
+    match rx {
+        Some(rx) => rx.changed().await,
+        None => std::future::pending().await,
     }
 }
 

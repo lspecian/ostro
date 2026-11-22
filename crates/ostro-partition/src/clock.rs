@@ -10,6 +10,20 @@ use tokio::sync::watch;
 /// Milliseconds since the Unix epoch.
 pub trait Clock: Send + Sync + 'static {
     fn now_ms(&self) -> u64;
+
+    /// Dev time skipping (Phase 10 D-P10-6): a receiver notified whenever the clock jumps
+    /// forward, so leader services that turned a clock deadline into a real-time sleep
+    /// re-evaluate it. Production clocks return `None` (the default).
+    fn subscribe_changes(&self) -> Option<watch::Receiver<u64>> {
+        None
+    }
+
+    /// Dev time skipping (Phase 10 D-P10-6, W1): the skip barrier. The dispatcher holds a
+    /// **read** guard while it grants an activation; a skip takes the **write** guard, so
+    /// no grant interleaves with a skip. Production clocks return `None` (the default).
+    fn skip_barrier(&self) -> Option<Arc<tokio::sync::RwLock<()>>> {
+        None
+    }
 }
 
 /// The system wall clock.
@@ -73,5 +87,14 @@ mod tests {
         c.set(3);
         assert_eq!(*rx.borrow(), 3);
         assert!(SystemClock.now_ms() > 1_600_000_000_000);
+    }
+
+    #[test]
+    fn production_and_manual_clocks_have_no_skip_hooks() {
+        assert!(SystemClock.subscribe_changes().is_none());
+        assert!(SystemClock.skip_barrier().is_none());
+        let c = ManualClock::new(1);
+        assert!(c.subscribe_changes().is_none());
+        assert!(c.skip_barrier().is_none());
     }
 }
