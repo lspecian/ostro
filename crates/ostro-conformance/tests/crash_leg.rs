@@ -11,6 +11,12 @@
 //!   ones (D-P9-7), every run journals one `run_started` and one terminal event, the
 //!   server lists exactly one Python and one Rust run per root so far, and every listed
 //!   run is terminal.
+//! - `crash_cancel_propagates` (C-CRASH-02): per iteration, start the chain on
+//!   `rs_conf_leaf_sleep`, wait until the leaf journaled `timer_started`, then kill -9 just
+//!   before `POST /v1/runs/{root}/cancel`, kill -9 a random 0..500 ms after the cancel ack,
+//!   or no kill. Within 30 s of the last restart root, Python mid and Rust leaf are all
+//!   `cancelled`, the leaf's shielded `cleanup` step is journaled exactly once, and no run
+//!   is left non-terminal.
 //!
 //! Failpoint crash points (`FAILPOINTS` on a restart before the root starts): the `child::`
 //! sites return `Unavailable` on `return`, which the engine maps to an eviction without
@@ -63,11 +69,14 @@ const RING: usize = 400;
 const SPAWN_LIMIT: Duration = Duration::from_secs(90);
 /// Limit for the root to finish after the last restart.
 const COMPLETE_LIMIT: Duration = Duration::from_secs(60);
+const CANCEL_LIMIT: Duration = Duration::from_secs(30);
 /// Limit for an armed failpoint to be hit.
 const FAULT_LIMIT: Duration = Duration::from_secs(30);
-/// Busy window for [`Rng::kill_delay`]: the chain completes well under 100 ms after its
-/// start ack (idle machine).
+const POLL: Duration = Duration::from_millis(25);
+/// Busy windows for [`Rng::kill_delay`]: the chain completes well under 100 ms after its
+/// start ack, the cancel cascade in about 30-40 ms after the cancel ack (idle machine).
 const CHAIN_BUSY_MS: u64 = 80;
+const CASCADE_BUSY_MS: u64 = 40;
 /// Role per level: TS root, Python mid, Rust leaf (`wf:` / `wf2:` in the spec input).
 const ROLES: [Lang; 3] = [Lang::Ts, Lang::Py, Lang::Rust];
 
@@ -98,7 +107,7 @@ impl Rng {
     }
 
     /// A kill delay: uniform in `[0, max]`, but half of the draws fall in `[0, busy]`, the
-    /// window in which the chain is actually in flight on an idle
+    /// window in which the chain (or the cancel cascade) is actually in flight on an idle
     /// machine; with `[0, max]` alone nearly every kill lands after the runs finished.
     fn kill_delay(&mut self, busy: u64, max: u64) -> u64 {
         if self.next().is_multiple_of(2) {
@@ -469,6 +478,16 @@ impl Api {
             )
             .await?;
         parse_id(&v["run_id"])
+    }
+
+    async fn cancel(&self, run: &RunId) -> Result<(), String> {
+        self.post(
+            &format!("/v1/runs/{run}/cancel"),
+            &json!({ "reason": "crash-leg" }),
+            "cancel",
+        )
+        .await
+        .map(drop)
     }
 
     async fn run(&self, run: &RunId) -> Result<Value, String> {
@@ -1027,4 +1046,211 @@ async fn check_all_terminal(api: &Api) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------
+// C-CRASH-02
+// ---------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+enum CancelKill {
+    Before,
+    After,
+    None,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns the failpoint ostro binary and kills it; slow (09-18 crash leg)"]
+async fn crash_cancel_propagates() {
+    let started = Instant::now();
+    let iters = iterations();
+    let seed = fresh_seed();
+    eprintln!("C-CRASH-02: {iters} iterations, seed {seed:#018x}");
+    let spec = load("C-CRASH-02");
+    assert_eq!(spec.expect.status, "cancelled");
+    let mut leg = Leg::new("crash-cancel", seed).await;
+    let mut rng = Rng(seed);
+    let mut counts = [0u64; 3];
+    let mut mid_cascade_kills = 0u64;
+    let mut to_done = Vec::new();
+    for iter in 0..iters {
+        let kill = match iter % 3 {
+            0 => CancelKill::Before,
+            1 => CancelKill::After,
+            _ => CancelKill::None,
+        };
+        counts[iter % 3] += 1;
+        let api = leg.api();
+        let root = match api
+            .start(
+                &langs::workflow_name(ROLES[0], &spec.workflow),
+                &chain_input(&spec, iter),
+                &format!("crash-cancel-{seed:x}-{iter}"),
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => leg.fail(iter, "start root", e),
+        };
+        let leaf = match wait_sleeping_leaf(&leg, &root).await {
+            Ok(l) => l,
+            Err(e) => leg.fail(iter, "wait for the sleeping leaf", e),
+        };
+        let mut detail = format!("{kill:?}");
+        match kill {
+            CancelKill::Before => {
+                if let Err(e) = leg.restart(None).await {
+                    leg.fail(iter, "restart before cancel", e);
+                }
+                if let Err(e) = leg.api().cancel(&root).await {
+                    leg.fail(iter, "cancel", e);
+                }
+            }
+            CancelKill::After => {
+                if let Err(e) = api.cancel(&root).await {
+                    leg.fail(iter, "cancel", e);
+                }
+                let d = rng.kill_delay(CASCADE_BUSY_MS, 500);
+                tokio::time::sleep(Duration::from_millis(d)).await;
+                if leg
+                    .api()
+                    .run_status_now(&leaf)
+                    .await
+                    .as_deref()
+                    .is_some_and(|st| !is_terminal(st))
+                {
+                    mid_cascade_kills += 1;
+                }
+                if let Err(e) = leg.restart(None).await {
+                    leg.fail(iter, "restart after cancel", e);
+                }
+                detail = format!("After +{d} ms");
+            }
+            CancelKill::None => {
+                if let Err(e) = api.cancel(&root).await {
+                    leg.fail(iter, "cancel", e);
+                }
+            }
+        }
+        let t = Instant::now();
+        if let Err(e) = check_cancelled(&leg, &root, &leaf, iter + 1).await {
+            leg.fail(iter, &detail, e);
+        }
+        let took = t.elapsed();
+        to_done.push(took);
+        eprintln!("C-CRASH-02 iter {iter}: {detail}; ok {took:.2?} after the last restart/cancel");
+    }
+    eprintln!(
+        "C-CRASH-02 report: {iters} iterations (seed {seed:#018x}), kill before cancel {} / \
+         after cancel {} ({mid_cascade_kills} with the leaf not yet cancelled) / no kill {}, {} kill \
+         -9, {} restarts, median time to all-cancelled \
+         {:.2?}, total {:.1?}",
+        counts[0],
+        counts[1],
+        counts[2],
+        leg.kills,
+        leg.restarts,
+        median(&mut to_done),
+        started.elapsed()
+    );
+    leg.finish().await;
+}
+
+/// Resolves root -> Python mid -> Rust leaf and waits until the leaf journaled
+/// `timer_started`.
+async fn wait_sleeping_leaf(leg: &Leg, root: &RunId) -> Result<RunId, String> {
+    let api = leg.api();
+    let deadline = Instant::now() + COMPLETE_LIMIT;
+    let mut chain = vec![*root];
+    loop {
+        let last = *chain.last().expect("non-empty");
+        let h = api.history(&last).await.unwrap_or_default();
+        if chain.len() < 3 {
+            if kind_count(&h, "child_started") == 1 {
+                chain.push(only_child(&last, &h, leg.partitions)?);
+                continue;
+            }
+        } else if kind_count(&h, "timer_started") >= 1 {
+            return Ok(last);
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "chain {chain:?} did not reach a sleeping leaf within {COMPLETE_LIMIT:?}; \
+                 last history {:?}",
+                kinds(&h)
+            ));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+async fn check_cancelled(
+    leg: &Leg,
+    root: &RunId,
+    leaf: &RunId,
+    roots: usize,
+) -> Result<(), String> {
+    let api = leg.api();
+    let out = api.terminal(root, CANCEL_LIMIT).await?;
+    if out["status"] != "cancelled" {
+        return Err(format!("root {root}: {out} (expected cancelled)"));
+    }
+    let h_root = api.history(root).await?;
+    let mid = only_child(root, &h_root, leg.partitions)?;
+    // The root ends as soon as its own cancellation resolves; the descendants follow
+    // through the cascade, so their histories are read once they are terminal.
+    for (who, id) in [("python", mid), ("rust leaf", *leaf)] {
+        let v = api.terminal(&id, CANCEL_LIMIT).await?;
+        if v["status"] != "cancelled" {
+            return Err(format!("{who} {id}: {v} (expected cancelled)"));
+        }
+    }
+    let h_mid = api.history(&mid).await?;
+    let derived_leaf = only_child(&mid, &h_mid, leg.partitions)?;
+    if derived_leaf != *leaf {
+        return Err(format!("leaf {derived_leaf} != {leaf} seen sleeping"));
+    }
+    let h_leaf = api.history(leaf).await?;
+    let cleanups = h_leaf
+        .iter()
+        .filter(|e| e["kind"] == "step_completed" && step_name(e) == Some("cleanup"))
+        .count();
+    if cleanups != 1 {
+        return Err(format!(
+            "leaf {leaf}: cleanup step journaled {cleanups} times (expected 1): {:?}",
+            kinds(&h_leaf)
+        ));
+    }
+    for (who, h) in [
+        ("root", &h_root),
+        ("python", &h_mid),
+        ("rust leaf", &h_leaf),
+    ] {
+        let (starts, terminals) = (kind_count(h, "run_started"), terminal_count(h));
+        let cancelled = h
+            .iter()
+            .filter(|e| e["kind"] == "run_failed" && e["details"]["failure"]["type"] == "cancelled")
+            .count();
+        if starts != 1 || terminals != 1 || cancelled != 1 {
+            return Err(format!(
+                "{who}: {starts} run_started / {terminals} terminal / {cancelled} cancelled \
+                 run_failed (expected 1 / 1 / 1): {:?}",
+                kinds(h)
+            ));
+        }
+    }
+    for (wf, id) in [("py_conf_parent_chain", mid), ("rs_conf_leaf_sleep", *leaf)] {
+        let runs = api.list(wf).await?;
+        if runs.len() != roots || !runs.iter().any(|(r, _)| *r == id) {
+            return Err(format!(
+                "{wf}: {} runs listed for {roots} roots",
+                runs.len()
+            ));
+        }
+    }
+    check_all_terminal(&api).await
+}
+
+fn step_name(e: &Value) -> Option<&str> {
+    e["details"]["name"].as_str()
 }

@@ -1,0 +1,40 @@
+{
+  "id": "C-CRASH-02",
+  "title": "cancelling the TS root under kill -9 ends root, Python mid and Rust leaf Cancelled with the leaf cleanup run",
+  "leg": "crash",
+  "workflow": "conf_parent_chain",
+  "input": {
+    "next": [
+      "wf:conf_parent_chain",
+      "wf2:conf_leaf_sleep"
+    ]
+  },
+  "script": [
+    {"input": "api", "op": "wait_fact", "target": "child.child", "fact": "timer#1"},
+    {"input": "kill", "at": "before_cancel"},
+    {"input": "api", "op": "cancel", "target": "root", "reason": "crash-leg"},
+    {"input": "kill", "at": "after_cancel"}
+  ],
+  "expect": {
+    "status": "cancelled",
+    "roles": ["ts", "py", "rust"],
+    "iterations": {
+      "env": "OSTRO_CRASH_CHAIN_ITERS",
+      "default": 20,
+      "gate": 100
+    },
+    "modes": {
+      "rotation": "iteration % 3: kill -9 just before the cancel, kill -9 0..500 ms after the cancel ack (half of the draws 0..40 ms, the cascade window), no kill"
+    },
+    "descendants": {
+      "child": {"status": "cancelled"},
+      "child.child": {"status": "cancelled", "steps": {"cleanup": 1}}
+    },
+    "checks": [
+      "root, Python mid and Rust leaf cancelled within 30 s of the last restart or cancel",
+      "the leaf's shielded cleanup step is journaled exactly once",
+      "every run journals exactly one run_started and one terminal event (run_failed, type cancelled)",
+      "the server lists exactly one Python and one Rust run per root; no run is left non-terminal"
+    ]
+  }
+}
