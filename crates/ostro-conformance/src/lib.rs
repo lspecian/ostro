@@ -9,6 +9,8 @@
 //! - [`canon`], [`projection`], [`compare`]: canonical JSON, the normalised journal
 //!   projection and the comparators of D-P9-21.
 //! - [`engine_leg`]: the engine-leg runner/scheduler (ostro-engine testkit, D-P9-22).
+//! - [`server_leg`]: the server-leg harness (in-process `ostro-server`, REST API, Phase 6
+//!   `MockProvider`; 09-13).
 //!
 //! The Python/TypeScript legs live behind the `polyglot` feature (D-P9-12); everything
 //! else runs without guest toolchains.
@@ -20,6 +22,7 @@ pub mod inspect;
 pub mod langs;
 pub mod polyglot;
 pub mod projection;
+pub mod server_leg;
 pub mod spec;
 
 pub use inspect::{ComponentInfo, inspect};
