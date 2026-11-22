@@ -155,6 +155,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
+      - name: Drop the restored toolchain test cache
+        # target/ostro-toolchains-test (the shared cache of the ostro-build toolchain tests:
+        # uv + managed CPython + the componentize-py venv, wasi-sdk, zig, node) lives under
+        # target/, so rust-cache saves and restores it, but not intact: a restore once
+        # brought back a managed CPython without its _sysconfigdata_ file and no venv .ok,
+        # and every Python build test failed in `uv venv`. Always start it fresh.
+        run: rm -rf target/ostro-toolchains-test
 
       # --- musl legs: cargo-zigbuild + zig, static binary, mimalloc ---
       - if: matrix.zig
@@ -540,6 +547,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: polyglot
+      - name: Drop the restored toolchain test cache
+        # target/ostro-toolchains-test (the shared cache of the ostro-build toolchain tests:
+        # uv + managed CPython + the componentize-py venv, wasi-sdk, zig, node) lives under
+        # target/, so rust-cache saves and restores it, but not intact: a restore once
+        # brought back a managed CPython without its _sysconfigdata_ file and no venv .ok,
+        # and every Python build test failed in `uv venv`. Always start it fresh.
+        run: rm -rf target/ostro-toolchains-test
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.13.0"
