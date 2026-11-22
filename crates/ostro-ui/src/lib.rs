@@ -5,8 +5,26 @@
 //! as REST, so Phase 14's ControlPlane-level authorization and audit cover both. The
 //! [`auth::UiAuth`] seam is where Phase 14 plugs in; Phase 11 ships [`auth::AllowAll`].
 //!
-//! Plan 11-03 is the skeleton: [`router`] returns an empty router until 11-15 registers the
-//! pages (route registration is serialised 11-15 -> 11-16 -> 11-17).
+//! Plan 11-15 registers the run pages, the assets and the security layer (route
+//! registration is serialised 11-15 -> 11-16 -> 11-17; later plans append their routes
+//! in their own functions and to [`ROUTES`]).
+//!
+//! # Routes (11-15)
+//!
+//! | Method | Path | Answer |
+//! |---|---|---|
+//! | GET | `/ui` | 308 -> `/ui/` |
+//! | GET | `/ui/`, `/ui/runs` | run list (filters, tags, order, pagination) |
+//! | GET | `/ui/runs/{run_id}` | run detail (`?tab=timeline` default, `?tab=logs`) |
+//! | GET | `/ui/runs/{run_id}/status` | status card fragment (polls every 2 s while non-terminal) |
+//! | GET | `/ui/runs/{run_id}/timeline` | timeline fragment |
+//! | GET | `/ui/runs/{run_id}/logs` | logs fragment |
+//! | GET | `/ui/dlq` | DLQ tab |
+//! | GET | `/ui/assets/{*path}` | embedded assets (ETag, 304) |
+//! | POST | `/ui/_probe` | guard probe, only with `UiConfig::test_probe` |
+//!
+//! Every route sits behind [`security::guard`] (Host / `:authority` allowlist, security
+//! headers, D-P11-15).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,12 +38,23 @@ mod pages;
 mod security;
 mod timeline;
 
-// Declared by 11-03 for 11-15 (sha2: asset ETags; getrandom: CSRF tokens); anchored so
-// cargo's unused-dependency lint stays quiet until `assets`/`security` consume them.
-mod dep_anchors {
-    use getrandom as _;
-    use sha2 as _;
-}
+use axum::routing::{get, post};
+
+/// Every `/ui` route pattern 11-15 registers (GET unless noted), for the hardening
+/// tests; 11-16/11-17 append theirs.
+#[doc(hidden)]
+pub const ROUTES: &[&str] = &[
+    "/ui",
+    "/ui/",
+    "/ui/runs",
+    "/ui/runs/{run_id}",
+    "/ui/runs/{run_id}/status",
+    "/ui/runs/{run_id}/timeline",
+    "/ui/runs/{run_id}/logs",
+    "/ui/dlq",
+    "/ui/assets/{*path}",
+    "POST /ui/_probe",
+];
 
 /// `[ui]` configuration as the router sees it.
 #[derive(Debug, Clone, Default)]
@@ -56,13 +85,41 @@ pub struct UiDeps {
     pub auth: Arc<dyn auth::UiAuth>,
 }
 
-/// The `/ui` router. Empty until 11-15; empty whenever `deps.cfg.enabled` is false.
+/// The `/ui` router; empty whenever `deps.cfg.enabled` is false.
 pub fn router(deps: UiDeps) -> axum::Router {
     if !deps.cfg.enabled {
         return axum::Router::new();
     }
-    // 11-15 registers the pages here, 11-16 the actions, 11-17 the inventory.
+    let probe = deps.cfg.test_probe;
+    let state = pages::UiState::new(deps);
+    let mut r = page_routes().merge(asset_routes());
+    if probe {
+        r = r.route("/ui/_probe", post(security::probe));
+    }
+    // 11-16 merges actions::routes() here, 11-17 inventory::routes().
+    r.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        security::guard,
+    ))
+    .with_state(state)
+}
+
+/// The run pages and fragments (11-15).
+fn page_routes() -> axum::Router<pages::UiState> {
     axum::Router::new()
+        .route("/ui", get(pages::ui_root))
+        .route("/ui/", get(pages::runs))
+        .route("/ui/runs", get(pages::runs))
+        .route("/ui/runs/{run_id}", get(pages::run_detail))
+        .route("/ui/runs/{run_id}/status", get(pages::run_status))
+        .route("/ui/runs/{run_id}/timeline", get(pages::run_timeline))
+        .route("/ui/runs/{run_id}/logs", get(pages::run_logs))
+        .route("/ui/dlq", get(pages::dlq))
+}
+
+/// The embedded assets (11-15).
+fn asset_routes() -> axum::Router<pages::UiState> {
+    axum::Router::new().route("/ui/assets/{*path}", get(assets::serve))
 }
 
 #[cfg(test)]
@@ -107,12 +164,21 @@ mod tests {
         p.require("operate").expect("operate");
     }
 
-    #[test]
-    fn template_engine_renders_and_escapes() {
-        let html = pages::render_layout_probe("<b>&</b>").expect("render");
+    #[tokio::test]
+    async fn template_engine_renders_and_escapes() {
+        let req = http::Request::builder()
+            .uri("/ui/runs/%3Cb%3E%26")
+            .header("host", "localhost")
+            .body(axum::body::Body::empty())
+            .expect("request");
+        let resp = router(deps(true)).oneshot(req).await.expect("infallible");
+        assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let html = String::from_utf8(body.to_vec()).expect("utf8");
         assert!(
-            html.contains("&#60;b&#62;&#38;&#60;/b&#62;")
-                || html.contains("&lt;b&gt;&amp;&lt;/b&gt;"),
+            html.contains("&#60;b&#62;&#38;") || html.contains("&lt;b&gt;&amp;"),
             "{html}"
         );
         assert!(!html.contains("<b>"), "{html}");

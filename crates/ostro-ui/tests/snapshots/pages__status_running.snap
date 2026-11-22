@@ -1,0 +1,18 @@
+---
+source: crates/ostro-ui/tests/pages.rs
+expression: r.body
+---
+<section id="run-status" class="card" aria-live="polite" hx-get="/ui/runs/run-000002/status" hx-trigger="every 2s" hx-swap="outerHTML">
+<h3>Status</h3>
+<p><span class="badge running">running</span> <span class="muted htmx-indicator">refreshing</span></p>
+<dl class="kv">
+<dt>Attempt</dt><dd>1</dd>
+<dt>Retryable failures</dt><dd>0</dd>
+
+
+</dl>
+<h3>Published status</h3>
+<pre class="json">{
+  &#34;progress&#34;: 40
+}</pre>
+</section>

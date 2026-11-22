@@ -1,0 +1,92 @@
+---
+source: crates/ostro-ui/tests/pages.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Runs</h1>
+
+<nav class="tabs" aria-label="Run views">
+<a href="/ui/runs" aria-current="page">Runs</a>
+<a href="/ui/dlq">DLQ</a>
+</nav>
+<form class="filters" method="get" action="/ui/runs" role="search">
+<label>Workflow <input name="workflow" value=""></label>
+<label>Queue <input name="queue" value=""></label>
+<label>Status
+<select name="status">
+<option value="">any</option>
+<option value="scheduled">scheduled</option>
+<option value="ready">ready</option>
+<option value="running">running</option>
+<option value="completed">completed</option>
+<option value="failed">failed</option>
+<option value="cancelled">cancelled</option>
+<option value="terminated">terminated</option>
+<option value="timed_out">timed_out</option>
+<option value="continued_as_new">continued_as_new</option>
+</select>
+</label>
+<label>Tag <input name="tags" value="" placeholder="key=value"></label>
+<label>Order
+<select name="order">
+<option value="oldest" selected>oldest first</option>
+<option value="newest">newest first</option>
+</select>
+</label>
+<button type="submit">Filter</button>
+<a class="button secondary" href="/ui/runs">Clear</a>
+</form>
+
+<table class="runs">
+<thead><tr><th>Run</th><th>Workflow</th><th>Status</th><th>Queue</th><th>Created</th><th>Tags</th></tr></thead>
+<tbody>
+<tr>
+<td class="mono"><a href="/ui/runs/run-000001">run-000001</a></td>
+<td>greet@1</td>
+<td><span class="badge completed">completed</span></td>
+<td>default</td>
+<td class="mono">2023-11-14 22:13:22Z</td>
+<td><a class="chip" href="/ui/runs?tags=env%3Dprod">env=prod</a><a class="chip" href="/ui/runs?tags=team%3Da">team=a</a></td>
+</tr>
+<tr>
+<td class="mono"><a href="/ui/runs/run-000002">run-000002</a></td>
+<td>greet@1</td>
+<td><span class="badge running">running</span></td>
+<td>default</td>
+<td class="mono">2023-11-14 22:13:23Z</td>
+<td><a class="chip" href="/ui/runs?tags=env%3Dprod">env=prod</a></td>
+</tr>
+<tr>
+<td class="mono"><a href="/ui/runs/run-000003">run-000003</a></td>
+<td>billing@2</td>
+<td><span class="badge failed">failed</span></td>
+<td>payments</td>
+<td class="mono">2023-11-14 22:13:24Z</td>
+<td><a class="chip" href="/ui/runs?tags=%3Cscript%3Ealert%281%29%3C%2Fscript%3E">&#60;script&#62;alert(1)&#60;/script&#62;</a></td>
+</tr>
+<tr>
+<td class="mono"><a href="/ui/runs/run-000004">run-000004</a></td>
+<td>greet@1</td>
+<td><span class="badge ready">ready</span></td>
+<td>default</td>
+<td class="mono">2023-11-14 22:13:25Z</td>
+<td><a class="chip" href="/ui/runs?tags=env%3Dprod">env=prod</a><a class="chip system" href="/ui/runs?tags=__ostro%2Frerun_from%3D3">__ostro/rerun_from=3</a></td>
+</tr>
+<tr>
+<td class="mono"><a href="/ui/runs/run-000005">run-000005</a></td>
+<td>billing@2</td>
+<td><span class="badge completed">completed</span></td>
+<td>payments</td>
+<td class="mono">2023-11-14 22:13:26Z</td>
+<td><a class="chip system" href="/ui/runs?tags=__ostro%2Fon_failure_of%3Drun-000003">__ostro/on_failure_of=run-000003</a></td>
+</tr>
+</tbody>
+</table>
+
+<nav class="pager" aria-label="Pages">
+
+
+</nav>
+
+</main>

@@ -1,0 +1,111 @@
+---
+source: crates/ostro-ui/tests/pages.rs
+expression: html
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Run run-000001</h1>
+
+<p><a href="/ui/runs">All runs</a></p>
+<div class="cards">
+<section id="run-status" class="card" aria-live="polite">
+<h3>Status</h3>
+<p><span class="badge completed">completed</span></p>
+<dl class="kv">
+
+<dt>Retryable failures</dt><dd>0</dd>
+<dt>Completed</dt><dd class="mono">2023-11-14 22:13:28Z</dd>
+
+</dl>
+<h3>Published status</h3>
+<pre class="json">{
+  &#34;note&#34;: &#34;&#60;i&#62;done&#60;/i&#62;&#34;,
+  &#34;progress&#34;: 100
+}</pre>
+</section>
+<section class="card">
+<h3>Run</h3>
+<dl class="kv">
+<dt>Run id</dt><dd class="mono">run-000001</dd>
+<dt>Workflow</dt><dd>greet@1</dd>
+<dt>Queue</dt><dd>default</dd>
+
+<dt>Priority</dt><dd>0</dd>
+<dt>Module</dt><dd class="mono">a34a404543104ad077a28c7c790dfb23413c68a18d0c0940500d240acd1f14e7</dd>
+<dt>Created</dt><dd class="mono">2023-11-14 22:13:22Z</dd>
+</dl>
+</section>
+<section class="card">
+<h3>Lineage</h3>
+<p class="muted">An original run.</p>
+<ul class="lineage">
+</ul>
+<h3>Tags</h3>
+
+<p><a class="chip" href="/ui/runs?tags=env%3Dprod">env=prod</a><a class="chip" href="/ui/runs?tags=team%3Da">team=a</a></p>
+</section>
+</div>
+<h2>Result</h2>
+<pre class="json">{
+  &#34;greeting&#34;: &#34;hello &#60;b&#62;world&#60;/b&#62;&#34;
+}</pre>
+
+<nav class="tabs" aria-label="Run detail">
+<a href="/ui/runs/run-000001?tab=timeline" aria-current="page">Timeline</a>
+<a href="/ui/runs/run-000001?tab=logs">Logs</a>
+</nav>
+<div id="tab">
+<section id="timeline" class="timeline">
+<p class="muted">Replay markers are exact (recorded activation attempts). Span: 6.0 s. <a href="/ui/runs/run-000001/timeline" hx-get="/ui/runs/run-000001/timeline" hx-target="#timeline" hx-swap="outerHTML">Refresh</a></p>
+
+
+
+<div class="group">
+<h3>attempt 1.1</h3>
+<table>
+<thead><tr><th>Seq</th><th>Event</th><th>Summary</th><th>Time</th><th>Duration</th><th>Span</th><th>Rerun</th></tr></thead>
+<tbody>
+<tr class="start">
+<td class="mono">1</td>
+<td class="kind">RunStarted <span class="muted">(1.1)</span></td>
+<td>started greet@1</td>
+<td class="mono">2023-11-14 22:13:22Z</td>
+<td></td>
+<td class="bar"><svg width="200" height="10" viewBox="0 0 200 10" role="img" aria-label="event span"><rect class="track" x="0" y="0" width="200" height="10"></rect><rect class="span" x="0" y="0" width="2" height="10"></rect></svg></td>
+<td></td>
+</tr>
+<tr class="command">
+<td class="mono">2</td>
+<td class="kind">Statusrunning <span class="muted">(1.1)</span></td>
+<td>status -&#62; running</td>
+<td class="mono">2023-11-14 22:13:27Z</td>
+<td>5.0 s</td>
+<td class="bar"><svg width="200" height="10" viewBox="0 0 200 10" role="img" aria-label="event span"><rect class="track" x="0" y="0" width="200" height="10"></rect><rect class="span" x="0" y="0" width="166" height="10"></rect></svg></td>
+<td><a class="button small secondary" href="/ui/runs/run-000001/rerun?from_seq=2">Rerun from here</a></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="group">
+<h3>attempt 1.2</h3>
+<table>
+<thead><tr><th>Seq</th><th>Event</th><th>Summary</th><th>Time</th><th>Duration</th><th>Span</th><th>Rerun</th></tr></thead>
+<tbody>
+<tr class="marker-row"><td colspan="7"><span class="marker exact">attempt 1.2 replayed seq 0..2</span></td></tr>
+<tr class="command">
+<td class="mono">3</td>
+<td class="kind">Statuscompleted <span class="muted">(1.2)</span></td>
+<td>status -&#62; completed</td>
+<td class="mono">2023-11-14 22:13:28Z</td>
+<td>1.0 s</td>
+<td class="bar"><svg width="200" height="10" viewBox="0 0 200 10" role="img" aria-label="event span"><rect class="track" x="0" y="0" width="200" height="10"></rect><rect class="span" x="166" y="0" width="33" height="10"></rect></svg></td>
+<td><span class="disabled">Rerun unavailable: an effect &#60;b&#62;is&#60;/b&#62; in flight (nearest safe cut: seq 2)</span></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+
+</div>
+
+</main>

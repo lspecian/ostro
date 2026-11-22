@@ -1,0 +1,50 @@
+---
+source: crates/ostro-ui/tests/pages.rs
+expression: main_of(&r.body)
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Runs</h1>
+
+<nav class="tabs" aria-label="Run views">
+<a href="/ui/runs" aria-current="page">Runs</a>
+<a href="/ui/dlq">DLQ</a>
+</nav>
+<form class="filters" method="get" action="/ui/runs" role="search">
+<label>Workflow <input name="workflow" value="greet"></label>
+<label>Queue <input name="queue" value="default"></label>
+<label>Status
+<select name="status">
+<option value="">any</option>
+<option value="scheduled">scheduled</option>
+<option value="ready">ready</option>
+<option value="running" selected>running</option>
+<option value="completed">completed</option>
+<option value="failed">failed</option>
+<option value="cancelled">cancelled</option>
+<option value="terminated">terminated</option>
+<option value="timed_out">timed_out</option>
+<option value="continued_as_new">continued_as_new</option>
+</select>
+</label>
+<label>Tag <input name="tags" value="env=prod"></label>
+<label>Tag <input name="tags" value="team=a"></label>
+<label>Tag <input name="tags" value="" placeholder="key=value"></label>
+<label>Order
+<select name="order">
+<option value="oldest">oldest first</option>
+<option value="newest" selected>newest first</option>
+</select>
+</label>
+<button type="submit">Filter</button>
+<a class="button secondary" href="/ui/runs">Clear</a>
+</form>
+
+<p class="empty">No runs match these filters.</p>
+
+<nav class="pager" aria-label="Pages">
+
+
+</nav>
+
+</main>

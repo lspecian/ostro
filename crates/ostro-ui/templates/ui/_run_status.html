@@ -1,0 +1,12 @@
+<section id="run-status" class="card" aria-live="polite"{% if !status.terminal %} hx-get="{{ status.status_href }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+<h3>Status</h3>
+<p><span class="badge {{ status.status }}">{{ status.status }}</span>{% if !status.terminal %} <span class="muted htmx-indicator">refreshing</span>{% endif %}</p>
+<dl class="kv">
+{% if let Some(a) = status.attempt %}<dt>Attempt</dt><dd>{{ a }}</dd>{% endif %}
+<dt>Retryable failures</dt><dd>{{ status.attempt_failures }}</dd>
+{% if let Some(c) = status.completed %}<dt>Completed</dt><dd class="mono">{{ c }}</dd>{% endif %}
+{% if let Some(p) = status.paused %}<dt>Paused</dt><dd>{{ p }}</dd>{% endif %}
+</dl>
+<h3>Published status</h3>
+{% if let Some(p) = status.published %}<pre class="json">{{ p }}</pre>{% else %}<p class="muted">The run has not published a status.</p>{% endif %}
+</section>

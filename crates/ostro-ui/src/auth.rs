@@ -55,6 +55,46 @@ pub struct UiReject {
     pub message: String,
 }
 
+/// The caller of a `/ui` page: [`UiAuth::principal`] holding the `read` scope.
+pub(crate) struct Reader(#[allow(dead_code)] pub(crate) UiPrincipal);
+
+/// The caller of a mutating `/ui` route: [`UiAuth::principal`] holding `operate`
+/// (actions, bulk, rerun and DLQ; consumed by 11-16).
+#[allow(dead_code)]
+pub(crate) struct Operator(pub(crate) UiPrincipal);
+
+fn principal_with(
+    parts: &http::request::Parts,
+    state: &crate::pages::UiState,
+    scope: &str,
+) -> Result<UiPrincipal, crate::pages::UiError> {
+    let p = state.deps.auth.principal(parts)?;
+    p.require(scope)?;
+    Ok(p)
+}
+
+impl axum::extract::FromRequestParts<crate::pages::UiState> for Reader {
+    type Rejection = crate::pages::UiError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &crate::pages::UiState,
+    ) -> Result<Self, Self::Rejection> {
+        principal_with(parts, state, "read").map(Reader)
+    }
+}
+
+impl axum::extract::FromRequestParts<crate::pages::UiState> for Operator {
+    type Rejection = crate::pages::UiError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &crate::pages::UiState,
+    ) -> Result<Self, Self::Rejection> {
+        principal_with(parts, state, "operate").map(Operator)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

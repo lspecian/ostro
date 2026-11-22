@@ -1,0 +1,17 @@
+<section id="logs" class="logs">
+{% if !logs.available %}<p class="empty">Logs not available on this server.</p>
+{% else if logs.lines.is_empty() %}<p class="empty">No log lines for this run.</p>
+{% else %}{% if logs.dropped > 0 %}<p class="muted">{{ logs.dropped }} lines were dropped (rate limits or ring eviction).</p>{% endif %}
+<table>
+<thead><tr><th>Time</th><th>Level</th><th>Attempt</th><th>Message</th><th>Fields</th></tr></thead>
+<tbody>
+{% for l in logs.lines %}<tr class="{{ l.level }}">
+<td class="mono">{{ l.ts }}</td>
+<td class="level">{{ l.level }}</td>
+<td>{{ l.attempt }}</td>
+<td>{{ l.message }}</td>
+<td class="mono">{{ l.fields }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+{% endif %}</section>

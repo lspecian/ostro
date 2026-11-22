@@ -1,0 +1,27 @@
+---
+source: crates/ostro-ui/tests/pages.rs
+expression: section
+---
+<section id="timeline" class="timeline">
+<p class="muted">Replay markers are approximate (this journal predates recorded attempts). Span: 0 ms. <a href="/ui/runs/run-000004/timeline" hx-get="/ui/runs/run-000004/timeline" hx-target="#timeline" hx-swap="outerHTML">Refresh</a></p>
+<p class="muted">Rerun from a step is available once the run is terminal.</p>
+
+
+<div class="group copied">
+<h3>copied from the source run (seq 0..2)</h3>
+<table>
+<thead><tr><th>Seq</th><th>Event</th><th>Summary</th><th>Time</th><th>Duration</th><th>Span</th><th>Rerun</th></tr></thead>
+<tbody>
+<tr class="start copied">
+<td class="mono">1</td>
+<td class="kind">RunStarted</td>
+<td>started greet@1 <span class="chip system">copied from the source run</span></td>
+<td class="mono">2023-11-14 22:13:25Z</td>
+<td></td>
+<td class="bar"><svg width="200" height="10" viewBox="0 0 200 10" role="img" aria-label="event span"><rect class="track" x="0" y="0" width="200" height="10"></rect><rect class="span" x="0" y="0" width="2" height="10"></rect></svg></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>

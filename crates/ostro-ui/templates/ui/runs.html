@@ -1,0 +1,48 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+<nav class="tabs" aria-label="Run views">
+<a href="/ui/runs" aria-current="page">Runs</a>
+<a href="/ui/dlq">DLQ</a>
+</nav>
+<form class="filters" method="get" action="/ui/runs" role="search">
+<label>Workflow <input name="workflow" value="{{ f.workflow }}"></label>
+<label>Queue <input name="queue" value="{{ f.queue }}"></label>
+<label>Status
+<select name="status">
+<option value="">any</option>
+{% for (s, selected) in statuses %}<option value="{{ s }}"{% if *selected %} selected{% endif %}>{{ s }}</option>
+{% endfor %}</select>
+</label>
+{% for t in f.tags %}<label>Tag <input name="tags" value="{{ t }}"></label>
+{% endfor %}<label>Tag <input name="tags" value="" placeholder="key=value"></label>
+<label>Order
+<select name="order">
+<option value="oldest"{% if !f.newest %} selected{% endif %}>oldest first</option>
+<option value="newest"{% if f.newest %} selected{% endif %}>newest first</option>
+</select>
+</label>
+<button type="submit">Filter</button>
+<a class="button secondary" href="/ui/runs">Clear</a>
+</form>
+{% if rows.is_empty() %}
+<p class="empty">No runs match these filters.</p>
+{% else %}
+<table class="runs">
+<thead><tr><th>Run</th><th>Workflow</th><th>Status</th><th>Queue</th><th>Created</th><th>Tags</th></tr></thead>
+<tbody>
+{% for r in rows %}<tr>
+<td class="mono"><a href="{{ r.href }}">{{ r.run_id }}</a></td>
+<td>{{ r.workflow }}@{{ r.version }}</td>
+<td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+<td>{{ r.queue }}</td>
+<td class="mono">{{ r.created }}</td>
+<td>{% for c in r.tags %}<a class="chip{% if c.system %} system{% endif %}" href="{{ c.href }}">{{ c.text }}</a>{% endfor %}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+{% endif %}
+<nav class="pager" aria-label="Pages">
+{% if let Some(h) = first_href %}<a href="{{ h }}">First page</a>{% endif %}
+{% if let Some(h) = next_href %}<a href="{{ h }}" rel="next">Next page</a>{% endif %}
+</nav>
+{% endblock %}

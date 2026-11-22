@@ -1,0 +1,26 @@
+---
+source: crates/ostro-ui/tests/pages.rs
+expression: r.body
+---
+<section id="logs" class="logs">
+
+<table>
+<thead><tr><th>Time</th><th>Level</th><th>Attempt</th><th>Message</th><th>Fields</th></tr></thead>
+<tbody>
+<tr class="warn">
+<td class="mono">2023-11-14 22:14:10Z</td>
+<td class="level">warn</td>
+<td>1</td>
+<td>charging &#60;card&#62;</td>
+<td class="mono">{&#34;amount&#34;:12,&#34;html&#34;:&#34;&#60;b&#62;x&#60;/b&#62;&#34;}</td>
+</tr>
+<tr class="info">
+<td class="mono">2023-11-14 22:14:11Z</td>
+<td class="level">info</td>
+<td>1</td>
+<td>done</td>
+<td class="mono"></td>
+</tr>
+</tbody>
+</table>
+</section>

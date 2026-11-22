@@ -1,0 +1,42 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+<p><a href="/ui/runs">All runs</a></p>
+<div class="cards">
+{% include "ui/_run_status.html" %}
+<section class="card">
+<h3>Run</h3>
+<dl class="kv">
+<dt>Run id</dt><dd class="mono">{{ run.run_id }}</dd>
+<dt>Workflow</dt><dd>{{ run.workflow }}@{{ run.version }}</dd>
+<dt>Queue</dt><dd>{{ run.queue }}</dd>
+{% if let Some(t) = run.tenant %}<dt>Tenant</dt><dd>{{ t }}</dd>{% endif %}
+<dt>Priority</dt><dd>{{ run.priority }}</dd>
+<dt>Module</dt><dd class="mono">{{ run.module_sha256 }}</dd>
+<dt>Created</dt><dd class="mono">{{ run.created }}</dd>
+</dl>
+</section>
+<section class="card">
+<h3>Lineage</h3>
+{% if lineage.is_empty() %}<p class="muted">An original run.</p>{% endif %}
+<ul class="lineage">
+{% for l in lineage %}<li>{{ l.text }}{% if let Some(k) = l.link %} <a class="mono" href="{{ k.href }}">{{ k.text }}</a>{% endif %}</li>
+{% endfor %}</ul>
+<h3>Tags</h3>
+{% if run.tags.is_empty() %}<p class="muted">No tags.</p>{% endif %}
+<p>{% for c in run.tags %}<a class="chip{% if c.system %} system{% endif %}" href="{{ c.href }}">{{ c.text }}</a>{% endfor %}</p>
+</section>
+</div>
+{% if let Some(r) = run.result %}<h2>Result</h2>
+<pre class="json">{{ r }}</pre>
+{% endif %}{% if let Some(f) = run.failure %}<h2>Failure</h2>
+<pre class="json failure">{{ f }}</pre>
+{% endif %}
+<nav class="tabs" aria-label="Run detail">
+<a href="{{ run.href }}?tab=timeline"{% if tab == "timeline" %} aria-current="page"{% endif %}>Timeline</a>
+<a href="{{ run.href }}?tab=logs"{% if tab == "logs" %} aria-current="page"{% endif %}>Logs</a>
+</nav>
+<div id="tab">
+{% if let Some(timeline) = timeline %}{% include "ui/_timeline.html" %}{% endif %}
+{% if let Some(logs) = logs %}{% include "ui/_logs.html" %}{% endif %}
+</div>
+{% endblock %}

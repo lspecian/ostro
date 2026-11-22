@@ -1,0 +1,52 @@
+---
+source: crates/ostro-ui/tests/pages.rs
+expression: main_of(&r.body)
+---
+<main id="main">
+<div id="flash" class="flash" role="alert" hidden></div>
+<h1>Dead-letter queue</h1>
+
+<nav class="tabs" aria-label="Run views">
+<a href="/ui/runs">Runs</a>
+<a href="/ui/dlq" aria-current="page">DLQ</a>
+</nav>
+
+<form class="filters" method="get" action="/ui/dlq" role="search">
+<label>Workflow <input name="workflow" value=""></label>
+<label>Queue <input name="queue" value=""></label>
+<label>Reason prefix <input name="reason" value=""></label>
+<label>Tag <input name="tags" value="" placeholder="key=value"></label>
+<label>Dismissed
+<select name="include_dismissed">
+<option value="false" selected>hide</option>
+<option value="true">include</option>
+</select>
+</label>
+<button type="submit">Filter</button>
+<a class="button secondary" href="/ui/dlq">Clear</a>
+</form>
+
+<table class="dlq">
+<thead><tr><th>Run</th><th>Workflow</th><th>Queue</th><th>Status</th><th>Reason</th><th>Failed</th><th>Resumable</th><th>Hook</th><th>State</th><th>Tags</th></tr></thead>
+<tbody>
+<tr>
+<td class="mono"><a href="/ui/runs/run-000003">run-000003</a></td>
+<td>billing@2</td>
+<td>payments</td>
+<td><span class="badge failed">failed</span></td>
+<td>&#34;&#62;&#60;img src=x onerror=alert(1)&#62;</td>
+<td class="mono">2023-11-14 22:15:00Z</td>
+<td>no</td>
+<td><a class="mono" href="/ui/runs/run-000005">run-000005</a></td>
+<td>open</td>
+<td><a class="chip" href="/ui/dlq?tags=%3Cscript%3Ealert%281%29%3C%2Fscript%3E">&#60;script&#62;alert(1)&#60;/script&#62;</a></td>
+</tr>
+</tbody>
+</table>
+
+<nav class="pager" aria-label="Pages">
+
+</nav>
+
+
+</main>
