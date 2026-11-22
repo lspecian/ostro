@@ -1,0 +1,23 @@
+{
+  "name": "ostro-client",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript client for the Ostro REST API (no runtime dependencies)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test 'test/**/*.test.js'"
+  }
+}
