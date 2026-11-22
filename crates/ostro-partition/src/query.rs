@@ -13,16 +13,21 @@
 //! - [`runs_page`]: runs in key order (partition, then uuid v7 = creation time order).
 //! - [`effect_row`], [`open_effects`]: a run's in-flight effects (`effects` rows, Phase 6
 //!   plan 06-03). The bridge's `SendGate` (06-14) checks `effect_row` before sending.
+//! - [`index_page`], [`index_state`]: newest-first bounded pages of the derived run index
+//!   `x_run_index` (Phase 11 plan 11-05, OPS-05); `IndexError::Rebuilding` tells the caller to
+//!   fall back to the budgeted scan.
 
 use ostro_types::command::JournalEvent;
 use ostro_types::{AttemptToken, Epoch, PayloadRef, RunId};
 use prost::Message;
 
 use crate::apply::run;
+use crate::store::derived::{self, IndexState};
 use crate::store::keys::{
     decode_effect_key, decode_ready_key, effect_key, effect_run_prefix, event_key, payload_key,
     run_key,
 };
+use crate::store::meta::K_PARTITION;
 use crate::store::values::{self, EffectRow, ReadyValue, RunRecord};
 use crate::store::{StoreError, StoreReader, Table};
 
@@ -196,4 +201,88 @@ pub fn open_effects(r: &StoreReader, run: &RunId) -> Result<Vec<(u64, EffectRow)
             Ok((op, values::decode(&v)?))
         })
         .collect()
+}
+
+/// One page of [`index_page`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IndexPage {
+    /// `(run, created_at_ms)`, newest first (ties: higher uuid first).
+    pub runs: Vec<(RunId, u64)>,
+    /// Continuation token (the last key read; it carries `created_at_ms` and the uuid): pass
+    /// it as `after` for the next page. `None` = the prefix is exhausted.
+    pub next: Option<Vec<u8>>,
+    /// Index rows read (never more than the budget).
+    pub scanned: usize,
+}
+
+/// [`index_page`] failures.
+#[derive(Debug, thiserror::Error)]
+pub enum IndexError {
+    /// The index marker is missing or stale and a rebuild is pending: use the scan.
+    #[error("run index rebuilding")]
+    Rebuilding,
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
+/// Whether the run index can serve [`index_page`].
+pub fn index_state(r: &StoreReader) -> IndexState {
+    r.run_index_state()
+}
+
+/// Up to `min(limit, budget)` runs whose index key starts with `prefix`
+/// ([`derived::index_prefix`]), newest first, strictly after the continuation token `after`.
+/// Reads at most `budget` index rows (one extra row is peeked only when `limit < budget`, to
+/// tell an exhausted prefix apart). `limit == 0` or `budget == 0` returns no runs and keeps
+/// `after` as the token.
+pub fn index_page(
+    r: &StoreReader,
+    prefix: &[u8],
+    after: Option<&[u8]>,
+    limit: usize,
+    budget: usize,
+) -> Result<IndexPage, IndexError> {
+    if index_state(r) != IndexState::Ready {
+        return Err(IndexError::Rebuilding);
+    }
+    let take = limit.min(budget);
+    if take == 0 {
+        return Ok(IndexPage {
+            runs: Vec::new(),
+            next: after.map(<[u8]>::to_vec),
+            scanned: 0,
+        });
+    }
+    let peek = limit < budget;
+    let rows = r.run_index_rows(prefix, after, take + usize::from(peek))?;
+    let partition = r
+        .get(Table::Meta, K_PARTITION)?
+        .ok_or_else(|| StoreError::Codec("meta key partition missing".into()))?;
+    let scanned = rows.len();
+    let more = if peek {
+        rows.len() > take
+    } else {
+        rows.len() == take
+    };
+    let mut runs = Vec::with_capacity(take);
+    let mut last = None;
+    for (k, _) in rows.into_iter().take(take) {
+        let (at, uuid) = derived::decode_suffix(&k)
+            .ok_or_else(|| StoreError::Codec("x_run_index key too short".into()))?;
+        let mut id = partition.clone();
+        id.extend_from_slice(&uuid);
+        let run = RunId::from_bytes(&id)
+            .map_err(|e| StoreError::Codec(format!("x_run_index run id: {e}")))?;
+        runs.push((run, at));
+        last = Some(k);
+    }
+    // A rebuild that started during the read clears rows: never serve such a page.
+    if index_state(r) != IndexState::Ready {
+        return Err(IndexError::Rebuilding);
+    }
+    Ok(IndexPage {
+        runs,
+        next: if more { last } else { None },
+        scanned,
+    })
 }

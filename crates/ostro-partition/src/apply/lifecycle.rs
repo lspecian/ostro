@@ -288,6 +288,7 @@ pub(crate) fn retry_run(
     if let Some(due) = expire_due(&rec) {
         disarm(b, &run, due, EXPIRE_OP, actions);
     }
+    super::index::on_resume(b, &run, &rec);
     rec.terminal_reason.clear();
     rec.completed_at_ms = None;
     rec.resumable = false;

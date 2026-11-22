@@ -67,6 +67,7 @@ pub(crate) fn on_terminal(
         effects::delete_run_effects(b, run)?;
     }
     lifecycle::on_terminal(b, run, rec, at_ms, actions)?;
+    super::index::on_terminal(b, run, rec);
     // 08-07: schedule runs only (0 reads otherwise).
     if rec.idempotency_key.starts_with(schedule::CRON_KEY_PREFIX) {
         schedule::on_run_terminal(b, cur, run, rec.status, actions)?;

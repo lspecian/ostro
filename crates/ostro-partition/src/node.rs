@@ -896,6 +896,8 @@ impl PartitionStart {
         if self.mode == StartMode::Inspect {
             return Ok(());
         }
+        // 11-05: a stale or missing x_run_index rebuilds in the background (never in Inspect).
+        self.store.start_run_index_rebuild();
 
         // 5. a new term: LeaderAnnounced{epoch} is its first record.
         let epoch = next_term_epoch(

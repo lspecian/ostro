@@ -400,6 +400,7 @@ pub(crate) fn start_run(
         });
     }
     lifecycle::on_start(b, &run, &mut rec, s, actions);
+    super::index::on_start(b, &run, &rec);
     store_run(b, &run, &rec);
     Ok(ApplyOutcome::Accepted)
 }

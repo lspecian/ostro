@@ -162,6 +162,7 @@ fn delete_run(b: &mut ApplyBatch<'_>, run: &RunId, rec: &mut RunRecord) -> Resul
         }
     }
     b.remove(Table::Runs, run_key(run));
+    super::index::on_expire(b, run, rec);
     b.remove(Table::Running, running_key(run));
     remove_ready(b, run, rec);
     for seq in 0..rec.next_seq {

@@ -1097,11 +1097,9 @@ fn open_raw(path: &Path, cfg: &StoreConfig) -> Result<PartitionStore, SnapshotEr
     let ks: [Keyspace; TABLE_COUNT] = handles
         .try_into()
         .unwrap_or_else(|_| unreachable!("one keyspace per table"));
-    Ok(PartitionStore {
-        db,
-        ks,
-        gate: super::CommitGate::default(),
-    })
+    // The staging store gets an empty `x_run_index` and no marker (OSNP carries no derived
+    // keyspace, PF-11-2): the installed store opens `Rebuilding` and rebuilds from `runs`.
+    Ok(PartitionStore::assemble(db, ks, memtable)?)
 }
 
 /// Installs an OSNP v1 snapshot as the state of partition `p` under `data_dir`

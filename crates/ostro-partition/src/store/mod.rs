@@ -19,6 +19,7 @@
 pub mod batch;
 pub mod blobrefs;
 pub mod config;
+pub mod derived;
 mod digest;
 pub mod keys;
 pub mod meta;
@@ -163,6 +164,15 @@ pub struct PartitionStore {
     db: Database,
     ks: [Keyspace; TABLE_COUNT],
     gate: CommitGate,
+    /// The derived `x_run_index` keyspace (PF-11-2: not a [`Table`], not in [`TABLES`]).
+    index: derived::RunIndex,
+}
+
+impl Drop for PartitionStore {
+    fn drop(&mut self) {
+        // A running index rebuild holds database handles: stop and join it first.
+        self.index.stop();
+    }
 }
 
 /// Orders fjall snapshot creation against batch commits (see [`StoreReader`]).
@@ -236,16 +246,18 @@ impl PartitionStore {
         let ks: [Keyspace; TABLE_COUNT] = handles
             .try_into()
             .unwrap_or_else(|_| unreachable!("one keyspace per table"));
-        let store = Self {
-            db,
-            ks,
-            gate: CommitGate::default(),
-        };
+        let store = Self::assemble(db, ks, memtable)?;
 
         match meta::read_format_version(store.ks(Table::Meta))? {
             None => {
                 let mut b = store.db.batch();
                 meta::write_initial(&mut b, store.ks(Table::Meta), p, count);
+                // A fresh store has no runs: its (empty) run index is complete.
+                b.insert(
+                    &store.index.ks,
+                    derived::MARKER_KEY,
+                    derived::encode_marker(0),
+                );
                 store.gate.commit(b)?;
                 store.persist()?;
             }
@@ -265,7 +277,24 @@ impl PartitionStore {
                 found: m.count.get(),
             });
         }
+        derived::load_state(&store.index, m.applied.0)?;
         Ok((store, m))
+    }
+
+    /// A store over `db` with the table handles `ks`; opens the derived keyspace (no rows
+    /// are written).
+    pub(crate) fn assemble(
+        db: Database,
+        ks: [Keyspace; TABLE_COUNT],
+        memtable: u64,
+    ) -> Result<Self, StoreError> {
+        let index = derived::RunIndex::new(derived::open_keyspace(&db, memtable)?);
+        Ok(Self {
+            db,
+            ks,
+            gate: CommitGate::default(),
+            index,
+        })
     }
 
     /// Whether partition `p` has a state directory under `data_dir`.
@@ -301,6 +330,8 @@ impl PartitionStore {
             db: self.db.clone(),
             ks: self.ks.clone(),
             gate: self.gate.clone(),
+            index_ks: self.index.ks.clone(),
+            index: Arc::clone(&self.index.shared),
         }
     }
 
@@ -332,6 +363,8 @@ pub struct StoreReader {
     db: Database,
     ks: [Keyspace; TABLE_COUNT],
     gate: CommitGate,
+    index_ks: Keyspace,
+    index: Arc<derived::Shared>,
 }
 
 impl StoreReader {
@@ -364,6 +397,26 @@ impl StoreReader {
                 .range(&self.ks[t.idx()], from..to),
             limit,
         )
+    }
+}
+
+impl StoreReader {
+    /// The run index state (see [`derived::IndexState`]).
+    pub fn run_index_state(&self) -> derived::IndexState {
+        self.index.state()
+    }
+
+    /// Up to `limit` `x_run_index` rows starting with `prefix` (strictly after `after` when
+    /// given), in key order, from one snapshot. Rows are only meaningful while
+    /// [`run_index_state`](Self::run_index_state) is `Ready`.
+    pub fn run_index_rows(
+        &self,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Rows, StoreError> {
+        let snap = self.gate.snapshot(&self.db);
+        derived::scan(&snap, &self.index_ks, prefix, after, limit)
     }
 }
 
