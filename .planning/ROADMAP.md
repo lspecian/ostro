@@ -334,7 +334,7 @@ Plans:
 - [x] 09-05-PLAN.md — Children 1/2: derive StartChild (deterministic id, target resolution), no unsupported child path, repair rules that never re-decide delivered starts, child parent_event (none on CAN), parent apply journals ChildCompleted verbatim (WF-06) (W2)
 - [x] 09-06-PLAN.md — Rust SDK additions: start_child/ChildOptions, saga, random_f64, cross-SDK vectors + child/saga guests (WF-06, WF-10, SDK-04) (W2)
 - [x] 09-07-PLAN.md — Engine: componentize-py `exports` exact-shape allowance (ENG-1); core-instance count + weighted admission in Runtime::activate (describe/probe too), [engine] class + pool_total_core_instances (ENG-2) (SDK-02/03) (W3)
-- [ ] 09-08-PLAN.md — Children 2/2: cancel-op → CancelRun, detached completion, parent-close cascade, resume-after-close re-send + re-completion (B3), row-guarded completions, CAN chain cleanup + deferred expiry, child:: failpoints (WF-06) (W3)
+- [x] 09-08-PLAN.md — Children 2/2: cancel-op → CancelRun, detached completion, parent-close cascade, resume-after-close re-send + re-completion (B3), row-guarded completions, CAN chain cleanup + deferred expiry, child:: failpoints (WF-06) (W3)
 - [x] 09-09-PLAN.md — Python SDK core: OstroLoop, exclusive steps (B1), timers raise in steps, D11 shielding, determinism surface, componentize-py export (SDK-02/04, WF-07) (W3)
 - [x] 09-10-PLAN.md — TS SDK core: SdkPromise + sync job loop, exclusive steps (B1), setTimeout mapping, bigint ops, shielding, determinism, UTF-8/sha256, jco export (SDK-03/04, WF-07) (W3)
 - [x] 09-11-PLAN.md — Conformance harness: canonical JSON, projection, comparator, engine-leg scheduler (scenario kind only), conf-rust(+v2), engine-leg specs, 100% Rust pass (SDK-05, WF-07) (W3)
