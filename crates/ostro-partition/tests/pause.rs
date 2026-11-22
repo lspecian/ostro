@@ -191,6 +191,7 @@ fn append(id: &RunId, n: u32, from: u64, events: u64, d: Vec<derived::Intent>) -
                 seq,
                 kind: 16,
                 payload: inline(b"e"),
+                ..Default::default()
             })
             .collect(),
         derived: d.into_iter().map(Derived::new).collect(),

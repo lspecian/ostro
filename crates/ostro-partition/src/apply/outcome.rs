@@ -36,7 +36,9 @@
 //! variants are append-only as well (02-09 added `BadIntent`,
 //! `FieldTooLong`; 02-10 added `BadSource`, `TruncateBeyondEnd`; 04-12 added `BadLength`,
 //! `NotRunning`; 08-01 added Phase 8's `BadScheduleFire` (22) and `ScheduleOwnerMismatch` (23);
-//! 06-02 renamed the placeholder at 15 to Phase 6's `BadEffectCompletion`).
+//! 06-02 renamed the placeholder at 15 to Phase 6's `BadEffectCompletion`; 11-02 added Phase 11's
+//! `BadRerunPrefix` (29) and `BadDlqUpdate` (30) above the placeholders `ReservedP8_24`,
+//! `ReservedP9_25..28`).
 //!
 //! `InvalidCode` is declaration-indexed, so a phase landing above an absent lower slot declares
 //! `#[doc(hidden)]`, never-emitted placeholders named `Reserved<Phase>_<index>`
@@ -163,6 +165,25 @@ pub enum InvalidCode {
     /// A `ScheduleFire` applied on a partition that is not `schedule_owner(name, P)`.
     /// Phase 8 (08-01), index 23.
     ScheduleOwnerMismatch,
+    // RESERVATIONS.md §8: placeholders for the unclaimed slots 24..=28 (never emitted; 11-02,
+    // P-15 canonical names).
+    #[doc(hidden)]
+    ReservedP8_24,
+    #[doc(hidden)]
+    ReservedP9_25,
+    #[doc(hidden)]
+    ReservedP9_26,
+    #[doc(hidden)]
+    ReservedP9_27,
+    #[doc(hidden)]
+    ReservedP9_28,
+    /// A malformed rerun `StartRun` (`rerun_prefix` / `rerun_from_seq` inconsistent).
+    /// Phase 11 (11-02; emitted from 11-07), index 29.
+    // RESERVATIONS.md: P11 = InvalidCode 29..31
+    BadRerunPrefix,
+    /// A malformed `DlqUpdate` (missing op, bad ids, reason too long, unknown mode).
+    /// Phase 11 (11-02; emitted from 11-08), index 30.
+    BadDlqUpdate,
 }
 
 impl RejectReason {
@@ -350,6 +371,13 @@ mod tests {
             InvalidCode::ReservedP7_21,
             InvalidCode::BadScheduleFire,
             InvalidCode::ScheduleOwnerMismatch,
+            InvalidCode::ReservedP8_24,
+            InvalidCode::ReservedP9_25,
+            InvalidCode::ReservedP9_26,
+            InvalidCode::ReservedP9_27,
+            InvalidCode::ReservedP9_28,
+            InvalidCode::BadRerunPrefix,
+            InvalidCode::BadDlqUpdate,
         ];
         for (i, c) in order.into_iter().enumerate() {
             assert_eq!(c as usize, i, "{c:?}");
@@ -363,6 +391,13 @@ mod tests {
             26
         );
         assert_eq!(InvalidCode::ScheduleOwnerMismatch as usize, 23);
+        // Phase 11 (RESERVATIONS §8): 29 BadRerunPrefix, 30 BadDlqUpdate.
+        assert_eq!(InvalidCode::BadRerunPrefix as usize, 29);
+        assert_eq!(InvalidCode::BadDlqUpdate as usize, 30);
+        assert_eq!(
+            ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::BadDlqUpdate)).code(),
+            26
+        );
         assert_eq!(
             ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::BadScheduleFire)).code(),
             26

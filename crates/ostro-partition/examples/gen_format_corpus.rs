@@ -449,6 +449,7 @@ impl Gen {
                 seq: 0,
                 kind: EventKind::RunStarted.code(),
                 payload: inline(b"\x01run-started"),
+                ..Default::default()
             });
         }
         s
@@ -523,6 +524,7 @@ impl Gen {
                     seq: from + i as u64,
                     kind: k.code(),
                     payload: inline(format!("\x01{k:?}").as_bytes()),
+                    ..Default::default()
                 })
                 .collect();
             let o = self

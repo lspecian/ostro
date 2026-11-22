@@ -37,6 +37,7 @@ fn events(run: &RunId, t: AttemptToken, from: u64, derived: Vec<Derived>) -> Com
             seq: from,
             kind: 16,
             payload: inline(b"e"),
+            ..Default::default()
         }],
         derived,
     })

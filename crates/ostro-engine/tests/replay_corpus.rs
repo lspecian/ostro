@@ -177,6 +177,7 @@ fn encode_journal(journal: &[Event]) -> Vec<u8> {
             seq: ev.seq,
             kind,
             payload: Some(PayloadRef::inline(Bytes::from(bytes))),
+            ..Default::default()
         }
         .encode_to_vec();
         out.extend_from_slice(&(msg.len() as u32).to_le_bytes());

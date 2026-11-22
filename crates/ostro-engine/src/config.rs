@@ -163,6 +163,8 @@ pub struct EngineConfig {
     /// `engine.continue_as_new_events`: journal length that suggests continue-as-new
     /// (default 10,000).
     pub continue_as_new_events: u64,
+    /// `[limits]`: per-run limits (Phase 11, D-P11-13; enforced from 11-06).
+    pub run_limits: crate::run_limits::RunLimits,
 }
 
 impl Default for EngineConfig {
@@ -181,6 +183,7 @@ impl Default for EngineConfig {
             hot_wait: Duration::from_secs(2),
             node_memory_budget: GIB,
             continue_as_new_events: 10_000,
+            run_limits: crate::run_limits::RunLimits::default(),
         }
     }
 }

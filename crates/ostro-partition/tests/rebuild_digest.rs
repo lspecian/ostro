@@ -402,6 +402,7 @@ async fn drive(dir: &Path, sc: &Scenario) {
                         seq: from,
                         kind: 16,
                         payload: inline(b"e"),
+                        ..Default::default()
                     }],
                     derived: d,
                 });
@@ -499,6 +500,7 @@ async fn drive(dir: &Path, sc: &Scenario) {
                         seq: from,
                         kind: 16,
                         payload: inline(b"e"),
+                        ..Default::default()
                     }]
                 } else {
                     vec![]

@@ -190,6 +190,7 @@ fn ev(seq: u64, kind: u32) -> JournalEvent {
         seq,
         kind,
         payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+        ..Default::default()
     }
 }
 

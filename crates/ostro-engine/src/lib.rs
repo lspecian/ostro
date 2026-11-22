@@ -17,6 +17,8 @@ pub mod host;
 pub mod limits;
 pub mod replay;
 pub mod retry;
+/// Per-run limits (Phase 11, plan 11-02; enforced by 11-06).
+pub mod run_limits;
 pub mod runtime;
 pub mod sink;
 /// Span-id override contract (Phase 8, P8-D14; plan 08-01).
@@ -28,6 +30,8 @@ pub mod validate;
 /// The effect I/O seam (06-06) and the live request it carries (06-02).
 pub use effects_driver::EffectDriver;
 pub use ostro_types::live::LiveEffect;
+/// Per-run limits (Phase 11, D-P11-13), a field of [`config::EngineConfig`].
+pub use run_limits::RunLimits;
 
 /// Await-token API (05-03) for the server's token completion endpoint (05-13):
 /// `parse` (routing fields, no MAC check) and `verify` (constant-time HMAC check under

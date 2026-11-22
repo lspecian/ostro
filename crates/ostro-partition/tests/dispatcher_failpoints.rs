@@ -103,6 +103,7 @@ fn complete_cmd(job: &Job) -> Command {
             payload: Some(ostro_types::PayloadRef::inline(bytes::Bytes::from_static(
                 b"e",
             ))),
+            ..Default::default()
         }],
         derived: vec![Derived::new(derived::Intent::CompleteRun(CompleteRun {
             status: TerminalStatus::Completed as i32,

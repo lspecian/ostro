@@ -136,6 +136,7 @@ fn ev(seq: u64) -> JournalEvent {
         seq,
         kind: 16,
         payload: inline(b"e"),
+        ..Default::default()
     }
 }
 
@@ -752,6 +753,7 @@ mod query_helpers {
                     seq,
                     kind: 16 + seq as u32,
                     payload: Some(PayloadRef::inline(Bytes::from(vec![seq as u8]))),
+                    ..Default::default()
                 })
                 .collect()
         };

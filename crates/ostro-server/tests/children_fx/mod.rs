@@ -191,6 +191,7 @@ impl Fx {
                     seq: e.seq,
                     kind,
                     payload: Some(PayloadRef::inline(bytes.into())),
+                    ..Default::default()
                 }
             })
             .collect();

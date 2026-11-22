@@ -159,6 +159,7 @@ fn append(r: &RunId, from: u64, count: u64, d: Vec<Derived>) -> Command {
                 seq,
                 kind: 16,
                 payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+                ..Default::default()
             })
             .collect(),
         derived: d,

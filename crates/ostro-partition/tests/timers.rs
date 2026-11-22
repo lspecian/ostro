@@ -97,6 +97,7 @@ fn events(run: &RunId, t: AttemptTokenMsg, seq: u64, derived: Vec<Derived>) -> C
             seq,
             kind: 16,
             payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+            ..Default::default()
         }],
         derived,
     })

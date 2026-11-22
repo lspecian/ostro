@@ -155,6 +155,7 @@ fn append(r: &GenRun, events: u64, derived: Vec<Derived>) -> Option<Command> {
                 seq,
                 kind: 16,
                 payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+                ..Default::default()
             })
             .collect(),
         derived,

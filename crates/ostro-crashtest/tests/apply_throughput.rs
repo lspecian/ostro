@@ -181,6 +181,7 @@ impl Gen {
                     seq,
                     kind: 16,
                     payload: Some(PayloadRef::inline(Bytes::from_static(b"event"))),
+                    ..Default::default()
                 }],
                 derived: Vec::new(),
             })

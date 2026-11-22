@@ -246,6 +246,7 @@ fn events(id: &RunId, t: AttemptToken, from: u64, n: u64, intent: u8) -> Command
                 seq,
                 kind: 16,
                 payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+                ..Default::default()
             })
             .collect(),
         derived: d,

@@ -14,6 +14,10 @@ use ostro_types::command::{
     decode_command, encode_command,
 };
 use ostro_types::command::{
+    DLQ_DISMISS_REASON_MAX, DlqUpdate, ON_FAILURE_OF_TAG, RERUN_FROM_TAG, SYSTEM_TAG_PREFIX,
+    dlq_update,
+};
+use ostro_types::command::{
     MAX_PAUSE_DETAIL_LEN, PAUSE_REASON_OPERATOR, PAUSE_REASON_RETRIES_EXHAUSTED, PauseRun,
     ResumeRun,
 };
@@ -171,6 +175,7 @@ fn golden_commands() -> Vec<(&'static str, Command)> {
                         seq,
                         kind: 16 + seq as u32,
                         payload: Some(PayloadRef::inline(Bytes::from(vec![seq as u8; 3]))),
+                        ..Default::default()
                     })
                     .collect(),
                 derived: derived_all(),
@@ -224,6 +229,7 @@ fn golden_appended() -> Vec<(&'static str, Command)> {
                     seq: 13,
                     kind: 20,
                     payload: Some(PayloadRef::inline(Bytes::from_static(b"wait"))),
+                    ..Default::default()
                 }],
                 derived: vec![Derived::suspend()],
             }),
@@ -242,6 +248,7 @@ fn sample_start_v5(p: u16) -> StartRun {
             seq: 0,
             kind: 1,
             payload: Some(PayloadRef::inline(Bytes::from_static(b"run-started"))),
+            ..Default::default()
         }),
         ..sample_start_v4(p)
     }
@@ -325,6 +332,7 @@ fn golden_appended_v5() -> Vec<(&'static str, Command)> {
                     seq: 14,
                     kind: 19,
                     payload: Some(PayloadRef::inline(Bytes::from_static(b"wait-signal"))),
+                    ..Default::default()
                 }],
                 derived: vec![
                     Derived::register_wait(6, WaitKind::Signal, "approve", 70_000, 10_000),
@@ -451,7 +459,81 @@ fn all_golden() -> Vec<(&'static str, Command)> {
     v.extend(golden_appended_v8());
     v.extend(golden_appended_v6());
     v.extend(golden_appended_v7());
+    v.extend(golden_appended_v11());
     v
+}
+
+// ---- Plan 11-02: Phase 11 contract --------------------------------------------------------
+
+/// A journal event of the Phase 11 vectors.
+fn ev(seq: u64, kind: u32, attempt: u64) -> JournalEvent {
+    JournalEvent {
+        seq,
+        kind,
+        payload: Some(PayloadRef::inline(Bytes::from(format!("ev-{seq}")))),
+        attempt,
+    }
+}
+
+/// Vectors appended by plan 11-02 (Phase 11 contract; OPS-02, OPS-04): the three
+/// `DlqUpdate` marks, a rerun `StartRun` (fields 40/41) and an `EventsAppended` whose event
+/// carries `attempt` (JournalEvent.4).
+fn golden_appended_v11() -> Vec<(&'static str, Command)> {
+    let attempt = (7u64 << 32) | 2;
+    vec![
+        (
+            "dlq_update_hook_started",
+            Command::dlq_update(DlqUpdate {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                op: Some(dlq_update::Op::HookStarted(dlq_update::HookStarted {
+                    hook_run_id: run(5, 0x33).as_bytes().to_vec(),
+                })),
+                episode_completed_at_ms: 9_400,
+            }),
+        ),
+        (
+            "dlq_update_dismissed",
+            Command::dlq_update(DlqUpdate {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                op: Some(dlq_update::Op::Dismissed(dlq_update::Dismissed {
+                    reason: "known bad input".into(),
+                    at_ms: 9_500,
+                })),
+                episode_completed_at_ms: 9_400,
+            }),
+        ),
+        (
+            "dlq_update_requeued",
+            Command::dlq_update(DlqUpdate {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                op: Some(dlq_update::Op::Requeued(dlq_update::Requeued {
+                    mode: dlq_update::REQUEUE_RERUN,
+                    new_run_id: run(5, 0x44).as_bytes().to_vec(),
+                    at_ms: 9_600,
+                })),
+                episode_completed_at_ms: 9_400,
+            }),
+        ),
+        (
+            "start_run_rerun",
+            Command::start_run(StartRun {
+                rerun_prefix: vec![ev(1, 3, attempt), ev(2, 4, attempt)],
+                rerun_from_seq: 3,
+                tags: vec![format!("{RERUN_FROM_TAG}3")],
+                ..sample_start_v5(5)
+            }),
+        ),
+        (
+            "events_appended_attempt",
+            Command::events_appended(EventsAppended {
+                run_id: run(5, 0x11).as_bytes().to_vec(),
+                token: token(7, 2),
+                from_seq: 16,
+                events: vec![ev(16, 4, attempt)],
+                derived: vec![],
+            }),
+        ),
+    ]
 }
 
 // ---- Plan 07-03: Phase 7 contract ---------------------------------------------------------
@@ -545,6 +627,7 @@ fn golden_appended_v6() -> Vec<(&'static str, Command)> {
                     seq: 15,
                     kind: 18,
                     payload: Some(PayloadRef::inline(Bytes::from_static(b"effect-scheduled"))),
+                    ..Default::default()
                 }],
                 derived: vec![
                     Derived::register_effect(12, 0, 10_500),
@@ -894,6 +977,7 @@ fn routing_events_appended_helpers() {
                 seq,
                 kind: 16,
                 payload: None,
+                ..Default::default()
             })
             .collect(),
         derived: vec![],
@@ -917,11 +1001,13 @@ fn routing_events_appended_helpers() {
         seq: u64::MAX,
         kind: 0,
         payload: None,
+        ..Default::default()
     });
     ea.events.push(JournalEvent {
         seq: 0,
         kind: 0,
         payload: None,
+        ..Default::default()
     });
     assert!(!ea.events_contiguous_from(u64::MAX), "no wrap-around");
     ea.token = None;
@@ -1631,4 +1717,195 @@ fn phase7_run_id_token_and_limits() {
         .run_id(),
         Err(IdError::BadLength(2))
     );
+}
+
+#[test]
+fn phase11_vectors_round_trip() {
+    let v = golden_appended_v11();
+    for (name, c) in &v {
+        let back = decode_command(&encode_command(c)).expect("decode");
+        assert_eq!(&back, c, "{name} round trip");
+        assert_eq!(
+            decode_command(&golden_line(name)).expect("decode"),
+            *c,
+            "{name}"
+        );
+    }
+    let names: Vec<&str> = v.iter().map(|(_, c)| c.kind_name()).collect();
+    assert_eq!(
+        names,
+        [
+            "DlqUpdate",
+            "DlqUpdate",
+            "DlqUpdate",
+            "StartRun",
+            "EventsAppended"
+        ]
+    );
+    let Some(command::Cmd::StartRun(s)) = v[3].1.cmd.clone() else {
+        panic!("start_run_rerun is a StartRun");
+    };
+    assert_eq!(s.rerun_from_seq, 3);
+    assert_eq!(
+        s.rerun_prefix.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(s.rerun_prefix[0].attempt, (7u64 << 32) | 2);
+}
+
+#[test]
+fn phase11_tags_from_first_principles() {
+    use prost::Message as _;
+    // Cmd tag 45 (LEN): key = 45 << 3 | 2 = 362 = varint `ea 02`.
+    assert_eq!(
+        hex(&encode_command(&Command::dlq_update(DlqUpdate::default()))),
+        "ea0200"
+    );
+    // DlqUpdate: run_id 1 bytes, op oneof 2/3/4 (LEN), episode_completed_at_ms 5.
+    let d = DlqUpdate {
+        run_id: vec![0xAB], // 0a 01 ab
+        op: Some(dlq_update::Op::HookStarted(dlq_update::HookStarted {
+            hook_run_id: vec![0xCD], // 12 03 0a 01 cd
+        })),
+        episode_completed_at_ms: 7, // 28 07
+    };
+    assert_eq!(hex(&d.encode_to_vec()), "0a01ab12030a01cd2807");
+    let d = DlqUpdate {
+        op: Some(dlq_update::Op::Dismissed(dlq_update::Dismissed {
+            reason: "r".into(), // 0a 01 72
+            at_ms: 2,           // 10 02
+        })),
+        ..Default::default()
+    };
+    assert_eq!(hex(&d.encode_to_vec()), "1a050a01721002");
+    let d = DlqUpdate {
+        op: Some(dlq_update::Op::Requeued(dlq_update::Requeued {
+            mode: 1,                // 08 01
+            new_run_id: vec![0xEF], // 12 01 ef
+            at_ms: 3,               // 18 03
+        })),
+        ..Default::default()
+    };
+    assert_eq!(hex(&d.encode_to_vec()), "220708011201ef1803");
+    assert_eq!(
+        (
+            dlq_update::REQUEUE_RESUME,
+            dlq_update::REQUEUE_RESTART,
+            dlq_update::REQUEUE_RERUN
+        ),
+        (0, 1, 2)
+    );
+    // StartRun 40 (LEN, key 322 = `c2 02`) and 41 (varint, key 328 = `c8 02`).
+    let s = StartRun {
+        rerun_prefix: vec![JournalEvent {
+            seq: 1,
+            ..Default::default()
+        }],
+        rerun_from_seq: 2,
+        ..Default::default()
+    };
+    assert_eq!(hex(&s.encode_to_vec()), "c202020801c80202");
+    // JournalEvent 4: fixed64 (key 0x21), little-endian.
+    let e = JournalEvent {
+        attempt: (5u64 << 32) | 2,
+        ..Default::default()
+    };
+    assert_eq!(hex(&e.encode_to_vec()), "210200000005000000");
+    // Constants (RESERVATIONS §11 system tags).
+    assert_eq!(DLQ_DISMISS_REASON_MAX, 1024);
+    assert_eq!(SYSTEM_TAG_PREFIX, "__ostro/");
+    assert!(RERUN_FROM_TAG.starts_with(SYSTEM_TAG_PREFIX));
+    assert!(ON_FAILURE_OF_TAG.starts_with(SYSTEM_TAG_PREFIX));
+    assert_eq!(RERUN_FROM_TAG, "__ostro/rerun_from=");
+    assert_eq!(ON_FAILURE_OF_TAG, "__ostro/on_failure_of=");
+}
+
+#[test]
+fn phase11_attempt_defaults_and_is_omitted_at_zero() {
+    use prost::Message as _;
+    let without = JournalEvent {
+        seq: 9,
+        kind: 4,
+        payload: Some(PayloadRef::inline(Bytes::from_static(b"x"))),
+        ..Default::default()
+    };
+    let bytes = without.encode_to_vec();
+    // attempt == 0 is not on the wire: the bytes hold only fields 1..3.
+    assert_eq!(hex(&bytes), "080910041a030a0178");
+    let back = JournalEvent::decode(bytes.as_slice()).expect("decode");
+    assert_eq!(back.attempt, 0);
+    let with = JournalEvent {
+        attempt: (5u64 << 32) | 2,
+        ..without.clone()
+    };
+    let back = JournalEvent::decode(with.encode_to_vec().as_slice()).expect("decode");
+    assert_eq!(back, with);
+}
+
+#[test]
+fn phase11_dlq_update_run_id_and_limits() {
+    let id = run(9, 0x42);
+    let mut d = DlqUpdate {
+        run_id: id.as_bytes().to_vec(),
+        op: Some(dlq_update::Op::Dismissed(dlq_update::Dismissed {
+            reason: "x".repeat(DLQ_DISMISS_REASON_MAX),
+            at_ms: 1,
+        })),
+        episode_completed_at_ms: 1,
+    };
+    assert_eq!(d.run_id(), Ok(id));
+    assert!(d.check_limits().is_ok());
+    if let Some(dlq_update::Op::Dismissed(x)) = &mut d.op {
+        x.reason.push('x');
+    }
+    assert!(d.check_limits().is_err());
+    d.run_id = vec![1];
+    assert_eq!(d.run_id(), Err(IdError::BadLength(1)));
+}
+
+#[test]
+fn phase11_golden_lines_follow_phase7() {
+    // Append-only: the Phase 11 lines come after 07-03's three (lines 27..30).
+    let names: Vec<&str> = GOLDEN
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split_once('\t').expect("name<TAB>hex").0)
+        .collect();
+    assert_eq!(names[29], "resume_run");
+    assert_eq!(
+        &names[30..],
+        [
+            "dlq_update_hook_started",
+            "dlq_update_dismissed",
+            "dlq_update_requeued",
+            "start_run_rerun",
+            "events_appended_attempt"
+        ]
+    );
+}
+
+#[test]
+fn old_bytes_decode_unchanged_after_phase11() {
+    // Every line written before 11-02 decodes and re-encodes byte-identically: StartRun 40/41
+    // and JournalEvent.4 default-omit, so pre-Phase-11 commands carry none of them.
+    let pre: Vec<(&str, Command)> = {
+        let mut v = golden_commands();
+        v.extend(golden_appended());
+        v.extend(golden_appended_v5());
+        v.extend(golden_appended_v8());
+        v.extend(golden_appended_v6());
+        v.extend(golden_appended_v7());
+        v
+    };
+    assert_eq!(pre.len(), 30);
+    for (name, c) in pre {
+        let old = golden_line(name);
+        let back = decode_command(&old).expect("old bytes decode");
+        assert_eq!(back, c, "{name}");
+        assert_eq!(encode_command(&back).as_ref(), old.as_slice(), "{name}");
+        if let Some(command::Cmd::StartRun(s)) = &back.cmd {
+            assert!(s.rerun_prefix.is_empty() && s.rerun_from_seq == 0, "{name}");
+        }
+    }
 }

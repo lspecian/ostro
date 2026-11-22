@@ -381,6 +381,7 @@ pub(crate) async fn start_run(
         continued_from: Vec::new(),
         // D24 (05-25): filled by `attach_run_started` below.
         run_started: None,
+        ..Default::default()
     };
     let start = attach_run_started(handle, start, &input_bytes).await?;
     let outcome = handle
@@ -411,6 +412,7 @@ pub(crate) async fn attach_run_started(
         seq: 0,
         kind,
         payload: Some(payload),
+        ..Default::default()
     });
     Ok(start)
 }

@@ -199,6 +199,7 @@ pub async fn build_schedule_start(
         retry_of: Vec::new(),
         continued_from: Vec::new(),
         run_started: None,
+        ..Default::default()
     };
     attach_run_started(handle, start, &input_bytes)
         .await

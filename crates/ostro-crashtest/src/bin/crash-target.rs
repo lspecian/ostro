@@ -370,6 +370,7 @@ async fn load(
                         seq: run.next_seq,
                         kind: 16,
                         payload: inline(b"e"),
+                        ..Default::default()
                     }],
                     derived: d,
                 });

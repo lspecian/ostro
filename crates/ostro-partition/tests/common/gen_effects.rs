@@ -113,6 +113,7 @@ fn append(r: &GenRun, from: u64, events: u64, derived: Vec<Derived>) -> Option<C
                 seq,
                 kind: 18,
                 payload: Some(PayloadRef::inline(Bytes::from_static(b"fx"))),
+                ..Default::default()
             })
             .collect(),
         derived,

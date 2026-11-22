@@ -802,6 +802,7 @@ mod seam_tests {
                     seq,
                     kind: 16,
                     payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+                    ..Default::default()
                 })
                 .collect(),
             derived: vec![],

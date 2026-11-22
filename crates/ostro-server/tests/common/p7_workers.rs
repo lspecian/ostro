@@ -382,6 +382,7 @@ impl Rig {
             seq: 0,
             kind,
             payload: Some(payload),
+            ..Default::default()
         });
         let o = timeout(T, h.submit_one(Command::start_run(start)))
             .await

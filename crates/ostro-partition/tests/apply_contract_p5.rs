@@ -120,6 +120,7 @@ fn append(r: &RunId, derived: Vec<Derived>) -> Command {
             seq: 0,
             kind: 1,
             payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+            ..Default::default()
         }],
         derived,
     })

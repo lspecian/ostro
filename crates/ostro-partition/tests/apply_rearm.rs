@@ -36,6 +36,7 @@ fn jev(seq: u64, body: EventBody) -> JournalEvent {
         seq,
         kind,
         payload: Some(PayloadRef::inline(Bytes::from(bytes))),
+        ..Default::default()
     }
 }
 

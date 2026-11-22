@@ -648,6 +648,7 @@ pub fn successor_start(
         retry_of: Vec::new(),
         continued_from: parts.pred_id.as_bytes().to_vec(),
         run_started: None,
+        ..Default::default()
     })
 }
 

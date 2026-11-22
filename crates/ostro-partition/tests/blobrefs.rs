@@ -50,6 +50,7 @@ fn start(input: Option<PayloadRef>, started: Option<PayloadRef>) -> StartRun {
             seq: 0,
             kind: 1,
             payload: Some(p),
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -68,6 +69,7 @@ fn every_payload_ref_location_is_visited() {
             seq: 3,
             kind: 16,
             payload: p,
+            ..Default::default()
         }
         .encode_to_vec()
     };
@@ -242,6 +244,7 @@ fn blob_refs_snapshot_collects_a_deduplicated_set() {
             seq: 0,
             kind: 1,
             payload: blob(1),
+            ..Default::default()
         }
         .encode_to_vec(),
     );

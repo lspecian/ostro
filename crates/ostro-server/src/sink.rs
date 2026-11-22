@@ -406,6 +406,7 @@ impl<L: ReplicatedLog> PartitionSink<L> {
                 seq: ev.seq,
                 kind,
                 payload: Some(self.prepare(bytes).await?),
+                ..Default::default()
             });
         }
         Ok(out)

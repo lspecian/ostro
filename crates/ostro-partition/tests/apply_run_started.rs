@@ -176,6 +176,7 @@ fn started_event() -> JournalEvent {
         seq: 0,
         kind: EventKind::RunStarted.code(),
         payload: Some(inline(b"\x01opaque-run-started")),
+        ..Default::default()
     }
 }
 
@@ -287,6 +288,7 @@ fn first_activation_flag_turns_false_after_the_first_grant() {
             seq: 0,
             kind: EventKind::RunStarted.code(),
             payload: Some(inline(b"dup")),
+            ..Default::default()
         }],
         derived: vec![],
     });

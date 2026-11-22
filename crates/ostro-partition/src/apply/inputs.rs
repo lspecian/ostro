@@ -55,6 +55,7 @@ pub(crate) fn journal_input(
             seq,
             kind,
             payload: Some(PayloadRef::inline(Bytes::from(bytes))),
+            ..Default::default()
         },
     );
     advance_and_wake(b, run, rec, seq, ts_ms, actions);
@@ -84,6 +85,7 @@ pub(crate) fn journal_encoded(
             seq,
             kind: kind.code(),
             payload: Some(event.clone()),
+            ..Default::default()
         },
     );
     if wake {
@@ -210,6 +212,7 @@ mod tests {
                 seq: 3,
                 kind: EventKind::SignalPayload.code(),
                 payload: Some(blob),
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -218,6 +221,7 @@ mod tests {
                 seq: 4,
                 kind: EventKind::TokenCompleted.code(),
                 payload: Some(inline),
+                ..Default::default()
             }
         );
         // Only the waking call woke the Running run.

@@ -283,6 +283,7 @@ fn append(h: &H, r: &RunId, events: u64, derived: Vec<Derived>) -> Command {
                 seq,
                 kind: 16,
                 payload: Some(inline(b"e")),
+                ..Default::default()
             })
             .collect(),
         derived,

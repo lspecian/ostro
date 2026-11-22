@@ -7,9 +7,10 @@
 //!   fields, new oneof variants, new enum values.
 //! - Field numbers and oneof tags are never reused or renumbered. A removed field's number is
 //!   retired forever.
-//! - Reserved for future use: `Cmd` tags `14..=19`, `22..=26` and `28..=63` (blocks per phase in
-//!   `.planning/RESERVATIONS.md`; 13 is Phase 6's `CompleteEffect`, 20/21 are Phase 7's
-//!   `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`).
+//! - Reserved for future use: `Cmd` tags `14..=19`, `22..=26`, `28..=44` and `46..=63` (blocks
+//!   per phase in `.planning/RESERVATIONS.md`; 13 is Phase 6's `CompleteEffect`, 20/21 are
+//!   Phase 7's `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`, 45 is Phase 11's
+//!   `DlqUpdate`).
 //!   Unknown fields are skipped on decode, so an
 //!   older binary can read a log that carries newer optional fields.
 //! - The bytes are pinned by `tests/golden/commands.txt`.
@@ -96,6 +97,21 @@
 //!   fenced like `EventsAppended`; without it, it is an operator pause. Golden vectors
 //!   appended (`pause_run_operator`, `pause_run_auto`, `resume_run`); every older line is
 //!   byte-identical. Apply rejects both with `Invalid(NotImplemented)` until 07-04.
+//!
+//! # Phase 11 additions (plan 11-02, post-freeze, additive)
+//!
+//! Every number comes from the P11 block of `.planning/RESERVATIONS.md`; decision ids refer to
+//! `11-DECISIONS.md`.
+//!
+//! - [`Cmd::DlqUpdate`] at tag 45 (P11 block 45..=49; OPS-04): a dead-letter membership mark
+//!   (`HookStarted`, `Dismissed`, `Requeued`) for one failure episode of a run. Apply rejects
+//!   it with `Invalid(NotImplemented)` until 11-08.
+//! - [`StartRun`] fields 40 `rerun_prefix` (the journal events `1..cut` copied verbatim) and
+//!   41 `rerun_from_seq` (the cut; 0 = not a rerun) (OPS-02). Apply ignores them until 11-07.
+//! - [`JournalEvent`] field 4 `attempt` (fixed64, `epoch << 32 | n`; 0 = apply-originated or
+//!   unknown). Set by the submitter; apply stores it verbatim and never stamps it.
+//! - All three default-omit in proto3, so every older command re-encodes to the same bytes.
+//!   Golden vectors appended (`dlq_update_*`, `start_run_rerun`, `events_appended_attempt`).
 
 use bytes::Bytes;
 use prost::Message;
@@ -122,6 +138,15 @@ pub const MAX_SIGNAL_NAME_LEN: usize = 256;
 pub const MAX_REASON_LEN: usize = 1024;
 /// Maximum length of [`SignalRun::request_id`] (signal dedupe key, D13), in bytes. Phase 5.
 pub const MAX_REQUEST_ID_LEN: usize = 64;
+/// Maximum length of [`dlq_update::Dismissed::reason`], in bytes. Phase 11.
+pub const DLQ_DISMISS_REASON_MAX: usize = 1024;
+/// Prefix of system-owned run tags (`StartRun.tags`); user tags may not start with it.
+/// Phase 11 (RESERVATIONS §11).
+pub const SYSTEM_TAG_PREFIX: &str = "__ostro/";
+/// System tag of a rerun: `__ostro/rerun_from=<seq>` (zero-format rerun lineage). Phase 11.
+pub const RERUN_FROM_TAG: &str = "__ostro/rerun_from=";
+/// System tag of an on-failure hook run: `__ostro/on_failure_of=<run>`. Phase 11.
+pub const ON_FAILURE_OF_TAG: &str = "__ostro/on_failure_of=";
 
 /// Lowest timer op id reserved for apply-owned timers. Ops in
 /// `RESERVED_OP_MIN..=u64::MAX` are never allocated to guest operations; a guest
@@ -145,14 +170,15 @@ pub const fn is_reserved_op(op: u64) -> bool {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Command {
     /// The command variant. `None` only for malformed/empty input (apply rejects it as invalid).
-    /// Tags 14..=19, 22..=26 and 28..=63 are reserved for future variants
+    /// Tags 14..=19, 22..=26, 28..=44 and 46..=63 are reserved for future variants
     /// (`.planning/RESERVATIONS.md` §1; 13 is Phase 6's `CompleteEffect`, 20/21 are Phase 7's
-    /// `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`).
+    /// `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`, 45 is Phase 11's `DlqUpdate`).
     // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
     // RESERVATIONS.md: P7 = 20..26
+    // RESERVATIONS.md: P11 = 45..49
     #[prost(
         oneof = "Cmd",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 27"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 27, 45"
     )]
     pub cmd: Option<Cmd>,
 }
@@ -219,6 +245,10 @@ pub enum Cmd {
     // RESERVATIONS.md: P7 = 20..26
     #[prost(message, tag = "21")]
     ResumeRun(ResumeRun),
+    /// A dead-letter membership mark for one failure episode of a run (Phase 11, OPS-04).
+    // RESERVATIONS.md: P11 = 45..49
+    #[prost(message, tag = "45")]
+    DlqUpdate(DlqUpdate),
 }
 
 /// A new leader epoch.
@@ -348,6 +378,15 @@ pub struct StartRun {
     #[prost(message, optional, tag = "23")]
     pub run_started: Option<JournalEvent>,
     // RESERVATIONS.md: reserved P6 = 24..27, P7 = 28..31, P8 = 32..35, P9 = 36..39.
+    /// Rerun (Phase 11, OPS-02): the source run's journal events `1..rerun_from_seq`, copied
+    /// verbatim (empty = not a rerun). Applied by 11-07.
+    // RESERVATIONS.md: P11 = StartRun 40..43
+    #[prost(message, repeated, tag = "40")]
+    pub rerun_prefix: Vec<JournalEvent>,
+    /// Rerun cut (Phase 11, OPS-02): the first seq the rerun re-executes; 0 = not a rerun
+    /// (apply's rerun path is gated on `!= 0`).
+    #[prost(uint64, tag = "41")]
+    pub rerun_from_seq: u64,
 }
 
 /// A parent run and the operation that started the child.
@@ -417,6 +456,10 @@ pub struct JournalEvent {
     /// Encoded event payload.
     #[prost(message, optional, tag = "3")]
     pub payload: Option<PayloadRef>,
+    /// The attempt that produced the event, `epoch << 32 | n` (Phase 11, RESERVATIONS
+    /// `JournalEvent.4`). Submitter-set; 0 = apply-originated or unknown. Apply never stamps it.
+    #[prost(fixed64, tag = "4")]
+    pub attempt: u64,
 }
 
 /// Journal events appended by the holder of an attempt token, plus derived storage intents.
@@ -1130,6 +1173,79 @@ pub struct ResumeRun {
     pub requested_at_ms: u64,
 }
 
+/// A dead-letter membership mark (Phase 11, `Cmd` tag 45; OPS-04). Names one failure episode
+/// of a run (W5: `RunRecord.completed_at_ms` of the failure it refers to), so a mark for an
+/// older episode never affects a newer one. Implemented by 11-08.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct DlqUpdate {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// The mark.
+    #[prost(oneof = "dlq_update::Op", tags = "2, 3, 4")]
+    pub op: Option<dlq_update::Op>,
+    /// The failure episode (the run's `completed_at_ms`) this mark refers to.
+    #[prost(uint64, tag = "5")]
+    pub episode_completed_at_ms: u64,
+}
+
+/// [`DlqUpdate`] marks (Phase 11).
+pub mod dlq_update {
+    /// The mark of a [`super::DlqUpdate`].
+    #[derive(Clone, PartialEq, prost::Oneof)]
+    pub enum Op {
+        /// The on-failure hook run was started.
+        #[prost(message, tag = "2")]
+        HookStarted(HookStarted),
+        /// An operator dismissed the entry.
+        #[prost(message, tag = "3")]
+        Dismissed(Dismissed),
+        /// The run was requeued (resume, restart or rerun).
+        #[prost(message, tag = "4")]
+        Requeued(Requeued),
+    }
+
+    /// The on-failure hook run was started.
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct HookStarted {
+        /// The hook run's id (18 bytes).
+        #[prost(bytes = "vec", tag = "1")]
+        pub hook_run_id: Vec<u8>,
+    }
+
+    /// An operator dismissed the entry.
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Dismissed {
+        /// Human-readable reason, at most [`super::DLQ_DISMISS_REASON_MAX`] bytes.
+        #[prost(string, tag = "1")]
+        pub reason: String,
+        /// Dismiss time (ms), set by the submitter.
+        #[prost(uint64, tag = "2")]
+        pub at_ms: u64,
+    }
+
+    /// Requeue mode: resume the failed run ([`Requeued::mode`]).
+    pub const REQUEUE_RESUME: u32 = 0;
+    /// Requeue mode: restart from the beginning as a new run.
+    pub const REQUEUE_RESTART: u32 = 1;
+    /// Requeue mode: rerun from a cut as a new run.
+    pub const REQUEUE_RERUN: u32 = 2;
+
+    /// The run was requeued.
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub struct Requeued {
+        /// [`REQUEUE_RESUME`] (0), [`REQUEUE_RESTART`] (1) or [`REQUEUE_RERUN`] (2).
+        #[prost(uint32, tag = "1")]
+        pub mode: u32,
+        /// The new run's id (18 bytes; empty for a resume, which keeps the run id).
+        #[prost(bytes = "vec", tag = "2")]
+        pub new_run_id: Vec<u8>,
+        /// Requeue time (ms), set by the submitter.
+        #[prost(uint64, tag = "3")]
+        pub at_ms: u64,
+    }
+}
+
 /// Encode a command to its frozen protobuf bytes.
 pub fn encode_command(c: &Command) -> Bytes {
     Bytes::from(c.encode_to_vec())
@@ -1230,6 +1346,11 @@ impl Command {
         Self::of(Cmd::ResumeRun(r))
     }
 
+    /// `DlqUpdate` (Phase 11).
+    pub fn dlq_update(d: DlqUpdate) -> Self {
+        Self::of(Cmd::DlqUpdate(d))
+    }
+
     /// Variant name (for logs and metrics); `"None"` for an empty command.
     pub fn kind_name(&self) -> &'static str {
         match &self.cmd {
@@ -1250,6 +1371,7 @@ impl Command {
             Some(Cmd::CompleteEffect(_)) => "CompleteEffect",
             Some(Cmd::PauseRun(_)) => "PauseRun",
             Some(Cmd::ResumeRun(_)) => "ResumeRun",
+            Some(Cmd::DlqUpdate(_)) => "DlqUpdate",
         }
     }
 }
@@ -1393,6 +1515,23 @@ impl ResumeRun {
     /// The target run id; `Err` unless exactly 18 bytes.
     pub fn run_id(&self) -> Result<RunId, IdError> {
         parse_run_id(&self.run_id)
+    }
+}
+
+impl DlqUpdate {
+    /// The target run id; `Err` unless exactly 18 bytes.
+    pub fn run_id(&self) -> Result<RunId, IdError> {
+        parse_run_id(&self.run_id)
+    }
+
+    /// Checks a `Dismissed` reason ≤ [`DLQ_DISMISS_REASON_MAX`].
+    pub fn check_limits(&self) -> Result<(), FieldTooLong> {
+        match &self.op {
+            Some(dlq_update::Op::Dismissed(d)) => {
+                check_len("reason", d.reason.len(), DLQ_DISMISS_REASON_MAX)
+            }
+            _ => Ok(()),
+        }
     }
 }
 

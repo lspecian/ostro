@@ -44,6 +44,7 @@ fn events(run: &RunId, tok: (u32, u32), from: u64) -> Command {
             seq: from,
             kind: 16,
             payload: Some(PayloadRef::inline(bytes::Bytes::from_static(b"e"))),
+            ..Default::default()
         }],
         derived: vec![],
     })

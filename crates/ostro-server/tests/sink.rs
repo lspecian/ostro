@@ -506,6 +506,7 @@ async fn repair_completes_effects_left_without_completion() {
                 seq: 1,
                 kind,
                 payload: Some(PayloadRef::inline(bytes.into())),
+                ..Default::default()
             }],
             derived: vec![],
         }))
@@ -595,6 +596,7 @@ async fn read_journal_decode_failure_names_run_and_seq() {
                 seq: 1,
                 kind: 999,
                 payload: Some(PayloadRef::inline(Bytes::from_static(b"\x01junk"))),
+                ..Default::default()
             }],
             derived: vec![],
         }))
@@ -686,6 +688,7 @@ async fn raw_append(f: &Fixture, from: u64, events: &[Event]) {
                 seq: e.seq,
                 kind,
                 payload: Some(PayloadRef::inline(bytes.into())),
+                ..Default::default()
             }
         })
         .collect();

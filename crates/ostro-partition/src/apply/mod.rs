@@ -29,13 +29,18 @@
 //!   [`apply_chunk`] is a plain loop over [`apply_command`].
 
 pub mod cursor;
+// Phase 11 (11-02 stubs, D-P11-23): `dlq.rs` filled by 11-08, `index.rs` (x_run_index hooks)
+// by 11-05, `rerun.rs` (rerun prefix) by 11-07.
+mod dlq;
 mod effects;
 mod inbound;
+mod index;
 mod inputs;
 mod lifecycle;
 mod outbox;
 pub mod outcome;
 mod pause;
+mod rerun;
 mod retention;
 pub(crate) mod run;
 mod schedule;
@@ -153,6 +158,8 @@ fn dispatch(
         // Phase 7 (07-03 routing stubs; implemented in 07-04): pause / resume (`pause.rs`).
         Cmd::PauseRun(p) => pause::apply_pause_run(b, cur, p, actions),
         Cmd::ResumeRun(r) => pause::apply_resume_run(b, cur, r, actions),
+        // Phase 11 (11-02 stub; implemented in 11-08): dead-letter marks (`dlq.rs`).
+        Cmd::DlqUpdate(d) => dlq::apply_dlq_update(b, cur, d, actions),
     }
 }
 

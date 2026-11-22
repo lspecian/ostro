@@ -171,6 +171,7 @@ fn append(r: &RunId, from: u64, events: u64, derived: Vec<Derived>) -> Command {
                 seq,
                 kind: 16,
                 payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+                ..Default::default()
             })
             .collect(),
         derived,
@@ -591,6 +592,7 @@ fn inbound_signal_buffers_without_waits() {
             seq: 3,
             kind: ostro_types::journal::EventKind::SignalPayload.code(),
             payload: Some(big),
+            ..Default::default()
         }
     );
     assert_eq!(

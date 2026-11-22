@@ -208,6 +208,7 @@ pub fn ev(seq: u64) -> JournalEvent {
         seq,
         kind: 16,
         payload: Some(PayloadRef::inline(Bytes::from_static(b"e"))),
+        ..Default::default()
     }
 }
 

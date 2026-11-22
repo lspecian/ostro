@@ -193,6 +193,7 @@ pub fn commands(op: &WaitOp, runs: &[GenRun], n: usize) -> Vec<(u16, Command)> {
                         seq: op,
                         kind: 16,
                         payload: Some(PayloadRef::inline(Bytes::from_static(b"w"))),
+                        ..Default::default()
                     }],
                     derived,
                 }),

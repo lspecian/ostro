@@ -141,6 +141,7 @@ fn ev(seq: u64, kind: u32) -> JournalEvent {
         seq,
         kind,
         payload: inline(b"e"),
+        ..Default::default()
     }
 }
 

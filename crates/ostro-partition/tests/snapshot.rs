@@ -88,6 +88,7 @@ fn chunk_ops(i: u64) -> Vec<(Table, Vec<u8>, Option<Vec<u8>>)> {
                     seq: 0,
                     kind: 16,
                     payload: Some(payload(i)),
+                    ..Default::default()
                 }
                 .encode_to_vec(),
             ),
