@@ -7,8 +7,9 @@
 //!   fix). `--json` bodies are snapshot-tested with ids and times redacted.
 //! - `bulk_*`: against an in-process `ostro_api::router` over the `ostro_api::fake`
 //!   fakes (D-P11-24 e): request bodies are asserted on what the fake received.
-//! - `help_*`: `--help` of every new verb is snapshot-tested. `ostro completions` does
-//!   not exist at this HEAD (Phase 10 10-18), so there is no completions assertion.
+//! - `help_*`: `--help` of every new verb is snapshot-tested.
+//! - `completions_list_phase11_verbs` (10-18): every `ostro completions <shell>` script
+//!   names the verbs `rerun`, `dlq`, `bulk` and `limits` (presence only, no snapshot).
 
 mod common;
 #[path = "common/p11.rs"]
@@ -52,6 +53,27 @@ fn help_rerun_dlq_bulk_limits() {
                 .any(|l| l.split_whitespace().next() == Some(verb)),
             "--help lacks {verb}:\n{top}"
         );
+    }
+}
+
+#[test]
+fn completions_list_phase11_verbs() {
+    let part = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let mut cmd = command();
+        cmd.args(["completions", shell]);
+        let (st, out, err) = run_to_end(cmd);
+        assert!(st.success(), "completions {shell}: {err}");
+        for verb in ["rerun", "dlq", "bulk", "limits"] {
+            let found = out.match_indices(verb).any(|(i, _)| {
+                out[..i].chars().next_back().is_none_or(|c| !part(c))
+                    && out[i + verb.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !part(c))
+            });
+            assert!(found, "{shell} completions lack the verb {verb}");
+        }
     }
 }
 

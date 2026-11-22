@@ -8,6 +8,9 @@
 //! `GET /v1/admin/backup`; the offline backup (`--data-dir`) and restore run here on
 //! [`ostro_backup`] (see docs/bottomless.md, "Restore runbook").
 //!
+//! `ostro completions <shell>` (10-18) prints a clap_complete script for the live clap
+//! tree.
+//!
 //! `ostro worker` (07-15) is the remote worker process ([`worker`]): it joins a cluster
 //! (or uses an external certificate), runs activations until SIGINT / SIGTERM, then
 //! drains. `ostro worker token create|list|revoke` are client verbs
@@ -26,11 +29,11 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+use ostro_build as _;
 use ostro_server::ServerHandle;
 use ostro_server::config::{EnvSource, Overrides, ServerConfig, load_layered};
 use ostro_server::logging::init_tracing;
 use ostro_server::tls::TlsProfile;
-use {clap_complete as _, ostro_build as _};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -102,9 +105,25 @@ enum Command {
     /// join tokens).
     #[command(args_conflicts_with_subcommands = true)]
     Worker(Box<worker::WorkerCli>),
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish) on stdout.
+    #[command(after_help = COMPLETIONS_INSTALL)]
+    Completions {
+        /// The shell to generate the script for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     #[command(flatten)]
     Client(Box<ostro_cli::ClientCommand>),
 }
+
+/// Install lines shown by `ostro completions --help` (10-18).
+const COMPLETIONS_INSTALL: &str = "\
+Install:
+  bash:        ostro completions bash > ~/.local/share/bash-completion/completions/ostro
+  zsh:         ostro completions zsh > ~/.zfunc/_ostro   (with fpath+=~/.zfunc before compinit)
+  fish:        ostro completions fish > ~/.config/fish/completions/ostro.fish
+  powershell:  ostro completions powershell >> $PROFILE
+  elvish:      ostro completions elvish >> ~/.config/elvish/rc.elv";
 
 /// `build-info` suffix of a failpoint-enabled build (the crash campaign checks it).
 #[cfg(feature = "failpoints")]
@@ -219,6 +238,11 @@ fn main() -> ExitCode {
         Some(Command::Backup(a)) => run_backup(&a),
         Some(Command::Restore(a)) => run_restore(&a),
         Some(Command::Worker(w)) => worker::main(*w, started),
+        Some(Command::Completions { shell }) => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "ostro", &mut std::io::stdout());
+            ExitCode::SUCCESS
+        }
         Some(Command::Client(cmd)) => ostro_cli::run(*cmd).into(),
         None => {
             use clap::CommandFactory;
