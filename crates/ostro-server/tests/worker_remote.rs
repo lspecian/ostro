@@ -37,8 +37,9 @@ use ostro_server::workers::service::WireDir;
 use ostro_testkit::canary::{Canary, Quiet, spawn_quiet};
 use ostro_types::command::{PAUSE_REASON_OPERATOR, PauseRun};
 use ostro_types::journal::{
-    CommandHash, CommandMeta, EffectRequest, EffectScheduled, Event, EventBody, HASH_VER, Header,
-    HttpRequest, encode_event,
+    CommandArgs, CommandHash, CommandMeta, EffectRequest, EffectScheduled, Event, EventBody,
+    HASH_VER, Header, HttpRequest, OpCancelled, TimerFired, TimerStarted, command_hash,
+    encode_event,
 };
 use ostro_types::{Command, RunId};
 use ostro_worker_proto::v1;
@@ -116,8 +117,13 @@ fn remote_jobs(s: &TestServer, run: &RunId) -> Vec<ostro_server::executor::JobRe
 /// [`journal_shape`] without the timing-dependent interleaving of timer inputs: when
 /// `TimerFired` lands relative to the guest's wait decides how many `WaitResolved` a
 /// `join!` journals, in any two executions (embedded or not). Seqs are dropped.
+///
+/// An op id is the seq of the event that scheduled it, so it shifts with that same
+/// interleaving, and so does the `CancelOp { op }` command hash (`op` is hashed). An
+/// `OpCancelled` is therefore compared by its target's position in the timing-free
+/// shape, after checking that its hash is the canonical `CancelOp` hash of its op.
 fn timing_free_shape(j: &[Event]) -> Vec<String> {
-    journal_shape(j)
+    let kept: Vec<(String, &Event)> = journal_shape(j)
         .into_iter()
         .zip(j)
         .filter(|(_, e)| {
@@ -126,8 +132,95 @@ fn timing_free_shape(j: &[Event]) -> Vec<String> {
                 EventBody::TimerFired(_) | EventBody::WaitResolved(_)
             )
         })
-        .map(|(s, _)| s.split_once(' ').map(|(_, r)| r.to_owned()).unwrap_or(s))
+        .collect();
+    kept.iter()
+        .map(|(s, e)| {
+            if let EventBody::OpCancelled(c) = &e.body {
+                let want = command_hash(c.meta.hash_ver, &CommandArgs::CancelOp { op: c.op })
+                    .expect("cancel-op hash");
+                assert_eq!(c.meta.hash, want, "OpCancelled hash of op {}", c.op);
+                let target = kept
+                    .iter()
+                    .position(|(_, t)| t.seq == c.op)
+                    .unwrap_or_else(|| panic!("OpCancelled targets unknown op {}", c.op));
+                return format!("OpCancelled op=#{target} hash_ver={}", c.meta.hash_ver);
+            }
+            s.split_once(' ')
+                .map(|(_, r)| r.to_owned())
+                .unwrap_or_else(|| s.clone())
+        })
         .collect()
+}
+
+/// The CI flake behind `timing_free_shape`'s `OpCancelled` rule (ci-fix3): the same
+/// `sdk-basic` tail with one more `TimerFired` journaled before the `select!` timers
+/// shifts both timer seqs, so the `CancelOp` hash differs; the shapes must still match,
+/// and a cancel of the wrong timer must not.
+#[test]
+fn timing_free_shape_ignores_timer_input_seq_shift() {
+    let meta = |b: u8| CommandMeta {
+        hash_ver: HASH_VER,
+        hash: CommandHash([b; 16]),
+    };
+    let cancel = |op: u64| {
+        EventBody::OpCancelled(OpCancelled {
+            meta: CommandMeta {
+                hash_ver: HASH_VER,
+                hash: command_hash(HASH_VER, &CommandArgs::CancelOp { op }).expect("hash"),
+            },
+            op,
+        })
+    };
+    let timer = |b: u8| {
+        EventBody::TimerStarted(TimerStarted {
+            meta: meta(b),
+            fire_at_nanos: 0,
+        })
+    };
+    let fired = |op: u64| EventBody::TimerFired(TimerFired { op });
+    let journal = |bodies: Vec<EventBody>| -> Vec<Event> {
+        bodies
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| Event {
+                seq: i as u64 + 1,
+                ts_nanos: 0,
+                body,
+            })
+            .collect()
+    };
+    // seq: 1 a, 2 b, 3 fired(1), [4 fired(2)], short, long, fired(short), cancel(long).
+    let fast = journal(vec![
+        timer(1),
+        timer(2),
+        fired(1),
+        timer(3),
+        timer(4),
+        fired(4),
+        cancel(5),
+    ]);
+    let slow = journal(vec![
+        timer(1),
+        timer(2),
+        fired(1),
+        fired(2),
+        timer(3),
+        timer(4),
+        fired(5),
+        cancel(6),
+    ]);
+    assert_ne!(journal_shape(&fast), journal_shape(&slow));
+    assert_eq!(timing_free_shape(&fast), timing_free_shape(&slow));
+    let wrong = journal(vec![
+        timer(1),
+        timer(2),
+        fired(1),
+        timer(3),
+        timer(4),
+        fired(5),
+        cancel(4),
+    ]);
+    assert_ne!(timing_free_shape(&fast), timing_free_shape(&wrong));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
