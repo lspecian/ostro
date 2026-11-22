@@ -699,7 +699,17 @@ async fn processed_set_survives_restart_and_finished_jobs_stay_listed() {
 
     s.restart().await;
     s.wait_ready(Duration::from_secs(20)).await;
-    let (_, l) = s.get_json("/v1/bulk").await;
+    // The bulk service reloads `<data>/bulk` in its own task, which readiness does not
+    // wait for: poll until the reloaded job is listed.
+    let deadline = Instant::now() + LIMIT;
+    let l = loop {
+        let (_, l) = s.get_json("/v1/bulk").await;
+        if l["jobs"].as_array().is_some_and(|j| !j.is_empty()) {
+            break l;
+        }
+        assert!(Instant::now() < deadline, "bulk jobs not reloaded: {l}");
+        sleep(Duration::from_millis(20)).await;
+    };
     let jobs = l["jobs"].as_array().expect("jobs");
     assert_eq!(jobs.len(), 1, "{l}");
     assert_eq!(jobs[0]["job_id"], id.as_str());
