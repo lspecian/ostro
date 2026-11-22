@@ -333,26 +333,58 @@ async fn github_slack_hmac_hooks() {
 // SC2 / TRIG-03 through the CLI
 // ---------------------------------------------------------------------------------
 
-/// The `ostro` binary of this build (debug or release, same target dir), built once.
+/// The `ostro` binary of this build (same target dir, target triple and profile), built
+/// once.
+///
+/// The layout is read off this test binary's own path: the nearest ancestor holding
+/// `CACHEDIR.TAG` is the target dir, and the first component below it is either the
+/// profile (`debug` / `release`) or, for a `--target <triple>` build such as the musl CI
+/// legs (`cargo-zigbuild test --target ...`), the triple followed by the profile. Building
+/// with the same `--target` reuses the artifacts this test run already built (and the
+/// zig linker env that `cargo-zigbuild` passes down); building for the host instead would
+/// compile the whole workspace a second time, which filled the CI runner's disk.
 fn ostro_bin() -> PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
-        // The target dir of this build: CARGO_TARGET_DIR, else <repo>/target. The profile
-        // is `release` when this test binary lives under a `release` directory.
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(|t| repo_root().join(t))
-            .unwrap_or_else(|| repo_root().join("target"));
         let exe = std::env::current_exe().expect("current exe");
-        let release = exe.components().any(|c| c.as_os_str() == "release");
-        let profile_dir = target.join(if release { "release" } else { "debug" });
+        let target = exe
+            .ancestors()
+            .skip(1)
+            .find(|d| d.join("CACHEDIR.TAG").is_file())
+            .unwrap_or_else(|| panic!("no target dir (CACHEDIR.TAG) above {}", exe.display()))
+            .to_path_buf();
+        let rel: Vec<String> = exe
+            .strip_prefix(&target)
+            .expect("exe under target dir")
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let (triple, profile) = match rel.first().map(String::as_str) {
+            Some("debug") | Some("release") => (None, rel[0].clone()),
+            Some(t) => (
+                Some(t.to_owned()),
+                rel.get(1).cloned().expect("profile dir"),
+            ),
+            None => panic!("test exe directly in the target dir"),
+        };
+        let mut profile_dir = target.clone();
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut cmd = Command::new(cargo);
         cmd.current_dir(repo_root())
             .args(["build", "-p", "ostro", "--locked"])
             .env("CARGO_TARGET_DIR", &target);
-        if release {
-            cmd.arg("--release");
+        if let Some(t) = &triple {
+            cmd.args(["--target", t]);
+            profile_dir.push(t);
         }
+        match profile.as_str() {
+            "release" => {
+                cmd.arg("--release");
+            }
+            "debug" => {}
+            other => panic!("unexpected profile dir {other:?} in {}", exe.display()),
+        }
+        profile_dir.push(&profile);
         let out = cmd.output().expect("spawn cargo build -p ostro");
         assert!(
             out.status.success(),
