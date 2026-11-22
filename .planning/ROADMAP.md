@@ -343,7 +343,7 @@ Plans:
 - [x] 09-14-PLAN.md — Python conformance: engine + server legs 100% vs Rust, C-NATIVE-01 (WF-07) (SDK-05/04/02, WF-06/07/10) (W5)
 - [x] 09-15-PLAN.md — TS conformance: engine + server legs 100% vs Rust, C-NATIVE-01 (WF-07), StarlingMonkey smoke (SDK-05/04/03, WF-06/07/10) (W5)
 - [x] 09-16-PLAN.md — Cross-language: TS→Py→Rust chain (C-CHILD-08), HTTP saga in all languages (C-SAGA-03), value probes (C-VAL-01), full scenario × language table (SDK-05, WF-06, WF-10) (W6)
-- [ ] 09-17-PLAN.md — Reproducible builds per D-P9-3 (wrapper → pinned fork → documented residual), repro-check + C-REBUILD-01, packaging dry runs, ci-local polyglot block + SHA-pinned ci.yml job (SDK-04, SDK-02/03) (W7)
+- [x] 09-17-PLAN.md — Reproducible builds per D-P9-3 (wrapper → pinned fork → documented residual), repro-check + C-REBUILD-01, packaging dry runs, ci-local polyglot block + SHA-pinned ci.yml job (SDK-04, SDK-02/03) (W7)
 - [ ] 09-18-PLAN.md — Crash leg SC3: TS→Python→Rust chain under kill -9 + child failpoints, cancel reaches every descendant, 100-iteration gate run (WF-06, SDK-05) (W8)
 - [ ] 09-19-PLAN.md — SC5 measurements with real SDKs: warm instantiate, first call, start-to-first-step, idle RSS, mixed pool sizing; docs/sdk-resources.md (SDK-02/03) (W9)
 - [ ] 09-20-PLAN.md — PHASE-9 GATE: full gate + evidence, SDK READMEs, docs/conformance.md + docs/children.md, RESERVATIONS flip, REQUIREMENTS ticks (WF-07 only with C-NATIVE-01 evidence), VALIDATION, DECISIONS fold-in, STATE (all) (W10)
