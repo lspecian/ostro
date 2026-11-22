@@ -366,7 +366,7 @@ Plans:
 - [x] 10-02-PLAN.md — Contract A (Cargo/deny/ci mutex holder): every Phase 10 dep incl. test deps, notify CC0 crate-scoped exception, ostro-build/ostro-client skeletons, fixture HTTP server, ci-local/ci.yml client + polyglot steps (all) (W2)
 - [x] 10-03-PLAN.md — Contract B: CLI verb stubs with full flag sets (positional replay RUNs), exit code 4, local JSON envelope, p10 spawn helpers (CLI-03..08) (W2)
 - [ ] 10-04-PLAN.md — Contract C: Python/TS/Go client package scaffolds (SDK-06, SDK-07) (W2)
-- [ ] 10-05-PLAN.md — API contract: GET /v1/dev/time, POST /v1/dev/time/skip, POST /v1/modules/{sha}/replay (trait defaults, REST, OpenAPI, fake, REST-only parity exclusion), server delegation stubs, client methods (SDK-06, SDK-07, CLI-07) (W2)
+- [x] 10-05-PLAN.md — API contract: GET /v1/dev/time, POST /v1/dev/time/skip, POST /v1/modules/{sha}/replay (trait defaults, REST, OpenAPI, fake, REST-only parity exclusion), server delegation stubs, client methods (SDK-06, SDK-07, CLI-07) (W2)
 - [ ] 10-06-PLAN.md — Clock-exempt sweep: comment-only `// clock-exempt:` annotations in partition/server real-time sites so the F5 clock gate passes (SDK-06) (W2)
 - [ ] 10-07-PLAN.md — Hermetic toolchain cache: pinned toolchains.toml, verified fetch with timeouts/size cap, hardened extraction, async-safe locking, tools/state namespacing, offline/mirror, ostro toolchain/doctor (CLI-04) (W3)
 - [ ] 10-08-PLAN.md — Deterministic embedded SDK bundle, ostro.toml project model, rust/python/ts templates, ostro init (CLI-03) (W3)
