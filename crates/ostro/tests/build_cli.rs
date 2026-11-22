@@ -129,7 +129,8 @@ fn compile_error_and_forbidden_import_exit_1() {
     );
     assert_ne!(forbidden, original);
     std::fs::write(&lib, forbidden).unwrap();
-    let (code, out, err) = p10::run_cli_in(&t, &["build", "--json"], ENV);
+    // A relative DIR (from the parent dir): the step resolves it before running cargo.
+    let (code, out, err) = p10::run_cli_in(d.path(), &["build", "t", "--json"], ENV);
     assert_eq!(code, 1, "{out}{err}");
     assert!(
         err.contains("failed validation") && err.contains("wasi:filesystem"),

@@ -382,7 +382,11 @@ pub fn build_with(
     host: HostEnv,
     steps: StepFactory,
 ) -> Result<BuildOutput, BuildError> {
-    let project = project::load(&opts.dir)?;
+    // Absolute: the steps run tools with the project as their cwd (a relative
+    // CARGO_TARGET_DIR would resolve against it).
+    let dir = std::path::absolute(&opts.dir)
+        .map_err(|e| BuildError::io(format!("resolving {}", opts.dir.display()), e))?;
+    let project = project::load(&dir)?;
     let lang = project.manifest.project.lang;
     let requested = if opts.docker {
         ToolchainMode::Docker
