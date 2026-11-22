@@ -438,7 +438,7 @@ async fn interrupted_install_leftover_is_cleaned() {
     within(async {
         let srv = FixtureServer::spawn_default().await;
         let (_d, cache) = temp_cache();
-        // a pid above Linux's PID_MAX_LIMIT (2^22) is never alive
+        // a pid above PID_MAX_LIMIT on Linux (2^22) and macOS (99998) is never alive
         let leftover = cache.tools_dir().join(".tmp-4194399-0");
         std::fs::create_dir_all(leftover.join("entry/bin")).unwrap();
         std::fs::write(leftover.join("download"), b"partial").unwrap();

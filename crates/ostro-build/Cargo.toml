@@ -26,6 +26,10 @@ tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# stale install dir sweep: kill(pid, 0) liveness (macOS has no /proc)
+libc.workspace = true
+
 [build-dependencies]
 # 10-08: build.rs bundles the SDK sources (sdk_bundle.tar) and hashes them
 toml = "1.2"

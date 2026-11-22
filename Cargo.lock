@@ -3484,6 +3484,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "insta",
+ "libc",
  "lzma-rust2",
  "ostro-engine",
  "reqwest",

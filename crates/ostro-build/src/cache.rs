@@ -171,7 +171,8 @@ impl Cache {
 }
 
 /// Remove `tools/.tmp-<pid>-<n>` dirs left by dead processes (or by this process: under the
-/// lock no install of ours is running). Without `/proc`, dirs older than an hour are stale.
+/// lock no install of ours is running). Where liveness is not observable, dirs older than
+/// an hour are stale.
 fn clean_stale_tmp(tools: &Path) {
     let Ok(rd) = fs::read_dir(tools) else { return };
     let me = std::process::id();
@@ -195,14 +196,34 @@ fn clean_stale_tmp(tools: &Path) {
     }
 }
 
-/// `Some(alive)` where liveness is observable (`/proc`), else `None`.
+/// `Some(alive)` where liveness is observable (`kill(pid, 0)` on Unix), else `None`.
+///
+/// Not `/proc`: macOS has none, so every leftover of a crashed install there only went
+/// stale after an hour.
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> Option<bool> {
-    let proc = Path::new("/proc");
-    if proc.join("self").exists() {
-        Some(proc.join(pid.to_string()).exists())
-    } else {
-        None
+    // pid 0 / negative pid_t would address a process group, never one installer
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Some(false);
+    };
+    if pid <= 0 {
+        return Some(false);
     }
+    // SAFETY: signal 0 performs only the existence/permission check; nothing is delivered.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Some(true);
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Some(false),
+        // EPERM: the process exists but belongs to another user
+        Some(libc::EPERM) => Some(true),
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> Option<bool> {
+    None
 }
 
 fn older_than(p: &Path, age: Duration) -> bool {
