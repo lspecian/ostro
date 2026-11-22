@@ -1,0 +1,227 @@
+# Pinned hermetic toolchains (D-P10-1..D-P10-4, plan 10-07).
+#
+# Every artefact is downloaded only through `ostro_build::toolchain::ensure`, which streams
+# the sha256 and compares it with the pin below BEFORE anything is extracted or executed.
+# The file is embedded into the binary (`include_str!`); the toolchain-set id is the first 16
+# hex of sha256(this file), so editing any byte here changes the id (and build input hashes).
+#
+# Schema: one `[[tool]]` per (tool, platform):
+#   name      uv | componentize-py | node | rustup-init | zig
+#   version   exact version
+#   platform  linux-x86_64 | linux-aarch64 | macos-aarch64 | macos-x86_64
+#   kind      tar.gz | tar.xz | binary | wheel (wheels are verified, never extracted)
+#   url       https URL
+#   sha256    64 lower-case hex, from the official checksum source named in `# source:`
+#   strip     optional leading directory dropped on extraction
+#   max_bytes optional size cap (default 512 MiB)
+#
+# Mirrors: OSTRO_TOOLCHAIN_MIRROR=<base> rewrites every URL here to `<base>/<url path>`; the
+# sha256 stays authoritative. The builders map the same base to
+# UV_PYTHON_INSTALL_MIRROR=<base>/python-build-standalone (10-15) and
+# RUSTUP_DIST_SERVER=<base>/rustup + RUSTUP_UPDATE_ROOT=<base>/rustup/rustup (10-12).
+#
+# CPython is NOT pinned here: the host interpreter is installed by the pinned uv
+# (`uv python install 3.12`, UV_PYTHON_PREFERENCE=only-managed), and uv verifies its own
+# python-build-standalone downloads (D-P10-2).
+#
+# The npm toolchain (jco, rolldown) is not pinned here either: 10-15 runs `npm ci` with the
+# pinned Node against the embedded sdks/scripts/toolchain package-lock.json (integrity hashes).
+
+# ---------------------------------------------------------------------------------------
+# uv 0.7.15 (D-P9-28 / D-P10-2): static musl on Linux, darwin builds on macOS.
+# source: https://github.com/astral-sh/uv/releases/download/0.7.15/<file>.sha256
+# ---------------------------------------------------------------------------------------
+
+[[tool]]
+name = "uv"
+version = "0.7.15"
+platform = "linux-x86_64"
+kind = "tar.gz"
+url = "https://github.com/astral-sh/uv/releases/download/0.7.15/uv-x86_64-unknown-linux-musl.tar.gz"
+sha256 = "c97afc120614c88bd8c13dac2d35015bc59656289633d61bc438e7e680a38710"
+strip = "uv-x86_64-unknown-linux-musl"
+
+[[tool]]
+name = "uv"
+version = "0.7.15"
+platform = "linux-aarch64"
+kind = "tar.gz"
+url = "https://github.com/astral-sh/uv/releases/download/0.7.15/uv-aarch64-unknown-linux-musl.tar.gz"
+sha256 = "4351c1e2ec13f5eb4da058ac1c39f00ae3042de9d6fdb6480e0170f32813210f"
+strip = "uv-aarch64-unknown-linux-musl"
+
+[[tool]]
+name = "uv"
+version = "0.7.15"
+platform = "macos-aarch64"
+kind = "tar.gz"
+url = "https://github.com/astral-sh/uv/releases/download/0.7.15/uv-aarch64-apple-darwin.tar.gz"
+sha256 = "7a20f3d33cbbc75683d66e0562d4bdbd702ca656d7dc1b7be3c592de6a6517b9"
+strip = "uv-aarch64-apple-darwin"
+
+[[tool]]
+name = "uv"
+version = "0.7.15"
+platform = "macos-x86_64"
+kind = "tar.gz"
+url = "https://github.com/astral-sh/uv/releases/download/0.7.15/uv-x86_64-apple-darwin.tar.gz"
+sha256 = "4c7c1fe116566b6f8725a3801a33fa5e066b8687643acd73249e5db1351c2103"
+strip = "uv-x86_64-apple-darwin"
+
+# ---------------------------------------------------------------------------------------
+# componentize-py 0.25.1 released wheels (D-P9-30 / D-P10-2). Never the GitHub release
+# binary on Linux (it needs GLIBC_2.39).
+# source: https://pypi.org/pypi/componentize-py/0.25.1/json (urls[].digests.sha256)
+# ---------------------------------------------------------------------------------------
+
+[[tool]]
+name = "componentize-py"
+version = "0.25.1"
+platform = "linux-x86_64"
+kind = "wheel"
+url = "https://files.pythonhosted.org/packages/ed/c6/ad1431751ff1969a132323f6e2797ec38ccdf9d0a53aabb45d79221092a4/componentize_py-0.25.1-cp39-abi3-manylinux_2_28_x86_64.whl"
+sha256 = "8623cd8cab8453cb0cd8bf03f3c7103420d06f2f3d360186a280a70a1ca5e89f"
+
+[[tool]]
+name = "componentize-py"
+version = "0.25.1"
+platform = "linux-aarch64"
+kind = "wheel"
+url = "https://files.pythonhosted.org/packages/56/66/24a9671f1d9c608e53a8d5ae4873d1fc480f0603488a2f46132e70cc6839/componentize_py-0.25.1-cp39-abi3-manylinux_2_28_aarch64.whl"
+sha256 = "7b6a87c520358166843af0daa86d2312d7af4cbcbbf1e598951085cf7f2991ca"
+
+[[tool]]
+name = "componentize-py"
+version = "0.25.1"
+platform = "macos-aarch64"
+kind = "wheel"
+url = "https://files.pythonhosted.org/packages/4b/9c/f444240899a9b43c60b808d0ece5dff8f3dc6831aa119a1d8eb28d952bad/componentize_py-0.25.1-cp39-abi3-macosx_11_0_arm64.whl"
+sha256 = "a556991534cc496207a9d2ca733c4b0f17ed38ef56a8d6b5f1847fdf1225dd1b"
+
+[[tool]]
+name = "componentize-py"
+version = "0.25.1"
+platform = "macos-x86_64"
+kind = "wheel"
+url = "https://files.pythonhosted.org/packages/a1/fc/ea8ac30a3de452626e32c051a38f548e9f7863cd10c35705396e257ac029/componentize_py-0.25.1-cp39-abi3-macosx_10_12_x86_64.whl"
+sha256 = "65fbc4a94df1de8acf7da50a1f5ed1711230188844e53e6332d99029be4e0afa"
+
+# ---------------------------------------------------------------------------------------
+# Node 24.13.0 = the 09-17 CI pin (.github/workflows/ci.yml node-version, D-P10-3).
+# source: https://nodejs.org/dist/v24.13.0/SHASUMS256.txt
+# ---------------------------------------------------------------------------------------
+
+[[tool]]
+name = "node"
+version = "24.13.0"
+platform = "linux-x86_64"
+kind = "tar.xz"
+url = "https://nodejs.org/dist/v24.13.0/node-v24.13.0-linux-x64.tar.xz"
+sha256 = "e798599612f4bb71333a3397ab0d095fd62214e115aea45aa858a145fc72d67e"
+strip = "node-v24.13.0-linux-x64"
+
+[[tool]]
+name = "node"
+version = "24.13.0"
+platform = "linux-aarch64"
+kind = "tar.xz"
+url = "https://nodejs.org/dist/v24.13.0/node-v24.13.0-linux-arm64.tar.xz"
+sha256 = "aa881151bd0f9f154a0424dd60a72e9ce10672619121658c278a24327ef46831"
+strip = "node-v24.13.0-linux-arm64"
+
+[[tool]]
+name = "node"
+version = "24.13.0"
+platform = "macos-aarch64"
+kind = "tar.gz"
+url = "https://nodejs.org/dist/v24.13.0/node-v24.13.0-darwin-arm64.tar.gz"
+sha256 = "d595961e563fcae057d4a0fb992f175a54d97fcc4a14dc2d474d92ddeea3b9f8"
+strip = "node-v24.13.0-darwin-arm64"
+
+[[tool]]
+name = "node"
+version = "24.13.0"
+platform = "macos-x86_64"
+kind = "tar.gz"
+url = "https://nodejs.org/dist/v24.13.0/node-v24.13.0-darwin-x64.tar.gz"
+sha256 = "6f03c1b48ddbe1b129a6f8038be08e0899f05f17185b4d3e4350180ab669a7f3"
+strip = "node-v24.13.0-darwin-x64"
+
+# ---------------------------------------------------------------------------------------
+# rustup-init 1.29.3 (the stable rustup release at pin time, D-P10-4).
+# source: https://static.rust-lang.org/rustup/release-stable.toml (version) and
+#         https://static.rust-lang.org/rustup/archive/1.29.3/<triple>/rustup-init.sha256
+# ---------------------------------------------------------------------------------------
+
+[[tool]]
+name = "rustup-init"
+version = "1.29.3"
+platform = "linux-x86_64"
+kind = "binary"
+url = "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init"
+sha256 = "b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55"
+
+[[tool]]
+name = "rustup-init"
+version = "1.29.3"
+platform = "linux-aarch64"
+kind = "binary"
+url = "https://static.rust-lang.org/rustup/archive/1.29.3/aarch64-unknown-linux-gnu/rustup-init"
+sha256 = "9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282"
+
+[[tool]]
+name = "rustup-init"
+version = "1.29.3"
+platform = "macos-aarch64"
+kind = "binary"
+url = "https://static.rust-lang.org/rustup/archive/1.29.3/aarch64-apple-darwin/rustup-init"
+sha256 = "63752a1919a3a4793173ec70f8f212621a7ce38ba6a246095984482f4de20f9f"
+
+[[tool]]
+name = "rustup-init"
+version = "1.29.3"
+platform = "macos-x86_64"
+kind = "binary"
+url = "https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-apple-darwin/rustup-init"
+sha256 = "bc107f1fb0228de7fa32413c89c1b305cea9cd256e94b01150cd054128145429"
+
+# ---------------------------------------------------------------------------------------
+# zig 0.17.1 (the CI zig, D-P10-4): the `cc` shim when the host has no C compiler.
+# source: https://ziglang.org/download/index.json ("0.17.1".<arch>-<os>.shasum)
+# ---------------------------------------------------------------------------------------
+
+[[tool]]
+name = "zig"
+version = "0.17.1"
+platform = "linux-x86_64"
+kind = "tar.xz"
+url = "https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz"
+sha256 = "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a"
+strip = "zig-x86_64-linux-0.17.1"
+
+[[tool]]
+name = "zig"
+version = "0.17.1"
+platform = "linux-aarch64"
+kind = "tar.xz"
+url = "https://ziglang.org/download/0.17.1/zig-aarch64-linux-0.17.1.tar.xz"
+sha256 = "a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795"
+strip = "zig-aarch64-linux-0.17.1"
+
+[[tool]]
+name = "zig"
+version = "0.17.1"
+platform = "macos-aarch64"
+kind = "tar.xz"
+url = "https://ziglang.org/download/0.17.1/zig-aarch64-macos-0.17.1.tar.xz"
+sha256 = "75f1bc7a1e9852f17ec9a0c1895f767c4ec56d46bc8a834920eece1d0359dd8d"
+strip = "zig-aarch64-macos-0.17.1"
+
+[[tool]]
+name = "zig"
+version = "0.17.1"
+platform = "macos-x86_64"
+kind = "tar.xz"
+url = "https://ziglang.org/download/0.17.1/zig-x86_64-macos-0.17.1.tar.xz"
+sha256 = "9af07b20319fbd0c92ee46ad23e81d6a782b1aaea2cfb8dcbff35f1d2c7ddbb7"
+strip = "zig-x86_64-macos-0.17.1"
