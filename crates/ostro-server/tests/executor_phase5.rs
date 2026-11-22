@@ -228,17 +228,30 @@ async fn attempt_failure_limit_survives_a_restart_f9() {
     assert_eq!(rec.status, RunStatus::Failed);
     assert!(rec.resumable);
     assert_eq!(rec.attempt_failures, 2);
-    let traps = n
-        .jobs_of(&run)
-        .into_iter()
-        .filter(|j| {
-            matches!(
-                j.activation,
-                Some(ActivationOutcome::AttemptFailed(AttemptFailure::Trap(_)))
-            )
-        })
-        .count();
-    assert_eq!(traps, 3, "exactly 3 attempt failures in total, not 3 more");
+    // The third failure completes the run `Failed` from inside its job (`CompleteRun`), and
+    // the job's record is pushed only after that job returns: a terminal record does not
+    // yet imply the third trap's `JobRecord` (CI: 2 counted). The run is terminal, so no
+    // further attempt can start; wait for the record of the job that failed it.
+    let traps = || {
+        n.jobs_of(&run)
+            .into_iter()
+            .filter(|j| {
+                matches!(
+                    j.activation,
+                    Some(ActivationOutcome::AttemptFailed(AttemptFailure::Trap(_)))
+                )
+            })
+            .count()
+    };
+    let t0 = std::time::Instant::now();
+    while traps() < 3 && t0.elapsed() < T {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        traps(),
+        3,
+        "exactly 3 attempt failures in total, not 3 more"
+    );
     n.stop().await;
 }
 
