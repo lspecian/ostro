@@ -1,0 +1,17 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: out
+---
+blk_0000000000000001 cancel: running, 2/3 done, 0 skipped, 0 failed
+job       blk_0000000000000001
+action    cancel
+state     done
+matched   3
+done      3
+skipped   0
+failed    0
+rate      20/s
+created   2023-11-14T22:13:21Z
+started   2023-11-14T22:13:21Z
+finished  2023-11-14T22:13:24Z
+eta       -

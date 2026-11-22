@@ -1,0 +1,7 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: out
+---
+JOB                   STATE      ACTION  MATCHED  DONE  SKIPPED  FAILED  RATE  CREATED
+blk_0000000000000001  done       cancel  3        3     0        0       20    2023-11-14T22:13:21Z
+blk_0000000000000002  cancelled  pause   3        1     0        0       7     2023-11-14T22:13:25Z

@@ -25,6 +25,7 @@ pub mod schedules;
 pub mod webhooks;
 pub mod worker_tokens;
 // Phase 11 (11-14): run operations.
+pub mod bulk;
 pub mod dlq;
 pub mod limits;
 pub mod rerun;
@@ -144,6 +145,12 @@ pub enum ClientCommand {
     },
     /// Show the published engine and API limits.
     Limits(limits::LimitsArgs),
+    /// Rate-limited bulk jobs over a run selection (cancel, terminate, retry, rerun,
+    /// requeue, pause, resume, signal; ls, status, cancel <JOB>).
+    Bulk {
+        #[command(subcommand)]
+        command: bulk::BulkCommand,
+    },
 }
 
 /// Run a verb to completion on a current-thread runtime.
@@ -208,6 +215,7 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Rerun(a) => &a.conn,
         ClientCommand::Dlq { command } => command.conn(),
         ClientCommand::Limits(a) => &a.conn,
+        ClientCommand::Bulk { command } => command.conn(),
     };
     let out = conn.out();
     let client = match conn.client() {
@@ -241,6 +249,7 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Rerun(a) => rerun::rerun(&client, out, a).await,
         ClientCommand::Dlq { command } => dlq::run(&client, out, command).await,
         ClientCommand::Limits(a) => limits::limits(&client, out, a).await,
+        ClientCommand::Bulk { command } => bulk::run(&client, out, command).await,
     };
     match res {
         Ok(o) => o,

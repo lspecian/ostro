@@ -1,0 +1,16 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "serde_json::to_string_pretty(&v).unwrap()"
+---
+{
+  "error": {
+    "code": "rate_limited",
+    "details": {
+      "limit": "bulk_jobs",
+      "max": 4,
+      "reason": "bulk_too_many_jobs",
+      "retry_after_ms": 1000
+    },
+    "message": "4 bulk jobs are already running"
+  }
+}

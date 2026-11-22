@@ -1,0 +1,9 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: out
+---
+dry run: bulk cancel would match about 3 runs (matched_estimate)
+sample:
+  run-a
+  run-b
+  run-c

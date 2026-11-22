@@ -1,0 +1,25 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"bulk\", \"cancel\"])"
+---
+Cancel the selected runs, or (`bulk cancel <JOB>`) cancel a bulk job
+
+Usage: ostro bulk cancel [OPTIONS] [JOB]
+
+Arguments:
+  [JOB]  Bulk job id (`blk_...`) to cancel; without it, cancel the selected runs
+
+Options:
+      --tag <TAGS>           Tag filter (repeatable; every tag must match)
+      --status <STATUS>      Status filter [possible values: scheduled, ready, running, completed, failed, cancelled, terminated, timed_out, continued_as_new]
+      --workflow <WORKFLOW>  Workflow filter
+      --queue <QUEUE>        Queue filter
+      --dlq                  Only DLQ members
+      --rate <N>             Operations per second (server default `[bulk] default_rate`, capped at `max_rate`)
+      --max-in-flight <N>    Concurrent operations (server default `[bulk] max_in_flight`)
+      --dry-run              Count and sample the matches only; create no job
+      --server <SERVER>      Server URL [env: OSTRO_SERVER=] [default: http://127.0.0.1:7700]
+      --json                 Print the REST response body as JSON
+      --timeout <TIMEOUT>    Per-request timeout (friendly duration; a long-poll adds its wait) [default: 30s]
+      --ca-file <PEM>        PEM CA certificate to trust for an https:// server instead of the platform roots (e.g. the cluster CA `<data_dir>/tls/ca.crt` behind a self-signed listener) [env: OSTRO_CA_FILE=]
+  -h, --help                 Print help

@@ -1,0 +1,18 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "serde_json::to_string_pretty(&v).unwrap()"
+---
+{
+  "action": "cancel",
+  "created_at_ms": 1700000001000,
+  "done": 1,
+  "eta_ms": 150,
+  "failed": [],
+  "failed_count": 0,
+  "job_id": "blk_0000000000000001",
+  "matched": 3,
+  "rate_per_sec": 20,
+  "skipped": 0,
+  "started_at_ms": 1700000001000,
+  "state": "running"
+}

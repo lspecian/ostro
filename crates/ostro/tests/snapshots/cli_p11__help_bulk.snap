@@ -1,0 +1,23 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"bulk\"])"
+---
+Rate-limited bulk jobs over a run selection (cancel, terminate, retry, rerun, requeue, pause, resume, signal; ls, status, cancel <JOB>)
+
+Usage: ostro bulk <COMMAND>
+
+Commands:
+  cancel     Cancel the selected runs, or (`bulk cancel <JOB>`) cancel a bulk job
+  terminate  Terminate the selected runs
+  retry      Retry (resume) the selected failed runs
+  rerun      Rerun the selected runs from a cut
+  requeue    Requeue the selected DLQ members
+  pause      Pause the selected runs
+  resume     Resume the selected paused runs
+  signal     Send a signal to the selected runs
+  ls         List bulk jobs
+  status     Show (or `--watch`) a bulk job's progress
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help

@@ -1,0 +1,25 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "help(&[\"bulk\", \"rerun\"])"
+---
+Rerun the selected runs from a cut
+
+Usage: ostro bulk rerun [OPTIONS] <--from-step <NAME[#N]>|--from-seq <N>>
+
+Options:
+      --from-step <NAME[#N]>       Cut before the N-th (1-based, default 1) execution of step NAME: `NAME` or `NAME#N`
+      --from-seq <N>               Cut at journal sequence number N (events before N are copied)
+      --version <active|source|N>  Version to execute: `active` (server default), `source` or a number
+      --tag <TAGS>                 Tag filter (repeatable; every tag must match)
+      --status <STATUS>            Status filter [possible values: scheduled, ready, running, completed, failed, cancelled, terminated, timed_out, continued_as_new]
+      --workflow <WORKFLOW>        Workflow filter
+      --queue <QUEUE>              Queue filter
+      --dlq                        Only DLQ members
+      --rate <N>                   Operations per second (server default `[bulk] default_rate`, capped at `max_rate`)
+      --max-in-flight <N>          Concurrent operations (server default `[bulk] max_in_flight`)
+      --dry-run                    Count and sample the matches only; create no job
+      --server <SERVER>            Server URL [env: OSTRO_SERVER=] [default: http://127.0.0.1:7700]
+      --json                       Print the REST response body as JSON
+      --timeout <TIMEOUT>          Per-request timeout (friendly duration; a long-poll adds its wait) [default: 30s]
+      --ca-file <PEM>              PEM CA certificate to trust for an https:// server instead of the platform roots (e.g. the cluster CA `<data_dir>/tls/ca.crt` behind a self-signed listener) [env: OSTRO_CA_FILE=]
+  -h, --help                       Print help

@@ -1,0 +1,12 @@
+---
+source: crates/ostro/tests/cli_p11.rs
+expression: "serde_json::to_string_pretty(&v).unwrap()"
+---
+{
+  "matched_estimate": 3,
+  "sample": [
+    "run-a",
+    "run-b",
+    "run-c"
+  ]
+}

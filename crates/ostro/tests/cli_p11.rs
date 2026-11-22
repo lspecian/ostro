@@ -16,7 +16,7 @@ mod p11;
 
 use common::*;
 use p11::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const PIPELINE: &str = "pipeline";
 
@@ -33,7 +33,7 @@ fn help(args: &[&str]) -> String {
 }
 
 #[test]
-fn help_rerun_dlq_limits() {
+fn help_rerun_dlq_bulk_limits() {
     insta::assert_snapshot!("help_rerun", help(&["rerun"]));
     insta::assert_snapshot!("help_dlq", help(&["dlq"]));
     insta::assert_snapshot!("help_dlq_ls", help(&["dlq", "ls"]));
@@ -41,8 +41,12 @@ fn help_rerun_dlq_limits() {
     insta::assert_snapshot!("help_dlq_dismiss", help(&["dlq", "dismiss"]));
     insta::assert_snapshot!("help_limits", help(&["limits"]));
     insta::assert_snapshot!("help_ls", help(&["ls"]));
+    insta::assert_snapshot!("help_bulk", help(&["bulk"]));
+    insta::assert_snapshot!("help_bulk_cancel", help(&["bulk", "cancel"]));
+    insta::assert_snapshot!("help_bulk_rerun", help(&["bulk", "rerun"]));
+    insta::assert_snapshot!("help_bulk_status", help(&["bulk", "status"]));
     let top = help(&[]);
-    for verb in ["rerun", "dlq", "limits"] {
+    for verb in ["rerun", "dlq", "limits", "bulk"] {
         assert!(
             top.lines()
                 .any(|l| l.split_whitespace().next() == Some(verb)),
@@ -309,4 +313,204 @@ async fn dlq_ls_dismiss_requeue_and_limits() {
     insta::assert_snapshot!("limits_table", out);
 
     d.stop();
+}
+
+// ---------------------------------------------------------------------------------
+// bulk (in-process API over the fakes)
+// ---------------------------------------------------------------------------------
+
+/// The last bulk create request the fake received, as JSON.
+fn last_bulk(api: &FakeApi) -> Value {
+    let reqs = api.ops.bulk_requests();
+    serde_json::to_value(reqs.last().expect("a bulk request")).expect("json")
+}
+
+#[test]
+fn bulk_dry_run_create_watch_cancel_ls() {
+    let api = FakeApi::start();
+    api.ops
+        .set_bulk_matches(vec!["run-a".into(), "run-b".into(), "run-c".into()]);
+
+    // Dry run: estimate + sample, no job.
+    let (code, out, err) = api.cli(&["bulk", "cancel", "--tag", "t", "--dry-run"]);
+    assert_eq!(code, 0, "{err}");
+    insta::assert_snapshot!("bulk_dry_run_human", out);
+    let (code, v, err) = api.json(&["bulk", "cancel", "--tag", "t", "--dry-run"]);
+    assert_eq!(code, 0, "{err}");
+    insta::assert_snapshot!(
+        "bulk_dry_run_json",
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+    assert_eq!(
+        last_bulk(&api),
+        json!({"action": "cancel", "filter": {"tags": ["t"], "dlq": false}, "dry_run": true})
+    );
+    let (_, v, _) = api.json(&["bulk", "ls"]);
+    assert_eq!(v, json!({"jobs": []}), "a dry run created a job");
+    let (code, out, _) = api.cli(&["bulk", "ls"]);
+    assert_eq!((code, out.trim()), (0, "no bulk jobs"));
+
+    // Create: the job id.
+    let (code, v, err) = api.json(&["bulk", "cancel", "--tag", "t"]);
+    assert_eq!(code, 0, "{err}");
+    let job = v["job_id"].as_str().expect("job_id").to_owned();
+    assert_eq!(v["matched_estimate"], 3, "{v}");
+    // status --json (each GET advances the fake job by one op).
+    let (code, v, err) = api.json(&["bulk", "status", &job]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        (v["state"].as_str(), v["done"].as_u64()),
+        (Some("running"), Some(1))
+    );
+    insta::assert_snapshot!(
+        "bulk_status_json",
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+    // --watch polls until done and exits 0.
+    let (code, out, err) = api.cli(&["bulk", "status", &job, "--watch", "--interval", "20ms"]);
+    assert_eq!(code, 0, "{out}{err}");
+    insta::assert_snapshot!("bulk_watch_human", out);
+
+    // A second job (human create line), cancelled by id.
+    let (code, out, err) = api.cli(&["bulk", "pause", "--workflow", "w", "--rate", "7"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("started bulk job blk_"), "{out}");
+    let job2 = out.split_whitespace().nth(3).expect("job id").to_owned();
+    assert_eq!(
+        last_bulk(&api),
+        json!({"action": "pause", "filter": {"workflow": "w", "tags": [], "dlq": false},
+            "rate_per_sec": 7, "dry_run": false})
+    );
+    let (code, out, err) = api.cli(&["bulk", "cancel", &job2]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim(), format!("bulk job {job2}: cancelled"));
+    // --watch on a cancelled job ends at once with exit 3 (not done).
+    let (code, v, err) = api.json(&["bulk", "status", &job2, "--watch"]);
+    assert_eq!(code, 3, "{v}\n{err}");
+    assert_eq!(v["state"], "cancelled");
+
+    // ls: both jobs.
+    let (code, v, err) = api.json(&["bulk", "ls"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(v["jobs"].as_array().map(Vec::len), Some(2), "{v}");
+    insta::assert_snapshot!("bulk_ls_json", serde_json::to_string_pretty(&v).unwrap());
+    let (code, out, err) = api.cli(&["bulk", "ls"]);
+    assert_eq!(code, 0, "{err}");
+    insta::assert_snapshot!("bulk_ls_table", out);
+
+    // Unknown job: 404, exit 1.
+    let (code, _, err) = api.cli(&["bulk", "status", "blk_ffffffffffffffff"]);
+    assert_eq!(code, 1, "{err}");
+}
+
+#[test]
+fn bulk_request_bodies_and_too_many_jobs() {
+    let api = FakeApi::start();
+    api.ops.set_bulk_matches(vec!["run-a".into()]);
+
+    let (code, _, err) = api.cli(&[
+        "bulk",
+        "rerun",
+        "--tag",
+        "t",
+        "--from-step",
+        "s3",
+        "--version",
+        "active",
+        "--rate",
+        "5",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        last_bulk(&api),
+        json!({
+            "action": {"rerun": {"from": {"step": {"name": "s3", "occurrence": 1}},
+                "version": "active"}},
+            "filter": {"tags": ["t"], "dlq": false},
+            "rate_per_sec": 5,
+            "dry_run": false,
+        })
+    );
+    let (code, _, err) = api.cli(&[
+        "bulk",
+        "signal",
+        "--name",
+        "go",
+        "--payload",
+        "{}",
+        "--status",
+        "running",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        last_bulk(&api),
+        json!({
+            "action": {"signal": {"name": "go", "payload": {}}},
+            "filter": {"status": "running", "tags": [], "dlq": false},
+            "dry_run": false,
+        })
+    );
+    let (code, _, err) = api.cli(&[
+        "bulk", "requeue", "--dlq", "--mode", "restart", "--queue", "q",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        last_bulk(&api),
+        json!({
+            "action": {"requeue": {"mode": "restart"}},
+            "filter": {"queue": "q", "tags": [], "dlq": true},
+            "dry_run": false,
+        })
+    );
+    let (code, _, err) = api.cli(&[
+        "bulk",
+        "terminate",
+        "--reason",
+        "cleanup",
+        "--dlq",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        last_bulk(&api)["action"],
+        json!({"terminate": {"reason": "cleanup"}})
+    );
+    for (verb, action) in [("retry", "retry"), ("resume", "resume")] {
+        let (code, _, err) = api.cli(&["bulk", verb, "--tag", "x", "--dry-run"]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(last_bulk(&api)["action"], action);
+    }
+
+    // 429 bulk_too_many_jobs: the reason and the retry hint, exit 1 (the existing
+    // "API error / unavailable" code); --json prints the error body.
+    api.ops.fail(
+        "create_bulk",
+        Some(ostro_api::phase11::bulk_too_many_jobs(4, 1_000)),
+    );
+    let (code, out, err) = api.cli(&["bulk", "cancel", "--tag", "t"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("reason bulk_too_many_jobs"), "{err}");
+    assert!(err.contains("retry after 1 s"), "{err}");
+    let (code, v, _) = api.json(&["bulk", "cancel", "--tag", "t"]);
+    assert_eq!(code, 1);
+    assert_eq!(v["error"]["details"]["reason"], "bulk_too_many_jobs", "{v}");
+    insta::assert_snapshot!(
+        "bulk_too_many_jobs",
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+
+    // Usage errors (exit 2) never reach the server.
+    let before = api.ops.bulk_requests().len();
+    for args in [
+        &["bulk", "cancel", "blk_1", "--tag", "t"][..],
+        &["bulk", "rerun", "--tag", "t"],
+        &["bulk", "requeue", "--mode", "rerun"],
+        &["bulk", "signal", "--payload", "{}"],
+        &["bulk", "status"],
+    ] {
+        let (code, _, err) = api.cli(args);
+        assert_eq!(code, 2, "{args:?}: {err}");
+    }
+    assert_eq!(api.ops.bulk_requests().len(), before);
 }
