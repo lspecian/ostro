@@ -215,6 +215,15 @@ fn assert_all_completed(runs: &[Value]) {
 }
 
 /// `[first grant, completed_at]` in µs for each run.
+///
+/// The grant time is the µs wall time of its log line, but `completed_at_ms` is the
+/// journal timestamp of `RunCompleted` rounded **up** to the millisecond (`derive.rs`:
+/// `ceil(t / 1e6)`), so `completed_at_ms * 1000` can lie up to 1 ms after the real
+/// completion, and after the next grant that the completion's slot release allowed (a
+/// sub-millisecond hand-off, seen on the aarch64 CI runner as a phantom `key_concurrency`
+/// overlap of 2). The end used here is the lower bound `(completed_at_ms - 1) * 1000`,
+/// which never lies after the real completion; a real overlap of two 40 ms+ runs is
+/// still counted.
 fn intervals(firsts: &BTreeMap<String, u64>, runs: &[Value]) -> Vec<(u64, u64)> {
     runs.iter()
         .map(|r| {
@@ -222,7 +231,11 @@ fn intervals(firsts: &BTreeMap<String, u64>, runs: &[Value]) -> Vec<(u64, u64)> 
             let s = *firsts
                 .get(id)
                 .unwrap_or_else(|| panic!("no grant logged for {id}"));
-            let e = r["completed_at_ms"].as_u64().expect("completed_at_ms") * 1000;
+            let e = r["completed_at_ms"]
+                .as_u64()
+                .expect("completed_at_ms")
+                .saturating_sub(1)
+                * 1000;
             (s, e)
         })
         .collect()
