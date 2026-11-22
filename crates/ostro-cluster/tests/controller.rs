@@ -62,18 +62,33 @@ async fn fresh_three_node_cluster_places_every_partition_once() {
         "{recs:?}"
     );
 
-    // Member self-registration: written once, then only on change.
+    // Member self-registration: written once, then only on change. The joiner is a node
+    // with no member record yet: InitCluster already registered the founding node (the
+    // meta leader at init, any of 1..=3) with joined_at_ms 1.
     let l = g.leader().await;
+    let joiner = g
+        .meta(l)
+        .view()
+        .read(|s| g.voters.iter().copied().find(|&n| s.member(n).is_none()))
+        .expect("a voter without a member record");
     let me = ostro_meta::Member {
-        node_id: 2,
+        node_id: joiner,
         addr: "127.0.0.1:7001".into(),
         joined_at_ms: 5,
         cluster_addr: Some("127.0.0.1:7002".into()),
         repl_addr: None,
         ext: Vec::new(),
     };
-    assert!(members::upsert_self(g.meta(2), me.clone()).await.unwrap());
-    assert!(!members::upsert_self(g.meta(2), me.clone()).await.unwrap());
+    assert!(
+        members::upsert_self(g.meta(joiner), me.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !members::upsert_self(g.meta(joiner), me.clone())
+            .await
+            .unwrap()
+    );
     let moved = ostro_meta::Member {
         repl_addr: Some("127.0.0.1:7003".into()),
         joined_at_ms: 99,
@@ -83,7 +98,7 @@ async fn fresh_three_node_cluster_places_every_partition_once() {
     let stored = g
         .meta(l)
         .view()
-        .read(|s| s.member(2).cloned())
+        .read(|s| s.member(joiner).cloned())
         .unwrap()
         .value;
     assert_eq!(stored.repl_addr.as_deref(), Some("127.0.0.1:7003"));
