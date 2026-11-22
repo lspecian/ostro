@@ -1,0 +1,34 @@
+{
+  "id": "C-CHILD-04",
+  "title": "cancel-op on a sleeping child gives the parent Err(Cancelled)",
+  "leg": "server",
+  "workflow": "conf_parent_cancel_child",
+  "input": {
+    "child": "wf:conf_leaf_sleep",
+    "delay_ms": 1000
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "caught": "cancelled"
+    },
+    "projection": [
+      "child:conf_leaf_sleep#1",
+      "timer#1",
+      "cancel-op#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "cancelled",
+        "parent": true,
+        "cancel_reason": "parent_cancel_op",
+        "projection": [
+          "timer#1",
+          "step:cleanup",
+          "terminal:cancelled"
+        ]
+      }
+    }
+  }
+}

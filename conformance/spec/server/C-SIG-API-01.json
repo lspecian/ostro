@@ -1,0 +1,33 @@
+{
+  "id": "C-SIG-API-01",
+  "title": "a signal sent through the REST API resumes the waiting run (conf_sig_api)",
+  "leg": "server",
+  "workflow": "conf_sig_api",
+  "script": [
+    {
+      "input": "api",
+      "op": "wait_fact",
+      "target": "root",
+      "fact": "signal:approve#1"
+    },
+    {
+      "input": "signal",
+      "name": "approve",
+      "payload": {
+        "by": "api"
+      }
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "approved": {
+        "by": "api"
+      }
+    },
+    "projection": [
+      "signal:approve#1",
+      "terminal:completed"
+    ]
+  }
+}

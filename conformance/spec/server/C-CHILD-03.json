@@ -1,0 +1,61 @@
+{
+  "id": "C-CHILD-03",
+  "title": "a detached child start returns {run_id} to the parent immediately",
+  "leg": "server",
+  "workflow": "conf_parent_detached",
+  "input": {
+    "child": "wf:conf_leaf_sleep"
+  },
+  "script": [
+    {
+      "input": "api",
+      "op": "wait_status",
+      "target": "root",
+      "status": "completed"
+    },
+    {
+      "input": "api",
+      "op": "wait_fact",
+      "target": "child",
+      "fact": "timer#1"
+    },
+    {
+      "input": "api",
+      "op": "sleep",
+      "ms": 2000
+    },
+    {
+      "input": "api",
+      "op": "assert_live",
+      "target": "child"
+    },
+    {
+      "input": "api",
+      "op": "cancel",
+      "target": "child",
+      "reason": "conformance_cleanup"
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "run_id": "@child"
+    },
+    "projection": [
+      "child:conf_leaf_sleep#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "cancelled",
+        "parent": false,
+        "cancel_reason": "conformance_cleanup",
+        "projection": [
+          "timer#1",
+          "step:cleanup",
+          "terminal:cancelled"
+        ]
+      }
+    }
+  }
+}

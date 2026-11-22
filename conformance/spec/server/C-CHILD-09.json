@@ -1,0 +1,52 @@
+{
+  "id": "C-CHILD-09",
+  "title": "cancelling the root of a 3-level chain ends every descendant Cancelled",
+  "leg": "server",
+  "workflow": "conf_parent_chain",
+  "input": {
+    "next": [
+      "wf:conf_parent_chain",
+      "wf2:conf_leaf_sleep"
+    ]
+  },
+  "script": [
+    {
+      "input": "api",
+      "op": "wait_fact",
+      "target": "child.child",
+      "fact": "timer#1"
+    },
+    {
+      "input": "api",
+      "op": "cancel",
+      "target": "root",
+      "reason": "conformance"
+    }
+  ],
+  "expect": {
+    "status": "cancelled",
+    "projection": [
+      "child:conf_parent_chain#1",
+      "terminal:cancelled"
+    ],
+    "descendants": {
+      "child": {
+        "status": "cancelled",
+        "parent": true,
+        "projection": [
+          "child:conf_leaf_sleep#1",
+          "terminal:cancelled"
+        ]
+      },
+      "child.child": {
+        "status": "cancelled",
+        "parent": true,
+        "projection": [
+          "timer#1",
+          "step:cleanup",
+          "terminal:cancelled"
+        ]
+      }
+    }
+  }
+}

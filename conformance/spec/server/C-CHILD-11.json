@@ -1,0 +1,58 @@
+{
+  "id": "C-CHILD-11",
+  "title": "cancel cascade beats shielding: a shielded await on an in-flight child gets Err(Cancelled), a child started in shielded cleanup runs until parent close then is cancelled (W2)",
+  "leg": "server",
+  "workflow": "conf_parent_shielded_child",
+  "input": {
+    "child": "wf:conf_leaf_sleep"
+  },
+  "script": [
+    {
+      "input": "api",
+      "op": "wait_fact",
+      "target": "child",
+      "fact": "timer#1"
+    },
+    {
+      "input": "api",
+      "op": "cancel",
+      "target": "root",
+      "reason": "conformance"
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "first": "cancelled",
+      "cleanup_child": true
+    },
+    "projection": [
+      "child:conf_leaf_sleep#1",
+      "child:conf_leaf_sleep#2",
+      "timer#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "cancelled",
+        "parent": true,
+        "cancel_reason": "conformance",
+        "projection": [
+          "timer#1",
+          "step:cleanup",
+          "terminal:cancelled"
+        ]
+      },
+      "child#2": {
+        "status": "cancelled",
+        "parent": true,
+        "cancel_reason": "parent_closed",
+        "projection": [
+          "timer#1",
+          "step:cleanup",
+          "terminal:cancelled"
+        ]
+      }
+    }
+  }
+}

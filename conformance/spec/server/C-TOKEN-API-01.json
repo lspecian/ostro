@@ -1,0 +1,31 @@
+{
+  "id": "C-TOKEN-API-01",
+  "title": "an await token completed through the REST API, read from the published status, resumes the run (conf_token_api)",
+  "leg": "server",
+  "workflow": "conf_token_api",
+  "script": [
+    {
+      "input": "api",
+      "op": "token",
+      "target": "root",
+      "payload": {
+        "ok": true,
+        "n": 3
+      }
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "token_payload": {
+        "ok": true,
+        "n": 3
+      }
+    },
+    "projection": [
+      "token#1",
+      "status:{\"token\":\"<token>\"}",
+      "terminal:completed"
+    ]
+  }
+}

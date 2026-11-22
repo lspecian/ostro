@@ -1,0 +1,64 @@
+{
+  "id": "C-CHILD-06",
+  "title": "terminating the child via the API makes the parent catch child_terminated",
+  "leg": "server",
+  "workflow": "conf_parent_fail_child",
+  "input": {
+    "child": "wf:conf_leaf_sleep"
+  },
+  "script": [
+    {
+      "input": "api",
+      "op": "wait_fact",
+      "target": "child",
+      "fact": "timer#1"
+    },
+    {
+      "input": "api",
+      "op": "terminate",
+      "target": "child",
+      "reason": "conformance"
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "caught": "child_terminated"
+    },
+    "projection": [
+      "child:conf_leaf_sleep#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "terminated",
+        "parent": true
+      }
+    },
+    "variants": [
+      {
+        "title": "child run timeout 2 s -> timeout",
+        "input": {
+          "child": "wf:conf_leaf_sleep",
+          "run_timeout_ms": 2000
+        },
+        "expect": {
+          "status": "completed",
+          "result": {
+            "caught": "timeout"
+          },
+          "projection": [
+            "child:conf_leaf_sleep#1",
+            "terminal:completed"
+          ],
+          "descendants": {
+            "child": {
+              "status": "timed_out",
+              "parent": true
+            }
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "id": "C-CHILD-07",
+  "title": "a child that continues-as-new twice delivers its final result {done: true, generation: 2} (conf_leaf_can)",
+  "leg": "server",
+  "workflow": "conf_parent_attached",
+  "input": {
+    "child": "wf:conf_leaf_can",
+    "input": {
+      "n": 2
+    }
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "child": {
+        "done": true,
+        "generation": 2
+      }
+    },
+    "projection": [
+      "child:conf_leaf_can#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "completed",
+        "parent": true,
+        "result": {
+          "done": true,
+          "generation": 2
+        },
+        "projection": [
+          "terminal:continued_as_new",
+          "terminal:continued_as_new",
+          "terminal:completed"
+        ]
+      }
+    }
+  }
+}

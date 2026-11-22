@@ -1,0 +1,21 @@
+{
+  "id": "C-CAN-02",
+  "title": "the result long-poll follows a continue-as-new chain to its final result",
+  "leg": "server",
+  "workflow": "conf_can",
+  "input": {
+    "n": 2
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "generation": 2
+    },
+    "chain_runs": 3,
+    "projection": [
+      "terminal:continued_as_new",
+      "terminal:continued_as_new",
+      "terminal:completed"
+    ]
+  }
+}

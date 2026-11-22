@@ -1,0 +1,33 @@
+{
+  "id": "C-CHILD-05",
+  "title": "a parent returning with an attached sleeping child cancels it with reason parent_closed and its cleanup runs",
+  "leg": "server",
+  "workflow": "conf_parent_close",
+  "input": {
+    "child": "wf:conf_leaf_sleep",
+    "delay_ms": 1000
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "started": true
+    },
+    "projection": [
+      "child:conf_leaf_sleep#1",
+      "timer#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "cancelled",
+        "parent": true,
+        "cancel_reason": "parent_closed",
+        "projection": [
+          "timer#1",
+          "step:cleanup",
+          "terminal:cancelled"
+        ]
+      }
+    }
+  }
+}

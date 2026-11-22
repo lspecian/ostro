@@ -1,0 +1,40 @@
+{
+  "id": "C-CHILD-01",
+  "title": "a parent starts an attached child and its result contains the child output (conf_leaf_echo)",
+  "leg": "server",
+  "workflow": "conf_parent_attached",
+  "input": {
+    "child": "wf:conf_leaf_echo",
+    "input": {
+      "x": 1
+    }
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "child": {
+        "echo": {
+          "x": 1
+        }
+      }
+    },
+    "projection": [
+      "child:conf_leaf_echo#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "completed",
+        "parent": true,
+        "result": {
+          "echo": {
+            "x": 1
+          }
+        },
+        "projection": [
+          "terminal:completed"
+        ]
+      }
+    }
+  }
+}

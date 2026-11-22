@@ -1,0 +1,20 @@
+{
+  "id": "C-FX-01",
+  "title": "an HTTP effect with ctx.idempotency_key(pay) charges the MockProvider exactly once (conf_fx_http)",
+  "leg": "server",
+  "workflow": "conf_fx_http",
+  "input": {
+    "url": "$MOCK/pay"
+  },
+  "expect": {
+    "status": "completed",
+    "projection": [
+      "effect:http#1",
+      "terminal:completed"
+    ],
+    "fx_pay": {
+      "key": "pay",
+      "status": 200
+    }
+  }
+}

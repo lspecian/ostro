@@ -1,0 +1,28 @@
+{
+  "id": "C-CHILD-02",
+  "title": "a failing child surfaces to the parent as a caught failure of kind boom (conf_leaf_fail)",
+  "leg": "server",
+  "workflow": "conf_parent_fail_child",
+  "input": {
+    "child": "wf:conf_leaf_fail"
+  },
+  "expect": {
+    "status": "completed",
+    "result": {
+      "caught": "boom"
+    },
+    "projection": [
+      "child:conf_leaf_fail#1",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "failed",
+        "parent": true,
+        "projection": [
+          "terminal:failed"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "id": "C-CHILD-10",
+  "title": "a terminated parent with an in-flight attached child is RetryRun-resumed and completes (B3)",
+  "leg": "server",
+  "workflow": "conf_parent_attached",
+  "input": {
+    "child": "wf:conf_leaf_sleep"
+  },
+  "script": [
+    {
+      "input": "api",
+      "op": "wait_fact",
+      "target": "child",
+      "fact": "timer#1"
+    },
+    {
+      "input": "api",
+      "op": "terminate",
+      "target": "root",
+      "reason": "conformance"
+    },
+    {
+      "input": "api",
+      "op": "wait_status",
+      "target": "child",
+      "status": "cancelled"
+    },
+    {
+      "input": "api",
+      "op": "retry",
+      "target": "root"
+    }
+  ],
+  "expect": {
+    "status": "completed",
+    "result": {
+      "caught": "cancelled"
+    },
+    "projection": [
+      "child:conf_leaf_sleep#1",
+      "terminal:terminated",
+      "terminal:completed"
+    ],
+    "descendants": {
+      "child": {
+        "status": "cancelled",
+        "parent": true,
+        "projection": [
+          "timer#1",
+          "step:cleanup",
+          "terminal:cancelled"
+        ],
+        "cancel_reason": "conformance"
+      }
+    },
+    "variants": [
+      {
+        "title": "child completes while the parent is terminated -> child_terminated",
+        "input": {
+          "child": "wf:conf_leaf_echo",
+          "input": {
+            "delay_ms": 2000
+          }
+        },
+        "script": [
+          {
+            "input": "api",
+            "op": "wait_fact",
+            "target": "child",
+            "fact": "timer#1"
+          },
+          {
+            "input": "api",
+            "op": "terminate",
+            "target": "root",
+            "reason": "conformance"
+          },
+          {
+            "input": "api",
+            "op": "wait_status",
+            "target": "child",
+            "status": "completed"
+          },
+          {
+            "input": "api",
+            "op": "retry",
+            "target": "root"
+          }
+        ],
+        "expect": {
+          "status": "completed",
+          "result": {
+            "caught": "child_terminated"
+          },
+          "projection": [
+            "child:conf_leaf_echo#1",
+            "terminal:terminated",
+            "terminal:completed"
+          ],
+          "descendants": {
+            "child": {
+              "status": "completed",
+              "parent": true,
+              "projection": [
+                "timer#1",
+                "terminal:completed"
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}
