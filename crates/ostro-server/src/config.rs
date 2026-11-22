@@ -65,6 +65,8 @@ pub const SECTIONS: &[&str] = &[
     // Phase 12 (D-P12-10/12, RESERVATIONS §11), parsed since 12-02. The peer keys live in
     // `[cluster]`.
     "replication",
+    // Phase 10 (D-P10-6/19, RESERVATIONS §11), parsed since 10-10.
+    "dev",
 ];
 
 static PARSER: SpanParser = SpanParser::new();
@@ -430,6 +432,8 @@ pub struct ServerConfig {
     pub dlq: DlqSection,
     // Phase 12 section (D-P12-10, plan 12-02).
     pub replication: ReplicationSection,
+    // Phase 10 section (D-P10-6, plan 10-10).
+    pub dev: DevSection,
 }
 
 impl ServerConfig {
@@ -2005,5 +2009,178 @@ fn inline_table(v: &serde_json::Value) -> String {
             format!("[{}]", items.join(", "))
         }
         other => other.to_string(),
+    }
+}
+
+// --- Phase 10 (10-10) ---
+
+/// `[dev] time_skipping` (D-P10-6): the dev clock mode. Default `off`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeSkipping {
+    /// No dev clock (the server runs the plain clock path).
+    #[default]
+    Off,
+    /// Skip to the next due timer whenever the node is idle (10-13).
+    Auto,
+    /// Time moves only through `POST /v1/dev/time/skip`.
+    Manual,
+}
+
+impl TimeSkipping {
+    /// The API mode of a dev clock, `None` when off.
+    pub fn mode(self) -> Option<ostro_api::domain::DevTimeMode> {
+        match self {
+            TimeSkipping::Off => None,
+            TimeSkipping::Auto => Some(ostro_api::domain::DevTimeMode::Auto),
+            TimeSkipping::Manual => Some(ostro_api::domain::DevTimeMode::Manual),
+        }
+    }
+
+    /// Wire name: `off`, `auto` or `manual`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimeSkipping::Off => "off",
+            TimeSkipping::Auto => "auto",
+            TimeSkipping::Manual => "manual",
+        }
+    }
+}
+
+/// `[dev]` (D-P10-6): dev-only knobs. Only `ostro dev --ephemeral` may turn them on
+/// ([`ServerConfig::validate_time_skipping`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DevSection {
+    /// Dev clock time skipping (`off` | `auto` | `manual`; `OSTRO_DEV__TIME_SKIPPING`).
+    pub time_skipping: TimeSkipping,
+}
+
+impl ServerConfig {
+    /// Time skipping (D-P10-6) is allowed only on an ephemeral `ostro dev` node with
+    /// embedded execution only. `server_profile`: the node runs as `ostro server`. Each
+    /// error names `--time-skipping` and the reason. Off always passes.
+    pub fn validate_time_skipping(&self, server_profile: bool) -> Result<(), ConfigError> {
+        if self.dev.time_skipping == TimeSkipping::Off {
+            return Ok(());
+        }
+        if server_profile {
+            return Err(ConfigError::Invalid(
+                "--time-skipping ([dev] time_skipping) is dev only: `ostro server` refuses it; use `ostro dev --ephemeral --time-skipping`".into(),
+            ));
+        }
+        if !self.node.ephemeral {
+            return Err(ConfigError::Invalid(
+                "--time-skipping needs --ephemeral: skipped time is written into the journal, so it is refused on a persistent data directory".into(),
+            ));
+        }
+        if self.workers.enabled {
+            return Err(ConfigError::Invalid(
+                "--time-skipping cannot be used with a worker listener ([workers] enabled = true): only embedded executors follow the dev clock".into(),
+            ));
+        }
+        if self.workers.default_placement != PlacementSetting::Embedded {
+            return Err(ConfigError::Invalid(format!(
+                "--time-skipping cannot be used with remote placement ([workers] default_placement = \"{}\"): only embedded executors follow the dev clock",
+                match self.workers.default_placement {
+                    PlacementSetting::Workers => "workers",
+                    _ => "auto",
+                }
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dev_section_tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> EnvSource {
+        EnvSource::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn dev_time_skipping_defaults_off_and_reads_env() {
+        assert_eq!(ServerConfig::default().dev.time_skipping, TimeSkipping::Off);
+        assert_eq!(
+            ServerConfig::dev_defaults().dev.time_skipping,
+            TimeSkipping::Off
+        );
+        for (raw, want) in [
+            ("auto", TimeSkipping::Auto),
+            ("manual", TimeSkipping::Manual),
+            ("off", TimeSkipping::Off),
+        ] {
+            let c = load_layered(
+                ServerConfig::dev_defaults(),
+                None,
+                false,
+                &env(&[("OSTRO_DEV__TIME_SKIPPING", raw)]),
+                &Overrides::default(),
+            )
+            .expect("load");
+            assert_eq!(c.dev.time_skipping, want, "{raw}");
+        }
+        assert!(
+            load_layered(
+                ServerConfig::dev_defaults(),
+                None,
+                false,
+                &env(&[("OSTRO_DEV__TIME_SKIPPING", "sometimes")]),
+                &Overrides::default(),
+            )
+            .is_err()
+        );
+        assert!(
+            load_layered(
+                ServerConfig::dev_defaults(),
+                None,
+                false,
+                &env(&[("OSTRO_DEV__BOGUS", "1")]),
+                &Overrides::default(),
+            )
+            .is_err(),
+            "[dev] keeps deny_unknown_fields"
+        );
+    }
+
+    #[test]
+    fn validate_time_skipping_rules() {
+        let mut c = ServerConfig::dev_defaults();
+        c.validate_time_skipping(true).expect("off always passes");
+        c.dev.time_skipping = TimeSkipping::Auto;
+        let msg = |c: &ServerConfig, server| {
+            c.validate_time_skipping(server)
+                .expect_err("refused")
+                .to_string()
+        };
+        assert!(msg(&c, false).contains("--ephemeral"));
+        c.node.ephemeral = true;
+        assert!(msg(&c, true).contains("ostro server"));
+        assert!(
+            msg(&c, false).contains("worker listener"),
+            "workers on by default"
+        );
+        c.workers.enabled = false;
+        c.validate_time_skipping(false)
+            .expect("ephemeral, embedded-only dev");
+        c.workers.default_placement = PlacementSetting::Workers;
+        let m = msg(&c, false);
+        assert!(
+            m.contains("remote placement") && m.contains("--time-skipping"),
+            "{m}"
+        );
+        assert_eq!(TimeSkipping::Manual.as_str(), "manual");
+        assert_eq!(
+            TimeSkipping::Auto.mode(),
+            Some(ostro_api::domain::DevTimeMode::Auto)
+        );
+        assert_eq!(TimeSkipping::Off.mode(), None);
     }
 }

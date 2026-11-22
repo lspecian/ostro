@@ -59,6 +59,17 @@ enum Command {
         /// rebuild and redeploy on every change (10-16).
         #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
         watch: Option<PathBuf>,
+        /// Dev clock time skipping (needs --ephemeral): `auto` (bare flag) skips to the
+        /// next due timer when idle, `manual` only via POST /v1/dev/time/skip.
+        #[arg(
+            long,
+            value_name = "MODE",
+            num_args = 0..=1,
+            default_missing_value = "auto",
+            require_equals = true,
+            value_parser = ["auto", "manual"]
+        )]
+        time_skipping: Option<String>,
     },
     /// Single-node server; TOML file and OSTRO_<SECTION>__<KEY> env overrides.
     Server {
@@ -78,7 +89,11 @@ enum Command {
     /// Print the OpenAPI document served at /openapi.json.
     Openapi,
     /// Print build information (version, target triple, allocator).
-    BuildInfo,
+    BuildInfo {
+        /// Print `{"version", "target", "allocator"}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write a backup file (tar): online from a running server, or offline (--data-dir).
     Backup(ostro_cli::commands::backup::BackupArgs),
     /// Rebuild a data directory from a bucket (s3://, file://) or a backup file, verified.
@@ -106,7 +121,18 @@ fn main() -> ExitCode {
     let started = Instant::now();
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::BuildInfo) => {
+        Some(Command::BuildInfo { json: true }) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "target": env!("OSTRO_TARGET"),
+                    "allocator": "mimalloc",
+                })
+            );
+            ExitCode::SUCCESS
+        }
+        Some(Command::BuildInfo { json: false }) => {
             println!(
                 "ostro {} target={} allocator=mimalloc{FAILPOINTS_INFO}",
                 env!("CARGO_PKG_VERSION"),
@@ -126,6 +152,7 @@ fn main() -> ExitCode {
             listen,
             data_dir,
             watch,
+            time_skipping,
         }) => {
             // 10-16: `--watch` without a project is a usage error, before any startup.
             if let Some(dir) = &watch
@@ -146,6 +173,9 @@ fn main() -> ExitCode {
                 Ok(mut cfg) => {
                     if ephemeral {
                         cfg.node.ephemeral = true;
+                    }
+                    if let Err(code) = apply_time_skipping(&mut cfg, time_skipping.as_deref()) {
+                        return code;
                     }
                     run_server("ostro dev", cfg, TlsProfile::Dev, started, watch)
                 }
@@ -173,6 +203,10 @@ fn main() -> ExitCode {
                 print!("{}", cfg.to_toml_string());
                 return ExitCode::SUCCESS;
             }
+            // D-P10-6: `[dev] time_skipping` is refused by `ostro server` (exit 2).
+            if let Err(e) = cfg.validate_time_skipping(true) {
+                return usage_error(e);
+            }
             // D-W8: the server profile's `auto` rule applies whatever the configuration
             // says (`secrets.auto_sealing_key` included). The server enforces it too
             // (`ServerOptions::with_tls_profile`, 07-22); checking here first gives the
@@ -199,6 +233,38 @@ fn main() -> ExitCode {
 fn fail(msg: impl std::fmt::Display) -> ExitCode {
     eprintln!("ostro: error: {msg}");
     ExitCode::FAILURE
+}
+
+/// One-line error on stderr, exit code 2 (a refused flag combination, D-P10-6).
+fn usage_error(msg: impl std::fmt::Display) -> ExitCode {
+    eprintln!("ostro: error: {msg}");
+    ExitCode::from(2)
+}
+
+/// `ostro dev --time-skipping[=auto|manual]` (D-P10-6, 10-10): set `[dev] time_skipping`
+/// (the flag wins over `OSTRO_DEV__TIME_SKIPPING`), validate it (exit 2 before the server
+/// starts), and print one stderr notice. Time skipping is embedded-only, so the worker
+/// listener is turned off unless `OSTRO_WORKERS__ENABLED` asks for it explicitly (which
+/// is then refused).
+fn apply_time_skipping(cfg: &mut ServerConfig, flag: Option<&str>) -> Result<(), ExitCode> {
+    use ostro_server::config::TimeSkipping;
+    match flag {
+        Some("manual") => cfg.dev.time_skipping = TimeSkipping::Manual,
+        Some(_) => cfg.dev.time_skipping = TimeSkipping::Auto,
+        None => {}
+    }
+    if cfg.dev.time_skipping == TimeSkipping::Off {
+        return Ok(());
+    }
+    if std::env::var_os("OSTRO_WORKERS__ENABLED").is_none() {
+        cfg.workers.enabled = false;
+    }
+    cfg.validate_time_skipping(false).map_err(usage_error)?;
+    eprintln!(
+        "time skipping: {} (dev only; data is ephemeral)",
+        cfg.dev.time_skipping.as_str()
+    );
+    Ok(())
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, ExitCode> {

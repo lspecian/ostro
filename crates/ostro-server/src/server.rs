@@ -294,6 +294,21 @@ async fn start_inner(
     } = opts;
     // Phase 12: consumed by the cluster wiring (12-14, `cluster::ClusterServices`).
     drop(cluster_transport);
+    // Phase 10 (10-10, D-P10-6): with `[dev] time_skipping` on (ephemeral `ostro dev`
+    // only), the dev clock over the seam clock becomes the one clock. Off: no DevClock.
+    let server_profile = tls_profile.unwrap_or_else(|| crate::tls::TlsProfile::of(&cfg))
+        == crate::tls::TlsProfile::Server;
+    cfg.validate_time_skipping(server_profile)
+        .map_err(|e| ServerError::Config(e.to_string()))?;
+    let dev_clock = cfg
+        .dev
+        .time_skipping
+        .mode()
+        .map(|mode| crate::devclock::DevClock::new(Arc::clone(&clock), mode));
+    let clock: Arc<dyn Clock> = match &dev_clock {
+        Some(d) => d.clone(),
+        None => clock,
+    };
     // clock-exempt: startup step durations are reported (StartupTimings), never used for logic.
     let t0 = Instant::now(); // clock-exempt: startup timing
     let count = PartitionCount::new(cfg.node.partitions)
@@ -373,14 +388,16 @@ async fn start_inner(
 
     // 3. engine runtime.
     let t = Instant::now(); // clock-exempt: startup timing
-    let runtime = match Runtime::new(
-        cfg.to_engine_config(),
-        RuntimeOptions {
-            token_key,
-            cache_dir: Some(data_dir.join("cache").join("aot")),
-            ..RuntimeOptions::default()
-        },
-    ) {
+    let mut runtime_opts = RuntimeOptions {
+        token_key,
+        cache_dir: Some(data_dir.join("cache").join("aot")),
+        ..RuntimeOptions::default()
+    };
+    if let Some(d) = &dev_clock {
+        // Phase 10 (10-10): journal timestamps come from the same dev clock (Pitfall 9).
+        runtime_opts.clock = d.clone();
+    }
+    let runtime = match Runtime::new(cfg.to_engine_config(), runtime_opts) {
         Ok(rt) => Arc::new(rt),
         Err(e) => {
             bridge.shutdown().await;
@@ -541,15 +558,18 @@ async fn start_inner(
     };
 
     // 5. API.
-    let control = Arc::new(ServerControlPlane::new(
-        Arc::clone(&meta),
-        partitions,
-        count,
-        Arc::clone(&runtime),
-        Arc::clone(&cfg),
-        Arc::clone(&bridge),
-        Arc::clone(&p7.shared),
-    ));
+    let control = Arc::new(
+        ServerControlPlane::new(
+            Arc::clone(&meta),
+            partitions,
+            count,
+            Arc::clone(&runtime),
+            Arc::clone(&cfg),
+            Arc::clone(&bridge),
+            Arc::clone(&p7.shared),
+        )
+        .with_dev(dev_clock),
+    );
     let mut api_cfg = ApiConfig {
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
         max_request_bytes: usize::try_from(cfg.api.max_request_bytes).unwrap_or(usize::MAX),
@@ -951,6 +971,12 @@ impl ServerHandle {
     /// The clock shared by meta timestamps, the node and the services.
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.clock
+    }
+
+    /// Phase 10 (10-10): the dev clock when time skipping is on (it is also
+    /// [`Self::clock`]); `None` otherwise.
+    pub fn dev_clock(&self) -> Option<&Arc<crate::devclock::DevClock>> {
+        self.control.dev.as_ref()
     }
 
     /// The telemetry guard (OTLP providers, Prometheus upkeep).

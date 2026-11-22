@@ -129,6 +129,9 @@ pub struct ServerControlPlane {
     /// control plane, so a strong reference would be a cycle. Read it through
     /// [`ServerControlPlane::p11`].
     pub(crate) p11: Arc<OnceLock<Weak<P11Ctx>>>,
+    /// Phase 10 (10-10): the dev clock when time skipping is on (`ostro dev --ephemeral
+    /// --time-skipping`); `None` = the dev endpoints answer 409 `time_skipping_disabled`.
+    pub(crate) dev: Option<Arc<crate::devclock::DevClock>>,
 }
 
 impl std::fmt::Debug for ServerControlPlane {
@@ -172,7 +175,14 @@ impl ServerControlPlane {
             bridge,
             p7,
             p11: Arc::new(OnceLock::new()),
+            dev: None,
         }
+    }
+
+    /// Phase 10 (10-10): serve the dev clock endpoints from `dev` (`None`: 409).
+    pub(crate) fn with_dev(mut self, dev: Option<Arc<crate::devclock::DevClock>>) -> Self {
+        self.dev = dev;
+        self
     }
 
     /// The Phase 11 context: `None` before `p11::wire` ran and after the API stopped.
