@@ -1,0 +1,107 @@
+// Rust probe for the componentize-py `exports` export allowance (plan 09-07, ENG-1).
+// Same name, init's stub-wasi parameter is u32 instead of bool: validation rejects it.
+package ostro-probe:shape;
+
+world probe {
+    include ostro:runtime/workflow@0.1.0;
+
+    // componentize-py 0.25.1's init export, copied from `jco wit` of a real build
+    // (conformance/fixtures/py-min).
+    export exports: interface {
+        record function {
+            protocol: string,
+            name: string,
+        }
+
+        record %constructor {
+            module: string,
+            protocol: string,
+        }
+
+        record %static {
+            module: string,
+            protocol: string,
+            name: string,
+        }
+
+        variant function-export-kind {
+            freestanding(function),
+            %constructor(%constructor),
+            method(string),
+            %static(%static),
+        }
+
+        variant return-style {
+            none,
+            normal,
+            %result,
+        }
+
+        record function-export {
+            kind: function-export-kind,
+            return-style: return-style,
+        }
+
+        record %resource {
+            %package: string,
+            name: string,
+        }
+
+        record %record {
+            %package: string,
+            name: string,
+            fields: list<string>,
+        }
+
+        record %flags {
+            %package: string,
+            name: string,
+            u32-count: u32,
+        }
+
+        record %tuple {
+            count: u32,
+        }
+
+        record case {
+            name: string,
+            has-payload: bool,
+        }
+
+        record %variant {
+            %package: string,
+            name: string,
+            cases: list<case>,
+        }
+
+        record %enum {
+            %package: string,
+            name: string,
+            count: u32,
+        }
+
+        enum option-kind {
+            non-nesting,
+            nesting,
+        }
+
+        record result-record {
+            has-ok: bool,
+            has-err: bool,
+        }
+
+        record symbols {
+            exports: list<function-export>,
+            resources: list<%resource>,
+            records: list<%record>,
+            %flags: list<%flags>,
+            tuples: list<%tuple>,
+            variants: list<%variant>,
+            enums: list<%enum>,
+            options: list<option-kind>,
+            results: list<result-record>,
+        }
+
+        init: func(app-name: string, symbols: symbols, stub-wasi: u32) -> result<_, string>;
+    }
+}

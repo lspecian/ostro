@@ -3,13 +3,16 @@
 //! A deployed module must be a Wasm component whose imports are limited to
 //! `ostro:runtime/*@0.1.*` plus the deterministic WASI shim interfaces
 //! ([`ALLOWED_WASI`], any `@0.2.*`), whose only export is
-//! `ostro:runtime/workflows@0.1.*`, and which the host linker can pre-instantiate.
+//! `ostro:runtime/workflows@0.1.*` (plus componentize-py's `exports` export with its exact
+//! `init` shape, see [`COMPONENTIZE_PY_EXPORT`]), and which the host linker can
+//! pre-instantiate.
 //! Every violation is collected (not first-fail) and returned in
 //! [`EngineError::Validation`], each message naming the offending interface.
 
 // 09-02 anchor; 09-07 replaces it with the export-shape check.
 use wasmparser as _;
 use wasmtime::Engine;
+use wasmtime::component::types::{ComponentItem, Type};
 use wasmtime::component::{Component, Linker};
 
 use crate::error::EngineError;
@@ -47,10 +50,149 @@ pub const ALLOWED_WASI: &[&str] = &[
 ];
 
 /// The one export every workflow component must have (any `@0.1.*`).
-///
-/// TODO(Phase 9): componentize-py adds an extra `exports` interface (S2). Decide then
-/// whether to allow it; it is rejected for now.
 pub const REQUIRED_EXPORT: &str = "ostro:runtime/workflows";
+
+/// The extra bare export every componentize-py component carries (S2, 09-RESEARCH ENG-1).
+///
+/// Rule (plan 09-07): a component may have exactly one extra export named `exports`, only
+/// next to [`REQUIRED_EXPORT`], and only if its type is structurally identical to
+/// componentize-py 0.25.1's `init(app-name, symbols, stub-wasi) -> result<_, string>`
+/// interface (see [`componentize_py_init_signature`]). The same name with any other type,
+/// or any other extra export, is a violation. The host never calls `init`: componentize-py
+/// runs it at build time (pre-initialisation), it is only left in the component's surface.
+pub const COMPONENTIZE_PY_EXPORT: &str = "exports";
+
+/// The function inside [`COMPONENTIZE_PY_EXPORT`].
+const COMPONENTIZE_PY_FUNC: &str = "init";
+
+/// Canonical rendering (see [`render_type`]) of componentize-py 0.25.1's `exports.init`,
+/// transcribed from `jco wit` of a real build (`conformance/fixtures/py-min`).
+pub fn componentize_py_init_signature() -> String {
+    let function = "record{protocol: string, name: string}";
+    let constructor = "record{module: string, protocol: string}";
+    let static_ = "record{module: string, protocol: string, name: string}";
+    let kind = format!(
+        "variant{{freestanding({function}), constructor({constructor}), method(string), \
+         static({static_})}}"
+    );
+    let return_style = "variant{none, normal, result}";
+    let function_export = format!("record{{kind: {kind}, return-style: {return_style}}}");
+    let resource = "record{package: string, name: string}";
+    let record = "record{package: string, name: string, fields: list<string>}";
+    let flags = "record{package: string, name: string, u32-count: u32}";
+    let tuple = "record{count: u32}";
+    let case = "record{name: string, has-payload: bool}";
+    let variant = format!("record{{package: string, name: string, cases: list<{case}>}}");
+    let enum_ = "record{package: string, name: string, count: u32}";
+    let option_kind = "enum{non-nesting, nesting}";
+    let result_record = "record{has-ok: bool, has-err: bool}";
+    let symbols = format!(
+        "record{{exports: list<{function_export}>, resources: list<{resource}>, \
+         records: list<{record}>, flags: list<{flags}>, tuples: list<{tuple}>, \
+         variants: list<{variant}>, enums: list<{enum_}>, options: list<{option_kind}>, \
+         results: list<{result_record}>}}"
+    );
+    format!(
+        "{COMPONENTIZE_PY_FUNC}(app-name: string, symbols: {symbols}, stub-wasi: bool) -> \
+         result<_, string>"
+    )
+}
+
+/// Structural rendering of an interface type (type names are not part of a component
+/// type, field/case names are). Owned/borrowed handles, async types and maps render as
+/// opaque markers: none appear in the shapes compared here.
+pub fn render_type(t: &Type) -> String {
+    fn join(it: impl Iterator<Item = String>) -> String {
+        it.collect::<Vec<_>>().join(", ")
+    }
+    match t {
+        Type::Bool => "bool".into(),
+        Type::S8 => "s8".into(),
+        Type::U8 => "u8".into(),
+        Type::S16 => "s16".into(),
+        Type::U16 => "u16".into(),
+        Type::S32 => "s32".into(),
+        Type::U32 => "u32".into(),
+        Type::S64 => "s64".into(),
+        Type::U64 => "u64".into(),
+        Type::Float32 => "f32".into(),
+        Type::Float64 => "f64".into(),
+        Type::Char => "char".into(),
+        Type::String => "string".into(),
+        Type::List(l) => format!("list<{}>", render_type(&l.ty())),
+        Type::FixedLengthList(l) => format!("list<{}, {}>", render_type(&l.ty()), l.len()),
+        Type::Record(r) => format!(
+            "record{{{}}}",
+            join(
+                r.fields()
+                    .map(|f| format!("{}: {}", f.name, render_type(&f.ty)))
+            )
+        ),
+        Type::Tuple(t) => format!("tuple<{}>", join(t.types().map(|t| render_type(&t)))),
+        Type::Variant(v) => format!(
+            "variant{{{}}}",
+            join(v.cases().map(|c| match c.ty {
+                Some(t) => format!("{}({})", c.name, render_type(&t)),
+                None => c.name.to_string(),
+            }))
+        ),
+        Type::Enum(e) => format!("enum{{{}}}", join(e.names().map(str::to_string))),
+        Type::Flags(f) => format!("flags{{{}}}", join(f.names().map(str::to_string))),
+        Type::Option(o) => format!("option<{}>", render_type(&o.ty())),
+        Type::Result(r) => {
+            let side = |t: Option<Type>| t.map_or_else(|| "_".to_string(), |t| render_type(&t));
+            match (r.ok(), r.err()) {
+                (None, None) => "result".into(),
+                (ok, err) => format!("result<{}, {}>", side(ok), side(err)),
+            }
+        }
+        Type::Own(_) => "own<resource>".into(),
+        Type::Borrow(_) => "borrow<resource>".into(),
+        Type::Map(_) => "map".into(),
+        Type::Future(_) => "future".into(),
+        Type::Stream(_) => "stream".into(),
+        Type::ErrorContext => "error-context".into(),
+    }
+}
+
+/// Render the functions exported by `item` (an instance), or describe why it has no
+/// function-only shape. Type exports are skipped (they carry no behaviour).
+fn render_instance_funcs(engine: &Engine, item: &ComponentItem) -> Result<Vec<String>, String> {
+    let ComponentItem::ComponentInstance(inst) = item else {
+        return Err("not an instance".into());
+    };
+    let mut funcs = Vec::new();
+    for (name, ext) in inst.exports(engine) {
+        match &ext.ty {
+            ComponentItem::Type(_) => {}
+            ComponentItem::ComponentFunc(f) => {
+                let params = f
+                    .params()
+                    .map(|(n, t)| format!("{n}: {}", render_type(&t)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let results: Vec<String> = f.results().map(|t| render_type(&t)).collect();
+                let mut sig = format!("{name}({params})");
+                if !results.is_empty() {
+                    sig.push_str(" -> ");
+                    sig.push_str(&results.join(", "));
+                }
+                funcs.push(sig);
+            }
+            _ => return Err(format!("item {name} is not a function")),
+        }
+    }
+    Ok(funcs)
+}
+
+/// `None` if `item` is exactly componentize-py's `exports` interface, else the reason.
+fn componentize_py_mismatch(engine: &Engine, item: &ComponentItem) -> Option<String> {
+    match render_instance_funcs(engine, item) {
+        Ok(funcs) if funcs == [componentize_py_init_signature()] => None,
+        Ok(funcs) => Some(format!("functions [{}]", funcs.join("; "))),
+        Err(e) => Some(e),
+    }
+}
 
 /// A component that passed deploy-time validation.
 pub struct ValidatedComponent {
@@ -160,16 +302,28 @@ pub fn validate_loaded<T: 'static>(
             ));
         }
     }
-    let mut has_required = false;
-    for name in &exports {
+    let has_required = exports.iter().any(|n| is_required_export(n));
+    for (name, ext) in ty.exports(engine) {
         if is_required_export(name) {
-            has_required = true;
-        } else {
-            violations.push(format!(
-                "export {name} is not allowed: Ostro workflows export {REQUIRED_EXPORT}, \
-                 not a command/HTTP handler"
-            ));
+            continue;
         }
+        if name == COMPONENTIZE_PY_EXPORT && has_required {
+            match componentize_py_mismatch(engine, &ext.ty) {
+                None => continue,
+                Some(why) => {
+                    violations.push(format!(
+                        "export {name} has an unexpected type: only componentize-py 0.25.1's \
+                         init(app-name, symbols, stub-wasi) interface is allowed under this \
+                         name (found {why})"
+                    ));
+                    continue;
+                }
+            }
+        }
+        violations.push(format!(
+            "export {name} is not allowed: Ostro workflows export {REQUIRED_EXPORT}, \
+             not a command/HTTP handler"
+        ));
     }
     if !has_required {
         violations.push(format!("missing required export {REQUIRED_EXPORT}@0.1.*"));
