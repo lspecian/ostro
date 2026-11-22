@@ -430,7 +430,7 @@ Plans:
 - [x] 12-01-PLAN.md — PHASE-12 GATE (Phase 8 + Phase 7 complete, seam signatures, reservations incl. env/metric names) + decisions/USER REVIEW to STATE + every dependency + FAILPOINT_CRATES sync (all CLUS) (W1)
 - [x] 12-02-PLAN.md — Contracts: cluster.proto, MetaCommand 4-6 shapes, ext 80, ReplicatedLog replica API, mutant names, role contracts, all module stubs, config + validation, harness API + scenario registry (all CLUS) (W2)
 - [ ] 12-03-PLAN.md — Tier-B harness: test PKI, in-memory tonic transport + FaultLayer, in-process cluster, measured oracles (cluster_formed, proposal-auditing election oracle), scenario runner with deadlines (CLUS-01) (W3)
-- [ ] 12-04-PLAN.md — Pure algorithms (TDD): tracker (caught-up vs previous durable end), KIP-497 maximal ISR + min_insync freeze, KIP-595 divergence, ISR-only planner (isr ∩ live), model, six mutants (CLUS-02, CLUS-03) (W3)
+- [x] 12-04-PLAN.md — Pure algorithms (TDD): tracker (caught-up vs previous durable end), KIP-497 maximal ISR + min_insync freeze, KIP-595 divergence, ISR-only planner (isr ∩ live), model, six mutants (CLUS-02, CLUS-03) (W3)
 - [ ] 12-05-PLAN.md — ElectLeader (ISR ⊆ published)/AlterIsr/ResignLeader validated at meta apply + command golden, multi-voter MetaHandle with forwarding, MetaPeer over mTLS with node-identity authz (CLUS-03) (W3)
 - [ ] 12-06-PLAN.md — Conformance suite FIRST, core groups: placement, ISR honesty, HW, stale epoch, divergence, failover/offline, min_insync + red run (CLUS-01) (W4)
 - [ ] 12-07-PLAN.md — Conformance suite FIRST, remaining groups (standby, bootstrap, fetch path, blobs, one path, zombie, object storage) + permanent mutant matrix + red run (CLUS-01) (W4)
