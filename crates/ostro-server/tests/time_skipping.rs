@@ -306,7 +306,9 @@ async fn skip_api_never_moves_back_and_accumulates() {
     let s = start(TimeSkipping::Manual).await;
     let t0 = dev_time(&s).await;
     assert_eq!(t0["mode"], "manual");
-    assert_eq!(t0["idle"], false, "10-13 fills idle");
+    // 10-13: an empty node is idle, with nothing due.
+    assert_eq!(t0["idle"], true, "{t0}");
+    assert!(t0["next_due_ms"].is_null(), "{t0}");
     // In the past: nothing.
     let v = post_skip(&s, json!({"to_ms": 1_000})).await;
     assert_eq!(u(&v, "skipped_ms"), 0, "{v}");

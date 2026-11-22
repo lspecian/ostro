@@ -303,3 +303,33 @@ fn watch_without_a_project_exits_2() {
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("no Ostro project"), "{err}");
 }
+
+/// 10-13: `--watch` and `--time-skipping` together. The watcher's deploys are API writes
+/// (the idle detector counts them); between them the node reports auto mode, idle and an
+/// untouched clock, and a save still redeploys.
+#[test]
+fn watch_with_time_skipping_deploys_and_stays_idle() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("p");
+    copy_tree(&fixture(), &p);
+    let ps = p.to_str().unwrap();
+    let dev = p10::spawn_dev(
+        &["--watch", ps, "--time-skipping"],
+        &[("CARGO_NET_OFFLINE", "true")],
+    );
+    assert_eq!(dev.ready.name, "ostro dev");
+    let mut log = Log::new(&dev);
+    log.wait_for(0, "deployed hello v1", BUILD_TIMEOUT);
+    assert_eq!(active(&dev), Some(1));
+    let (st, body) = p10::http_get(dev.addr, "/v1/dev/time");
+    assert_eq!(st, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["mode"], "auto", "{v}");
+    assert_eq!(v["idle"], true, "{v}");
+    assert_eq!(v["offset_ms"], 0, "{v}");
+    let mark = log.all.len();
+    edit(&p, "hi", 2);
+    log.wait_for(mark, "new runs use v2", BUILD_TIMEOUT);
+    assert_eq!(active(&dev), Some(2));
+    assert_eq!(run_version(&dev), 2);
+}

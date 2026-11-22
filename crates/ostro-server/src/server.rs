@@ -568,8 +568,18 @@ async fn start_inner(
             Arc::clone(&bridge),
             Arc::clone(&p7.shared),
         )
-        .with_dev(dev_clock),
+        .with_dev(dev_clock.clone()),
     );
+    // Phase 10 (10-13): the idle detector and its API write counter, only with time
+    // skipping on.
+    let dev_time = dev_clock.as_ref().map(|d| {
+        crate::devtime::DevTime::new(
+            Arc::clone(d),
+            &control,
+            Arc::clone(&stats),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+    });
     let mut api_cfg = ApiConfig {
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
         max_request_bytes: usize::try_from(cfg.api.max_request_bytes).unwrap_or(usize::MAX),
@@ -600,6 +610,14 @@ async fn start_inner(
     if cfg.telemetry.metrics {
         app = app.merge(crate::telemetry::metrics_router());
     }
+    // Phase 10 (10-13): the `ApiWriteCounter` layer (mutating requests in flight, read by
+    // the idle detector); not installed with time skipping off.
+    if let Some(t) = &dev_time {
+        app = app.layer(axum::middleware::from_fn_with_state(
+            t.api_writes(),
+            crate::devtime::count_api_writes,
+        ));
+    }
     let (done_tx, done_rx) = watch::channel(false);
     let client_endpoint = p7::client_endpoint(&p7, local_addr);
     let serve_client = p7::serve_client(&p7, listener, app);
@@ -612,6 +630,14 @@ async fn start_inner(
         res
     });
     timings.total = t0.elapsed();
+    // Phase 10 (10-13): auto time skipping (auto mode only); joined first at shutdown.
+    let dev_auto = dev_time
+        .as_ref()
+        .filter(|t| t.clock().mode() == ostro_api::domain::DevTimeMode::Auto)
+        .map(|t| {
+            let stop = CancellationToken::new();
+            (stop.clone(), Arc::clone(t).spawn_auto(stop))
+        });
 
     info!(
         addr = %local_addr,
@@ -639,6 +665,8 @@ async fn start_inner(
         clock,
         telemetry: telemetry.take().unwrap_or_else(TelemetryGuard::disabled),
         stats,
+        dev_time,
+        dev_auto,
         p7_shutdown: p7.shutdown.clone(),
         p7_handles: Some(p7_handles),
         client_endpoint,
@@ -865,6 +893,10 @@ pub struct ServerHandle {
     /// OTel providers + Prometheus upkeep; shut down last.
     telemetry: TelemetryGuard,
     stats: Arc<DispatcherStats>,
+    /// Phase 10 (10-13): the idle detector (time skipping on).
+    dev_time: Option<Arc<crate::devtime::DevTime>>,
+    /// Phase 10 (10-13): the auto-skip loop (auto mode): its stop token and task.
+    dev_auto: Option<(CancellationToken, JoinHandle<()>)>,
     /// Phase 7 shutdown (stops the client listener and the Phase 7 tasks).
     p7_shutdown: CancellationToken,
     /// Phase 7 tasks (07-02 seam); joined after the listener drained, before the services.
@@ -979,6 +1011,11 @@ impl ServerHandle {
         self.control.dev.as_ref()
     }
 
+    /// Phase 10 (10-13): the idle detector when time skipping is on.
+    pub fn dev_time(&self) -> Option<&Arc<crate::devtime::DevTime>> {
+        self.dev_time.as_ref()
+    }
+
     /// The telemetry guard (OTLP providers, Prometheus upkeep).
     pub fn telemetry(&self) -> &TelemetryGuard {
         &self.telemetry
@@ -1010,8 +1047,14 @@ impl ServerHandle {
             serve,
             data_lock,
             tempdir,
+            dev_auto,
             ..
         } = self;
+        // Phase 10 (10-13): no auto skip during shutdown.
+        if let Some((stop, task)) = dev_auto {
+            stop.cancel();
+            let _ = task.await;
+        }
         control.stop_serving();
         p7_shutdown.cancel();
         if let Some(mut serve) = serve {
