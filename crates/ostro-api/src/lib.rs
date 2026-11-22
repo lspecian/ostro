@@ -130,11 +130,11 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
                 .max_decoding_message_size(cfg.max_request_bytes),
         )
         .add_service(
-            RunsServer::new(grpc::GrpcRuns(cp.clone()))
+            RunsServer::new(grpc::GrpcRuns::new(cp.clone(), cfg.max_payload_bytes))
                 .max_decoding_message_size(cfg.max_request_bytes),
         )
         .add_service(
-            TokensServer::new(grpc::GrpcTokens(cp.clone()))
+            TokensServer::new(grpc::GrpcTokens::new(cp.clone(), cfg.max_payload_bytes))
                 .max_decoding_message_size(cfg.max_request_bytes),
         )
         // Phase 6 (06-08): bridge administration.
@@ -155,7 +155,9 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
             WorkersServer::new(grpc::GrpcWorkers(cp.clone()))
                 .max_decoding_message_size(cfg.max_request_bytes),
         );
-    let grpc = phase8::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
+    let grpc = phase8::add_grpc_services(grpc, &ext, cfg.max_request_bytes);
+    // Phase 11 (11-09): RunOps / Inventory for the slots that are present.
+    let grpc = phase11::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
         .into_axum_router()
         .layer(axum::middleware::map_response(grpc::map_size_limit_status));
     // The local presign route (06-08) sits outside the API middleware stack below: API

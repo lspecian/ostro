@@ -123,6 +123,9 @@ message HistoryEvent {
   string summary = 4;
   // UTF-8 JSON details.
   bytes details_json = 5;
+  // Activation attempt that wrote the event (epoch << 32 | n); unset when not
+  // recorded. Phase 11 (11-09, D-P11-18).
+  optional fixed64 attempt = 6;
 }
 
 message RunHistoryResponse {
@@ -141,6 +144,19 @@ message ListRunsRequest {
   // 0 = server default.
   uint32 limit = 7;
   optional string page_token = 8;
+  // Every tag must match (AND, max 8 including `tag`). Phase 11 (11-09, D-P11-10).
+  repeated string tags = 9;
+  // Result order (UNSPECIFIED = oldest first). Phase 11.
+  ListOrder order = 10;
+  // Only DLQ members (failed / timed-out runs not dismissed or requeued). Phase 11.
+  bool dlq = 11;
+}
+
+// Order of a run listing. Phase 11 (11-09).
+enum ListOrder {
+  LIST_ORDER_UNSPECIFIED = 0;
+  LIST_ORDER_OLDEST = 1;
+  LIST_ORDER_NEWEST = 2;
 }
 
 message RunSummary {

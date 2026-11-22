@@ -14,7 +14,8 @@ pub mod health {
 /// completion, Phase 5) mirror the REST operations one-to-one, as do the Phase 8
 /// services `Schedules`, `RunLogs` (`schedules.proto`) and `Webhooks` (`webhooks.proto`)
 /// and the Phase 6 services `Secrets` and `Connectors` (`bridge.proto`), and the Phase 7
-/// services `Queues` (`queues.proto`) and `Workers` (`workers.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
+/// services `Queues` (`queues.proto`) and `Workers` (`workers.proto`), and the Phase 11
+/// services `RunOps` and `Inventory` (`ops.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
 /// `*_json`; timestamps are Unix milliseconds in `*_at_ms` fields.
 pub mod api {
     /// Version 1 of the control-plane API.
@@ -402,5 +403,138 @@ mod tests {
         assert!(name::<SecretsServer<()>>().contains("SecretsServer"));
         assert!(name::<ConnectorsClient<tonic::transport::Channel>>().contains("ConnectorsClient"));
         assert!(name::<ConnectorsServer<()>>().contains("ConnectorsServer"));
+    }
+
+    #[test]
+    fn phase11_messages_roundtrip_and_numbering() {
+        use super::api::v1::{
+            BulkAction, BulkJob, BulkNoArgs, CreateBulkRequest, DlqEntry, FailurePolicy,
+            HistoryEvent, ListOrder, ListRunsRequest, OnFailurePolicy, RequeueDlqRequest,
+            RequeueMode, RerunFrom, RerunRequest, RerunStep, RunStatus, SetFailurePolicyRequest,
+            bulk_action, inventory_client::InventoryClient, inventory_server::InventoryServer,
+            requeue_mode, rerun_from, run_ops_client::RunOpsClient, run_ops_server::RunOpsServer,
+            set_failure_policy_request,
+        };
+
+        // Appended fields keep the pre-Phase 11 numbering: an old encoder's bytes decode
+        // with the new fields at their defaults, and the new fields use 9..11 / 6.
+        let old = ListRunsRequest {
+            tag: Some("a".into()),
+            limit: 5,
+            ..Default::default()
+        };
+        let back = ListRunsRequest::decode(old.encode_to_vec().as_slice()).expect("decode");
+        assert!(back.tags.is_empty());
+        assert_eq!(back.order(), ListOrder::Unspecified);
+        let new = ListRunsRequest {
+            tags: vec!["a".into(), "b".into()],
+            order: ListOrder::Newest as i32,
+            dlq: true,
+            ..Default::default()
+        };
+        // Field 9 (tags, LEN) = 0x4a, field 10 (order, varint) = 0x50, field 11 = 0x58.
+        let bytes = new.encode_to_vec();
+        assert_eq!(bytes[0], 0x4a);
+        assert!(bytes.windows(2).any(|w| w == [0x50, 2]));
+        assert!(bytes.windows(2).any(|w| w == [0x58, 1]));
+        assert_eq!(
+            ListRunsRequest::decode(bytes.as_slice()).expect("decode"),
+            new
+        );
+        let ev = HistoryEvent {
+            seq: 1,
+            attempt: Some(0),
+            ..Default::default()
+        };
+        let bytes = ev.encode_to_vec();
+        // Field 6, fixed64 = 0x31; presence survives for 0.
+        assert!(bytes.contains(&0x31));
+        assert_eq!(
+            HistoryEvent::decode(bytes.as_slice())
+                .expect("decode")
+                .attempt,
+            Some(0)
+        );
+
+        let rerun = RerunRequest {
+            run_id: "r".into(),
+            from: Some(RerunFrom {
+                point: Some(rerun_from::Point::Step(RerunStep {
+                    name: "charge".into(),
+                    occurrence: 2,
+                })),
+            }),
+            idempotency_key: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            RerunRequest::decode(rerun.encode_to_vec().as_slice()).expect("decode"),
+            rerun
+        );
+        let rq = RequeueDlqRequest {
+            run_id: "r".into(),
+            mode: Some(RequeueMode {
+                mode: Some(requeue_mode::Mode::Restart(true)),
+            }),
+            dry_run: true,
+        };
+        assert_eq!(
+            RequeueDlqRequest::decode(rq.encode_to_vec().as_slice()).expect("decode"),
+            rq
+        );
+        let bulk = CreateBulkRequest {
+            action: Some(BulkAction {
+                action: Some(bulk_action::Action::Pause(BulkNoArgs {})),
+            }),
+            rate_per_sec: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            CreateBulkRequest::decode(bulk.encode_to_vec().as_slice()).expect("decode"),
+            bulk
+        );
+        let e = DlqEntry {
+            run_id: "r".into(),
+            status: RunStatus::TimedOut as i32,
+            dismissed_at_ms: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            DlqEntry::decode(e.encode_to_vec().as_slice()).expect("decode"),
+            e
+        );
+        let j = BulkJob {
+            job_id: "blk_1".into(),
+            eta_ms: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(
+            BulkJob::decode(j.encode_to_vec().as_slice()).expect("decode"),
+            j
+        );
+        let p = SetFailurePolicyRequest {
+            scope: Some(set_failure_policy_request::Scope::Queue("q".into())),
+            policy: Some(FailurePolicy {
+                on_failure: Some(OnFailurePolicy {
+                    workflow: "alert".into(),
+                    queue: None,
+                    include_input: true,
+                }),
+                dlq: None,
+                version_tag: Some(3),
+            }),
+        };
+        assert_eq!(
+            SetFailurePolicyRequest::decode(p.encode_to_vec().as_slice()).expect("decode"),
+            p
+        );
+
+        fn name<T: ?Sized>() -> &'static str {
+            std::any::type_name::<T>()
+        }
+        assert!(name::<RunOpsClient<tonic::transport::Channel>>().contains("RunOpsClient"));
+        assert!(name::<RunOpsServer<()>>().contains("RunOpsServer"));
+        assert!(name::<InventoryClient<tonic::transport::Channel>>().contains("InventoryClient"));
+        assert!(name::<InventoryServer<()>>().contains("InventoryServer"));
     }
 }

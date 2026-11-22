@@ -50,6 +50,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+use ostro_proto::api::v1 as pb;
+use ostro_proto::api::v1::{inventory_server, run_ops_server};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
@@ -1698,6 +1700,857 @@ pub fn api_routes() -> OpenApiRouter<ExtState> {
 pub fn router(ext: ApiExtensions) -> axum::Router {
     let (r, _doc) = api_routes().split_for_parts();
     r.with_state(Arc::new(ext))
+}
+
+// ---------------------------------------------------------------------------------
+// gRPC (11-09): ostro.api.v1.{RunOps, Inventory}
+// ---------------------------------------------------------------------------------
+
+fn status_to_proto(s: RunStatusDto) -> i32 {
+    pb::RunStatus::from(crate::domain::RunStatus::from(s)) as i32
+}
+
+fn status_from_proto(field: &str, v: i32) -> Result<RunStatusDto, ApiError> {
+    crate::grpc::run_status_from_proto(field, v).map(RunStatusDto::from)
+}
+
+fn required<T>(field: &str, v: Option<T>) -> Result<T, ApiError> {
+    v.ok_or_else(|| ApiError::invalid_argument(format!("{field} is required")))
+}
+
+impl TryFrom<pb::RerunFrom> for RerunFrom {
+    type Error = ApiError;
+
+    fn try_from(f: pb::RerunFrom) -> Result<Self, ApiError> {
+        match required("from", f.point)? {
+            pb::rerun_from::Point::Seq(s) => Ok(RerunFrom::Seq(s)),
+            pb::rerun_from::Point::Step(st) => Ok(RerunFrom::Step {
+                name: st.name,
+                occurrence: st.occurrence.max(1),
+            }),
+        }
+    }
+}
+
+impl From<RerunFrom> for pb::RerunFrom {
+    fn from(f: RerunFrom) -> Self {
+        pb::RerunFrom {
+            point: Some(match f {
+                RerunFrom::Seq(s) => pb::rerun_from::Point::Seq(s),
+                RerunFrom::Step { name, occurrence } => {
+                    pb::rerun_from::Point::Step(pb::RerunStep { name, occurrence })
+                }
+            }),
+        }
+    }
+}
+
+fn from_proto(f: Option<pb::RerunFrom>) -> Result<RerunFrom, ApiError> {
+    required("from", f)?.try_into()
+}
+
+impl From<Option<pb::RerunVersion>> for RerunVersion {
+    fn from(v: Option<pb::RerunVersion>) -> Self {
+        match v.and_then(|v| v.choice) {
+            None | Some(pb::rerun_version::Choice::Active(_)) => RerunVersion::Active,
+            Some(pb::rerun_version::Choice::Source(_)) => RerunVersion::Source,
+            Some(pb::rerun_version::Choice::Version(n)) => RerunVersion::Version(n),
+        }
+    }
+}
+
+impl From<RerunVersion> for pb::RerunVersion {
+    fn from(v: RerunVersion) -> Self {
+        pb::RerunVersion {
+            choice: Some(match v {
+                RerunVersion::Active => pb::rerun_version::Choice::Active(true),
+                RerunVersion::Source => pb::rerun_version::Choice::Source(true),
+                RerunVersion::Version(n) => pb::rerun_version::Choice::Version(n),
+            }),
+        }
+    }
+}
+
+fn mode_from_proto(m: Option<pb::RequeueMode>) -> Result<RequeueMode, ApiError> {
+    Ok(match m.and_then(|m| m.mode) {
+        None | Some(pb::requeue_mode::Mode::Auto(_)) => RequeueMode::Auto,
+        Some(pb::requeue_mode::Mode::Resume(_)) => RequeueMode::Resume,
+        Some(pb::requeue_mode::Mode::Restart(_)) => RequeueMode::Restart,
+        Some(pb::requeue_mode::Mode::Rerun(f)) => RequeueMode::Rerun {
+            from: f.try_into()?,
+        },
+    })
+}
+
+impl From<RequeueMode> for pb::RequeueMode {
+    fn from(m: RequeueMode) -> Self {
+        pb::RequeueMode {
+            mode: Some(match m {
+                RequeueMode::Auto => pb::requeue_mode::Mode::Auto(true),
+                RequeueMode::Resume => pb::requeue_mode::Mode::Resume(true),
+                RequeueMode::Restart => pb::requeue_mode::Mode::Restart(true),
+                RequeueMode::Rerun { from } => pb::requeue_mode::Mode::Rerun(from.into()),
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::RerunRequest> for RerunRequest {
+    type Error = ApiError;
+
+    fn try_from(r: pb::RerunRequest) -> Result<Self, ApiError> {
+        Ok(RerunRequest {
+            run_id: r.run_id,
+            from: from_proto(r.from)?,
+            version: r.version.into(),
+            idempotency_key: r.idempotency_key,
+            dry_run: r.dry_run,
+        })
+    }
+}
+
+impl From<RerunRequest> for pb::RerunRequest {
+    fn from(r: RerunRequest) -> Self {
+        pb::RerunRequest {
+            run_id: r.run_id,
+            from: Some(r.from.into()),
+            version: Some(r.version.into()),
+            idempotency_key: r.idempotency_key,
+            dry_run: r.dry_run,
+        }
+    }
+}
+
+impl From<RerunResponse> for pb::RerunResponse {
+    fn from(r: RerunResponse) -> Self {
+        pb::RerunResponse {
+            new_run_id: r.new_run_id,
+            source_run_id: r.source_run_id,
+            cut_seq: r.cut_seq,
+            copied_events: r.copied_events,
+            workflow: r.workflow,
+            version: r.version,
+            verdict: r.verdict,
+            existing: r.existing,
+        }
+    }
+}
+
+impl From<pb::RerunResponse> for RerunResponse {
+    fn from(r: pb::RerunResponse) -> Self {
+        RerunResponse {
+            new_run_id: r.new_run_id,
+            source_run_id: r.source_run_id,
+            cut_seq: r.cut_seq,
+            copied_events: r.copied_events,
+            workflow: r.workflow,
+            version: r.version,
+            verdict: r.verdict,
+            existing: r.existing,
+        }
+    }
+}
+
+impl From<RerunCutsView> for pb::RerunCutsView {
+    fn from(v: RerunCutsView) -> Self {
+        pb::RerunCutsView {
+            run_id: v.run_id,
+            cuts: v
+                .cuts
+                .into_iter()
+                .map(|c| pb::RerunCut {
+                    seq: c.seq,
+                    step: c.step,
+                    occurrence: c.occurrence,
+                    safe: c.safe,
+                    reason: c.reason,
+                    nearest_safe_seq: c.nearest_safe_seq,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<pb::RerunCutsView> for RerunCutsView {
+    fn from(v: pb::RerunCutsView) -> Self {
+        RerunCutsView {
+            run_id: v.run_id,
+            cuts: v
+                .cuts
+                .into_iter()
+                .map(|c| RerunCut {
+                    seq: c.seq,
+                    step: c.step,
+                    occurrence: c.occurrence,
+                    safe: c.safe,
+                    reason: c.reason,
+                    nearest_safe_seq: c.nearest_safe_seq,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<pb::ListDlqRequest> for DlqListRequest {
+    fn from(r: pb::ListDlqRequest) -> Self {
+        DlqListRequest {
+            workflow: r.workflow,
+            queue: r.queue,
+            reason: r.reason,
+            tags: r.tags,
+            include_dismissed: r.include_dismissed,
+            limit: r.limit,
+            page_token: r.page_token,
+        }
+    }
+}
+
+impl From<DlqEntry> for pb::DlqEntry {
+    fn from(e: DlqEntry) -> Self {
+        pb::DlqEntry {
+            run_id: e.run_id,
+            workflow: e.workflow,
+            version: e.version,
+            queue: e.queue,
+            status: status_to_proto(e.status),
+            reason: e.reason,
+            failed_at_ms: e.failed_at_ms,
+            tags: e.tags,
+            resumable: e.resumable,
+            hook_run_id: e.hook_run_id,
+            dismissed_at_ms: e.dismissed_at_ms,
+            dismiss_reason: e.dismiss_reason,
+            requeued_to: e.requeued_to,
+            requeued_at_ms: e.requeued_at_ms,
+        }
+    }
+}
+
+impl TryFrom<pb::DlqEntry> for DlqEntry {
+    type Error = ApiError;
+
+    fn try_from(e: pb::DlqEntry) -> Result<Self, ApiError> {
+        Ok(DlqEntry {
+            status: status_from_proto("status", e.status)?,
+            run_id: e.run_id,
+            workflow: e.workflow,
+            version: e.version,
+            queue: e.queue,
+            reason: e.reason,
+            failed_at_ms: e.failed_at_ms,
+            tags: e.tags,
+            resumable: e.resumable,
+            hook_run_id: e.hook_run_id,
+            dismissed_at_ms: e.dismissed_at_ms,
+            dismiss_reason: e.dismiss_reason,
+            requeued_to: e.requeued_to,
+            requeued_at_ms: e.requeued_at_ms,
+        })
+    }
+}
+
+impl From<DlqPage> for pb::DlqPage {
+    fn from(p: DlqPage) -> Self {
+        pb::DlqPage {
+            entries: p.entries.into_iter().map(Into::into).collect(),
+            next_page_token: p.next_page_token,
+        }
+    }
+}
+
+impl TryFrom<pb::DlqPage> for DlqPage {
+    type Error = ApiError;
+
+    fn try_from(p: pb::DlqPage) -> Result<Self, ApiError> {
+        Ok(DlqPage {
+            entries: p
+                .entries
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            next_page_token: p.next_page_token,
+        })
+    }
+}
+
+impl From<DlqRequeueResponse> for pb::RequeueDlqResponse {
+    fn from(r: DlqRequeueResponse) -> Self {
+        pb::RequeueDlqResponse {
+            run_id: r.run_id,
+            mode: r.mode,
+            new_run_id: r.new_run_id,
+        }
+    }
+}
+
+impl From<pb::RequeueDlqResponse> for DlqRequeueResponse {
+    fn from(r: pb::RequeueDlqResponse) -> Self {
+        DlqRequeueResponse {
+            run_id: r.run_id,
+            mode: r.mode,
+            new_run_id: r.new_run_id,
+        }
+    }
+}
+
+impl TryFrom<pb::BulkAction> for BulkAction {
+    type Error = ApiError;
+
+    fn try_from(a: pb::BulkAction) -> Result<Self, ApiError> {
+        use pb::bulk_action::Action as A;
+        Ok(match required("action", a.action)? {
+            A::Cancel(_) => BulkAction::Cancel,
+            A::Terminate(t) => BulkAction::Terminate { reason: t.reason },
+            A::Retry(_) => BulkAction::Retry,
+            A::Rerun(r) => BulkAction::Rerun {
+                from: from_proto(r.from)?,
+                version: r.version.into(),
+            },
+            A::Requeue(r) => BulkAction::Requeue {
+                mode: mode_from_proto(r.mode)?,
+            },
+            A::Pause(_) => BulkAction::Pause,
+            A::Resume(_) => BulkAction::Resume,
+            A::Signal(s) => BulkAction::Signal {
+                payload: crate::grpc::payload_from_proto("payload_json", &s.payload_json)?,
+                name: s.name,
+            },
+        })
+    }
+}
+
+impl From<BulkAction> for pb::BulkAction {
+    fn from(a: BulkAction) -> Self {
+        use pb::bulk_action::Action as A;
+        pb::BulkAction {
+            action: Some(match a {
+                BulkAction::Cancel => A::Cancel(pb::BulkNoArgs {}),
+                BulkAction::Terminate { reason } => A::Terminate(pb::BulkTerminate { reason }),
+                BulkAction::Retry => A::Retry(pb::BulkNoArgs {}),
+                BulkAction::Rerun { from, version } => A::Rerun(pb::BulkRerun {
+                    from: Some(from.into()),
+                    version: Some(version.into()),
+                }),
+                BulkAction::Requeue { mode } => A::Requeue(pb::BulkRequeue {
+                    mode: Some(mode.into()),
+                }),
+                BulkAction::Pause => A::Pause(pb::BulkNoArgs {}),
+                BulkAction::Resume => A::Resume(pb::BulkNoArgs {}),
+                BulkAction::Signal { name, payload } => A::Signal(pb::BulkSignal {
+                    name,
+                    payload_json: serde_json::to_vec(&payload).unwrap_or_default(),
+                }),
+            }),
+        }
+    }
+}
+
+impl TryFrom<pb::CreateBulkRequest> for BulkCreateRequest {
+    type Error = ApiError;
+
+    fn try_from(r: pb::CreateBulkRequest) -> Result<Self, ApiError> {
+        let f = r.filter.unwrap_or_default();
+        Ok(BulkCreateRequest {
+            action: required("action", r.action)?.try_into()?,
+            filter: BulkFilter {
+                status: f
+                    .status
+                    .map(|s| status_from_proto("filter.status", s))
+                    .transpose()?,
+                workflow: f.workflow,
+                queue: f.queue,
+                tags: f.tags,
+                dlq: f.dlq,
+                created_after_ms: f.created_after_ms,
+                created_before_ms: f.created_before_ms,
+            },
+            rate_per_sec: r.rate_per_sec,
+            max_in_flight: r.max_in_flight,
+            dry_run: r.dry_run,
+        })
+    }
+}
+
+impl From<BulkCreateRequest> for pb::CreateBulkRequest {
+    fn from(r: BulkCreateRequest) -> Self {
+        let f = r.filter;
+        pb::CreateBulkRequest {
+            action: Some(r.action.into()),
+            filter: Some(pb::BulkFilter {
+                workflow: f.workflow,
+                status: f.status.map(status_to_proto),
+                queue: f.queue,
+                tags: f.tags,
+                dlq: f.dlq,
+                created_after_ms: f.created_after_ms,
+                created_before_ms: f.created_before_ms,
+            }),
+            rate_per_sec: r.rate_per_sec,
+            max_in_flight: r.max_in_flight,
+            dry_run: r.dry_run,
+        }
+    }
+}
+
+impl From<BulkCreateResponse> for pb::CreateBulkResponse {
+    fn from(r: BulkCreateResponse) -> Self {
+        pb::CreateBulkResponse {
+            job_id: r.job_id,
+            matched_estimate: r.matched_estimate,
+            sample: r.sample,
+        }
+    }
+}
+
+impl From<pb::CreateBulkResponse> for BulkCreateResponse {
+    fn from(r: pb::CreateBulkResponse) -> Self {
+        BulkCreateResponse {
+            job_id: r.job_id,
+            matched_estimate: r.matched_estimate,
+            sample: r.sample,
+        }
+    }
+}
+
+impl From<BulkJobView> for pb::BulkJob {
+    fn from(j: BulkJobView) -> Self {
+        pb::BulkJob {
+            job_id: j.job_id,
+            state: j.state,
+            action: j.action,
+            matched: j.matched,
+            done: j.done,
+            skipped: j.skipped,
+            failed: j
+                .failed
+                .into_iter()
+                .map(|f| pb::BulkFailure {
+                    run_id: f.run_id,
+                    reason: f.reason,
+                })
+                .collect(),
+            failed_count: j.failed_count,
+            rate_per_sec: j.rate_per_sec,
+            created_at_ms: j.created_at_ms,
+            started_at_ms: j.started_at_ms,
+            finished_at_ms: j.finished_at_ms,
+            eta_ms: j.eta_ms,
+        }
+    }
+}
+
+impl From<pb::BulkJob> for BulkJobView {
+    fn from(j: pb::BulkJob) -> Self {
+        BulkJobView {
+            job_id: j.job_id,
+            state: j.state,
+            action: j.action,
+            matched: j.matched,
+            done: j.done,
+            skipped: j.skipped,
+            failed: j
+                .failed
+                .into_iter()
+                .map(|f| BulkFailure {
+                    run_id: f.run_id,
+                    reason: f.reason,
+                })
+                .collect(),
+            failed_count: j.failed_count,
+            rate_per_sec: j.rate_per_sec,
+            created_at_ms: j.created_at_ms,
+            started_at_ms: j.started_at_ms,
+            finished_at_ms: j.finished_at_ms,
+            eta_ms: j.eta_ms,
+        }
+    }
+}
+
+impl From<LimitsView> for pb::Limits {
+    fn from(l: LimitsView) -> Self {
+        pb::Limits {
+            limits: l
+                .limits
+                .into_iter()
+                .map(|l| pb::Limit {
+                    name: l.name,
+                    value: l.value,
+                    unit: l.unit,
+                    configurable: l.configurable,
+                    enforced: l.enforced,
+                    error: l.error,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<pb::Limits> for LimitsView {
+    fn from(l: pb::Limits) -> Self {
+        LimitsView {
+            limits: l
+                .limits
+                .into_iter()
+                .map(|l| LimitView {
+                    name: l.name,
+                    value: l.value,
+                    unit: l.unit,
+                    configurable: l.configurable,
+                    enforced: l.enforced,
+                    error: l.error,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<FailurePolicy> for pb::FailurePolicy {
+    fn from(p: FailurePolicy) -> Self {
+        pb::FailurePolicy {
+            on_failure: p.on_failure.map(|o| pb::OnFailurePolicy {
+                workflow: o.workflow,
+                queue: o.queue,
+                include_input: o.include_input,
+            }),
+            dlq: p.dlq.map(|d| pb::DlqPolicy {
+                enabled: d.enabled,
+                hook_catchup_ms: d.hook_catchup_ms,
+            }),
+            version_tag: p.version_tag,
+        }
+    }
+}
+
+impl From<pb::FailurePolicy> for FailurePolicy {
+    fn from(p: pb::FailurePolicy) -> Self {
+        FailurePolicy {
+            on_failure: p.on_failure.map(|o| OnFailurePolicy {
+                workflow: o.workflow,
+                queue: o.queue,
+                include_input: o.include_input,
+            }),
+            dlq: p.dlq.map(|d| DlqPolicyDto {
+                enabled: d.enabled,
+                hook_catchup_ms: d.hook_catchup_ms,
+            }),
+            version_tag: p.version_tag,
+        }
+    }
+}
+
+impl From<ModulePage> for pb::ListModulesResponse {
+    fn from(p: ModulePage) -> Self {
+        pb::ListModulesResponse {
+            modules: p
+                .modules
+                .into_iter()
+                .map(|m| pb::ModuleSummary {
+                    sha256: m.sha256,
+                    size_bytes: m.size_bytes,
+                    uploaded_at_ms: m.uploaded_at_ms,
+                    workflows: m.workflows,
+                })
+                .collect(),
+            next_page_token: p.next_page_token,
+        }
+    }
+}
+
+impl From<pb::ListModulesResponse> for ModulePage {
+    fn from(p: pb::ListModulesResponse) -> Self {
+        ModulePage {
+            modules: p
+                .modules
+                .into_iter()
+                .map(|m| ModuleSummary {
+                    sha256: m.sha256,
+                    size_bytes: m.size_bytes,
+                    uploaded_at_ms: m.uploaded_at_ms,
+                    workflows: m.workflows,
+                })
+                .collect(),
+            next_page_token: p.next_page_token,
+        }
+    }
+}
+
+impl From<QueueView> for pb::QueueSummary {
+    fn from(q: QueueView) -> Self {
+        pb::QueueSummary {
+            name: q.name,
+            paused: q.paused,
+            ready: q.ready,
+            running: q.running,
+            demand: q.demand,
+            flow_json: q.flow.map(|f| serde_json::to_vec(&f).unwrap_or_default()),
+        }
+    }
+}
+
+impl TryFrom<pb::QueueSummary> for QueueView {
+    type Error = ApiError;
+
+    fn try_from(q: pb::QueueSummary) -> Result<Self, ApiError> {
+        Ok(QueueView {
+            flow: q
+                .flow_json
+                .map(|b| crate::grpc::payload_from_proto("flow_json", &b))
+                .transpose()?,
+            name: q.name,
+            paused: q.paused,
+            ready: q.ready,
+            running: q.running,
+            demand: q.demand,
+        })
+    }
+}
+
+impl From<PartitionView> for pb::PartitionSummary {
+    fn from(p: PartitionView) -> Self {
+        pb::PartitionSummary {
+            id: u32::from(p.id),
+            role: p.role,
+            leader: p.leader,
+            epoch: p.epoch,
+            applied_offset: p.applied_offset,
+            log_end_offset: p.log_end_offset,
+            ready: p.ready,
+            running: p.running,
+            healthy: p.healthy,
+            detail: p.detail,
+        }
+    }
+}
+
+impl TryFrom<pb::PartitionSummary> for PartitionView {
+    type Error = ApiError;
+
+    fn try_from(p: pb::PartitionSummary) -> Result<Self, ApiError> {
+        Ok(PartitionView {
+            id: u16::try_from(p.id)
+                .map_err(|_| ApiError::invalid_argument(format!("id: {} > 65535", p.id)))?,
+            role: p.role,
+            leader: p.leader,
+            epoch: p.epoch,
+            applied_offset: p.applied_offset,
+            log_end_offset: p.log_end_offset,
+            ready: p.ready,
+            running: p.running,
+            healthy: p.healthy,
+            detail: p.detail,
+        })
+    }
+}
+
+fn scope_from_get(
+    s: Option<pb::get_failure_policy_request::Scope>,
+) -> Result<PolicyScope, ApiError> {
+    Ok(match required("scope", s)? {
+        pb::get_failure_policy_request::Scope::Workflow(n) => PolicyScope::Workflow(n),
+        pb::get_failure_policy_request::Scope::Queue(n) => PolicyScope::Queue(n),
+    })
+}
+
+fn scope_from_set(
+    s: Option<pb::set_failure_policy_request::Scope>,
+) -> Result<PolicyScope, ApiError> {
+    Ok(match required("scope", s)? {
+        pb::set_failure_policy_request::Scope::Workflow(n) => PolicyScope::Workflow(n),
+        pb::set_failure_policy_request::Scope::Queue(n) => PolicyScope::Queue(n),
+    })
+}
+
+type GrpcResult<T> = Result<tonic::Response<T>, tonic::Status>;
+
+fn ok<T>(v: T) -> GrpcResult<T> {
+    Ok(tonic::Response::new(v))
+}
+
+fn st(e: ApiError) -> tonic::Status {
+    crate::grpc::to_status(e)
+}
+
+/// `ostro.api.v1.RunOps` over an [`OpsApi`] (same validation as REST).
+#[derive(Clone)]
+pub struct GrpcRunOps(pub Arc<dyn OpsApi>);
+
+/// `ostro.api.v1.Inventory` over an [`InventoryApi`].
+#[derive(Clone)]
+pub struct GrpcInventory(pub Arc<dyn InventoryApi>);
+
+#[tonic::async_trait]
+impl run_ops_server::RunOps for GrpcRunOps {
+    async fn rerun(&self, r: tonic::Request<pb::RerunRequest>) -> GrpcResult<pb::RerunResponse> {
+        let req = RerunRequest::try_from(r.into_inner()).map_err(st)?;
+        check::rerun(&req).map_err(st)?;
+        ok(self.0.rerun_run(req).await.map_err(st)?.into())
+    }
+
+    async fn rerun_cuts(
+        &self,
+        r: tonic::Request<pb::RerunCutsRequest>,
+    ) -> GrpcResult<pb::RerunCutsView> {
+        let run_id = r.into_inner().run_id;
+        validate_run_id(&run_id).map_err(st)?;
+        ok(self.0.analyze_rerun(run_id).await.map_err(st)?.into())
+    }
+
+    async fn list_dlq(&self, r: tonic::Request<pb::ListDlqRequest>) -> GrpcResult<pb::DlqPage> {
+        let req = DlqListRequest::from(r.into_inner());
+        check::dlq_list(&req).map_err(st)?;
+        ok(self.0.list_dlq(req).await.map_err(st)?.into())
+    }
+
+    async fn requeue_dlq(
+        &self,
+        r: tonic::Request<pb::RequeueDlqRequest>,
+    ) -> GrpcResult<pb::RequeueDlqResponse> {
+        let r = r.into_inner();
+        let req = DlqRequeueRequest {
+            run_id: r.run_id,
+            mode: mode_from_proto(r.mode).map_err(st)?,
+            dry_run: r.dry_run,
+        };
+        check::requeue(&req).map_err(st)?;
+        ok(self.0.requeue_dlq(req).await.map_err(st)?.into())
+    }
+
+    async fn dismiss_dlq(
+        &self,
+        r: tonic::Request<pb::DismissDlqRequest>,
+    ) -> GrpcResult<pb::DlqEntry> {
+        let r = r.into_inner();
+        let req = DlqDismissRequest {
+            run_id: r.run_id,
+            reason: r.reason,
+        };
+        check::dismiss(&req).map_err(st)?;
+        ok(self.0.dismiss_dlq(req).await.map_err(st)?.into())
+    }
+
+    async fn create_bulk(
+        &self,
+        r: tonic::Request<pb::CreateBulkRequest>,
+    ) -> GrpcResult<pb::CreateBulkResponse> {
+        let req = BulkCreateRequest::try_from(r.into_inner()).map_err(st)?;
+        check::bulk(&req).map_err(st)?;
+        ok(self.0.create_bulk(req).await.map_err(st)?.into())
+    }
+
+    async fn list_bulk(
+        &self,
+        _r: tonic::Request<pb::ListBulkRequest>,
+    ) -> GrpcResult<pb::ListBulkResponse> {
+        let jobs = self.0.list_bulk().await.map_err(st)?;
+        ok(pb::ListBulkResponse {
+            jobs: jobs.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    async fn get_bulk(&self, r: tonic::Request<pb::GetBulkRequest>) -> GrpcResult<pb::BulkJob> {
+        let id = r.into_inner().job_id;
+        check::job_id(&id).map_err(st)?;
+        ok(self.0.get_bulk(id).await.map_err(st)?.into())
+    }
+
+    async fn cancel_bulk(
+        &self,
+        r: tonic::Request<pb::CancelBulkRequest>,
+    ) -> GrpcResult<pb::BulkJob> {
+        let id = r.into_inner().job_id;
+        check::job_id(&id).map_err(st)?;
+        ok(self.0.cancel_bulk(id).await.map_err(st)?.into())
+    }
+
+    async fn get_limits(&self, _r: tonic::Request<pb::GetLimitsRequest>) -> GrpcResult<pb::Limits> {
+        ok(self.0.limits().await.map_err(st)?.into())
+    }
+
+    async fn get_failure_policy(
+        &self,
+        r: tonic::Request<pb::GetFailurePolicyRequest>,
+    ) -> GrpcResult<pb::FailurePolicy> {
+        let scope = scope_from_get(r.into_inner().scope).map_err(st)?;
+        check::scope(&scope).map_err(st)?;
+        ok(self.0.get_failure_policy(scope).await.map_err(st)?.into())
+    }
+
+    async fn set_failure_policy(
+        &self,
+        r: tonic::Request<pb::SetFailurePolicyRequest>,
+    ) -> GrpcResult<pb::FailurePolicy> {
+        let r = r.into_inner();
+        let scope = scope_from_set(r.scope).map_err(st)?;
+        let p = FailurePolicy::from(r.policy.unwrap_or_default());
+        check::failure_policy(&scope, &p).map_err(st)?;
+        ok(self
+            .0
+            .set_failure_policy(scope, p)
+            .await
+            .map_err(st)?
+            .into())
+    }
+}
+
+#[tonic::async_trait]
+impl inventory_server::Inventory for GrpcInventory {
+    async fn list_modules(
+        &self,
+        r: tonic::Request<pb::ListModulesRequest>,
+    ) -> GrpcResult<pb::ListModulesResponse> {
+        let r = r.into_inner();
+        let page = self
+            .0
+            .list_modules(ListModulesRequest {
+                limit: r.limit,
+                page_token: r.page_token,
+            })
+            .await
+            .map_err(st)?;
+        ok(page.into())
+    }
+
+    async fn list_queues(
+        &self,
+        _r: tonic::Request<pb::ListQueuesRequest>,
+    ) -> GrpcResult<pb::ListQueuesResponse> {
+        let queues = self.0.list_queues().await.map_err(st)?;
+        ok(pb::ListQueuesResponse {
+            queues: queues.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    async fn list_partitions(
+        &self,
+        _r: tonic::Request<pb::ListPartitionsRequest>,
+    ) -> GrpcResult<pb::ListPartitionsResponse> {
+        let partitions = self.0.list_partitions().await.map_err(st)?;
+        ok(pb::ListPartitionsResponse {
+            partitions: partitions.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+/// Mount `RunOps` / `Inventory` for the slots that are present (absent = not mounted,
+/// so clients see `UNIMPLEMENTED`, as for Phase 8).
+pub(crate) fn add_grpc_services(
+    mut routes: tonic::service::Routes,
+    ext: &ApiExtensions,
+    max_request_bytes: usize,
+) -> tonic::service::Routes {
+    if let Some(o) = &ext.ops {
+        routes = routes.add_service(
+            run_ops_server::RunOpsServer::new(GrpcRunOps(Arc::clone(o)))
+                .max_decoding_message_size(max_request_bytes),
+        );
+    }
+    if let Some(i) = &ext.inventory {
+        routes = routes.add_service(
+            inventory_server::InventoryServer::new(GrpcInventory(Arc::clone(i)))
+                .max_decoding_message_size(max_request_bytes),
+        );
+    }
+    routes
 }
 
 #[cfg(test)]

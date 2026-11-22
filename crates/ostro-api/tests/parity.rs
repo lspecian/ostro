@@ -839,6 +839,7 @@ impl Client for GrpcClient {
                 created_before_ms: None,
                 limit: l.limit,
                 page_token: l.page_token,
+                ..Default::default()
             })
             .await
             .map_err(grpc_err)?
@@ -4009,5 +4010,1143 @@ mod phase7 {
             .unwrap()
             .to_owned();
         assert!(!get("list tokens").unwrap().to_string().contains(&secret));
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 11 (11-09): RunOps and Inventory parity against `FakeOps` / `FakeInventory`,
+// the new ListRuns fields, the history attempt and the API caps on Runs / Tokens
+// (D-P11-31). An absent slot is REST 404 vs gRPC UNIMPLEMENTED (service not mounted,
+// the Phase 8 convention); that pair is checked separately.
+// ---------------------------------------------------------------------------------
+
+mod phase11 {
+    use super::*;
+    use ostro_api::fake::{FAKE_MAX_BULK_JOBS, FakeInventory, FakeOps};
+    use ostro_api::phase11::{
+        BulkCreateRequest, BulkCreateResponse, BulkJobView, DlqEntry, DlqPage, DlqRequeueResponse,
+        FailurePolicy, LimitsView, ModulePage, ModuleSummary, PartitionView, QueueView, RerunCut,
+        RerunCutsView, RerunRequest, RerunResponse, rerun_cut_unsafe,
+    };
+    use ostro_api::rest::RunStatusDto;
+    use ostro_api::{ApiExtensions, phase11 as p11};
+    use ostro_proto::api::v1::{inventory_client::InventoryClient, run_ops_client::RunOpsClient};
+
+    const CAP: usize = 1024;
+
+    struct P11Server {
+        addr: SocketAddr,
+        cp: Arc<FakeControlPlane>,
+        ops: Arc<FakeOps>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for P11Server {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    fn p11_cfg() -> ApiConfig {
+        ApiConfig {
+            max_payload_bytes: CAP,
+            ..cfg()
+        }
+    }
+
+    async fn serve_p11(with_slots: bool) -> P11Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let cp = Arc::new(FakeControlPlane::new());
+        let ops = FakeOps::new();
+        let inv = FakeInventory::new();
+        let mut ext = ApiExtensions::default();
+        if with_slots {
+            ops.install(&mut ext);
+            inv.install(&mut ext);
+        }
+        seed(&ops, &inv);
+        let dyn_cp: Arc<dyn ControlPlane> = cp.clone();
+        let app = ostro_api::router_with(dyn_cp, p11_cfg(), ext);
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        P11Server {
+            addr,
+            cp,
+            ops,
+            task,
+        }
+    }
+
+    fn seed(ops: &FakeOps, inv: &FakeInventory) {
+        for i in 1..=5u64 {
+            ops.push_dlq(DlqEntry {
+                run_id: format!("run-dlq-{i}"),
+                workflow: "greet".into(),
+                version: 1,
+                queue: "default".into(),
+                status: if i == 3 {
+                    RunStatusDto::TimedOut
+                } else {
+                    RunStatusDto::Failed
+                },
+                reason: format!("boom {i}"),
+                failed_at_ms: 1_000 * i,
+                tags: vec![format!("t{}", i % 2)],
+                resumable: i == 1,
+                hook_run_id: (i == 2).then(|| "run-hook".to_owned()),
+                dismissed_at_ms: None,
+                dismiss_reason: None,
+                requeued_to: None,
+                requeued_at_ms: None,
+            });
+        }
+        ops.set_cuts(RerunCutsView {
+            run_id: "run-src".into(),
+            cuts: vec![
+                RerunCut {
+                    seq: 1,
+                    step: None,
+                    occurrence: 1,
+                    safe: true,
+                    reason: None,
+                    nearest_safe_seq: None,
+                },
+                RerunCut {
+                    seq: 6,
+                    step: Some("charge".into()),
+                    occurrence: 2,
+                    safe: false,
+                    reason: Some("open await".into()),
+                    nearest_safe_seq: Some(1),
+                },
+            ],
+        });
+        ops.set_bulk_matches((1..=25).map(|i| format!("run-b{i:02}")).collect());
+        inv.set_modules(
+            (0..3)
+                .map(|i| ModuleSummary {
+                    sha256: format!("{i:064x}"),
+                    size_bytes: 10 + i,
+                    uploaded_at_ms: (i > 0).then_some(5),
+                    workflows: vec!["greet".into()],
+                })
+                .collect(),
+        );
+        inv.set_queues(vec![
+            QueueView {
+                name: "default".into(),
+                paused: false,
+                ready: 2,
+                running: 1,
+                demand: Some(3),
+                flow: Some(json!({ "max_concurrency": 4 })),
+            },
+            QueueView {
+                name: "slow".into(),
+                paused: true,
+                ready: 0,
+                running: 0,
+                demand: None,
+                flow: None,
+            },
+        ]);
+        inv.set_partitions(vec![PartitionView {
+            id: 0,
+            role: "leader".into(),
+            leader: Some(1),
+            epoch: Some(3),
+            applied_offset: Some(42),
+            log_end_offset: None,
+            ready: Some(2),
+            running: Some(1),
+            healthy: true,
+            detail: None,
+        }]);
+    }
+
+    fn canon<T: serde::Serialize>(v: T) -> Value {
+        serde_json::to_value(v).expect("json")
+    }
+
+    fn rest_as<T: serde::de::DeserializeOwned + serde::Serialize>(v: Value) -> Value {
+        canon(serde_json::from_value::<T>(v).expect("dto"))
+    }
+
+    /// `?k=v&...` with RFC 3986 percent-encoding (reqwest's `query` feature is off).
+    fn qs(pairs: &[(String, String)]) -> String {
+        fn enc(s: &str) -> String {
+            s.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+                        (b as char).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        }
+        if pairs.is_empty() {
+            return String::new();
+        }
+        let q: Vec<String> = pairs
+            .iter()
+            .map(|(k, v)| format!("{}={}", enc(k), enc(v)))
+            .collect();
+        format!("?{}", q.join("&"))
+    }
+
+    fn grpc_err11(s: tonic::Status) -> (ErrorCode, Option<Value>) {
+        let d = status_details(&s);
+        (
+            ErrorCode::from_grpc_code_and_details(s.code(), d.as_ref()),
+            d,
+        )
+    }
+
+    trait P11Client {
+        async fn start(&mut self, input: Value, tags: Vec<&str>) -> Out;
+        async fn list(
+            &mut self,
+            tag: Option<&str>,
+            tags: Vec<&str>,
+            newest: bool,
+            dlq: bool,
+        ) -> Out;
+        async fn history(&mut self, run_id: &str) -> Out;
+        async fn signal(&mut self, run_id: &str, payload: Value) -> Out;
+        async fn complete_token(&mut self, token: &str, payload: Value) -> Out;
+        async fn rerun(&mut self, r: Value) -> Out;
+        async fn rerun_cuts(&mut self, run_id: &str) -> Out;
+        async fn list_dlq(&mut self, q: Value) -> Out;
+        async fn requeue(&mut self, run_id: &str, body: Value) -> Out;
+        async fn dismiss(&mut self, run_id: &str, reason: &str) -> Out;
+        async fn create_bulk(&mut self, r: Value) -> Out;
+        async fn list_bulk(&mut self) -> Out;
+        async fn get_bulk(&mut self, id: &str) -> Out;
+        async fn cancel_bulk(&mut self, id: &str) -> Out;
+        async fn limits(&mut self) -> Out;
+        async fn get_policy(&mut self, queue: bool, name: &str) -> Out;
+        async fn set_policy(&mut self, queue: bool, name: &str, p: Value) -> Out;
+        async fn modules(&mut self, limit: u32, token: Option<&str>) -> Out;
+        async fn queues(&mut self) -> Out;
+        async fn partitions(&mut self) -> Out;
+    }
+
+    impl P11Client for RestClient {
+        async fn start(&mut self, input: Value, tags: Vec<&str>) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/workflows/greet/runs", self.base))
+                        .json(&json!({ "input": input, "tags": tags })),
+                )
+                .await?;
+            Ok(json!({ "run_id": v["run_id"], "created": v["created"] }))
+        }
+
+        async fn list(
+            &mut self,
+            tag: Option<&str>,
+            tags: Vec<&str>,
+            newest: bool,
+            dlq: bool,
+        ) -> Out {
+            let mut q: Vec<(String, String)> = Vec::new();
+            if let Some(t) = tag {
+                q.push(("tag".into(), t.into()));
+            }
+            for t in tags {
+                q.push(("tags".into(), t.into()));
+            }
+            if newest {
+                q.push(("order".into(), "newest".into()));
+            }
+            if dlq {
+                q.push(("dlq".into(), "true".into()));
+            }
+            let v = self
+                .send(self.http.get(format!("{}/v1/runs{}", self.base, qs(&q))))
+                .await?;
+            let ids: Vec<Value> = v["runs"]
+                .as_array()
+                .expect("runs")
+                .iter()
+                .map(|r| r["run_id"].clone())
+                .collect();
+            Ok(json!(ids))
+        }
+
+        async fn history(&mut self, run_id: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .get(format!("{}/v1/runs/{run_id}/history", self.base)),
+                )
+                .await?;
+            Ok(json!(
+                v["events"]
+                    .as_array()
+                    .expect("events")
+                    .iter()
+                    .map(|e| json!({ "seq": e["seq"], "attempt": e.get("attempt") }))
+                    .collect::<Vec<_>>()
+            ))
+        }
+
+        async fn signal(&mut self, run_id: &str, payload: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/runs/{run_id}/signals/go", self.base))
+                        .json(&json!({ "payload": payload })),
+                )
+                .await?;
+            Ok(json!({ "accepted": v["accepted"], "duplicate": v["duplicate"] }))
+        }
+
+        async fn complete_token(&mut self, token: &str, payload: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/tokens/complete", self.base))
+                        .json(&json!({ "token": token, "payload": payload })),
+                )
+                .await?;
+            Ok(json!({ "run_id": v["run_id"], "accepted": v["accepted"] }))
+        }
+
+        async fn rerun(&mut self, r: Value) -> Out {
+            let run = r["run_id"].as_str().expect("run").to_owned();
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/runs/{run}/rerun", self.base))
+                        .json(&r),
+                )
+                .await?;
+            Ok(rest_as::<RerunResponse>(v))
+        }
+
+        async fn rerun_cuts(&mut self, run_id: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .get(format!("{}/v1/runs/{run_id}/rerun-cuts", self.base)),
+                )
+                .await?;
+            Ok(rest_as::<RerunCutsView>(v))
+        }
+
+        async fn list_dlq(&mut self, q: Value) -> Out {
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for (k, v) in q.as_object().expect("query") {
+                match v {
+                    Value::Array(a) => {
+                        for t in a {
+                            pairs.push((k.clone(), t.as_str().expect("tag").to_owned()));
+                        }
+                    }
+                    Value::String(s) => pairs.push((k.clone(), s.clone())),
+                    other => pairs.push((k.clone(), other.to_string())),
+                }
+            }
+            let v = self
+                .send(self.http.get(format!("{}/v1/dlq{}", self.base, qs(&pairs))))
+                .await?;
+            Ok(rest_as::<DlqPage>(v))
+        }
+
+        async fn requeue(&mut self, run_id: &str, body: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/dlq/{run_id}/requeue", self.base))
+                        .json(&body),
+                )
+                .await?;
+            Ok(rest_as::<DlqRequeueResponse>(v))
+        }
+
+        async fn dismiss(&mut self, run_id: &str, reason: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/dlq/{run_id}/dismiss", self.base))
+                        .json(&json!({ "reason": reason })),
+                )
+                .await?;
+            Ok(rest_as::<DlqEntry>(v))
+        }
+
+        async fn create_bulk(&mut self, r: Value) -> Out {
+            let v = self
+                .send(self.http.post(format!("{}/v1/bulk", self.base)).json(&r))
+                .await?;
+            Ok(rest_as::<BulkCreateResponse>(v))
+        }
+
+        async fn list_bulk(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/bulk", self.base)))
+                .await?;
+            Ok(rest_as::<Vec<BulkJobView>>(v["jobs"].clone()))
+        }
+
+        async fn get_bulk(&mut self, id: &str) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/bulk/{id}", self.base)))
+                .await?;
+            Ok(rest_as::<BulkJobView>(v))
+        }
+
+        async fn cancel_bulk(&mut self, id: &str) -> Out {
+            let v = self
+                .send(self.http.post(format!("{}/v1/bulk/{id}/cancel", self.base)))
+                .await?;
+            Ok(rest_as::<BulkJobView>(v))
+        }
+
+        async fn limits(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/limits", self.base)))
+                .await?;
+            Ok(rest_as::<LimitsView>(v))
+        }
+
+        async fn get_policy(&mut self, queue: bool, name: &str) -> Out {
+            let kind = if queue { "queues" } else { "workflows" };
+            let v = self
+                .send(
+                    self.http
+                        .get(format!("{}/v1/{kind}/{name}/failure-policy", self.base)),
+                )
+                .await?;
+            Ok(rest_as::<FailurePolicy>(v))
+        }
+
+        async fn set_policy(&mut self, queue: bool, name: &str, p: Value) -> Out {
+            let kind = if queue { "queues" } else { "workflows" };
+            let v = self
+                .send(
+                    self.http
+                        .put(format!("{}/v1/{kind}/{name}/failure-policy", self.base))
+                        .json(&p),
+                )
+                .await?;
+            Ok(rest_as::<FailurePolicy>(v))
+        }
+
+        async fn modules(&mut self, limit: u32, token: Option<&str>) -> Out {
+            let mut q = vec![("limit".to_owned(), limit.to_string())];
+            if let Some(t) = token {
+                q.push(("page_token".into(), t.into()));
+            }
+            let v = self
+                .send(self.http.get(format!("{}/v1/modules{}", self.base, qs(&q))))
+                .await?;
+            Ok(rest_as::<ModulePage>(v))
+        }
+
+        async fn queues(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/queues", self.base)))
+                .await?;
+            Ok(rest_as::<Vec<QueueView>>(v["queues"].clone()))
+        }
+
+        async fn partitions(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/partitions", self.base)))
+                .await?;
+            Ok(rest_as::<Vec<PartitionView>>(v["partitions"].clone()))
+        }
+    }
+
+    struct GrpcP11 {
+        runs: RunsClient<Channel>,
+        tokens: TokensClient<Channel>,
+        ops: RunOpsClient<Channel>,
+        inv: InventoryClient<Channel>,
+    }
+
+    impl GrpcP11 {
+        async fn connect(addr: SocketAddr) -> Self {
+            let ch = Channel::from_shared(format!("http://{addr}"))
+                .expect("uri")
+                .connect()
+                .await
+                .expect("connect");
+            GrpcP11 {
+                runs: RunsClient::new(ch.clone()),
+                tokens: TokensClient::new(ch.clone()),
+                ops: RunOpsClient::new(ch.clone()),
+                inv: InventoryClient::new(ch),
+            }
+        }
+    }
+
+    impl P11Client for GrpcP11 {
+        async fn start(&mut self, input: Value, tags: Vec<&str>) -> Out {
+            let r = self
+                .runs
+                .start(pb::StartRunRequest {
+                    workflow: "greet".into(),
+                    input_json: serde_json::to_vec(&input).expect("json"),
+                    tags: tags.into_iter().map(str::to_owned).collect(),
+                    ..Default::default()
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(json!({ "run_id": r.run_id, "created": r.created }))
+        }
+
+        async fn list(
+            &mut self,
+            tag: Option<&str>,
+            tags: Vec<&str>,
+            newest: bool,
+            dlq: bool,
+        ) -> Out {
+            let r = self
+                .runs
+                .list(pb::ListRunsRequest {
+                    tag: tag.map(str::to_owned),
+                    tags: tags.into_iter().map(str::to_owned).collect(),
+                    order: if newest {
+                        pb::ListOrder::Newest as i32
+                    } else {
+                        pb::ListOrder::Unspecified as i32
+                    },
+                    dlq,
+                    ..Default::default()
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(json!(
+                r.runs.iter().map(|r| r.run_id.clone()).collect::<Vec<_>>()
+            ))
+        }
+
+        async fn history(&mut self, run_id: &str) -> Out {
+            let r = self
+                .runs
+                .history(pb::RunHistoryRequest {
+                    run_id: run_id.into(),
+                    from_seq: 0,
+                    limit: 0,
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(json!(
+                r.events
+                    .iter()
+                    .map(|e| json!({ "seq": e.seq, "attempt": e.attempt }))
+                    .collect::<Vec<_>>()
+            ))
+        }
+
+        async fn signal(&mut self, run_id: &str, payload: Value) -> Out {
+            let r = self
+                .runs
+                .signal(pb::SignalRunRequest {
+                    run_id: run_id.into(),
+                    name: "go".into(),
+                    payload_json: serde_json::to_vec(&payload).expect("json"),
+                    ..Default::default()
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(json!({ "accepted": r.accepted, "duplicate": r.duplicate }))
+        }
+
+        async fn complete_token(&mut self, token: &str, payload: Value) -> Out {
+            let r = self
+                .tokens
+                .complete(pb::CompleteTokenRequest {
+                    token: token.into(),
+                    payload_json: serde_json::to_vec(&payload).expect("json"),
+                    dry_run: false,
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(json!({ "run_id": r.run_id, "accepted": r.accepted }))
+        }
+
+        async fn rerun(&mut self, r: Value) -> Out {
+            let req: RerunRequest = serde_json::from_value(r).expect("dto");
+            let res = self
+                .ops
+                .rerun(pb::RerunRequest::from(req))
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(RerunResponse::from(res)))
+        }
+
+        async fn rerun_cuts(&mut self, run_id: &str) -> Out {
+            let res = self
+                .ops
+                .rerun_cuts(pb::RerunCutsRequest {
+                    run_id: run_id.into(),
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(RerunCutsView::from(res)))
+        }
+
+        async fn list_dlq(&mut self, q: Value) -> Out {
+            let s = |k: &str| q.get(k).and_then(Value::as_str).map(str::to_owned);
+            let res = self
+                .ops
+                .list_dlq(pb::ListDlqRequest {
+                    workflow: s("workflow"),
+                    queue: s("queue"),
+                    reason: s("reason"),
+                    tags: q
+                        .get("tags")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .map(|t| t.as_str().expect("tag").to_owned())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    include_dismissed: q
+                        .get("include_dismissed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    limit: q.get("limit").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    page_token: s("page_token"),
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(DlqPage::try_from(res).expect("page")))
+        }
+
+        async fn requeue(&mut self, run_id: &str, body: Value) -> Out {
+            let b: p11::RequeueBody = serde_json::from_value(body).expect("body");
+            let res = self
+                .ops
+                .requeue_dlq(pb::RequeueDlqRequest {
+                    run_id: run_id.into(),
+                    mode: Some(b.mode.into()),
+                    dry_run: b.dry_run,
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(DlqRequeueResponse::from(res)))
+        }
+
+        async fn dismiss(&mut self, run_id: &str, reason: &str) -> Out {
+            let res = self
+                .ops
+                .dismiss_dlq(pb::DismissDlqRequest {
+                    run_id: run_id.into(),
+                    reason: reason.into(),
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(DlqEntry::try_from(res).expect("entry")))
+        }
+
+        async fn create_bulk(&mut self, r: Value) -> Out {
+            let req: BulkCreateRequest = serde_json::from_value(r).expect("dto");
+            let res = self
+                .ops
+                .create_bulk(pb::CreateBulkRequest::from(req))
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(BulkCreateResponse::from(res)))
+        }
+
+        async fn list_bulk(&mut self) -> Out {
+            let res = self
+                .ops
+                .list_bulk(pb::ListBulkRequest {})
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(
+                res.jobs
+                    .into_iter()
+                    .map(BulkJobView::from)
+                    .collect::<Vec<_>>(),
+            ))
+        }
+
+        async fn get_bulk(&mut self, id: &str) -> Out {
+            let res = self
+                .ops
+                .get_bulk(pb::GetBulkRequest { job_id: id.into() })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(BulkJobView::from(res)))
+        }
+
+        async fn cancel_bulk(&mut self, id: &str) -> Out {
+            let res = self
+                .ops
+                .cancel_bulk(pb::CancelBulkRequest { job_id: id.into() })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(BulkJobView::from(res)))
+        }
+
+        async fn limits(&mut self) -> Out {
+            let res = self
+                .ops
+                .get_limits(pb::GetLimitsRequest {})
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(LimitsView::from(res)))
+        }
+
+        async fn get_policy(&mut self, queue: bool, name: &str) -> Out {
+            use pb::get_failure_policy_request::Scope;
+            let scope = if queue {
+                Scope::Queue(name.into())
+            } else {
+                Scope::Workflow(name.into())
+            };
+            let res = self
+                .ops
+                .get_failure_policy(pb::GetFailurePolicyRequest { scope: Some(scope) })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(FailurePolicy::from(res)))
+        }
+
+        async fn set_policy(&mut self, queue: bool, name: &str, p: Value) -> Out {
+            use pb::set_failure_policy_request::Scope;
+            let scope = if queue {
+                Scope::Queue(name.into())
+            } else {
+                Scope::Workflow(name.into())
+            };
+            let p: FailurePolicy = serde_json::from_value(p).expect("dto");
+            let res = self
+                .ops
+                .set_failure_policy(pb::SetFailurePolicyRequest {
+                    scope: Some(scope),
+                    policy: Some(p.into()),
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(FailurePolicy::from(res)))
+        }
+
+        async fn modules(&mut self, limit: u32, token: Option<&str>) -> Out {
+            let res = self
+                .inv
+                .list_modules(pb::ListModulesRequest {
+                    limit,
+                    page_token: token.map(str::to_owned),
+                })
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(ModulePage::from(res)))
+        }
+
+        async fn queues(&mut self) -> Out {
+            let res = self
+                .inv
+                .list_queues(pb::ListQueuesRequest {})
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(
+                res.queues
+                    .into_iter()
+                    .map(|q| QueueView::try_from(q).expect("queue"))
+                    .collect::<Vec<_>>(),
+            ))
+        }
+
+        async fn partitions(&mut self) -> Out {
+            let res = self
+                .inv
+                .list_partitions(pb::ListPartitionsRequest {})
+                .await
+                .map_err(grpc_err11)?
+                .into_inner();
+            Ok(canon(
+                res.partitions
+                    .into_iter()
+                    .map(|p| PartitionView::try_from(p).expect("partition"))
+                    .collect::<Vec<_>>(),
+            ))
+        }
+    }
+
+    async fn scenario11<C: P11Client>(c: &mut C, srv: &P11Server) -> Vec<(String, Out)> {
+        let mut t: Vec<(String, Out)> = Vec::new();
+        macro_rules! rec {
+            ($label:expr, $e:expr) => {
+                t.push(($label.to_owned(), $e));
+            };
+        }
+        let wasm = fake_module(&[("greet", 1)]);
+        let dyn_cp: &dyn ControlPlane = srv.cp.as_ref();
+        dyn_cp
+            .upload_module(ostro_api::domain::UploadModule {
+                sha256: sha256_hex(&wasm),
+                wasm,
+                language: None,
+                tenant: None,
+                name: None,
+            })
+            .await
+            .expect("upload");
+
+        // Core Runs / Tokens with the Phase 11 fields and caps.
+        rec!("start ab", c.start(json!(1), vec!["a", "b"]).await);
+        rec!("start a", c.start(json!(2), vec!["a"]).await);
+        rec!("start b", c.start(json!(3), vec!["b"]).await);
+        let first = ok_field(&t[0].1, "start ab", &["run_id"]);
+        let first = first.as_str().expect("id").to_owned();
+        rec!(
+            "list tags a,b",
+            c.list(None, vec!["a", "b"], false, false).await
+        );
+        rec!(
+            "list tag a newest",
+            c.list(Some("a"), vec![], true, false).await
+        );
+        rec!(
+            "list tag a + tags b",
+            c.list(Some("a"), vec!["b"], false, false).await
+        );
+        rec!("list dlq", c.list(None, vec![], false, true).await);
+        let nine: Vec<&str> = vec!["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+        rec!("list nine tags", c.list(None, nine, false, false).await);
+        srv.cp
+            .set_history_attempt(&first, 1, Some((2u64 << 32) | 1));
+        rec!("history attempt", c.history(&first).await);
+        let big = json!({ "s": "x".repeat(CAP) });
+        rec!("start over payload cap", c.start(big.clone(), vec![]).await);
+        rec!(
+            "start system tag",
+            c.start(json!(null), vec!["__ostro/x"]).await
+        );
+        rec!(
+            "signal over payload cap",
+            c.signal(&first, big.clone()).await
+        );
+        rec!(
+            "signal at cap",
+            c.signal(&first, json!("y".repeat(CAP - 2))).await
+        );
+        let token = srv.cp.mint_token(&first, 1);
+        rec!(
+            "token over payload cap",
+            c.complete_token(&token, big.clone()).await
+        );
+        rec!("token ok", c.complete_token(&token, json!(1)).await);
+
+        // RunOps.
+        rec!(
+            "rerun dry",
+            c.rerun(json!({ "run_id": "run-src", "from": { "seq": 4 }, "dry_run": true }))
+                .await
+        );
+        let rr = json!({ "run_id": "run-src", "from": { "step": { "name": "charge", "occurrence": 2 } }, "version": { "version": 3 }, "idempotency_key": "k" });
+        rec!("rerun", c.rerun(rr.clone()).await);
+        rec!("rerun again", c.rerun(rr).await);
+        rec!(
+            "rerun empty step name",
+            c.rerun(json!({ "run_id": "run-src", "from": { "step": { "name": "" } } }))
+                .await
+        );
+        srv.ops.fail(
+            "rerun_run",
+            Some(rerun_cut_unsafe(6, "open await", Some(1))),
+        );
+        rec!(
+            "rerun unsafe",
+            c.rerun(json!({ "run_id": "run-src", "from": { "seq": 6 } }))
+                .await
+        );
+        srv.ops.fail("rerun_run", None);
+        rec!("rerun cuts", c.rerun_cuts("run-src").await);
+        rec!("rerun cuts unknown", c.rerun_cuts("run-nope").await);
+
+        rec!("dlq page 1", c.list_dlq(json!({ "limit": 2 })).await);
+        rec!(
+            "dlq page 2",
+            c.list_dlq(json!({ "limit": 2, "page_token": "run-dlq-2" }))
+                .await
+        );
+        rec!("dlq tag t1", c.list_dlq(json!({ "tags": ["t1"] })).await);
+        rec!(
+            "dlq nine tags",
+            c.list_dlq(json!({ "tags": ["1", "2", "3", "4", "5", "6", "7", "8", "9"] }))
+                .await
+        );
+        rec!("dismiss 4", c.dismiss("run-dlq-4", "known").await);
+        rec!("dismiss 4 again", c.dismiss("run-dlq-4", "again").await);
+        rec!(
+            "dismiss long reason",
+            c.dismiss("run-dlq-5", &"r".repeat(1025)).await
+        );
+        rec!(
+            "dlq include dismissed",
+            c.list_dlq(json!({ "include_dismissed": true, "workflow": "greet" }))
+                .await
+        );
+        rec!(
+            "requeue auto resumable",
+            c.requeue("run-dlq-1", json!({})).await
+        );
+        rec!(
+            "requeue restart dry",
+            c.requeue("run-dlq-2", json!({ "mode": "restart", "dry_run": true }))
+                .await
+        );
+        rec!(
+            "requeue rerun",
+            c.requeue(
+                "run-dlq-3",
+                json!({ "mode": { "rerun": { "from": { "seq": 2 } } } })
+            )
+            .await
+        );
+        rec!("requeue non-member", c.requeue("run-nope", json!({})).await);
+
+        rec!(
+            "bulk dry",
+            c.create_bulk(json!({ "action": { "signal": { "name": "go", "payload": { "n": 1 } } }, "filter": { "status": "failed", "tags": ["x"], "dlq": true }, "dry_run": true }))
+                .await
+        );
+        rec!(
+            "bulk create",
+            c.create_bulk(json!({ "action": { "rerun": { "from": { "seq": 3 }, "version": "source" } }, "rate_per_sec": 7 }))
+                .await
+        );
+        let job = ok_field(t.last().map(|x| &x.1).expect("step"), "bulk", &["job_id"]);
+        let job = job.as_str().expect("job").to_owned();
+        srv.ops.set_bulk_progress(&job, 5, 1);
+        rec!("bulk get", c.get_bulk(&job).await);
+        rec!("bulk list", c.list_bulk().await);
+        rec!("bulk cancel", c.cancel_bulk(&job).await);
+        rec!("bulk get unknown", c.get_bulk("blk_nope").await);
+        rec!(
+            "bulk bad rate",
+            c.create_bulk(json!({ "action": "cancel", "rate_per_sec": 0 }))
+                .await
+        );
+        for i in 0..FAKE_MAX_BULK_JOBS {
+            rec!(
+                format!("bulk fill {i}"),
+                c.create_bulk(json!({ "action": { "requeue": { "mode": "auto" } } }))
+                    .await
+            );
+        }
+        rec!(
+            "bulk too many jobs",
+            c.create_bulk(json!({ "action": "resume" })).await
+        );
+
+        rec!("limits", c.limits().await);
+        rec!("policy get empty", c.get_policy(false, "greet").await);
+        rec!(
+            "policy bad hook name",
+            c.set_policy(false, "greet", json!({ "on_failure": { "workflow": "" } }))
+                .await
+        );
+        rec!(
+            "policy dlq on workflow",
+            c.set_policy(
+                false,
+                "greet",
+                json!({ "dlq": { "enabled": true, "hook_catchup_ms": 1 } })
+            )
+            .await
+        );
+        rec!(
+            "policy set",
+            c.set_policy(false, "greet", json!({ "on_failure": { "workflow": "acme/alert", "queue": "ops", "include_input": true } }))
+                .await
+        );
+        rec!(
+            "policy stale",
+            c.set_policy(
+                false,
+                "greet",
+                json!({ "on_failure": { "workflow": "alert" }, "version_tag": 9 })
+            )
+            .await
+        );
+        rec!(
+            "queue policy set",
+            c.set_policy(
+                true,
+                "default",
+                json!({ "dlq": { "enabled": false, "hook_catchup_ms": 5 } })
+            )
+            .await
+        );
+        rec!("queue policy get", c.get_policy(true, "default").await);
+        rec!("bad scope name", c.get_policy(true, "a b").await);
+
+        // Inventory.
+        rec!("modules page 1", c.modules(2, None).await);
+        let tok = ok_field(
+            t.last().map(|x| &x.1).expect("step"),
+            "modules",
+            &["next_page_token"],
+        );
+        rec!("modules page 2", c.modules(2, tok.as_str()).await);
+        rec!("queues", c.queues().await);
+        rec!("partitions", c.partitions().await);
+        t
+    }
+
+    #[tokio::test]
+    async fn phase11_rest_and_grpc_transcripts_are_equal() {
+        let rest_srv = serve_p11(true).await;
+        let mut rest = RestClient::new(rest_srv.addr);
+        let rest_t = scenario11(&mut rest, &rest_srv).await;
+
+        let grpc_srv = serve_p11(true).await;
+        let mut grpc = GrpcP11::connect(grpc_srv.addr).await;
+        let grpc_t = scenario11(&mut grpc, &grpc_srv).await;
+
+        assert_eq!(rest_t.len(), grpc_t.len());
+        for ((label, r), (_, g)) in rest_t.iter().zip(&grpc_t) {
+            assert_eq!(r, g, "step {label:?} differs\nREST: {r:#?}\ngRPC: {g:#?}");
+        }
+
+        let get = |label: &str| {
+            rest_t
+                .iter()
+                .find(|(l, _)| l == label)
+                .unwrap_or_else(|| panic!("no step {label}"))
+                .1
+                .clone()
+        };
+        let err = |label: &str| get(label).expect_err(label);
+        // Search fields reached the control plane on both transports.
+        assert_eq!(
+            get("list tags a,b").expect("ok").as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            get("list tag a newest")
+                .expect("ok")
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        let (code, d) = err("list nine tags");
+        assert_eq!(code, ErrorCode::InvalidArgument);
+        assert_eq!(d.expect("details")["limit"], "search_tags");
+        assert_eq!(
+            get("history attempt").expect("ok")[0]["attempt"],
+            (2u64 << 32) | 1
+        );
+        // Caps: 413 <-> RESOURCE_EXHAUSTED with identical details; 400 <-> INVALID_ARGUMENT.
+        for label in [
+            "start over payload cap",
+            "signal over payload cap",
+            "token over payload cap",
+        ] {
+            let (code, d) = err(label);
+            assert_eq!(code, ErrorCode::PayloadTooLarge, "{label}");
+            let d = d.expect("details");
+            assert_eq!(d["reason"], "limit_exceeded", "{label}");
+            assert_eq!(d["limit"], "payload_bytes", "{label}");
+            assert_eq!(d["max"], CAP, "{label}");
+        }
+        assert_eq!(err("start system tag").0, ErrorCode::InvalidArgument);
+        get("signal at cap").expect("exactly at the cap");
+        // Ops error mapping.
+        let (code, d) = err("rerun unsafe");
+        assert_eq!(code, ErrorCode::Conflict);
+        assert_eq!(d.expect("details")["reason"], "rerun_cut_unsafe");
+        assert_eq!(err("rerun cuts unknown").0, ErrorCode::NotFound);
+        assert_eq!(get("rerun again").expect("ok")["existing"], true);
+        assert_eq!(
+            err("dismiss 4 again").1.expect("d")["reason"],
+            "dlq_not_member"
+        );
+        assert_eq!(
+            err("dismiss long reason").1.expect("d")["limit"],
+            "reason_bytes"
+        );
+        let (code, d) = err("bulk too many jobs");
+        assert_eq!(code, ErrorCode::RateLimited);
+        assert_eq!(d.expect("details")["reason"], "bulk_too_many_jobs");
+        assert_eq!(
+            err("policy stale").1.expect("d")["reason"],
+            "version_mismatch"
+        );
+        assert_eq!(get("bulk cancel").expect("ok")["state"], "cancelled");
+        assert_eq!(get("requeue rerun").expect("ok")["mode"], "rerun");
+        assert_eq!(get("requeue auto resumable").expect("ok")["mode"], "resume");
+        assert_eq!(
+            get("modules page 2").expect("ok")["modules"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(get("queues").expect("ok")[0]["flow"]["max_concurrency"], 4);
+    }
+
+    #[tokio::test]
+    async fn absent_slots_are_rest_404_and_grpc_unimplemented() {
+        let srv = serve_p11(false).await;
+        let http = reqwest::Client::new();
+        for p in [
+            "/v1/limits",
+            "/v1/dlq",
+            "/v1/bulk",
+            "/v1/modules",
+            "/v1/partitions",
+        ] {
+            let r = http
+                .get(format!("http://{}{p}", srv.addr))
+                .send()
+                .await
+                .expect("get");
+            assert_eq!(r.status().as_u16(), 404, "{p}");
+        }
+        let mut g = GrpcP11::connect(srv.addr).await;
+        let e = g
+            .ops
+            .get_limits(pb::GetLimitsRequest {})
+            .await
+            .expect_err("not mounted");
+        assert_eq!(e.code(), tonic::Code::Unimplemented);
+        let e = g
+            .inv
+            .list_queues(pb::ListQueuesRequest {})
+            .await
+            .expect_err("not mounted");
+        assert_eq!(e.code(), tonic::Code::Unimplemented);
+        // The core services still answer.
+        g.runs
+            .list(pb::ListRunsRequest::default())
+            .await
+            .expect("Runs is mounted");
     }
 }

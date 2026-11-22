@@ -67,7 +67,7 @@ pub(crate) async fn map_size_limit_status(
 // ---------------------------------------------------------------------------------
 
 /// Proto `RunStatus` (i32) -> domain; `UNSPECIFIED` and unknown values are invalid.
-fn run_status_from_proto(field: &str, v: i32) -> Result<domain::RunStatus, ApiError> {
+pub(crate) fn run_status_from_proto(field: &str, v: i32) -> Result<domain::RunStatus, ApiError> {
     use domain::RunStatus as S;
     match pb::RunStatus::try_from(v) {
         Ok(pb::RunStatus::Scheduled) => Ok(S::Scheduled),
@@ -197,6 +197,7 @@ impl From<domain::HistoryPage> for pb::RunHistoryResponse {
                     ts_ms: e.ts_ms,
                     summary: e.summary,
                     details_json: e.details_json,
+                    attempt: e.attempt,
                 })
                 .collect(),
             next_from_seq: p.next_from_seq,
@@ -267,18 +268,30 @@ impl TryFrom<pb::ListRunsRequest> for domain::ListRunsRequest {
             .status
             .map(|s| run_status_from_proto("status", s))
             .transpose()?;
+        // Phase 11 (D-P11-10): `tag` and `tags` merge, max 8.
+        let order = match pb::ListOrder::try_from(r.order) {
+            Ok(pb::ListOrder::Unspecified | pb::ListOrder::Oldest) => domain::ListOrder::Oldest,
+            Ok(pb::ListOrder::Newest) => domain::ListOrder::Newest,
+            Err(_) => {
+                return Err(ApiError::invalid_argument(format!(
+                    "order: invalid list order {}",
+                    r.order
+                )));
+            }
+        };
+        let tags = crate::phase11::search_tags(r.tag, r.tags)?;
         Ok(domain::ListRunsRequest {
             workflow: r.workflow,
             status,
             queue: r.queue,
-            tags: r.tag.clone().into_iter().collect(),
-            tag: r.tag,
+            tag: tags.first().cloned(),
             created_after_ms: r.created_after_ms,
             created_before_ms: r.created_before_ms,
             limit: domain::effective_limit(r.limit),
             page_token: r.page_token,
-            order: domain::ListOrder::Oldest,
-            dlq: false,
+            tags,
+            order,
+            dlq: r.dlq,
         })
     }
 }
@@ -294,7 +307,7 @@ impl From<pb::RunHistoryRequest> for domain::HistoryRequest {
 }
 
 /// Optional JSON payload bytes -> value: empty = JSON null (like `input_json`).
-fn payload_from_proto(field: &str, bytes: &[u8]) -> Result<serde_json::Value, ApiError> {
+pub(crate) fn payload_from_proto(field: &str, bytes: &[u8]) -> Result<serde_json::Value, ApiError> {
     if bytes.is_empty() {
         return Ok(serde_json::Value::Null);
     }
@@ -410,13 +423,42 @@ impl GrpcModules {
 #[derive(Clone)]
 pub struct GrpcWorkflows(pub Arc<dyn ControlPlane>);
 
-/// `ostro.api.v1.Runs` over a [`ControlPlane`].
+/// `ostro.api.v1.Runs` over a [`ControlPlane`]. Start and signal enforce the Phase 11
+/// payload cap and the system-tag rule exactly as REST does (D-P11-31).
 #[derive(Clone)]
-pub struct GrpcRuns(pub Arc<dyn ControlPlane>);
+pub struct GrpcRuns {
+    cp: Arc<dyn ControlPlane>,
+    max_payload_bytes: usize,
+}
 
-/// `ostro.api.v1.Tokens` (await-token completion) over a [`ControlPlane`].
+impl GrpcRuns {
+    /// Over `cp` with the user payload cap `max_payload_bytes`
+    /// ([`crate::ApiConfig::max_payload_bytes`]).
+    pub fn new(cp: Arc<dyn ControlPlane>, max_payload_bytes: usize) -> Self {
+        GrpcRuns {
+            cp,
+            max_payload_bytes,
+        }
+    }
+}
+
+/// `ostro.api.v1.Tokens` (await-token completion) over a [`ControlPlane`], with the
+/// Phase 11 payload cap.
 #[derive(Clone)]
-pub struct GrpcTokens(pub Arc<dyn ControlPlane>);
+pub struct GrpcTokens {
+    cp: Arc<dyn ControlPlane>,
+    max_payload_bytes: usize,
+}
+
+impl GrpcTokens {
+    /// Over `cp` with the user payload cap `max_payload_bytes`.
+    pub fn new(cp: Arc<dyn ControlPlane>, max_payload_bytes: usize) -> Self {
+        GrpcTokens {
+            cp,
+            max_payload_bytes,
+        }
+    }
+}
 
 #[tonic::async_trait]
 impl modules_server::Modules for GrpcModules {
@@ -576,11 +618,15 @@ impl runs_server::Runs for GrpcRuns {
     ) -> Result<Response<pb::StartRunResponse>, Status> {
         let header = traceparent_metadata(request.metadata()).map_err(to_status)?;
         let mut req = domain::StartRunRequest::try_from(request.into_inner()).map_err(to_status)?;
+        // Phase 11 API caps (D-P11-13, D-P11-31), identical to REST.
+        crate::phase11::check_payload("input", req.input_json.len(), self.max_payload_bytes)
+            .map_err(to_status)?;
+        crate::phase11::validate_user_tags(&req.tags).map_err(to_status)?;
         // Body wins; else the `traceparent` metadata (08-10). Validated either way.
         req.traceparent =
             crate::phase8::resolve_traceparent(req.traceparent.take(), header.as_deref())
                 .map_err(to_status)?;
-        let res = self.0.start_run(req).await.map_err(to_status)?;
+        let res = self.cp.start_run(req).await.map_err(to_status)?;
         Ok(Response::new(pb::StartRunResponse {
             run_id: res.run_id,
             created: res.created,
@@ -593,7 +639,7 @@ impl runs_server::Runs for GrpcRuns {
         request: Request<pb::GetRunRequest>,
     ) -> Result<Response<pb::RunInfo>, Status> {
         let run = self
-            .0
+            .cp
             .get_run(request.into_inner().run_id)
             .await
             .map_err(to_status)?;
@@ -605,7 +651,7 @@ impl runs_server::Runs for GrpcRuns {
         request: Request<pb::RunHistoryRequest>,
     ) -> Result<Response<pb::RunHistoryResponse>, Status> {
         let page = self
-            .0
+            .cp
             .run_history(request.into_inner().into())
             .await
             .map_err(to_status)?;
@@ -617,7 +663,7 @@ impl runs_server::Runs for GrpcRuns {
         request: Request<pb::ListRunsRequest>,
     ) -> Result<Response<pb::ListRunsResponse>, Status> {
         let req = domain::ListRunsRequest::try_from(request.into_inner()).map_err(to_status)?;
-        let page = self.0.list_runs(req).await.map_err(to_status)?;
+        let page = self.cp.list_runs(req).await.map_err(to_status)?;
         Ok(Response::new(page.into()))
     }
 
@@ -626,7 +672,9 @@ impl runs_server::Runs for GrpcRuns {
         request: Request<pb::SignalRunRequest>,
     ) -> Result<Response<pb::SignalRunResponse>, Status> {
         let req = domain::SignalRequest::try_from(request.into_inner()).map_err(to_status)?;
-        let r = self.0.signal_run(req).await.map_err(to_status)?;
+        crate::phase11::check_json_payload("payload", &req.payload, self.max_payload_bytes)
+            .map_err(to_status)?;
+        let r = self.cp.signal_run(req).await.map_err(to_status)?;
         Ok(Response::new(pb::SignalRunResponse {
             accepted: r.accepted,
             duplicate: r.duplicate,
@@ -640,7 +688,7 @@ impl runs_server::Runs for GrpcRuns {
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
         let r = request.into_inner();
         let res = self
-            .0
+            .cp
             .cancel_run(domain::CancelRequest {
                 run_id: r.run_id,
                 reason: r.reason,
@@ -660,7 +708,7 @@ impl runs_server::Runs for GrpcRuns {
     ) -> Result<Response<pb::TerminateRunResponse>, Status> {
         let r = request.into_inner();
         let res = self
-            .0
+            .cp
             .terminate_run(domain::TerminateRequest {
                 run_id: r.run_id,
                 reason: r.reason,
@@ -680,7 +728,7 @@ impl runs_server::Runs for GrpcRuns {
     ) -> Result<Response<pb::RetryRunResponse>, Status> {
         let r = request.into_inner();
         let res = self
-            .0
+            .cp
             .retry_run(domain::RetryRequest {
                 run_id: r.run_id,
                 dry_run: r.dry_run,
@@ -700,7 +748,7 @@ impl runs_server::Runs for GrpcRuns {
     ) -> Result<Response<pb::AwaitResultResponse>, Status> {
         let r = request.into_inner();
         let res = self
-            .0
+            .cp
             .await_result(domain::AwaitResultRequest {
                 run_id: r.run_id,
                 wait_ms: domain::effective_wait_ms(r.wait_ms),
@@ -719,7 +767,7 @@ impl runs_server::Runs for GrpcRuns {
     ) -> Result<Response<pb::RunPauseState>, Status> {
         let r = request.into_inner();
         let st = self
-            .0
+            .cp
             .pause_run(r.run_id, r.detail)
             .await
             .map_err(to_status)?;
@@ -731,7 +779,7 @@ impl runs_server::Runs for GrpcRuns {
         request: Request<pb::ResumeRunRequest>,
     ) -> Result<Response<pb::RunPauseState>, Status> {
         let st = self
-            .0
+            .cp
             .resume_run(request.into_inner().run_id)
             .await
             .map_err(to_status)?;
@@ -747,7 +795,9 @@ impl tokens_server::Tokens for GrpcTokens {
     ) -> Result<Response<pb::CompleteTokenResponse>, Status> {
         let req =
             domain::CompleteTokenRequest::try_from(request.into_inner()).map_err(to_status)?;
-        let r = self.0.complete_token(req).await.map_err(to_status)?;
+        crate::phase11::check_json_payload("payload", &req.payload, self.max_payload_bytes)
+            .map_err(to_status)?;
+        let r = self.cp.complete_token(req).await.map_err(to_status)?;
         Ok(Response::new(pb::CompleteTokenResponse {
             run_id: r.run_id,
             accepted: r.accepted,

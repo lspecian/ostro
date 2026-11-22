@@ -16,6 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Phase 7 (07-11): Queues (flow, pause, demand) + Workers (admin, join).
         "proto/ostro/api/v1/queues.proto",
         "proto/ostro/api/v1/workers.proto",
+        // Phase 11 (11-09): RunOps (rerun, DLQ, bulk, limits, failure policy) + Inventory.
+        "proto/ostro/api/v1/ops.proto",
     ];
     for proto in PROTOS {
         println!("cargo:rerun-if-changed={proto}");

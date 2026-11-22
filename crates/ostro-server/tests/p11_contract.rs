@@ -244,14 +244,10 @@ async fn seam_is_wired_after_start_and_released_at_shutdown() {
         .await
         .expect("GET /metrics");
     assert_eq!(r.status(), reqwest::StatusCode::OK);
+    // 11-09: with the UI enabled (loopback listener) `GET /` answers 303 -> /ui/.
     let r = s.http.get(s.url("/")).send().await.expect("GET /");
-    assert_eq!(
-        r.status(),
-        reqwest::StatusCode::OK,
-        "root shell until 11-09"
-    );
-    let body = r.text().await.expect("body");
-    assert!(body.contains("/openapi.json"), "{body}");
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    assert_eq!(r.url().path(), "/ui/", "root redirects to the UI");
     let r = s
         .http
         .get(s.url("/healthz"))

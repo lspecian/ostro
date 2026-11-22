@@ -183,22 +183,15 @@ async fn warm_restart_once(
     );
     assert_eq!(ready.data_dir, data);
 
-    // UI shell and gRPC health on the same port.
+    // UI and gRPC health on the same port: the dev profile enables the UI (loopback
+    // listener), so `GET /` redirects to /ui/ (11-09, D-P11-17).
     let r = client
         .get(format!("http://{addr}/"))
         .send()
         .await
         .expect("GET /");
     assert_eq!(r.status(), reqwest::StatusCode::OK);
-    let ct = r
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
-    assert!(ct.starts_with("text/html"), "content-type {ct}");
-    let body = r.text().await.expect("body");
-    assert!(body.contains("/openapi.json"), "{body}");
+    assert_eq!(r.url().path(), "/ui/", "GET / redirects to the UI");
     assert_eq!(grpc_health(addr).await, "SERVING");
 
     s.stop_clean("TERM");

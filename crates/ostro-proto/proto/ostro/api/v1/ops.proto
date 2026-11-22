@@ -1,0 +1,391 @@
+// Run operations and inventory (Phase 11, 11-09; OPS-02..05, OPS-07, UI-03):
+// services RunOps and Inventory.
+//
+// REST mirrors:
+//   POST /v1/runs/{id}/rerun, GET /v1/runs/{id}/rerun-cuts,
+//   GET /v1/dlq, POST /v1/dlq/{run}/requeue, POST /v1/dlq/{run}/dismiss,
+//   GET|POST /v1/bulk, GET /v1/bulk/{id}, POST /v1/bulk/{id}/cancel,
+//   GET /v1/limits, GET|PUT /v1/{workflows,queues}/{name}/failure-policy,
+//   GET /v1/modules, GET /v1/queues, GET /v1/partitions.
+//
+// A server without the Phase 11 extensions does not mount these services
+// (UNIMPLEMENTED). Errors carry the same JSON details as REST (details.reason,
+// D-P11-21).
+syntax = "proto3";
+
+package ostro.api.v1;
+
+import "ostro/api/v1/common.proto";
+
+service RunOps {
+  // Rerun a terminal run from a cut (or validate it, dry_run).
+  rpc Rerun(RerunRequest) returns (RerunResponse);
+  // Candidate cuts of a run, safe or not.
+  rpc RerunCuts(RerunCutsRequest) returns (RerunCutsView);
+  // A page of DLQ entries.
+  rpc ListDlq(ListDlqRequest) returns (DlqPage);
+  // Requeue a DLQ entry (resume, restart or rerun).
+  rpc RequeueDlq(RequeueDlqRequest) returns (RequeueDlqResponse);
+  // Dismiss a DLQ entry.
+  rpc DismissDlq(DismissDlqRequest) returns (DlqEntry);
+  // Create a bulk job (or count its matches, dry_run).
+  rpc CreateBulk(CreateBulkRequest) returns (CreateBulkResponse);
+  // Every bulk job on this node.
+  rpc ListBulk(ListBulkRequest) returns (ListBulkResponse);
+  // One bulk job.
+  rpc GetBulk(GetBulkRequest) returns (BulkJob);
+  // Cancel a bulk job.
+  rpc CancelBulk(CancelBulkRequest) returns (BulkJob);
+  // The published limits.
+  rpc GetLimits(GetLimitsRequest) returns (Limits);
+  // The failure policy (on_failure hook, DLQ policy) of a workflow or queue.
+  rpc GetFailurePolicy(GetFailurePolicyRequest) returns (FailurePolicy);
+  // Replace it (CAS on version_tag when set).
+  rpc SetFailurePolicy(SetFailurePolicyRequest) returns (FailurePolicy);
+}
+
+service Inventory {
+  rpc ListModules(ListModulesRequest) returns (ListModulesResponse);
+  rpc ListQueues(ListQueuesRequest) returns (ListQueuesResponse);
+  rpc ListPartitions(ListPartitionsRequest) returns (ListPartitionsResponse);
+}
+
+// --- Rerun -----------------------------------------------------------------
+
+// The occurrence-th (1-based; 0 = 1) execution of step `name`.
+message RerunStep {
+  string name = 1;
+  uint32 occurrence = 2;
+}
+
+// Where a rerun cuts the source journal. Required.
+message RerunFrom {
+  oneof point {
+    // Events with seq < this are copied.
+    uint64 seq = 1;
+    RerunStep step = 2;
+  }
+}
+
+// Which version a rerun executes. Unset = the active version.
+message RerunVersion {
+  oneof choice {
+    bool active = 1;
+    bool source = 2;
+    uint32 version = 3;
+  }
+}
+
+message RerunRequest {
+  string run_id = 1;
+  RerunFrom from = 2;
+  RerunVersion version = 3;
+  optional string idempotency_key = 4;
+  bool dry_run = 5;
+}
+
+message RerunResponse {
+  // Unset on a dry run.
+  optional string new_run_id = 1;
+  string source_run_id = 2;
+  uint64 cut_seq = 3;
+  uint64 copied_events = 4;
+  string workflow = 5;
+  uint32 version = 6;
+  // "ok" | "ok_frontier".
+  string verdict = 7;
+  // True when the idempotency key returned an existing run.
+  bool existing = 8;
+}
+
+message RerunCutsRequest {
+  string run_id = 1;
+}
+
+message RerunCut {
+  uint64 seq = 1;
+  optional string step = 2;
+  uint32 occurrence = 3;
+  bool safe = 4;
+  optional string reason = 5;
+  optional uint64 nearest_safe_seq = 6;
+}
+
+message RerunCutsView {
+  string run_id = 1;
+  repeated RerunCut cuts = 2;
+}
+
+// --- DLQ -------------------------------------------------------------------
+
+message ListDlqRequest {
+  optional string workflow = 1;
+  optional string queue = 2;
+  // Failure reason prefix.
+  optional string reason = 3;
+  // Every tag must match (max 8).
+  repeated string tags = 4;
+  bool include_dismissed = 5;
+  // 0 = server default.
+  uint32 limit = 6;
+  optional string page_token = 7;
+}
+
+message DlqEntry {
+  string run_id = 1;
+  string workflow = 2;
+  uint32 version = 3;
+  string queue = 4;
+  RunStatus status = 5;
+  string reason = 6;
+  uint64 failed_at_ms = 7;
+  repeated string tags = 8;
+  bool resumable = 9;
+  optional string hook_run_id = 10;
+  optional uint64 dismissed_at_ms = 11;
+  optional string dismiss_reason = 12;
+  optional string requeued_to = 13;
+  optional uint64 requeued_at_ms = 14;
+}
+
+message DlqPage {
+  repeated DlqEntry entries = 1;
+  optional string next_page_token = 2;
+}
+
+// How a DLQ entry is requeued. Unset = auto (resume if resumable, else restart).
+message RequeueMode {
+  oneof mode {
+    bool auto = 1;
+    bool resume = 2;
+    bool restart = 3;
+    RerunFrom rerun = 4;
+  }
+}
+
+message RequeueDlqRequest {
+  string run_id = 1;
+  RequeueMode mode = 2;
+  bool dry_run = 3;
+}
+
+message RequeueDlqResponse {
+  string run_id = 1;
+  // "resume" | "restart" | "rerun".
+  string mode = 2;
+  optional string new_run_id = 3;
+}
+
+message DismissDlqRequest {
+  string run_id = 1;
+  // Operator reason (<= 1024 bytes).
+  string reason = 2;
+}
+
+// --- Bulk ------------------------------------------------------------------
+
+message BulkNoArgs {}
+
+message BulkTerminate {
+  string reason = 1;
+}
+
+message BulkRerun {
+  RerunFrom from = 1;
+  RerunVersion version = 2;
+}
+
+message BulkRequeue {
+  RequeueMode mode = 1;
+}
+
+message BulkSignal {
+  string name = 1;
+  // UTF-8 JSON (empty = null).
+  bytes payload_json = 2;
+}
+
+// The operation applied to each matched run. Required.
+message BulkAction {
+  oneof action {
+    BulkNoArgs cancel = 1;
+    BulkTerminate terminate = 2;
+    BulkNoArgs retry = 3;
+    BulkRerun rerun = 4;
+    BulkRequeue requeue = 5;
+    BulkNoArgs pause = 6;
+    BulkNoArgs resume = 7;
+    BulkSignal signal = 8;
+  }
+}
+
+message BulkFilter {
+  optional string workflow = 1;
+  optional RunStatus status = 2;
+  optional string queue = 3;
+  repeated string tags = 4;
+  bool dlq = 5;
+  optional uint64 created_after_ms = 6;
+  optional uint64 created_before_ms = 7;
+}
+
+message CreateBulkRequest {
+  BulkAction action = 1;
+  BulkFilter filter = 2;
+  optional uint32 rate_per_sec = 3;
+  optional uint32 max_in_flight = 4;
+  bool dry_run = 5;
+}
+
+message CreateBulkResponse {
+  // blk_<uuidv7>; unset on a dry run.
+  optional string job_id = 1;
+  uint64 matched_estimate = 2;
+  repeated string sample = 3;
+}
+
+message BulkFailure {
+  string run_id = 1;
+  string reason = 2;
+}
+
+message BulkJob {
+  string job_id = 1;
+  // pending | running | paused_backpressure | done | cancelled | failed.
+  string state = 2;
+  string action = 3;
+  uint64 matched = 4;
+  uint64 done = 5;
+  uint64 skipped = 6;
+  repeated BulkFailure failed = 7;
+  uint64 failed_count = 8;
+  uint32 rate_per_sec = 9;
+  uint64 created_at_ms = 10;
+  optional uint64 started_at_ms = 11;
+  optional uint64 finished_at_ms = 12;
+  optional uint64 eta_ms = 13;
+}
+
+message ListBulkRequest {}
+
+message ListBulkResponse {
+  repeated BulkJob jobs = 1;
+}
+
+message GetBulkRequest {
+  string job_id = 1;
+}
+
+message CancelBulkRequest {
+  string job_id = 1;
+}
+
+// --- Limits ----------------------------------------------------------------
+
+message GetLimitsRequest {}
+
+message Limit {
+  string name = 1;
+  uint64 value = 2;
+  string unit = 3;
+  bool configurable = 4;
+  string enforced = 5;
+  string error = 6;
+}
+
+message Limits {
+  repeated Limit limits = 1;
+}
+
+// --- Failure policy (D-P11-12, D-P11-29) -----------------------------------
+
+message OnFailurePolicy {
+  string workflow = 1;
+  optional string queue = 2;
+  bool include_input = 3;
+}
+
+message DlqPolicy {
+  bool enabled = 1;
+  uint64 hook_catchup_ms = 2;
+}
+
+message FailurePolicy {
+  OnFailurePolicy on_failure = 1;
+  // Queues only.
+  DlqPolicy dlq = 2;
+  // Meta record version: CAS on write, returned on read.
+  optional uint64 version_tag = 3;
+}
+
+message GetFailurePolicyRequest {
+  // Required.
+  oneof scope {
+    string workflow = 1;
+    string queue = 2;
+  }
+}
+
+message SetFailurePolicyRequest {
+  // Required.
+  oneof scope {
+    string workflow = 1;
+    string queue = 2;
+  }
+  FailurePolicy policy = 3;
+}
+
+// --- Inventory (D-P11-19) --------------------------------------------------
+
+message ListModulesRequest {
+  // 0 = server default.
+  uint32 limit = 1;
+  optional string page_token = 2;
+}
+
+message ModuleSummary {
+  string sha256 = 1;
+  uint64 size_bytes = 2;
+  optional uint64 uploaded_at_ms = 3;
+  repeated string workflows = 4;
+}
+
+message ListModulesResponse {
+  repeated ModuleSummary modules = 1;
+  optional string next_page_token = 2;
+}
+
+message ListQueuesRequest {}
+
+message QueueSummary {
+  string name = 1;
+  bool paused = 2;
+  uint64 ready = 3;
+  uint64 running = 4;
+  optional uint64 demand = 5;
+  // Phase 7 flow configuration as UTF-8 JSON (unset = none).
+  optional bytes flow_json = 6;
+}
+
+message ListQueuesResponse {
+  repeated QueueSummary queues = 1;
+}
+
+message ListPartitionsRequest {}
+
+message PartitionSummary {
+  uint32 id = 1;
+  string role = 2;
+  optional uint64 leader = 3;
+  optional uint64 epoch = 4;
+  optional uint64 applied_offset = 5;
+  optional uint64 log_end_offset = 6;
+  optional uint64 ready = 7;
+  optional uint64 running = 8;
+  bool healthy = 9;
+  optional string detail = 10;
+}
+
+message ListPartitionsResponse {
+  repeated PartitionSummary partitions = 1;
+}
