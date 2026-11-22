@@ -159,12 +159,17 @@ pub fn is_dlq_member(ctx: &P11Ctx, run: &RunId, rec: &RunRecord) -> Result<bool,
 // Reason
 // ---------------------------------------------------------------------------------
 
-/// `"<reason_code>: <message>"` from a failure JSON body.
+/// `"<reason_code>: <message>"` from a failure JSON body. A message that already starts
+/// with `"<reason_code>:"` (the 11-06 `limit_exceeded: history_events 21 > 20` messages)
+/// is used as is, so the code is not repeated.
 pub fn reason_from_failure_json(bytes: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let code = v.get("reason_code").and_then(|c| c.as_str());
     let msg = v.get("message").and_then(|m| m.as_str());
     match (code, msg) {
+        (Some(c), Some(m)) if m.strip_prefix(c).is_some_and(|r| r.starts_with(':')) => {
+            Some(m.to_owned())
+        }
         (Some(c), Some(m)) if !m.is_empty() => Some(format!("{c}: {m}")),
         (Some(c), _) => Some(c.to_owned()),
         (None, Some(m)) => Some(m.to_owned()),
@@ -1049,6 +1054,21 @@ mod tests {
             Some("workflow_failed: s3 fails")
         );
         assert_eq!(reason_from_failure_json(b"nope"), None);
+        // 11-18: a message that already carries the code is not prefixed twice.
+        let j = crate::derive::failure_json(
+            "limit_exceeded",
+            "history_events",
+            "limit_exceeded: history_events 21 > 20",
+        );
+        assert_eq!(
+            reason_from_failure_json(&j).as_deref(),
+            Some("limit_exceeded: history_events 21 > 20")
+        );
+        let j = crate::derive::failure_json("limit_exceeded", "x", "limit_exceeded_other");
+        assert_eq!(
+            reason_from_failure_json(&j).as_deref(),
+            Some("limit_exceeded: limit_exceeded_other")
+        );
     }
 
     #[test]
