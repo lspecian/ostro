@@ -119,9 +119,15 @@ fn tracker_continuous_appends_keep_a_keeping_up_follower_in_sync() {
     let r2 = rows.iter().find(|r| r.replica == 2).unwrap();
     let r3 = rows.iter().find(|r| r.replica == 3).unwrap();
     assert!(r2.in_sync);
-    assert!(!r3.in_sync, "a stuck follower loses caught-up after lag max");
+    assert!(
+        !r3.in_sync,
+        "a stuck follower loses caught-up after lag max"
+    );
     assert!(t.lag_ms(3, now).unwrap() > LAG);
-    assert!(rows.iter().all(|r| r.replica != 1), "status lists followers only");
+    assert!(
+        rows.iter().all(|r| r.replica != 1),
+        "status lists followers only"
+    );
 }
 
 #[test]
@@ -284,7 +290,10 @@ fn next_change_one_pending_at_a_time() {
 fn alter_isr_rejection_drops_pending_and_keeps_published() {
     let mut s = isr(&[1, 2, 3], None);
     assert!(s.propose(PendingChange::Remove(3)));
-    assert!(!s.propose(PendingChange::Remove(2)), "one pending at a time");
+    assert!(
+        !s.propose(PendingChange::Remove(2)),
+        "one pending at a time"
+    );
     s.reject();
     assert_eq!(s.pending, None);
     assert_eq!(s.published, vec![1, 2, 3]);
@@ -320,15 +329,24 @@ fn rejected_shrink_never_lets_hw_pass_removed_replica() {
 #[test]
 fn fetch_below_log_start_needs_snapshot() {
     let h = hist(&[(3, 100)]);
-    assert_eq!(check(&h, o(100), o(150), o(99), Some(Epoch(3))), FetchCheck::SnapshotRequired);
+    assert_eq!(
+        check(&h, o(100), o(150), o(99), Some(Epoch(3))),
+        FetchCheck::SnapshotRequired
+    );
 }
 
 #[test]
 fn fetch_at_log_start_anchored_follower_is_ok_after_trim() {
     // W5: the leader trimmed its history below 200; epoch 2 was in force at 200.
     let h = hist(&[(2, 200), (5, 260)]);
-    assert_eq!(check(&h, o(200), o(300), o(200), Some(Epoch(2))), FetchCheck::Ok);
-    assert_eq!(check(&h, o(200), o(300), o(200), Some(Epoch(1))), FetchCheck::Ok);
+    assert_eq!(
+        check(&h, o(200), o(300), o(200), Some(Epoch(2))),
+        FetchCheck::Ok
+    );
+    assert_eq!(
+        check(&h, o(200), o(300), o(200), Some(Epoch(1))),
+        FetchCheck::Ok
+    );
     assert_eq!(check(&h, o(200), o(300), o(200), None), FetchCheck::Ok);
 }
 
@@ -343,36 +361,65 @@ fn diverging_epoch_cases() {
     let h = hist(&[(1, 0), (3, 100)]);
     assert_eq!(
         check(&h, o(0), o(150), o(120), Some(Epoch(2))),
-        FetchCheck::Diverging { epoch: Epoch(1), end: o(100) }
+        FetchCheck::Diverging {
+            epoch: Epoch(1),
+            end: o(100)
+        }
     );
-    assert_eq!(check(&h, o(0), o(150), o(100), Some(Epoch(1))), FetchCheck::Ok);
+    assert_eq!(
+        check(&h, o(0), o(150), o(100), Some(Epoch(1))),
+        FetchCheck::Ok
+    );
     assert_eq!(
         check(&h, o(0), o(150), o(110), Some(Epoch(1))),
-        FetchCheck::Diverging { epoch: Epoch(1), end: o(100) }
+        FetchCheck::Diverging {
+            epoch: Epoch(1),
+            end: o(100)
+        }
     );
-    assert_eq!(check(&h, o(0), o(150), o(140), Some(Epoch(3))), FetchCheck::Ok);
+    assert_eq!(
+        check(&h, o(0), o(150), o(140), Some(Epoch(3))),
+        FetchCheck::Ok
+    );
     assert_eq!(
         check(&h, o(0), o(150), o(160), Some(Epoch(3))),
-        FetchCheck::Diverging { epoch: Epoch(3), end: o(150) }
+        FetchCheck::Diverging {
+            epoch: Epoch(3),
+            end: o(150)
+        }
     );
 }
 
 #[test]
 fn epoch_older_than_retained_history_needs_snapshot() {
     let h = hist(&[(4, 100), (6, 200)]);
-    assert_eq!(check(&h, o(100), o(250), o(150), Some(Epoch(2))), FetchCheck::SnapshotRequired);
+    assert_eq!(
+        check(&h, o(100), o(250), o(150), Some(Epoch(2))),
+        FetchCheck::SnapshotRequired
+    );
 }
 
 #[test]
 fn truncation_point_is_min_of_both_ends() {
     let own = hist(&[(1, 0), (2, 100)]);
-    assert_eq!(follower_truncation_point(&own, o(150), Epoch(1), o(100)), o(100));
+    assert_eq!(
+        follower_truncation_point(&own, o(150), Epoch(1), o(100)),
+        o(100)
+    );
     let own = hist(&[(1, 0), (2, 80)]);
-    assert_eq!(follower_truncation_point(&own, o(150), Epoch(1), o(100)), o(80));
+    assert_eq!(
+        follower_truncation_point(&own, o(150), Epoch(1), o(100)),
+        o(80)
+    );
 }
 
 /// Drive the follower against the leader until Ok; returns the follower's final LEO.
-fn converge(leader: &EpochHistory, leader_leo: u64, own: &mut EpochHistory, own_leo: &mut u64) -> usize {
+fn converge(
+    leader: &EpochHistory,
+    leader_leo: u64,
+    own: &mut EpochHistory,
+    own_leo: &mut u64,
+) -> usize {
     for round in 0..64 {
         match check(leader, o(0), o(leader_leo), o(*own_leo), own.latest()) {
             FetchCheck::Ok => return round,
@@ -471,11 +518,17 @@ fn live(ids: &[u64]) -> BTreeSet<u64> {
 fn elect_first_live_isr_member_with_isr_intersect_live() {
     assert_eq!(
         plan(&a(1, &[1, 2, 3], &[1, 2, 3]), &live(&[2, 3]), None),
-        Plan::Elect { leader: 2, isr: vec![2, 3] }
+        Plan::Elect {
+            leader: 2,
+            isr: vec![2, 3]
+        }
     );
     assert_eq!(
         plan(&a(1, &[1, 2, 3], &[2, 3]), &live(&[2, 3]), None),
-        Plan::Elect { leader: 2, isr: vec![2, 3] }
+        Plan::Elect {
+            leader: 2,
+            isr: vec![2, 3]
+        }
     );
 }
 
@@ -483,7 +536,10 @@ fn elect_first_live_isr_member_with_isr_intersect_live() {
 fn live_replica_outside_isr_is_never_chosen() {
     assert_eq!(
         plan(&a(1, &[1, 2, 3], &[1, 3]), &live(&[2, 3]), None),
-        Plan::Elect { leader: 3, isr: vec![3] }
+        Plan::Elect {
+            leader: 3,
+            isr: vec![3]
+        }
     );
 }
 
@@ -491,7 +547,10 @@ fn live_replica_outside_isr_is_never_chosen() {
 fn preferred_order_follows_replicas() {
     assert_eq!(
         plan(&a(1, &[1, 3, 2], &[1, 2, 3]), &live(&[2, 3]), None),
-        Plan::Elect { leader: 3, isr: vec![2, 3] }
+        Plan::Elect {
+            leader: 3,
+            isr: vec![2, 3]
+        }
     );
 }
 
@@ -499,11 +558,17 @@ fn preferred_order_follows_replicas() {
 fn resigned_node_is_skipped() {
     assert_eq!(
         plan(&a(1, &[1, 2, 3], &[1, 2, 3]), &live(&[1, 2, 3]), Some(1)),
-        Plan::Elect { leader: 2, isr: vec![1, 2, 3] }
+        Plan::Elect {
+            leader: 2,
+            isr: vec![1, 2, 3]
+        }
     );
     assert_eq!(
         plan(&a(0, &[1, 2, 3], &[1, 2, 3]), &live(&[1, 2, 3]), Some(2)),
-        Plan::Elect { leader: 1, isr: vec![1, 2, 3] }
+        Plan::Elect {
+            leader: 1,
+            isr: vec![1, 2, 3]
+        }
     );
 }
 
@@ -521,7 +586,10 @@ fn offline_keeps_last_isr_member() {
     // The kept member returns: it is elected.
     assert_eq!(
         plan(&a(0, &[1, 2, 3], &[1]), &live(&[1, 3]), None),
-        Plan::Elect { leader: 1, isr: vec![1] }
+        Plan::Elect {
+            leader: 1,
+            isr: vec![1]
+        }
     );
 }
 
@@ -535,9 +603,15 @@ fn dead_follower_only_shrinks() {
 
 #[test]
 fn live_leader_full_isr_is_nothing() {
-    assert_eq!(plan(&a(1, &[1, 2, 3], &[1, 2, 3]), &live(&[1, 2, 3]), None), Plan::Nothing);
+    assert_eq!(
+        plan(&a(1, &[1, 2, 3], &[1, 2, 3]), &live(&[1, 2, 3]), None),
+        Plan::Nothing
+    );
     // A dead replica outside the ISR is no ISR change.
-    assert_eq!(plan(&a(1, &[1, 2, 3], &[1, 2]), &live(&[1, 2]), None), Plan::Nothing);
+    assert_eq!(
+        plan(&a(1, &[1, 2, 3], &[1, 2]), &live(&[1, 2]), None),
+        Plan::Nothing
+    );
 }
 
 #[test]
