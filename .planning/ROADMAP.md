@@ -397,7 +397,7 @@ Plans:
 Plans:
 - [x] 11-01-PLAN.md — PHASE-11 GATE (Phase 7 + Phase 8 complete, Phase 5 freeze, seams, code vs RESERVATIONS) + Phase 11 name rows + decisions D-P11-1..34, Phase 13 emission-gate obligation and coordination rules to STATE (all) (W1)
 - [ ] 11-02-PLAN.md — Contract a: StartRun 40/41, Cmd 45 (+ failure episode), JournalEvent.4, InvalidCode 29/30, apply stubs, RunLimits + every JournalEvent/StartRun/EngineConfig struct-literal fix-up in one green commit (OPS-02/04/07, UI-01) (W2)
-- [ ] 11-03-PLAN.md — Contract b: all Cargo edits (askama/maud decision), ostro-ui skeleton + UiAuth seam, vendored htmx 2.0.11, ostro dev-dep on the API fakes; exclusive with 10-02 (UI-01..03) (W2)
+- [x] 11-03-PLAN.md — Contract b: all Cargo edits (askama/maud decision), ostro-ui skeleton + UiAuth seam, vendored htmx 2.0.11, ostro dev-dep on the API fakes; exclusive with 10-02 (UI-01..03) (W2)
 - [ ] 11-04-PLAN.md — Contract c: OpsApi/InventoryApi + FailurePolicy contract, ApiConfig/ApiExtensions fields + literal fix-ups, [limits]/[ui]/[bulk]/[dlq] config, final p11.rs seam (P11Ctx OnceLock, emission gate), stubs, FAILPOINT_CRATES (all) (W3)
 - [ ] 11-05-PLAN.md — Derived run index x_run_index: created_at-ordered keys, offset-stamped marker, shared start-path hooks, clear-and-rebuild under the apply lock (not in Inspect), install, index_page, index == scan proptest (OPS-05) (W3)
 - [ ] 11-06-PLAN.md — Live-only engine limits (history with terminal/failure exemption, children, payload) → resumable limit_exceeded, WireOutcome + worker EngineLimits, docs/limits.md (OPS-07) (W4)
