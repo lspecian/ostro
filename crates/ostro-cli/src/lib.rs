@@ -13,6 +13,7 @@
 pub mod client;
 pub mod commands;
 pub mod output;
+pub mod watch;
 
 pub use commands::{ClientCommand, run};
 pub use output::{Outcome, exit_code};
@@ -20,9 +21,19 @@ pub use output::{Outcome, exit_code};
 // Phase 8 (plan 08-01): `tar` for `ostro backup --to` (08-12/08-18), anchored until it is used.
 use tar as _;
 
+// Phase 10 (plan 10-02): dependencies of 10-09 (ostro-client), 10-12/10-13 (ostro-build,
+// ostro-engine) and 10-16 (notify, notify-debouncer-full), anchored until they are used.
+use notify as _;
+use notify_debouncer_full as _;
+use ostro_build as _;
+use ostro_client as _;
+use ostro_engine as _;
+
 #[cfg(test)]
 mod dev_dep_anchors {
     // FakeControlPlane-backed CLI tests (08-12, tests/phase8_verbs.rs).
     use axum as _;
     use ostro_api as _;
+    // Phase 10 (10-02): --json snapshots of the Phase 10 verbs.
+    use insta as _;
 }

@@ -20,6 +20,14 @@ sha2.workspace = true
 tokio.workspace = true
 # Phase 8: `ostro backup --to f.tar` (08-12/08-18)
 tar.workspace = true
+# Phase 10 (plan 10-02 declares every Phase 10 dependency once): `ostro build|init` (10-12),
+# the REST client moved into ostro-client (10-09), local validation (10-13) and
+# `ostro dev --watch` (10-16).
+ostro-build = { path = "../ostro-build" }
+ostro-client = { path = "../ostro-client" }
+ostro-engine = { path = "../ostro-engine" }
+notify.workspace = true
+notify-debouncer-full.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -27,6 +35,8 @@ tempfile.workspace = true
 ostro-api = { path = "../ostro-api", features = ["fake"] }
 # serve the fake router on 127.0.0.1:0 in tests/phase8_verbs.rs (08-12)
 axum.workspace = true
+# Phase 10 (10-02): --json snapshots of the Phase 10 verbs
+insta.workspace = true
 
 [lints]
 workspace = true

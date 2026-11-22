@@ -149,6 +149,17 @@ ostro-ui = { path = "crates/ostro-ui" }
 # already in Cargo.lock (same version as axum's): request parts / StatusCode. ostro-ui's
 # tests use the Phase 12 `tower` pin above (ServiceExt).
 http = "1"
+# Phase 10 (plan 10-02 declares every Phase 10 dependency once, D-P10-11; exact pins).
+# notify is CC0-1.0: deny.toml carries a crate-scoped exception for it (USER REVIEW D-P10-11).
+# `ostro dev --watch` (10-16): file watcher + debouncer.
+notify = "=8.2.2"
+notify-debouncer-full = "=0.7.0"
+# `ostro completions` (10-03)
+clap_complete = "=4.6.12"
+# toolchain archives (10-07): .tar.gz (pure-Rust miniz_oxide backend, no zlib C) and .tar.xz
+# (pure Rust). tar is the Phase 8 pin above (already 0.4.46 in Cargo.lock).
+flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
+lzma-rust2 = "=0.25.0"
 # build
 protox = "0.10.0"
 tonic-prost-build = "0.14.9"

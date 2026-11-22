@@ -1,0 +1,48 @@
+[package]
+name = "ostro-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Phase 10 `ostro build` / `ostro init`: hermetic toolchains, project scaffolding, the build pipeline"
+
+# Plan 10-02 declares every dependency the Phase 10 build plans need (no later Phase 10 plan
+# edits a Cargo file). Deps that only later plans consume are anchored in src/lib.rs.
+[dependencies]
+ostro-engine = { path = "../ostro-engine" }
+serde.workspace = true
+serde_json.workspace = true
+# same spec as ostro-engine / ostro-partition (no workspace pin; one toml in Cargo.lock)
+toml = "1.2"
+sha2.workspace = true
+# toolchain downloads (10-07): rustls (aws-lc-rs + platform verifier), never webpki-roots
+reqwest = { workspace = true, features = ["rustls"] }
+tokio.workspace = true
+tar.workspace = true
+flate2.workspace = true
+lzma-rust2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+# 10-08: build.rs bundles the SDK sources (sdk_bundle.tar) and hashes them
+toml = "1.2"
+sha2.workspace = true
+tar.workspace = true
+
+[dev-dependencies]
+# fixture HTTP server (tests/common/fixture_server.rs)
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+insta.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+# polyglot (Python/TypeScript) toolchain tests that download or need Node/uv (10-15)
+polyglot = []
+
+[lints]
+workspace = true

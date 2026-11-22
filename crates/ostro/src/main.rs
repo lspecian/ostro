@@ -30,6 +30,7 @@ use ostro_server::ServerHandle;
 use ostro_server::config::{EnvSource, Overrides, ServerConfig, load_layered};
 use ostro_server::logging::init_tracing;
 use ostro_server::tls::TlsProfile;
+use {clap_complete as _, ostro_build as _};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

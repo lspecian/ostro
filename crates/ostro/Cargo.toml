@@ -17,6 +17,9 @@ path = "src/main.rs"
 #   cargo build --release -p ostro --features failpoints --target-dir target/failpoints
 # Phase 12 (12-01): the chain also reaches ostro-cluster (repl::/fetch::/isr::/install::) and
 # ostro-meta (elect::) directly; tier-C replication tests spawn this binary.
+# Phase 10 (10-02): the polyglot (Python/TypeScript) build tests of ostro-build; the
+# `ostro` polyglot tests (parity, replay_cli, template_tests) are gated on it too.
+polyglot = ["ostro-build/polyglot"]
 failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints", "ostro-backup/failpoints", "ostro-worker/failpoints", "ostro-cluster/failpoints", "ostro-meta/failpoints"]
 
 [dependencies]
@@ -37,6 +40,10 @@ ostro-worker = { path = "../ostro-worker" }
 ostro-cluster = { path = "../ostro-cluster" }
 ostro-meta = { path = "../ostro-meta" }
 fail = { workspace = true, optional = true }
+# Phase 10 (10-02): `ostro build|init` reaches ostro-build directly (polyglot feature
+# passthrough) and `ostro completions` (10-03)
+ostro-build = { path = "../ostro-build" }
+clap_complete.workspace = true
 
 [dev-dependencies]
 # spawned-binary tests (04-19): REST + gRPC health against the real binary
@@ -58,6 +65,10 @@ x509-parser.workspace = true
 # (ostro_api::router over FakeControlPlane + the 11-09 fakes)
 ostro-api = { path = "../ostro-api", features = ["fake"] }
 axum.workspace = true
+# Phase 10 (10-02): polyglot parity / template tests build guests through ostro-conformance
+# (its polyglot::build is not feature-gated); the spawned-server kit; scratch projects
+ostro-conformance = { path = "../ostro-conformance" }
+ostro-client = { path = "../ostro-client", features = ["testing"] }
 
 [lints]
 workspace = true
