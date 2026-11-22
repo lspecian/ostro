@@ -438,7 +438,7 @@ Plans:
 - [ ] 12-09-PLAN.md — Tier-C harness: Rust TCP chaos proxy (RST passthrough) + multi-process loopback cluster with real kill -9 (CLUS-04) (W4)
 - [x] 12-10-PLAN.md — Controller: learner-aware sample_live, Ostro wiped-voter remedy text, suspect-confirmed liveness, placement for any voter count, fresh terms, ISR-only failover, resign, Member self-upsert (CLUS-03, CLUS-04) (W4)
 - [x] 12-11-PLAN.md — Follower-pull Fetch: leader handler (fencing, divergence, two timeouts, durable-capped reads), follower loop with truncation + blobs-before-durable, ISR publisher via AlterIsr (CLUS-02, CLUS-03) (W5)
-- [ ] 12-12-PLAN.md — Snapshot bootstrap: FetchSnapshot OSNP v1 streaming with resume, crash-safe install (reset log first) + crash loop, derived keyspaces checked (CLUS-04) (W5)
+- [x] 12-12-PLAN.md — Snapshot bootstrap: FetchSnapshot OSNP v1 streaming with resume, crash-safe install (reset log first) + crash loop, derived keyspaces checked (CLUS-04) (W5)
 - [ ] 12-13-PLAN.md — Partition role lifecycle (epoch 0 offline, lead only above the log's epoch, resign on failure), replica services in both roles, install/roles contracts, node.toml identity binding (CLUS-03, CLUS-04) (W5)
 - [ ] 12-14-PLAN.md — Server integration: cluster-id + meta-voter checks before meta, meta-first boot (single node included), always-live meta transport, not-leader 503 + hints, self-demotion, module blob replication, /v1/admin/replication, first conformance run (CLUS-02..04) (W6)
 - [ ] 12-15-PLAN.md — Bottomless in cluster mode: leader-only per-partition uploads, epoch-fenced p/<pppp>/head, takeover repair + gap re-chain from a remote snapshot, restore refuses cluster buckets (CLUS-02) (W6)
