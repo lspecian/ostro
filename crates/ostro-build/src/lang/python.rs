@@ -167,8 +167,9 @@ fn sha8(s: &str) -> &str {
     &s[..8.min(s.len())]
 }
 
-/// First 8 hex of sha256(the cache root path).
+/// First 8 hex of sha256(the canonical cache root path).
 pub(crate) fn root_hash8(root: &Path) -> String {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     crate::pipeline::sha256_hex(root.as_os_str().as_encoded_bytes())[..8].to_owned()
 }
 

@@ -175,6 +175,9 @@ pub fn cache_key(mode: Mode, guest_dir: &Path) -> Result<String, String> {
 /// Builds (or reuses from the cache) the component for `guest_dir` in `mode` and returns
 /// its path. Fails loudly when a toolchain is missing (the script exits 2).
 pub fn build(mode: Mode, guest_dir: &Path) -> Result<PathBuf, String> {
+    if mode != Mode::TsSm && ostro_builder() {
+        return build_with_ostro(mode, guest_dir);
+    }
     let _guard = BUILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let guest_dir = guest_dir
         .canonicalize()
@@ -212,5 +215,159 @@ pub fn build(mode: Mode, guest_dir: &Path) -> Result<PathBuf, String> {
         ));
     }
     std::fs::rename(&tmp, &out).map_err(|e| format!("rename {}: {e}", out.display()))?;
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// Plan 10-15 (D-P10-16): `OSTRO_POLYGLOT_BUILDER=ostro` builds Py/Ts guests with
+// `ostro build --toolchain hermetic --json` instead of build-guest.sh (TsSm keeps the
+// script: StarlingMonkey is not an `ostro build` target). The guest dir is copied into a
+// temp project with a generated `ostro.toml` (python: entry `app`; ts: entry `index.ts`).
+// The binary is `$OSTRO_BIN`, else `<repo>/target/debug/ostro`; the toolchain cache is
+// `$OSTRO_TOOLCHAIN_DIR`, else `<repo>/target/ostro-toolchains-test`. The cache key is the
+// build-guest.sh key plus the builder and the binary's path, size and mtime.
+// ---------------------------------------------------------------------------------------
+
+/// `OSTRO_POLYGLOT_BUILDER=ostro`.
+pub fn ostro_builder() -> bool {
+    std::env::var("OSTRO_POLYGLOT_BUILDER").is_ok_and(|v| v == "ostro")
+}
+
+/// The `ostro` binary of the `OSTRO_POLYGLOT_BUILDER=ostro` branch.
+pub fn ostro_bin() -> PathBuf {
+    match std::env::var_os("OSTRO_BIN") {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => repo_root().join("target/debug/ostro"),
+    }
+}
+
+/// A valid `ostro.toml` project name for a guest dir name.
+fn project_name(dir_name: &str) -> String {
+    let mut s: String = dir_name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if !s.starts_with(|c: char| c.is_ascii_lowercase()) {
+        s.insert_str(0, "g-");
+    }
+    s
+}
+
+fn copy_guest(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("mkdir {}: {e}", to.display()))?;
+    let rd = std::fs::read_dir(from).map_err(|e| format!("read_dir {}: {e}", from.display()))?;
+    for e in rd {
+        let e = e.map_err(|e| format!("read_dir {}: {e}", from.display()))?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        let ft = e.file_type().map_err(|e| format!("stat {name}: {e}"))?;
+        if ft.is_dir() {
+            if !skip_dir(&name) && name != "target" {
+                copy_guest(&e.path(), &to.join(&name))?;
+            }
+        } else if ft.is_file() && !name.ends_with(".pyc") {
+            std::fs::copy(e.path(), to.join(&name))
+                .map_err(|err| format!("copy {}: {err}", e.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn build_with_ostro(mode: Mode, guest_dir: &Path) -> Result<PathBuf, String> {
+    let _guard = BUILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let guest_dir = guest_dir
+        .canonicalize()
+        .map_err(|e| format!("guest dir {}: {e}", guest_dir.display()))?;
+    let bin = ostro_bin();
+    let meta = std::fs::metadata(&bin).map_err(|e| {
+        format!(
+            "OSTRO_POLYGLOT_BUILDER=ostro: ostro binary {} ({e}); build it or set OSTRO_BIN",
+            bin.display()
+        )
+    })?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let mut h = Sha256::new();
+    h.update(cache_key(mode, &guest_dir)?.as_bytes());
+    h.update(format!("\0builder:ostro:{}:{}:{mtime}\0", bin.display(), meta.len()).as_bytes());
+    let key: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let name = guest_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "guest".into());
+    let dir = cache_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let out = dir.join(format!("{name}-{}-ostro-{}.wasm", mode.arg(), &key[..16]));
+    if out.is_file() {
+        return Ok(out);
+    }
+    let (lang, entry) = match mode {
+        Mode::Py => ("python", "app"),
+        _ => ("ts", "index.ts"),
+    };
+    let proj = dir.join(format!(
+        ".ostro-proj-{}-{}-{}",
+        std::process::id(),
+        mode.arg(),
+        &key[..16]
+    ));
+    let _ = std::fs::remove_dir_all(&proj);
+    copy_guest(&guest_dir, &proj)?;
+    std::fs::write(
+        proj.join("ostro.toml"),
+        format!(
+            "[project]\nname = \"{}\"\nlang = \"{lang}\"\nentry = \"{entry}\"\n",
+            project_name(&name)
+        ),
+    )
+    .map_err(|e| format!("write ostro.toml: {e}"))?;
+    SCRIPT_RUNS.fetch_add(1, Ordering::SeqCst);
+    let mut cmd = Command::new(&bin);
+    cmd.args(["build", "--toolchain", "hermetic", "--json"])
+        .arg(&proj);
+    if std::env::var_os("OSTRO_TOOLCHAIN_DIR").is_none_or(|v| v.is_empty()) {
+        cmd.env(
+            "OSTRO_TOOLCHAIN_DIR",
+            repo_root().join("target/ostro-toolchains-test"),
+        );
+    }
+    let res = cmd
+        .output()
+        .map_err(|e| format!("spawn {}: {e}", bin.display()))?;
+    let fail = |what: String| {
+        let _ = std::fs::remove_dir_all(&proj);
+        format!(
+            "ostro build {} ({}) {what}:\n--- stdout\n{}\n--- stderr\n{}",
+            guest_dir.display(),
+            mode.arg(),
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        )
+    };
+    if !res.status.success() {
+        return Err(fail(format!("failed ({})", res.status)));
+    }
+    let v: serde_json::Value = match serde_json::from_slice(&res.stdout) {
+        Ok(v) => v,
+        Err(e) => return Err(fail(format!("printed no JSON result ({e})"))),
+    };
+    let Some(wasm) = v.get("wasm").and_then(serde_json::Value::as_str) else {
+        return Err(fail("printed no `wasm`".into()));
+    };
+    let tmp = dir.join(format!(".tmp-{}-{}.wasm", std::process::id(), &key[..16]));
+    let copied = std::fs::copy(wasm, &tmp)
+        .and_then(|_| std::fs::rename(&tmp, &out))
+        .map_err(|e| format!("copy {wasm} to {}: {e}", out.display()));
+    let _ = std::fs::remove_dir_all(&proj);
+    copied?;
     Ok(out)
 }

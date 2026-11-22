@@ -185,3 +185,38 @@ fn python_offline_after_warm() {
     );
     assert!(!out.up_to_date && has(&out, "hello"));
 }
+
+#[test]
+fn ts_template_builds() {
+    let (_d, root, home) = template(Lang::Ts, "ts-tmpl");
+    let out = timed("ts template cold", &root, &home, &[]);
+    assert!(has(&out, "hello"), "{:?}", out.workflows);
+    let t = tools(&out);
+    assert!(
+        t.contains("node@24.13.0") && t.contains("jco@1.42.0 (lock "),
+        "{t}"
+    );
+    let warm = timed("ts template up-to-date", &root, &home, &[]);
+    assert!(warm.up_to_date);
+    let src = root.join("src/index.ts");
+    let text = std::fs::read_to_string(&src).unwrap();
+    std::fs::write(&src, text.replace("`hello ${", "`hi ${")).unwrap();
+    let rebuilt = timed("ts template warm rebuild", &root, &home, &[]);
+    assert!(!rebuilt.up_to_date && has(&rebuilt, "hello"));
+}
+
+#[test]
+fn ts_offline_after_warm() {
+    let (_d, root, home) = template(Lang::Ts, "ts-offline");
+    timed("ts offline: warm-up", &root, &home, &[]);
+    let src = root.join("src/index.ts");
+    let text = std::fs::read_to_string(&src).unwrap();
+    std::fs::write(&src, format!("{text}\n// edited\n")).unwrap();
+    let out = timed(
+        "ts offline rebuild",
+        &root,
+        &home,
+        &[("OSTRO_OFFLINE", "1")],
+    );
+    assert!(!out.up_to_date && has(&out, "hello"));
+}
