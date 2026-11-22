@@ -240,7 +240,10 @@ async fn dry_run_cancel_and_second_job_skips() {
         ),
         "{m}"
     );
-    assert!(metric_at_least(&m, "ostro_bulk_jobs{state=\"done\"}", 2.0));
+    // `ostro_bulk_jobs{state}` is an absolute gauge set by each node's registry, and the
+    // in-process test servers share one global recorder (last writer wins), so only the
+    // series is asserted here; the job states themselves are checked through the API above.
+    assert!(m.contains("ostro_bulk_jobs{state=\"done\"}"), "{m}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -699,17 +702,10 @@ async fn processed_set_survives_restart_and_finished_jobs_stay_listed() {
 
     s.restart().await;
     s.wait_ready(Duration::from_secs(20)).await;
-    // The bulk service reloads `<data>/bulk` in its own task, which readiness does not
-    // wait for: poll until the reloaded job is listed.
-    let deadline = Instant::now() + LIMIT;
-    let l = loop {
-        let (_, l) = s.get_json("/v1/bulk").await;
-        if l["jobs"].as_array().is_some_and(|j| !j.is_empty()) {
-            break l;
-        }
-        assert!(Instant::now() < deadline, "bulk jobs not reloaded: {l}");
-        sleep(Duration::from_millis(20)).await;
-    };
+    // 11-18: the bulk API waits for the service's reload of `<data>/bulk`, so the first
+    // listing right after readiness already has the job (no polling).
+    let (_, l) = s.get_json("/v1/bulk").await;
+    assert!(s.h().control().p11().expect("p11").bulk.is_loaded());
     let jobs = l["jobs"].as_array().expect("jobs");
     assert_eq!(jobs.len(), 1, "{l}");
     assert_eq!(jobs[0]["job_id"], id.as_str());

@@ -368,7 +368,13 @@ pub struct BulkRegistry {
     /// The service task's job queue (set by [`spawn`]).
     tx: OnceLock<mpsc::UnboundedSender<Arc<Job>>>,
     resumed: AtomicBool,
+    /// `true` once [`BulkRegistry::resume_all`] has reloaded `<data>/bulk/` (11-18): the
+    /// API waits for it, so a listing right after a restart is never missing a job.
+    loaded: tokio::sync::watch::Sender<bool>,
 }
+
+/// Longest wait of an API call for the initial job reload (it reads a few small files).
+const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl std::fmt::Debug for BulkRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -390,6 +396,7 @@ impl BulkRegistry {
             jobs: Mutex::new(BTreeMap::new()),
             tx: OnceLock::new(),
             resumed: AtomicBool::new(false),
+            loaded: tokio::sync::watch::channel(false).0,
         })
     }
 
@@ -563,6 +570,28 @@ impl BulkRegistry {
         })
     }
 
+    /// Wait until the persisted jobs are reloaded ([`BulkRegistry::resume_all`]), at most
+    /// [`LOAD_WAIT`]. Returns at once when no bulk service runs (nothing will reload) or
+    /// the reload is done. The bulk API calls this before every create / list / get /
+    /// cancel, so they see the jobs of the previous run as soon as the server is ready.
+    pub async fn wait_loaded(&self) {
+        if self.tx.get().is_none() {
+            return;
+        }
+        let mut rx = self.loaded.subscribe();
+        if tokio::time::timeout(LOAD_WAIT, rx.wait_for(|done| *done))
+            .await
+            .is_err()
+        {
+            warn!("bulk job reload still running after {LOAD_WAIT:?}; answering without it");
+        }
+    }
+
+    /// Whether the initial reload is done (tests).
+    pub fn is_loaded(&self) -> bool {
+        *self.loaded.borrow()
+    }
+
     /// Every job on this node (creation order).
     pub fn list(&self) -> Vec<BulkJobView> {
         let jobs: Vec<Arc<Job>> = self.jobs().values().cloned().collect();
@@ -617,6 +646,7 @@ impl BulkRegistry {
             Ok(f) => f,
             Err(e) => {
                 warn!(error = %e, "bulk job reload task failed");
+                self.loaded.send_replace(true);
                 return;
             }
         };
@@ -639,6 +669,7 @@ impl BulkRegistry {
         if resumed > 0 {
             info!(resumed, "bulk jobs resumed");
         }
+        self.loaded.send_replace(true);
         self.publish_job_gauges();
     }
 

@@ -11,6 +11,10 @@
 //!   reasons, rate, eta). Unknown job: 404.
 //! - `cancel_bulk`: no new op starts; an op in flight finishes. A finished job is
 //!   returned unchanged.
+//!
+//! Every call first waits for the bulk service's reload of `<data>/bulk/`
+//! ([`crate::services::bulk::BulkRegistry::wait_loaded`], 11-18), so right after a restart
+//! the API never answers without the jobs of the previous run.
 
 use ostro_api::ApiError;
 use ostro_api::phase11::{BulkCreateRequest, BulkCreateResponse, BulkJobView};
@@ -22,16 +26,19 @@ pub async fn create_bulk(
     ctx: &P11Ctx,
     req: BulkCreateRequest,
 ) -> Result<BulkCreateResponse, ApiError> {
+    ctx.bulk.wait_loaded().await;
     ctx.bulk.create(ctx, req).await
 }
 
 /// Every bulk job on this node, in creation order.
 pub async fn list_bulk(ctx: &P11Ctx) -> Result<Vec<BulkJobView>, ApiError> {
+    ctx.bulk.wait_loaded().await;
     Ok(ctx.bulk.list())
 }
 
 /// One bulk job.
 pub async fn get_bulk(ctx: &P11Ctx, job_id: String) -> Result<BulkJobView, ApiError> {
+    ctx.bulk.wait_loaded().await;
     ctx.bulk
         .get(&job_id)
         .ok_or_else(|| ApiError::not_found(format!("bulk job {job_id} not found")))
@@ -39,5 +46,6 @@ pub async fn get_bulk(ctx: &P11Ctx, job_id: String) -> Result<BulkJobView, ApiEr
 
 /// Cancel a bulk job.
 pub async fn cancel_bulk(ctx: &P11Ctx, job_id: String) -> Result<BulkJobView, ApiError> {
+    ctx.bulk.wait_loaded().await;
     ctx.bulk.cancel(&job_id).await
 }
