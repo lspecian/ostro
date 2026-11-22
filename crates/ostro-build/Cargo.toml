@@ -35,6 +35,8 @@ tar.workspace = true
 [dev-dependencies]
 # fixture HTTP server (tests/common/fixture_server.rs)
 axum.workspace = true
+# slow.bin: a body that stalls after the headers (stream::pending)
+futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 insta.workspace = true
 tempfile.workspace = true

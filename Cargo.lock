@@ -3482,6 +3482,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "flate2",
+ "futures-util",
  "insta",
  "lzma-rust2",
  "ostro-engine",
