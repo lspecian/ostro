@@ -17,6 +17,10 @@ classifiers = [
 # Hand-written client over the standard library only (D-P10): no runtime dependencies.
 dependencies = []
 
+# The pytest plugin (fixtures `ostro_env`, `ostro_project`); pytest itself stays optional.
+[project.entry-points.pytest11]
+ostro = "ostro_client.pytest_plugin"
+
 # Same build backend as the guest SDK (sdks/python/pyproject.toml, 09-17).
 [build-system]
 requires = ["hatchling==1.27.0"]
