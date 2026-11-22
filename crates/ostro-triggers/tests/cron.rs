@@ -576,9 +576,13 @@ proptest! {
         let s = spec("* * * * * *", zone);
         let now = ms("2026-11-01T06:30:00Z") + sub_ms; // inside the NY overlap
         let floor = now - back_ms;
-        // The per-case runtime bound (50 ms, debug build) is checked on the fastest of up to
+        // The per-case runtime bound (250 ms, debug build) is checked on the fastest of up to
         // three identical runs, so a scheduler hiccup on a loaded machine cannot fail it while
-        // unbounded work still would.
+        // unbounded work still would. Bounded work is ~3 x SKIP_COUNT_BUDGET croner steps
+        // (x86_64 glibc debug: p50 ~3 ms, max ~13 ms over 512 cases); the musl CI legs run it
+        // on musl's allocator and measured 50 ms on aarch64. Walking every second of a
+        // multi-day downtime instead is 10^5..10^6 steps, i.e. seconds, so 250 ms still
+        // separates the two by more than an order of magnitude.
         let mut elapsed = std::time::Duration::MAX;
         let mut result = None;
         for _ in 0..3 {
@@ -589,7 +593,7 @@ proptest! {
             let all = plan_catchup(&s, floor, 0, now, CatchupPolicy::All, window_ms, cap);
             elapsed = elapsed.min(started.elapsed()); // clock-exempt: test runtime bound only
             result = Some((latest, skip, one, all));
-            if elapsed.as_millis() < 50 {
+            if elapsed.as_millis() < 250 {
                 break;
             }
         }
@@ -612,6 +616,6 @@ proptest! {
         expect.reverse();
         prop_assert_eq!(&all.fire, &expect);
         prop_assert_eq!(all.advance_to, None);
-        prop_assert!(elapsed.as_millis() < 50, "{:?}", elapsed);
+        prop_assert!(elapsed.as_millis() < 250, "{:?}", elapsed);
     }
 }
