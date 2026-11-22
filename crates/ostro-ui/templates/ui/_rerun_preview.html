@@ -1,0 +1,19 @@
+<section id="rerun-preview" aria-live="polite">
+{% if let Some(ok) = preview.ok %}<div class="verdict">
+<h2>Preview: {{ ok.verdict }}</h2>
+<dl class="kv">
+<dt>Verdict</dt><dd>{{ ok.verdict }}</dd>
+<dt>Cut</dt><dd>seq {{ ok.cut_seq }}</dd>
+<dt>Copied events</dt><dd>{{ ok.copied_events }}</dd>
+<dt>Runs as</dt><dd>{{ ok.workflow }}@{{ ok.version }}</dd>
+</dl>
+</div>
+{% else if let Some(r) = preview.refusal %}<div class="refusal">
+<h2>Refused: {{ r.code }} ({{ r.status }})</h2>
+<p>{{ r.message }}</p>
+{% if let Some(s) = r.seq %}<p>At seq {{ s }}{% if let Some(d) = r.detail %}: {{ d }}{% endif %}</p>{% else if let Some(d) = r.detail %}<p>{{ d }}</p>{% endif %}
+{% if let Some((n, h)) = r.nearest %}<p><a class="button small" href="{{ h }}">Use the nearest safe step (seq {{ n }})</a></p>{% endif %}
+{% if let Some(t) = r.terminate_href %}<p>The run is still live: <a href="{{ t }}">terminate first</a>, then rerun.</p>{% endif %}
+</div>
+{% else %}<p class="muted">Preview runs the replay check without creating a run.</p>
+{% endif %}</section>

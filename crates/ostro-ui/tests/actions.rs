@@ -16,11 +16,12 @@ use ostro_api::ControlPlane;
 use ostro_api::domain::{HistoryRequest, RunStatus, StartRunRequest};
 use ostro_api::fake::FakeOps;
 use ostro_api::phase11::{
-    DlqDismissRequest, DlqEntry, DlqListRequest, DlqPage, DlqRequeueRequest, DlqRequeueResponse,
-    OpsApi, RequeueMode, RerunFrom,
+    BulkAction, BulkCreateRequest, BulkFilter, DlqDismissRequest, DlqEntry, DlqListRequest,
+    DlqPage, DlqRequeueRequest, DlqRequeueResponse, OpsApi, RequeueMode, RerunCut, RerunCutsView,
+    RerunFrom, RerunRequest, RerunVersion, reason, reason_error, rerun_cut_unsafe,
 };
 use ostro_api::rest::RunStatusDto;
-use ostro_api::{ApiError, ApiExtensions};
+use ostro_api::{ApiError, ApiExtensions, ErrorCode};
 use ostro_ui::UiDeps;
 use ostro_ui::auth::{UiAuth, UiPrincipal, UiReject};
 
@@ -693,6 +694,11 @@ fn mutations(s: &Seeded) -> Vec<(String, Vec<(&'static str, &'static str)>)> {
         format!("/ui/dlq/{}/dismiss", s.failed),
         vec![("reason", "x")],
     ));
+    out.push((runs_path(&s.completed, "rerun/preview"), vec![("seq", "2")]));
+    out.push((runs_path(&s.completed, "rerun"), vec![("seq", "2")]));
+    out.push(("/ui/bulk/preview".to_owned(), vec![("action", "cancel")]));
+    out.push(("/ui/bulk".to_owned(), vec![("action", "cancel")]));
+    out.push(("/ui/bulk/blk_0000000000000001/cancel".to_owned(), vec![]));
     out
 }
 
@@ -720,8 +726,562 @@ async fn scope_operate_is_required_on_every_mutation_while_pages_render() {
         "/ui/runs".to_owned(),
         "/ui/dlq".to_owned(),
         runs_path_base(&s.running),
+        "/ui/bulk".to_owned(),
+        runs_path(&s.completed, "rerun?from_seq=2"),
     ] {
         let r = send(&router, common::get(&path)).await;
         assert_eq!(r.status, StatusCode::OK, "{path}");
     }
+}
+
+// ---------------------------------------------------------------------------------
+// Rerun from a step
+// ---------------------------------------------------------------------------------
+
+/// The `<section id="rerun-preview">` of a page or fragment.
+fn preview_of(body: &str) -> &str {
+    let start = body
+        .find(r#"<section id="rerun-preview""#)
+        .expect("preview section");
+    let end = body[start..].find("</section>").expect("section end") + start + 10;
+    &body[start..end]
+}
+
+#[tokio::test]
+async fn rerun_form_renders_the_cut_and_version_choice() {
+    let (ui, s) = seeded().await;
+    ui.ops.set_cuts(RerunCutsView {
+        run_id: s.completed.clone(),
+        cuts: vec![RerunCut {
+            seq: 2,
+            step: Some("charge".to_owned()),
+            occurrence: 1,
+            safe: true,
+            reason: None,
+            nearest_safe_seq: None,
+        }],
+    });
+    let base = runs_path_base(&s.completed);
+    // The timeline's "Rerun from here" link (11-15).
+    let r = get_ok(&ui, &format!("{base}/rerun?from_seq=2")).await;
+    assert!(
+        r.body
+            .contains(r#"<input name="seq" inputmode="numeric" value="2">"#),
+        "{}",
+        r.body
+    );
+    assert!(
+        r.body
+            .contains("seq 2: step charge (occurrence 1), a safe cut")
+    );
+    assert!(r.body.contains(r#"value="active" checked"#));
+    assert!(
+        r.body
+            .contains(&format!(r#"formaction="{base}/rerun/preview""#))
+    );
+    assert!(r.body.contains(&format!(r#"action="{base}/rerun""#)));
+    assert!(r.body.contains(&format!(r#"name="csrf" value="{TOKEN}""#)));
+    assert!(r.body.contains("Preview runs the replay check"));
+
+    let r = get_ok(
+        &ui,
+        &format!("{base}/rerun?step=s3&occurrence=2&version=source"),
+    )
+    .await;
+    assert!(r.body.contains(r#"<input name="step" value="s3">"#));
+    assert!(r.body.contains(r#"value="2" placeholder="1""#));
+    assert!(r.body.contains(r#"value="source" checked"#));
+    // A live run says "terminate first".
+    let r = get_ok(&ui, &runs_path(&s.running, "rerun?seq=1")).await;
+    assert!(r.body.contains("terminate it first"));
+    // Unknown run: 404.
+    let r = send(&ui.router, common::get("/ui/runs/run-999999/rerun")).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn rerun_preview_is_a_dry_run_and_renders_verdict_cut_and_copied_events() {
+    let (ui, s) = seeded().await;
+    let path = runs_path(&s.completed, "rerun/preview");
+    let r = act(
+        &ui,
+        Via::Htmx,
+        &path,
+        &[("seq", "3"), ("step", ""), ("version", "source")],
+    )
+    .await;
+    assert_html(&r, "htmx preview");
+    assert_eq!(
+        ui.ops.reruns(),
+        vec![RerunRequest {
+            run_id: s.completed.clone(),
+            from: RerunFrom::Seq(3),
+            version: RerunVersion::Source,
+            idempotency_key: None,
+            dry_run: true,
+        }]
+    );
+    assert!(
+        r.body.starts_with(r#"<section id="rerun-preview""#),
+        "{}",
+        r.body
+    );
+    insta::assert_snapshot!("rerun_preview_ok", r.body);
+
+    // Without JavaScript: the whole form page with the preview.
+    let r = act(
+        &ui,
+        Via::Form,
+        &path,
+        &[
+            ("step", "charge"),
+            ("occurrence", "2"),
+            ("version", "number"),
+            ("version_number", "4"),
+        ],
+    )
+    .await;
+    assert_html(&r, "form preview");
+    assert!(r.body.contains("<h1>Rerun "), "full page");
+    assert!(preview_of(&r.body).contains("Preview: ok"));
+    assert!(
+        r.body.contains(r#"value="number" checked"#),
+        "form echoes the choice"
+    );
+    let last = ui.ops.reruns().pop().expect("rerun");
+    assert_eq!(
+        last.from,
+        RerunFrom::Step {
+            name: "charge".to_owned(),
+            occurrence: 2
+        }
+    );
+    assert_eq!(last.version, RerunVersion::Version(4));
+    assert!(last.dry_run);
+
+    // No cut, bad version: 400 without a call.
+    for fields in [
+        vec![("version", "active")],
+        vec![("seq", "x")],
+        vec![("seq", "2"), ("version", "number")],
+        vec![("step", "a"), ("occurrence", "0")],
+    ] {
+        let r = act(&ui, Via::Form, &path, &fields).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{fields:?}: {}", r.body);
+    }
+    assert_eq!(ui.ops.reruns().len(), 2);
+}
+
+#[tokio::test]
+async fn rerun_submit_redirects_to_the_new_run() {
+    let (ui, s) = seeded().await;
+    let path = runs_path(&s.completed, "rerun");
+    let r = act(&ui, Via::Form, &path, &[("seq", "2")]).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let to = r.header("location").expect("location");
+    assert!(to.starts_with("/ui/runs/run-rerun-"), "{to}");
+    let r = act(&ui, Via::Htmx, &path, &[("step", "s3")]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(
+        r.header("hx-redirect")
+            .expect("hx-redirect")
+            .starts_with("/ui/runs/run-rerun-")
+    );
+    let reruns = ui.ops.reruns();
+    assert_eq!(reruns.len(), 2);
+    assert!(
+        reruns
+            .iter()
+            .all(|r| !r.dry_run && r.version == RerunVersion::Active)
+    );
+}
+
+#[tokio::test]
+async fn rerun_refusals_render_their_details() {
+    let (ui, s) = seeded().await;
+    let base = runs_path_base(&s.completed);
+    let preview = runs_path(&s.completed, "rerun/preview");
+
+    ui.ops.fail(
+        "rerun_run",
+        Some(rerun_cut_unsafe(
+            5,
+            "inside an uncommitted effect <x>",
+            Some(3),
+        )),
+    );
+    let r = act(
+        &ui,
+        Via::Htmx,
+        &preview,
+        &[("seq", "5"), ("version", "source")],
+    )
+    .await;
+    assert_html(&r, "unsafe htmx");
+    assert!(
+        r.body.contains("Refused: rerun_cut_unsafe (409)"),
+        "{}",
+        r.body
+    );
+    assert!(
+        r.body.contains("inside an uncommitted effect &#60;x&#62;") || r.body.contains("&lt;x&gt;")
+    );
+    assert!(
+        r.body.contains(&format!(
+            r#"href="{base}/rerun?seq=3&#38;version=source">Use the nearest safe step (seq 3)"#
+        )),
+        "{}",
+        r.body
+    );
+    insta::assert_snapshot!("rerun_preview_unsafe", r.body);
+    let r = act(&ui, Via::Form, &preview, &[("seq", "5")]).await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert!(preview_of(&r.body).contains("Use the nearest safe step (seq 3)"));
+    // Submitting is refused the same way; htmx retargets the preview region.
+    let r = act(
+        &ui,
+        Via::Htmx,
+        &runs_path(&s.completed, "rerun"),
+        &[("seq", "5")],
+    )
+    .await;
+    assert_html(&r, "unsafe submit");
+    assert_eq!(r.header("hx-retarget"), Some("#rerun-preview"));
+    assert_eq!(r.header("hx-reswap"), Some("outerHTML"));
+    assert!(r.body.contains("rerun_cut_unsafe"));
+
+    ui.ops.fail(
+        "rerun_run",
+        Some(reason_error(
+            ErrorCode::Conflict,
+            reason::RERUN_NONDETERMINISTIC,
+            "the copied prefix does not replay on version 2",
+            serde_json::json!({"seq": 7, "detail": "activity order changed"}),
+        )),
+    );
+    let r = act(&ui, Via::Htmx, &preview, &[("seq", "9")]).await;
+    assert!(r.body.contains("Refused: rerun_nondeterministic (409)"));
+    assert!(
+        r.body.contains("At seq 7: activity order changed"),
+        "{}",
+        r.body
+    );
+
+    ui.ops.fail(
+        "rerun_run",
+        Some(ApiError::run_not_terminal(&s.running, RunStatus::Running)),
+    );
+    let r = act(&ui, Via::Htmx, &preview, &[("seq", "1")]).await;
+    assert!(r.body.contains("Refused: run_not_terminal (409)"));
+    assert!(
+        r.body
+            .contains(&format!(r#"<a href="{base}">terminate first</a>"#)),
+        "{}",
+        r.body
+    );
+
+    // A server without the rerun implementation: the API's 501 is shown as is.
+    ui.ops.fail(
+        "rerun_run",
+        Some(ApiError::new(
+            ErrorCode::Unimplemented,
+            "rerun_run lands in 11-10",
+        )),
+    );
+    let r = act(&ui, Via::Form, &preview, &[("seq", "1")]).await;
+    assert_eq!(r.status, StatusCode::NOT_IMPLEMENTED);
+    assert!(preview_of(&r.body).contains("rerun_run lands in 11-10"));
+    assert!(preview_of(&r.body).contains("(501)"));
+}
+
+// ---------------------------------------------------------------------------------
+// Bulk jobs
+// ---------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bulk_link_carries_the_run_list_filter_into_the_form() {
+    let (ui, _s) = seeded().await;
+    let r = get_ok(
+        &ui,
+        "/ui/runs?workflow=greet&status=failed&tags=env%3Dprod&order=newest",
+    )
+    .await;
+    assert!(
+        r.body.contains(
+            r#"href="/ui/bulk?workflow=greet&#38;status=failed&#38;tags=env%3Dprod">Bulk…</a>"#
+        ),
+        "{}",
+        r.body
+    );
+    let r = get_ok(&ui, "/ui/bulk?workflow=greet&status=failed&tags=env%3Dprod").await;
+    assert!(r.body.contains(r#"<input name="workflow" value="greet">"#));
+    assert!(
+        r.body
+            .contains(r#"<option value="failed" selected>failed</option>"#)
+    );
+    assert!(r.body.contains(r#"<input name="tags" value="env=prod">"#));
+    assert!(r.body.contains(r#"action="/ui/bulk/preview""#));
+    assert!(r.body.contains("No bulk jobs."));
+}
+
+fn bulk_fields() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("workflow", "greet"),
+        ("status", "failed"),
+        ("tags", "env=prod"),
+        ("tags", ""),
+        ("action", "terminate"),
+        ("reason", "cleanup"),
+        ("rate", "5"),
+        ("payload", ""),
+    ]
+}
+
+#[tokio::test]
+async fn bulk_preview_is_a_dry_run_with_estimate_sample_and_confirm() {
+    let (ui, s) = seeded().await;
+    ui.ops
+        .set_bulk_matches(vec![s.failed.clone(), s.running.clone()]);
+    let r = act(&ui, Via::Form, "/ui/bulk/preview", &bulk_fields()).await;
+    assert_html(&r, "bulk preview");
+    assert_eq!(
+        ui.ops.bulk_requests(),
+        vec![BulkCreateRequest {
+            action: BulkAction::Terminate {
+                reason: "cleanup".to_owned()
+            },
+            filter: BulkFilter {
+                workflow: Some("greet".to_owned()),
+                status: Some(RunStatusDto::Failed),
+                tags: vec!["env=prod".to_owned()],
+                ..BulkFilter::default()
+            },
+            rate_per_sec: Some(5),
+            max_in_flight: None,
+            dry_run: true,
+        }]
+    );
+    assert!(
+        r.body.contains("matches about <strong>2</strong> runs"),
+        "{}",
+        r.body
+    );
+    assert!(r.body.contains(&format!(
+        r#"<a class="mono" href="/ui/runs/{0}">{0}</a>"#,
+        s.failed
+    )));
+    assert!(
+        r.body
+            .contains(r#"hx-confirm="Apply terminate to about 2 runs?""#)
+    );
+    for (k, v) in [
+        ("workflow", "greet"),
+        ("tags", "env=prod"),
+        ("reason", "cleanup"),
+        ("rate", "5"),
+    ] {
+        assert!(
+            r.body
+                .contains(&format!(r#"<input type="hidden" name="{k}" value="{v}">"#)),
+            "{k}"
+        );
+    }
+    assert!(
+        !r.body.contains(r#"type="hidden" name="payload""#),
+        "empty fields dropped"
+    );
+    assert!(
+        r.body
+            .contains(r#"href="/ui/bulk?workflow=greet&#38;status=failed"#),
+        "edit link"
+    );
+    assert!(
+        ui.ops.list_bulk().await.expect("jobs").is_empty(),
+        "nothing created"
+    );
+}
+
+#[tokio::test]
+async fn bulk_actions_parse_into_requests_and_bad_forms_are_400() {
+    let (ui, _s) = seeded().await;
+    let cases: Vec<(Vec<(&str, &str)>, BulkAction)> = vec![
+        (vec![("action", "cancel")], BulkAction::Cancel),
+        (vec![("action", "retry")], BulkAction::Retry),
+        (vec![("action", "pause")], BulkAction::Pause),
+        (vec![("action", "resume")], BulkAction::Resume),
+        (
+            vec![("action", "rerun"), ("step", "s3"), ("version", "source")],
+            BulkAction::Rerun {
+                from: RerunFrom::Step {
+                    name: "s3".to_owned(),
+                    occurrence: 1,
+                },
+                version: RerunVersion::Source,
+            },
+        ),
+        (
+            vec![("action", "requeue"), ("mode", "rerun"), ("seq", "4")],
+            BulkAction::Requeue {
+                mode: RequeueMode::Rerun {
+                    from: RerunFrom::Seq(4),
+                },
+            },
+        ),
+        (
+            vec![("action", "requeue")],
+            BulkAction::Requeue {
+                mode: RequeueMode::Auto,
+            },
+        ),
+        (
+            vec![
+                ("action", "signal"),
+                ("signal_name", "go"),
+                ("payload", "[1,2]"),
+            ],
+            BulkAction::Signal {
+                name: "go".to_owned(),
+                payload: serde_json::json!([1, 2]),
+            },
+        ),
+    ];
+    for (fields, want) in &cases {
+        let mut f = fields.clone();
+        f.push(("dlq", "true"));
+        let r = act(&ui, Via::Form, "/ui/bulk/preview", &f).await;
+        assert_html(&r, &format!("{fields:?}"));
+        let got = ui.ops.bulk_requests().pop().expect("request");
+        assert_eq!(&got.action, want, "{fields:?}");
+        assert!(got.filter.dlq);
+        assert_eq!(got.rate_per_sec, None);
+    }
+    for bad in [
+        vec![],
+        vec![("action", "explode")],
+        vec![("action", "terminate")],
+        vec![("action", "signal")],
+        vec![
+            ("action", "signal"),
+            ("signal_name", "go"),
+            ("payload", "{"),
+        ],
+        vec![("action", "rerun")],
+        vec![("action", "cancel"), ("rate", "0")],
+        vec![("action", "cancel"), ("status", "nope")],
+    ] {
+        let r = act(&ui, Via::Form, "/ui/bulk/preview", &bad).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad:?}: {}", r.body);
+    }
+    assert_eq!(
+        ui.ops.bulk_requests().len(),
+        cases.len(),
+        "bad forms call nothing"
+    );
+}
+
+#[tokio::test]
+async fn bulk_create_progress_polls_until_done_and_cancel() {
+    let (ui, s) = seeded().await;
+    ui.ops
+        .set_bulk_matches(vec![s.failed.clone(), s.running.clone()]);
+    let r = act(&ui, Via::Form, "/ui/bulk", &bulk_fields()).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{}", r.body);
+    let page = r.header("location").expect("location").to_owned();
+    assert!(page.starts_with("/ui/bulk/blk_"), "{page}");
+    let job = page.trim_start_matches("/ui/bulk/").to_owned();
+    let req = ui.ops.bulk_requests().pop().expect("request");
+    assert!(!req.dry_run);
+    assert_eq!(req.rate_per_sec, Some(5));
+
+    let r = get_ok(&ui, &page).await;
+    assert!(
+        r.body.contains(&format!(
+            r#"hx-get="{page}/progress" hx-trigger="every 2s" hx-swap="outerHTML""#
+        )),
+        "{}",
+        r.body
+    );
+    assert!(r.body.contains(r#"<progress max="2" value="0">"#));
+    assert!(
+        r.body
+            .contains(&format!(r#"hx-confirm="Cancel bulk job {job}?"#))
+    );
+
+    // The jobs list.
+    let r = get_ok(&ui, "/ui/bulk").await;
+    assert!(r.body.contains(&format!(r#"<a href="{page}">{job}</a>"#)));
+    assert!(r.body.contains("0 done, 0 skipped of 2"));
+
+    // Progress: still running, then done (polling stops, no cancel).
+    ui.ops.set_bulk_progress(&job, 1, 0);
+    let r = get_ok(&ui, &format!("{page}/progress")).await;
+    assert!(r.body.starts_with(r#"<section id="bulk-progress""#));
+    assert!(r.body.contains("every 2s") && r.body.contains(r#"value="1""#));
+    ui.ops.set_bulk_progress(&job, 1, 1);
+    let r = get_ok(&ui, &format!("{page}/progress")).await;
+    assert!(r.body.contains("badge done"));
+    assert!(!r.body.contains("hx-trigger"), "{}", r.body);
+    assert!(!r.body.contains("/cancel"));
+
+    // htmx create + cancel: HX-Redirect, then the progress fragment, cancelled.
+    let r = act(&ui, Via::Htmx, "/ui/bulk", &[("action", "pause")]).await;
+    let to = r.header("hx-redirect").expect("hx-redirect").to_owned();
+    let r = act(&ui, Via::Htmx, &format!("{to}/cancel"), &[]).await;
+    assert_html(&r, "htmx cancel");
+    assert!(r.body.contains("badge cancelled"));
+    assert!(!r.body.contains("hx-trigger"));
+    // A plain form cancel lands on the job page.
+    let r = act(&ui, Via::Form, &format!("{to}/cancel"), &[]).await;
+    assert_303(&r, &to, "form cancel");
+    // Unknown job: 404 page.
+    let r = send(&ui.router, common::get("/ui/bulk/blk_nope")).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn bulk_api_errors_are_surfaced() {
+    let (ui, _s) = seeded().await;
+    // A server whose bulk API is not implemented yet (11-13): 501 shown as is.
+    ui.ops.fail(
+        "create_bulk",
+        Some(ApiError::new(
+            ErrorCode::Unimplemented,
+            "create_bulk lands in 11-13",
+        )),
+    );
+    ui.ops.fail(
+        "list_bulk",
+        Some(ApiError::new(
+            ErrorCode::Unimplemented,
+            "list_bulk lands in 11-13",
+        )),
+    );
+    let r = act(&ui, Via::Form, "/ui/bulk/preview", &[("action", "cancel")]).await;
+    assert_eq!(r.status, StatusCode::NOT_IMPLEMENTED);
+    assert!(r.body.contains("create_bulk lands in 11-13"));
+    let r = act(&ui, Via::Htmx, "/ui/bulk", &[("action", "cancel")]).await;
+    assert_eq!(r.header("hx-retarget"), Some("#flash"));
+    assert!(r.body.contains("create_bulk lands in 11-13"));
+    let r = get_ok(&ui, "/ui/bulk").await;
+    assert!(
+        r.body
+            .contains("Bulk jobs unavailable (501): list_bulk lands in 11-13")
+    );
+    // Too many jobs: the API's 429.
+    ui.ops.fail(
+        "create_bulk",
+        Some(ostro_api::phase11::bulk_too_many_jobs(4, 1000)),
+    );
+    let r = act(&ui, Via::Form, "/ui/bulk", &[("action", "cancel")]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
+    // No ops slot at all.
+    let bare = common::ui_with(common::Slots {
+        ops: false,
+        logs: true,
+    });
+    let r = get_ok(&bare, "/ui/bulk").await;
+    assert!(
+        r.body
+            .contains("Bulk operations are not available on this server.")
+    );
 }

@@ -1,0 +1,13 @@
+---
+source: crates/ostro-ui/tests/actions.rs
+expression: r.body
+---
+<section id="rerun-preview" aria-live="polite">
+<div class="refusal">
+<h2>Refused: rerun_cut_unsafe (409)</h2>
+<p>seq 5 is not a safe rerun cut: inside an uncommitted effect &#60;x&#62;</p>
+<p>At seq 5: inside an uncommitted effect &#60;x&#62;</p>
+<p><a class="button small" href="/ui/runs/run-000001/rerun?seq=3&#38;version=source">Use the nearest safe step (seq 3)</a></p>
+
+</div>
+</section>

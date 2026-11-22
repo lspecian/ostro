@@ -30,6 +30,14 @@
 //! | POST | `/ui/runs/{run_id}/{cancel,terminate,retry,signal,pause,resume}` | status fragment (htmx) or 303 -> run page |
 //! | POST | `/ui/dlq/{run_id}/requeue` | `HX-Redirect` / 303 -> resulting run |
 //! | POST | `/ui/dlq/{run_id}/dismiss` | empty 200 (htmx deletes the row) or 303 -> `/ui/dlq` |
+//! | GET | `/ui/runs/{run_id}/rerun` | rerun form (`?seq=`/`from_seq=` or `step=&occurrence=`) |
+//! | POST | `/ui/runs/{run_id}/rerun/preview` | dry run: preview fragment (htmx) or the form page |
+//! | POST | `/ui/runs/{run_id}/rerun` | `HX-Redirect` / 303 -> new run; refusals render their details |
+//! | GET | `/ui/bulk` | bulk jobs + new-job form (prefilled from the run-list filter query) |
+//! | POST | `/ui/bulk/preview` | dry run: estimate, sample, confirm form |
+//! | POST | `/ui/bulk` | create: `HX-Redirect` / 303 -> `/ui/bulk/{job_id}` |
+//! | GET | `/ui/bulk/{job_id}`, `/ui/bulk/{job_id}/progress` | job page / progress fragment (polls every 2 s while active) |
+//! | POST | `/ui/bulk/{job_id}/cancel` | progress fragment (htmx) or 303 -> job page |
 //!
 //! Every route sits behind [`security::guard`] (Host / `:authority` allowlist, security
 //! headers, D-P11-15).
@@ -71,6 +79,15 @@ pub const ROUTES: &[&str] = &[
     "POST /ui/runs/{run_id}/resume",
     "POST /ui/dlq/{run_id}/requeue",
     "POST /ui/dlq/{run_id}/dismiss",
+    "/ui/runs/{run_id}/rerun",
+    "POST /ui/runs/{run_id}/rerun/preview",
+    "POST /ui/runs/{run_id}/rerun",
+    "/ui/bulk",
+    "POST /ui/bulk/preview",
+    "POST /ui/bulk",
+    "/ui/bulk/{job_id}",
+    "/ui/bulk/{job_id}/progress",
+    "POST /ui/bulk/{job_id}/cancel",
 ];
 
 /// `[ui]` configuration as the router sees it.

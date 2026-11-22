@@ -1,0 +1,27 @@
+<section id="bulk-progress" class="card" aria-live="polite"{% if job.active %} hx-get="{{ job.progress_href }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+<h3>Job <span class="mono">{{ job.job_id }}</span></h3>
+<p><span class="badge {{ job.state }}">{{ job.state }}</span> {{ job.action }}{% if job.active %} <span class="muted htmx-indicator">refreshing</span>{% endif %}</p>
+<progress max="{{ job.progress_max }}" value="{{ job.progress_value }}">{{ job.progress_value }} / {{ job.matched }}</progress>
+<dl class="kv">
+<dt>Matched</dt><dd>{{ job.matched }}</dd>
+<dt>Done</dt><dd>{{ job.done }}</dd>
+<dt>Skipped</dt><dd>{{ job.skipped }}</dd>
+<dt>Failed</dt><dd>{{ job.failed_count }}</dd>
+<dt>Rate</dt><dd>{{ job.rate }}/s</dd>
+<dt>Created</dt><dd class="mono">{{ job.created }}</dd>
+{% if let Some(t) = job.started %}<dt>Started</dt><dd class="mono">{{ t }}</dd>{% endif %}
+{% if let Some(t) = job.finished %}<dt>Finished</dt><dd class="mono">{{ t }}</dd>{% endif %}
+{% if let Some(e) = job.eta %}<dt>ETA</dt><dd>{{ e }}</dd>{% endif %}
+</dl>
+{% if !job.failed.is_empty() %}<h3>Failures</h3>
+<table>
+<thead><tr><th>Run</th><th>Reason</th></tr></thead>
+<tbody>
+{% for (l, why) in job.failed %}<tr><td class="mono"><a href="{{ l.href }}">{{ l.text }}</a></td><td>{{ why }}</td></tr>
+{% endfor %}</tbody>
+</table>
+{% endif %}{% if job.active %}<form class="action" method="post" action="{{ job.cancel_href }}" hx-post="{{ job.cancel_href }}" hx-target="#bulk-progress" hx-swap="outerHTML" hx-confirm="Cancel bulk job {{ job.job_id }}? Runs already processed stay processed.">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="danger">Cancel job</button>
+</form>
+{% endif %}</section>

@@ -1,0 +1,15 @@
+---
+source: crates/ostro-ui/tests/actions.rs
+expression: r.body
+---
+<section id="rerun-preview" aria-live="polite">
+<div class="verdict">
+<h2>Preview: ok</h2>
+<dl class="kv">
+<dt>Verdict</dt><dd>ok</dd>
+<dt>Cut</dt><dd>seq 3</dd>
+<dt>Copied events</dt><dd>2</dd>
+<dt>Runs as</dt><dd>fake@1</dd>
+</dl>
+</div>
+</section>

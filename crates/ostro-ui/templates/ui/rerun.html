@@ -1,0 +1,27 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+<p><a href="{{ form.base }}">Back to run {{ form.run_id }}</a></p>
+<p>Source: <span class="mono">{{ form.run_id }}</span>, {{ form.workflow }}@{{ form.version }}, <span class="badge {{ form.status }}">{{ form.status }}</span></p>
+{% if !form.terminal %}<p class="refusal">The run is not terminal: terminate it first, then rerun.</p>{% endif %}
+<form class="stack" method="post" action="{{ form.base }}/rerun">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<fieldset>
+<legend>Cut: events before it are copied, the rest re-executes</legend>
+<label>Seq <input name="seq" inputmode="numeric" value="{{ form.seq }}"></label>
+<label>or step <input name="step" value="{{ form.step }}"></label>
+<label>occurrence <input name="occurrence" inputmode="numeric" value="{{ form.occurrence }}" placeholder="1"></label>
+{% if let Some(n) = form.cut_note %}<p class="muted">{{ n }}</p>{% endif %}
+</fieldset>
+<fieldset>
+<legend>Version</legend>
+<label><input type="radio" name="version" value="active"{% if form.version_choice == "active" %} checked{% endif %}> active version</label>
+<label><input type="radio" name="version" value="source"{% if form.version_choice == "source" %} checked{% endif %}> source version ({{ form.version }})</label>
+<label><input type="radio" name="version" value="number"{% if form.version_choice == "number" %} checked{% endif %}> version <input name="version_number" inputmode="numeric" value="{{ form.version_number }}"></label>
+</fieldset>
+<p>
+<button type="submit" class="secondary" formaction="{{ form.base }}/rerun/preview" hx-post="{{ form.base }}/rerun/preview" hx-target="#rerun-preview" hx-swap="outerHTML">Preview</button>
+<button type="submit" hx-post="{{ form.base }}/rerun" hx-target="#rerun-preview" hx-swap="outerHTML">Rerun</button>
+</p>
+</form>
+{% include "ui/_rerun_preview.html" %}
+{% endblock %}

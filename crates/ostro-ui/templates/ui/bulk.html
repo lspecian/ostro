@@ -1,0 +1,94 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+<p><a href="/ui/runs">All runs</a> · <a href="/ui/bulk">All bulk jobs</a></p>
+{% if !available %}
+<p class="empty">Bulk operations are not available on this server.</p>
+{% else if mode == "job" %}
+{% if let Some(job) = job %}{% include "ui/_bulk_progress.html" %}{% endif %}
+{% else if mode == "preview" %}
+{% if let Some(p) = preview %}
+<section class="card">
+<h3>Dry run</h3>
+<p>Action <strong>{{ p.action }}</strong> matches about <strong>{{ p.matched_estimate }}</strong> runs.</p>
+{% if p.sample.is_empty() %}<p class="muted">No sample: nothing matches.</p>{% else %}<p>Sample:</p>
+<ul class="sample">
+{% for l in p.sample %}<li><a class="mono" href="{{ l.href }}">{{ l.text }}</a></li>
+{% endfor %}</ul>{% endif %}
+</section>
+<form class="action" method="post" action="/ui/bulk" hx-post="/ui/bulk" hx-confirm="Apply {{ p.action }} to about {{ p.matched_estimate }} runs?">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% for (k, v) in p.hidden %}<input type="hidden" name="{{ k }}" value="{{ v }}">
+{% endfor %}<button type="submit" class="danger">Start bulk job</button>
+<a class="button secondary" href="{{ p.edit_href }}">Edit</a>
+</form>
+{% endif %}
+{% else %}
+<h2>Jobs</h2>
+{% if let Some(e) = jobs_error %}<p class="flash">{{ e }}</p>{% endif %}
+{% if jobs.is_empty() %}<p class="empty">No bulk jobs.</p>{% else %}
+<table class="bulk">
+<thead><tr><th>Job</th><th>Action</th><th>State</th><th>Progress</th><th>Failed</th><th>Created</th></tr></thead>
+<tbody>
+{% for j in jobs %}<tr>
+<td class="mono"><a href="{{ j.href }}">{{ j.job_id }}</a></td>
+<td>{{ j.action }}</td>
+<td><span class="badge {{ j.state }}">{{ j.state }}</span></td>
+<td>{{ j.done }} done, {{ j.skipped }} skipped of {{ j.matched }}</td>
+<td>{{ j.failed_count }}</td>
+<td class="mono">{{ j.created }}</td>
+</tr>
+{% endfor %}</tbody>
+</table>
+{% endif %}
+<h2>New bulk job</h2>
+<form class="stack" method="post" action="/ui/bulk/preview">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<fieldset>
+<legend>Runs (the run-list filter)</legend>
+<label>Workflow <input name="workflow" value="{{ form.workflow }}"></label>
+<label>Queue <input name="queue" value="{{ form.queue }}"></label>
+<label>Status
+<select name="status">
+<option value="">any</option>
+{% for (s, selected) in form.statuses %}<option value="{{ s }}"{% if *selected %} selected{% endif %}>{{ s }}</option>
+{% endfor %}</select>
+</label>
+{% for t in form.tags %}<label>Tag <input name="tags" value="{{ t }}"></label>
+{% endfor %}<label>Tag <input name="tags" value="" placeholder="key=value"></label>
+<label><input type="checkbox" name="dlq" value="true"{% if form.dlq %} checked{% endif %}> DLQ members only</label>
+</fieldset>
+<fieldset>
+<legend>Action</legend>
+<label>Action
+<select name="action">
+{% for (v, label, selected) in form.actions %}<option value="{{ v }}"{% if *selected %} selected{% endif %}>{{ label }}</option>
+{% endfor %}</select>
+</label>
+<label>Terminate reason <input name="reason" maxlength="1024" value="{{ form.reason }}"></label>
+<label>Signal name <input name="signal_name" maxlength="256" value="{{ form.signal_name }}"></label>
+<label>Signal payload (JSON) <textarea name="payload" rows="2" placeholder="null">{{ form.payload }}</textarea></label>
+<label>Rerun step <input name="step" value="{{ form.step }}"></label>
+<label>Occurrence <input name="occurrence" inputmode="numeric" value="{{ form.occurrence }}" placeholder="1"></label>
+<label>or seq <input name="seq" inputmode="numeric" value="{{ form.seq }}"></label>
+<label>Rerun version
+<select name="version">
+<option value="active"{% if form.version == "active" %} selected{% endif %}>active</option>
+<option value="source"{% if form.version == "source" %} selected{% endif %}>source</option>
+<option value="number"{% if form.version == "number" %} selected{% endif %}>number</option>
+</select>
+</label>
+<label>Version number <input name="version_number" inputmode="numeric" value="{{ form.version_number }}"></label>
+<label>Requeue mode
+<select name="mode">
+<option value="auto"{% if form.mode == "auto" %} selected{% endif %}>auto</option>
+<option value="resume"{% if form.mode == "resume" %} selected{% endif %}>resume</option>
+<option value="restart"{% if form.mode == "restart" %} selected{% endif %}>restart</option>
+<option value="rerun"{% if form.mode == "rerun" %} selected{% endif %}>rerun (uses the step / seq)</option>
+</select>
+</label>
+</fieldset>
+<label>Rate (ops/s) <input name="rate" inputmode="numeric" value="{{ form.rate }}" placeholder="server default"></label>
+<p><button type="submit">Preview (dry run)</button></p>
+</form>
+{% endif %}
+{% endblock %}

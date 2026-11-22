@@ -213,6 +213,7 @@ async fn foreign_host_is_403_on_every_route_while_auth_is_off() {
         let path = pattern.trim_start_matches("POST ");
         paths.push(
             path.replace("{run_id}", &s.completed)
+                .replace("{job_id}", "blk_0000000000000001")
                 .replace("{*path}", "app.css"),
         );
     }

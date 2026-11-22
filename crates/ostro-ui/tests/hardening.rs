@@ -25,7 +25,7 @@ fn assert_security_headers(r: &common::Resp, what: &str) {
 }
 
 /// A concrete request path for every route pattern of [`ostro_ui::ROUTES`].
-fn concrete(pattern: &str, run: &str) -> Option<(&'static str, String)> {
+fn concrete(pattern: &str, run: &str, job: &str) -> Option<(&'static str, String)> {
     let (method, path) = match pattern.split_once(' ') {
         Some((m, p)) => (m, p),
         None => ("GET", pattern),
@@ -37,6 +37,7 @@ fn concrete(pattern: &str, run: &str) -> Option<(&'static str, String)> {
     };
     let path = path
         .replace("{run_id}", run)
+        .replace("{job_id}", job)
         .replace("{*path}", "vendor/htmx-2.0.11.min.js");
     assert!(!path.contains('{'), "unmapped parameter in {pattern}");
     Some((method, path))
@@ -47,8 +48,9 @@ async fn every_route_carries_csp_and_security_headers() {
     let ui = ui();
     let s = seed(&ui).await;
     assert!(ostro_ui::ROUTES.len() >= 10);
+    let job = bulk_job(&ui).await;
     for pattern in ostro_ui::ROUTES {
-        let (method, path) = concrete(pattern, &s.completed).expect("route");
+        let (method, path) = concrete(pattern, &s.completed, &job).expect("route");
         let req = Request::builder()
             .method(method)
             .uri(&path)
@@ -90,6 +92,23 @@ async fn every_route_carries_csp_and_security_headers() {
         assert_security_headers(&r, path);
         assert_eq!(r.header("cache-control"), Some("no-store"), "{path}");
     }
+}
+
+/// A bulk job on the fake (11-16's `/ui/bulk/{job_id}` routes).
+async fn bulk_job(ui: &common::Ui) -> String {
+    use ostro_api::phase11::{BulkAction, BulkCreateRequest, OpsApi};
+    ui.ops
+        .create_bulk(BulkCreateRequest {
+            action: BulkAction::Cancel,
+            filter: Default::default(),
+            rate_per_sec: None,
+            max_in_flight: None,
+            dry_run: false,
+        })
+        .await
+        .expect("bulk job")
+        .job_id
+        .expect("job id")
 }
 
 fn crate_dir() -> PathBuf {
@@ -183,6 +202,11 @@ async fn rendered_pages_pass_the_lint_and_carry_the_htmx_config() {
         "/ui/dlq".to_owned(),
         format!("/ui/runs/{}", s.completed),
         format!("/ui/runs/{}?tab=logs", s.running),
+        // 11-16
+        format!("/ui/runs/{}", s.running),
+        format!("/ui/runs/{}/rerun?from_seq=2", s.completed),
+        "/ui/bulk?workflow=greet".to_owned(),
+        format!("/ui/bulk/{}", bulk_job(&ui).await),
     ] {
         let r = get_ok(&ui, &path).await;
         assert_eq!(lint_tags(&r.body), Vec::<String>::new(), "{path}");
