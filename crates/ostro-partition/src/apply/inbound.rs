@@ -34,12 +34,15 @@
 //!   `ContinuedAsNew` child forwards the duplicate to `continued_to` (start `run_id`
 //!   rewritten, like the CancelRun forward of 05-08). A live child or a parent mismatch is a
 //!   drop. One extra point read (the child record).
-//! - **Row guard.** The parent accepts a `ChildCompleted` only with a matching `children`
-//!   row: the exact `(parent, child)` row, else (one prefix scan, only when `children > 0`)
-//!   the row whose child uuid is `child_run_uuid(parent, op)`, i.e. the original child of
-//!   a continue-as-new chain whose successor reports. The row is removed; no row → drop, so
-//!   a re-completion never completes an op twice. A uuid match also sends
-//!   `CancelRun{reason: "chain_done"}` to the original child.
+//! - **Row guard.** The parent journals a `ChildCompleted` only with a matching marked
+//!   `children` row: the exact `(parent, child)` row, else (one prefix scan, only when
+//!   `children > 0`) the row whose child uuid is `child_run_uuid(parent, op)`, i.e. the
+//!   original child of a continue-as-new chain whose successor reports. The row is
+//!   removed, so a re-completion never journals an op twice. A uuid match also sends
+//!   `CancelRun{reason: "chain_done"}` to the original child. With no row at all the v0.1
+//!   semantics are kept (legacy inbox row and wake): v0.1 commands, such as a completion
+//!   for a parent that never recorded the child, apply as before, except that the counter
+//!   is no longer decremented for a row that does not exist.
 //! - **`chain_done`.** A `ContinuedAsNew` run receiving it forwards it to `continued_to` and
 //!   clears `continued_to` (no cancel request); a record whose expiry was deferred
 //!   (`retention.rs`) is deleted instead. Any other run drops it. "chain_done" is therefore a
@@ -383,21 +386,23 @@ fn child_completed(
     let status = terminal_status(c.status)
         .ok_or_else(|| StoreError::Codec("validated terminal status".into()))?;
     // 09-08 row guard: the exact row, else the original child's row of a continue-as-new
-    // chain (uuid match, D-P9-27); no row -> per-message drop (no double completion).
+    // chain (uuid match, D-P9-27). Journaling needs a marked row and consumes it, so a
+    // re-completion is never journaled twice. No row at all keeps the v0.1 path unchanged
+    // (legacy inbox row; format v0.1 frozen).
     let exact = children_key(&parent, &child);
     let (row, value, chained) = match b.get(Table::Children, &exact)? {
-        Some(v) => (exact, v, None),
+        Some(v) => (exact, Some(v), None),
         None => match chain_row(b, &parent, &rec, c.op)? {
             Some((k, v)) => {
                 let original = k[RunId::LEN..].to_vec();
-                (k, v, Some(original))
+                (k, Some(v), Some(original))
             }
-            None => return Ok(()),
+            None => (exact, None, None),
         },
     };
     // 09-05: a row marked by the opt-in `ChildJournal` intent journals the completion as
     // the parent's kind-67 event (D21); any other case keeps the v0.1 inbox row.
-    let journaled = value.as_slice() == CHILD_ROW_JOURNAL;
+    let journaled = value.as_deref() == Some(CHILD_ROW_JOURNAL);
     if journaled {
         match &c.event {
             // Submitter-encoded by the child's derive (PF-F1): verbatim, never decoded or
@@ -453,8 +458,12 @@ fn child_completed(
         let at = rec.created_at_ms;
         make_ready(b, &parent, &mut rec, at, actions);
     }
-    b.remove(Table::Children, row);
-    rec.children = rec.children.saturating_sub(1);
+    // 09-08: only a row that exists is consumed and counted (a stray re-completion must
+    // not drift the counter the cascades rely on).
+    if value.is_some() {
+        b.remove(Table::Children, row);
+        rec.children = rec.children.saturating_sub(1);
+    }
     store_run(b, &parent, &rec);
     // 09-08 (D-P9-27): the chain is done; its predecessors stop being kept for forwarding.
     if let Some(original) = chained {

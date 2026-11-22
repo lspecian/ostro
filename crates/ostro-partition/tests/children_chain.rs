@@ -179,15 +179,24 @@ fn exact_row_completion_is_journaled_once() {
     assert_eq!(rec.children, 0);
     assert_eq!(rec.next_seq, 4);
     assert!(h.get(Table::Children, &children_key(&p, &c)).is_none());
-    // A second completion of the same op (re-completion) finds no row: drop.
+    // A second completion of the same op (re-completion) finds no row: never journaled
+    // (the v0.1 no-row path keeps its legacy inbox row).
     let (o, _, _) = h.deliver(completed_kind(&p, &c, 1, TerminalStatus::Cancelled, None));
     assert_eq!(o, ApplyOutcome::Accepted);
     assert_eq!(h.journal(&p).len(), 4);
-    assert_eq!(h.run(&p), rec);
+    legacy_only(&h, &p, &rec);
+}
+
+/// Nothing journaled, nothing else changed: only the v0.1 legacy inbox row was added.
+fn legacy_only(h: &H, p: &RunId, before: &ostro_partition::store::values::RunRecord) {
+    let now = h.run(p);
+    assert_eq!(now.next_seq, before.next_seq, "not journaled");
+    assert_eq!(now.inbox_next, before.inbox_next + 1, "legacy inbox row");
+    assert_eq!(now.children, before.children, "no row, no decrement");
 }
 
 #[test]
-fn completion_without_any_matching_row_is_a_drop() {
+fn completion_without_any_matching_row_is_never_journaled() {
     let mut h = H::new();
     let kids = parent_with_children(&mut h, start(&rid(1)), &[1]);
     let p = rid(1);
@@ -201,12 +210,13 @@ fn completion_without_any_matching_row_is_a_drop() {
         None,
     ));
     assert!(out.is_empty());
-    assert_eq!(h.run(&p), rec);
     assert_eq!(h.journal(&p).len(), 3);
     assert!(
         h.get(Table::Children, &children_key(&p, &kids[0]))
             .is_some()
     );
+    // v0.1 path: legacy inbox row (no row consumed, the counter is untouched).
+    legacy_only(&h, &p, &rec);
 }
 
 #[test]
@@ -235,7 +245,8 @@ fn chain_successor_completion_matches_the_original_row_and_sends_chain_done() {
         h.get(Table::Children, &children_key(&p, &kids[1]))
             .is_some()
     );
-    // Re-completion from the successor: no row any more → drop, no second chain_done.
+    // Re-completion from the successor: no row any more → not journaled, no second
+    // chain_done, the other child's row and the counter intact.
     let again = h.deliver_out(completed_kind(
         &p,
         &succ,
@@ -244,7 +255,11 @@ fn chain_successor_completion_matches_the_original_row_and_sends_chain_done() {
         None,
     ));
     assert!(again.is_empty());
-    assert_eq!(h.run(&p), rec);
+    legacy_only(&h, &p, &rec);
+    assert!(
+        h.get(Table::Children, &children_key(&p, &kids[1]))
+            .is_some()
+    );
 }
 
 // ------------------------------------------------------------- chain_done / expiry
