@@ -10,6 +10,7 @@ pub mod error;
 pub mod fake;
 pub mod grpc;
 mod openapi;
+pub mod phase11;
 pub mod phase7;
 pub mod phase8;
 pub mod rest;
@@ -50,21 +51,30 @@ pub fn tls_provider() -> rustls::crypto::CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()
 }
 
-/// HTTP API limits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// HTTP API limits and router options.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiConfig {
     /// Body limit of `PUT /v1/modules/{sha256}` only.
     pub max_module_bytes: usize,
     /// Body limit of every other route.
     pub max_request_bytes: usize,
+    /// Largest run input / signal / await-completion payload accepted before proposal
+    /// (`[limits] max_payload_bytes`, D-P11-13; enforced from 11-09). 4 MiB by default.
+    pub max_payload_bytes: usize,
+    /// When set, `GET /` answers `303 See Other` to this location instead of the shell
+    /// page (D-P11-17; implemented by 11-09). `None` by default.
+    pub root_redirect: Option<String>,
 }
 
 impl Default for ApiConfig {
-    /// 64 MiB modules, 4 MiB requests (matches ostro-server's `[api]` defaults).
+    /// 64 MiB modules, 4 MiB requests (matches ostro-server's `[api]` defaults), 4 MiB
+    /// payloads (`[limits]`), no root redirect.
     fn default() -> Self {
         ApiConfig {
             max_module_bytes: 64 * 1024 * 1024,
             max_request_bytes: 4 * 1024 * 1024,
+            max_payload_bytes: 4 * 1024 * 1024,
+            root_redirect: None,
         }
     }
 }

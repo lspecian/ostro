@@ -588,5 +588,6 @@ pub fn phase8_extensions(ctx: &ControlCtx) -> ApiExtensions {
         admin: Some(Arc::new(admin::AdminController::new(ctx.clone()))),
         hook_body_limit: usize::try_from(ctx.config.triggers.webhook_body_limit)
             .unwrap_or(usize::MAX),
+        ..Default::default()
     }
 }

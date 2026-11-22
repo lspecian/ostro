@@ -40,6 +40,7 @@ impl Server {
             ApiConfig {
                 max_module_bytes: 1024 * 1024,
                 max_request_bytes: MAX_REQUEST,
+                ..Default::default()
             },
         );
         let task = tokio::spawn(async move {

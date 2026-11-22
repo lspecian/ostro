@@ -160,6 +160,7 @@ async fn module_over_limit_is_413() {
     let s = Server::start(ApiConfig {
         max_module_bytes: 1024 * 1024,
         max_request_bytes: 4 * 1024 * 1024,
+        ..Default::default()
     })
     .await;
     let big = bytes::Bytes::from(vec![1u8; 2 * 1024 * 1024]);
@@ -173,6 +174,7 @@ async fn request_body_limit_applies_to_other_routes() {
     let s = Server::start(ApiConfig {
         max_module_bytes: 64 * 1024 * 1024,
         max_request_bytes: 64 * 1024,
+        ..Default::default()
     })
     .await;
     s.upload(fake_module(&[("greet", 1)])).await;

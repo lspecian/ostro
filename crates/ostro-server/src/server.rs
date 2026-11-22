@@ -537,6 +537,7 @@ async fn start_inner(
     let api_cfg = ApiConfig {
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
         max_request_bytes: usize::try_from(cfg.api.max_request_bytes).unwrap_or(usize::MAX),
+        ..Default::default()
     };
     // Phase 8 controllers (08-10): one context, every slot filled.
     let ctl = ControlCtx::new(

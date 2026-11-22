@@ -33,6 +33,7 @@ fn cfg() -> ApiConfig {
     ApiConfig {
         max_module_bytes: 8 * MIB,
         max_request_bytes: MIB,
+        ..Default::default()
     }
 }
 

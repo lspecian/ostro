@@ -758,6 +758,10 @@ pub struct ApiExtensions {
     pub admin: Option<Arc<dyn AdminApi>>,
     /// Body limit of `POST /hooks/{name}` (`[triggers] webhook_body_limit`).
     pub hook_body_limit: usize,
+    /// Phase 11 run operations (11-04 slot; routes from 11-09).
+    pub ops: Option<Arc<dyn crate::phase11::OpsApi>>,
+    /// Phase 11 inventory views (11-04 slot; routes from 11-09).
+    pub inventory: Option<Arc<dyn crate::phase11::InventoryApi>>,
 }
 
 impl Default for ApiExtensions {
@@ -770,6 +774,8 @@ impl Default for ApiExtensions {
             run_logs: None,
             admin: None,
             hook_body_limit: DEFAULT_HOOK_BODY_LIMIT,
+            ops: None,
+            inventory: None,
         }
     }
 }
@@ -783,6 +789,8 @@ impl std::fmt::Debug for ApiExtensions {
             .field("run_logs", &self.run_logs.is_some())
             .field("admin", &self.admin.is_some())
             .field("hook_body_limit", &self.hook_body_limit)
+            .field("ops", &self.ops.is_some())
+            .field("inventory", &self.inventory.is_some())
             .finish()
     }
 }
@@ -1956,6 +1964,7 @@ pub mod fake {
                 run_logs: Some(Arc::clone(self) as Arc<dyn RunLogsApi>),
                 admin: Some(Arc::clone(self) as Arc<dyn AdminApi>),
                 hook_body_limit: DEFAULT_HOOK_BODY_LIMIT,
+                ..ApiExtensions::default()
             }
         }
 
