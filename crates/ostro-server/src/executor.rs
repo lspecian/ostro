@@ -517,7 +517,7 @@ async fn watch_lease(
     hooks: Arc<ExecutorHooks>,
 ) {
     let heartbeat = heartbeat.max(Duration::from_millis(1));
-    let mut next_hb = Instant::now() + heartbeat;
+    let mut next_hb = Instant::now() + heartbeat; // clock-exempt: heartbeat cadence
     loop {
         let deadline = st.deadline();
         tokio::select! {
@@ -529,7 +529,7 @@ async fn watch_lease(
                 return;
             }
             _ = tokio::time::sleep_until(deadline) => {
-                if Instant::now() >= st.deadline() {
+                if Instant::now() >= st.deadline() { // clock-exempt: lease self-fence deadline
                     st.self_fenced.store(true, Ordering::Release);
                     hooks.self_fences.fetch_add(1, Ordering::Relaxed);
                     debug!("executor self-fenced: lease not renewed before the local deadline");
@@ -538,7 +538,7 @@ async fn watch_lease(
                 }
             }
             _ = tokio::time::sleep_until(next_hb) => {
-                next_hb = Instant::now() + heartbeat;
+                next_hb = Instant::now() + heartbeat; // clock-exempt: heartbeat cadence
                 if !suppress && !st.renew() {
                     cancel.cancel();
                     return;
@@ -767,7 +767,7 @@ impl EngineExecutor {
         let cancel = CancellationToken::new();
         let st = Arc::new(LeaseState {
             lease: job.lease.clone(),
-            base: Instant::now(),
+            base: Instant::now(), // clock-exempt: lease TTL base
             last_renew_ms: AtomicU64::new(0),
             ttl: self.cfg.lease_ttl,
             margin: self.cfg.self_fence_margin,

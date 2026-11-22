@@ -295,7 +295,7 @@ async fn start_inner(
     // Phase 12: consumed by the cluster wiring (12-14, `cluster::ClusterServices`).
     drop(cluster_transport);
     // clock-exempt: startup step durations are reported (StartupTimings), never used for logic.
-    let t0 = Instant::now();
+    let t0 = Instant::now(); // clock-exempt: startup timing
     let count = PartitionCount::new(cfg.node.partitions)
         .ok_or_else(|| ServerError::Config("node.partitions must be at least 1".into()))?;
     let node_id = cfg.node.node_id;
@@ -318,12 +318,12 @@ async fn start_inner(
     };
 
     // 1. meta (campaigns immediately).
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: startup timing
     let meta = MetaHandle::start(&data_dir.join("meta"), node_id).await?;
     timings.meta_leader = t.elapsed();
 
     // 2. cluster identity + token key.
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: startup timing
     let (cluster_id, token_key) = match init_cluster(&meta, node_id, count, clock.now_ms()).await {
         Ok(v) => v,
         Err(e) => {
@@ -372,7 +372,7 @@ async fn start_inner(
     }
 
     // 3. engine runtime.
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: startup timing
     let runtime = match Runtime::new(
         cfg.to_engine_config(),
         RuntimeOptions {
@@ -415,7 +415,7 @@ async fn start_inner(
     };
 
     // 4. node + dispatcher(EngineExecutor).
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: startup timing
     let lease_ttl = cfg.executor.lease_ttl.get();
     let exec_cfg = ExecutorConfig {
         heartbeat: cfg.executor.effective_heartbeat(),
@@ -481,7 +481,7 @@ async fn start_inner(
         }
     }
 
-    let t = Instant::now();
+    let t = Instant::now(); // clock-exempt: startup timing
     if let Err(e) = record_partition_leaders(&meta, &node, node_id).await {
         bridge.shutdown().await;
         shutdown_node(node).await;
@@ -973,7 +973,7 @@ impl ServerHandle {
     /// (leases revoked, activations stop, final checkpoints), stop meta, then remove the
     /// ephemeral directory.
     pub async fn shutdown(self) -> Result<(), ServerError> {
-        let t = Instant::now();
+        let t = Instant::now(); // clock-exempt: shutdown timing
         let ServerHandle {
             control,
             node,

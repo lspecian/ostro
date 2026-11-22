@@ -478,7 +478,7 @@ impl Uploader {
         mut shutdown: watch::Receiver<bool>,
     ) {
         let period = self.cfg.round_interval();
-        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period); // clock-exempt: tokio interval cadence
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut backoff = Duration::ZERO;
         loop {

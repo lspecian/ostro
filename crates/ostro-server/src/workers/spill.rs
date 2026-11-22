@@ -366,7 +366,7 @@ impl CpuMeter {
     fn read(&self) -> Option<(std::time::Instant, Duration)> {
         // clock-exempt: process CPU-time delta (getrusage); the wall delta is its
         // denominator, never used for spill windows.
-        let wall = std::time::Instant::now();
+        let wall = std::time::Instant::now(); // clock-exempt: metric: CPU-load wall delta
         process_cpu_time().map(|cpu| (wall, cpu))
     }
 

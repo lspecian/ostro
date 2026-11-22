@@ -530,7 +530,7 @@ impl<L: ReplicatedLog> PartitionSink<L> {
                 // An unreadable row is treated as present: never re-decide on doubt.
                 .unwrap_or(true)
         };
-        let now_ms = std::time::SystemTime::now()
+        let now_ms = std::time::SystemTime::now() // clock-exempt: logic-time follow-up (10-10)
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let plan = children::plan_child_repairs(

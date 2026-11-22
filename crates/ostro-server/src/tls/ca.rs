@@ -50,7 +50,7 @@ pub const IDENTITY_SCHEME: &str = "ostro://";
 fn unix_now() -> i64 {
     // clock-exempt: X.509 validity timestamps checked by peers.
     #[allow(clippy::disallowed_methods)]
-    let now = std::time::SystemTime::now();
+    let now = std::time::SystemTime::now(); // clock-exempt: real-time: X.509 validity
     now.duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)

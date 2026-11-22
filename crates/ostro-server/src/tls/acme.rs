@@ -43,7 +43,7 @@ use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
     NewOrder, OrderStatus, RetryPolicy,
 };
-use ostro_partition::{Clock, SystemClock};
+use ostro_partition::{Clock, SystemClock}; // clock-exempt: fallback clock import
 use rcgen::{CertificateParams, CustomExtension, DistinguishedName, KeyPair};
 use rustls::sign::CertifiedKey;
 use rustls_pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -89,14 +89,14 @@ pub fn set_clock(clock: Arc<dyn Clock>) -> bool {
     CLOCK.set(clock).is_ok()
 }
 
-/// The clock [`start`] uses: the injected one, else the partition [`SystemClock`].
+/// The clock [`start`] uses: the injected one, else the partition [`SystemClock`]. // clock-exempt: doc ref
 fn clock() -> Arc<dyn Clock> {
     CLOCK
         .get()
         .cloned()
         // clock-exempt: fallback injection root for library callers; `p7::init` always
         // injects the node clock with `set_clock` (07-22).
-        .unwrap_or_else(|| Arc::new(SystemClock) as Arc<dyn Clock>)
+        .unwrap_or_else(|| Arc::new(SystemClock) as Arc<dyn Clock>) // clock-exempt: default production clock for the injected seam
 }
 
 // ------------------------------------------------------------------------------------

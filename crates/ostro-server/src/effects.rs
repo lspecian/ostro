@@ -335,7 +335,7 @@ impl EffectDriver for ServerEffectDriver {
                 .decorate_live_request(run, &rec, effect.op, req);
         }
         // clock-exempt: span timing for the tracing hooks only, never used for logic.
-        let now = SystemTime::now();
+        let now = SystemTime::now(); // clock-exempt: diagnostic: hook span timing
         lock(&self.seam.started)
             .entry((run.partition, run.run_id.clone(), effect.op))
             .or_insert((effect.kind(), now));
@@ -468,7 +468,7 @@ impl CompletionSink for PartitionCompletionSink {
             && res.is_ok()
         {
             // clock-exempt: span timing for the tracing hooks only.
-            let ended = SystemTime::now();
+            let ended = SystemTime::now(); // clock-exempt: diagnostic: hook span timing
             let rref = RunRef {
                 partition,
                 run_id: run_id.to_owned(),
