@@ -94,10 +94,6 @@ fn stubs_exit_2_naming_their_plan() {
     for (args, verb, plan) in [
         (&["init", "--lang", "rust"][..], "init", "10-08"),
         (&["build", "--json"], "build", "10-12"),
-        (&["toolchain", "install", "--all"], "toolchain", "10-07"),
-        (&["toolchain", "list"], "toolchain", "10-07"),
-        (&["toolchain", "prune", "--state"], "toolchain", "10-07"),
-        (&["doctor"], "doctor", "10-07"),
         (
             &["replay", "r1", "r2", "--module", "m.wasm"],
             "replay",

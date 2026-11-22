@@ -712,8 +712,6 @@ mod p10_tests {
         for args in [
             &["init"][..],
             &["build"],
-            &["toolchain", "list"],
-            &["doctor"],
             &["replay", "r1", "--module", "m.wasm"],
         ] {
             let cmd = parse(args).unwrap();
