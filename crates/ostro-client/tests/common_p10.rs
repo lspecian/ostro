@@ -21,31 +21,37 @@ pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The `ostro` binary: `OSTRO_BIN`, else `${CARGO_TARGET_DIR:-<workspace>/target}/debug/ostro`.
+/// The `ostro` binary: `OSTRO_BIN`, else the one in this test binary's own profile dir.
+///
+/// `cargo test --workspace` builds the `ostro` bin next to this run's artifacts: the
+/// profile dir is `<target>/debug`, or `<target>/<triple>/debug` for a `--target` build
+/// such as the musl CI legs (`cargo-zigbuild test --target ...`), and the test exe lives
+/// somewhere below it (`deps/`, or `build/<pkg>/<hash>/out/` with the newer build-dir
+/// layout). The nearest ancestor of the exe holding an `ostro` file is that dir.
 /// Panics with the build command when it does not exist.
 pub fn ostro_bin() -> PathBuf {
+    let name = format!("ostro{}", std::env::consts::EXE_SUFFIX);
     let path = match std::env::var_os("OSTRO_BIN") {
         Some(p) => PathBuf::from(p),
         None => {
-            let target = std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .map(|t| {
-                    if t.is_relative() {
-                        repo_root().join(t)
-                    } else {
-                        t
-                    }
+            let exe = std::env::current_exe().expect("current exe");
+            exe.ancestors()
+                .skip(1)
+                .map(|d| d.join(&name))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no ostro binary in any directory above {}: build it first with \
+                         `cargo build -p ostro` (same CARGO_TARGET_DIR and --target) or point \
+                         OSTRO_BIN at one",
+                        exe.display()
+                    )
                 })
-                .unwrap_or_else(|| repo_root().join("target"));
-            target
-                .join("debug")
-                .join(format!("ostro{}", std::env::consts::EXE_SUFFIX))
         }
     };
     assert!(
         path.is_file(),
-        "the ostro binary {} does not exist: build it first with `cargo build -p ostro` \
-         (same CARGO_TARGET_DIR) or point OSTRO_BIN at one",
+        "the ostro binary {} does not exist: point OSTRO_BIN at a built one",
         path.display()
     );
     path
