@@ -137,7 +137,7 @@ impl MachineHandle {
         // Thread start counts as a checkpoint instant: the store was persisted at open or
         // reflects the last checkpoint plus buffered commits.
         #[allow(clippy::disallowed_methods)]
-        let now = Instant::now();
+        let now = Instant::now(); // clock-exempt: cadence: checkpoint interval
         let machine = Machine {
             store,
             log,
@@ -523,7 +523,7 @@ impl<L: ReplicatedLog> Machine<L> {
         }
 
         #[allow(clippy::disallowed_methods)] // metrics only
-        let t0 = Instant::now();
+        let t0 = Instant::now(); // clock-exempt: metric: apply latency
         let mut b = self.store.batch();
         let mut actions = Vec::new();
         let outcomes = apply_chunk(&mut b, &mut self.cur, &batches, &mut actions)
@@ -578,7 +578,7 @@ impl<L: ReplicatedLog> Machine<L> {
 
     fn checkpoint(&mut self) -> Result<Offset, String> {
         #[allow(clippy::disallowed_methods)] // metrics + cadence only (see maybe_checkpoint)
-        let t0 = Instant::now();
+        let t0 = Instant::now(); // clock-exempt: metric: checkpoint latency
         self.store
             .checkpoint(self.cur.next)
             .map_err(|e| format!("state checkpoint failed: {e}"))?;

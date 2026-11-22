@@ -359,7 +359,7 @@ impl LeaseRenewer {
         if self.is_revoked() {
             return false;
         }
-        let at = ms_since(self.base, Instant::now() + self.ttl);
+        let at = ms_since(self.base, Instant::now() + self.ttl); // clock-exempt: lease TTL (real time by design)
         self.deadline.fetch_max(at, Ordering::AcqRel);
         !self.is_revoked()
     }
@@ -638,13 +638,13 @@ impl State {
             leases: BTreeMap::new(),
             checks: BTreeSet::new(),
             next_generation: 0,
-            base: Instant::now(),
+            base: Instant::now(), // clock-exempt: lease TTL base
             ttl,
         }
     }
 
     fn now_rel(&self) -> u64 {
-        ms_since(self.base, Instant::now())
+        ms_since(self.base, Instant::now()) // clock-exempt: lease TTL
     }
 
     fn ttl_ms(&self) -> u64 {
@@ -1698,7 +1698,7 @@ impl Dispatcher {
         // Clock ms -> a tokio deadline (the sleep waits for a deadline computed from the
         // injected clock).
         let ready = at_clock
-            .map(|at| Instant::now() + Duration::from_millis(at.saturating_sub(self.now_ms())));
+            .map(|at| Instant::now() + Duration::from_millis(at.saturating_sub(self.now_ms()))); // clock-exempt: logic-time follow-up (10-10)
         let lease = self
             .st
             .checks

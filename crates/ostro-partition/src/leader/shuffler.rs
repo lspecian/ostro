@@ -129,7 +129,7 @@ impl Shuffler {
             }
             if scan {
                 scan = false;
-                if !self.scan(Instant::now()) {
+                if !self.scan(Instant::now() /* clock-exempt: retry backoff */) {
                     break;
                 }
             }
@@ -140,7 +140,7 @@ impl Shuffler {
                 Some(r) = self.rounds.join_next(), if !self.rounds.is_empty() => {
                     match r {
                         Ok((t, round)) => {
-                            if !self.finish(t, round, Instant::now()) {
+                            if !self.finish(t, round, Instant::now()) { // clock-exempt: retry backoff
                                 break;
                             }
                         }

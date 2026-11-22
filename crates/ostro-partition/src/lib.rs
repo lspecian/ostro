@@ -37,7 +37,7 @@ pub use acks::{ACK_RETAIN, PendingAcks};
 pub use handle::{PartitionError, PartitionHandle};
 pub use machine::{MachineConfig, MachineHandle, PartitionHealth};
 
-pub use clock::{Clock, ManualClock, SystemClock};
+pub use clock::{Clock, ManualClock, SystemClock}; // clock-exempt: re-export of the default clock
 pub use leader::dispatcher::{
     DispatcherConfig, DispatcherStats, ExecOutcome, Executor, Job, LeaseRenewer,
 };

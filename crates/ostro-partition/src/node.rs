@@ -30,7 +30,7 @@ use tracing::{error, info, warn};
 
 use crate::acks::PendingAcks;
 use crate::apply::{ApplyOutcome, Cursor};
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{Clock, SystemClock}; // clock-exempt: default clock import
 use crate::handle::PartitionHandle;
 use crate::leader::cron::{CronConfig, ScheduleSource};
 use crate::leader::retention::FloorWatches;
@@ -94,7 +94,7 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     /// Defaults: node id 1, default store/machine/WAL/leader configs, [`LocalLeadership`],
-    /// [`SystemClock`], [`StartMode::Leader`].
+    /// [`SystemClock`], [`StartMode::Leader`]. // clock-exempt: doc ref
     pub fn new(data_dir: PathBuf, partitions: PartitionCount) -> Self {
         Self {
             data_dir,
@@ -106,7 +106,7 @@ impl NodeConfig {
             leader: LeaderConfig::default(),
             mode: StartMode::Leader,
             leadership: Arc::new(LocalLeadership),
-            clock: Arc::new(SystemClock),
+            clock: Arc::new(SystemClock), // clock-exempt: default production clock for the injected seam
             router_wrapper: None,
             snapshots: SnapshotConfig::default(),
             cron: CronConfig::default(),
