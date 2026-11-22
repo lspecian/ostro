@@ -1917,6 +1917,10 @@ pub fn load_layered(
             .prefix_separator("_")
             .separator(ENV_SEPARATOR)
             .try_parsing(true)
+            // String-list keys take a comma-separated value (`OSTRO_EGRESS__ALLOW_PRIVATE=
+            // 127.0.0.0/8,::1/128`); every other key stays a scalar (10-17).
+            .list_separator(",")
+            .with_list_parse_key("egress.allow_private")
             .source(Some(env.sectioned())),
     );
     let mut cfg: ServerConfig = b.build()?.try_deserialize()?;
@@ -2147,6 +2151,39 @@ mod dev_section_tests {
             )
             .is_err(),
             "[dev] keeps deny_unknown_fields"
+        );
+    }
+
+    #[test]
+    fn egress_allow_private_env_is_a_comma_list() {
+        let load = |v: &str| {
+            load_layered(
+                ServerConfig::dev_defaults(),
+                None,
+                false,
+                &env(&[("OSTRO_EGRESS__ALLOW_PRIVATE", v)]),
+                &Overrides::default(),
+            )
+        };
+        let c = load("127.0.0.0/8").expect("one CIDR");
+        assert_eq!(c.egress.allow_private, vec!["127.0.0.0/8".to_owned()]);
+        let c = load("127.0.0.0/8,::1/128").expect("two CIDRs");
+        assert_eq!(
+            c.egress.allow_private,
+            vec!["127.0.0.0/8".to_owned(), "::1/128".to_owned()]
+        );
+        // Scalar keys are unaffected.
+        let c = load_layered(
+            ServerConfig::dev_defaults(),
+            None,
+            false,
+            &env(&[("OSTRO_RUNS__RETENTION", "48h")]),
+            &Overrides::default(),
+        )
+        .expect("scalar");
+        assert_eq!(
+            c.runs.retention.get(),
+            std::time::Duration::from_secs(48 * 3600)
         );
     }
 

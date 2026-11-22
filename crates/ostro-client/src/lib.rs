@@ -9,6 +9,8 @@
 //!   server's OpenAPI document by `tests/contract.rs`).
 //! - [`error`]: [`ClientError`] `{ status, code, message, details }`, built from the REST
 //!   error body.
+//! - `testing` (feature `testing`): `TestEnv`, a spawned `ostro dev --ephemeral
+//!   --time-skipping` with deploy, run, signal, time-skip and history helpers (10-17).
 //!
 //! The crate is bundleable (10-08): its manifest uses explicit versions only, so
 //! `ostro init` projects can depend on a copy outside this workspace. Phase 11 adds client
@@ -46,9 +48,8 @@ pub use client::{CallError, Client, Response};
 pub use error::ClientError;
 pub use typed::{StartRun, TypedClient};
 
-/// Spawned-server test kit (10-17 replaces this stub).
 #[cfg(feature = "testing")]
-pub mod testing {}
+pub mod testing;
 
 // Plan 10-02: dependencies of 10-09 / 10-17, anchored until they are used.
 use tokio as _;
