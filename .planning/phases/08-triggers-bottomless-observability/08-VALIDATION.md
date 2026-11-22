@@ -102,10 +102,10 @@ created: 2026-11-19
 | 8-21-01 | 21 | 6 | OBS-01 (outbound traceparent via ServerEffectDriver hooks, B2; journal unchanged) | integration (mock HTTP server) or helper-level + BLOCKING follow-up | `cargo test -p ostro-server --test outbound_traceparent --locked` | ❌ W0 | ✅ green |
 | 8-21-02 | 21 | 6 | OBS-01/02/03 (SC5) | e2e | `cargo test -p ostro-server --test observability_e2e --locked` | ❌ W0 | ✅ green |
 | 8-21-03 | 21 | 6 | FX-06 OTLP leg (D-FX6) | e2e | `cargo test -p ostro-server --test otlp_canary --locked` | ❌ W0 | ✅ green |
-| 8-22-01 | 22 | 7 | all | gate (full ci-local + campaign + loops at plan level) | `cargo deny check && bash scripts/forbidden-crates.sh --self-test` + RESERVATIONS flip grep + campaign report file | n/a | ✅ green (10k campaign ⚠ human_needed, resumable) |
+| 8-22-01 | 22 | 7 | all | gate (full ci-local + campaign + loops at plan level) | `cargo deny check && bash scripts/forbidden-crates.sh --self-test` + RESERVATIONS flip grep + campaign report file | n/a | ✅ green (10k campaign PASS 2026-11-22: 10,000 kills, 0 violations, restore_checked 20/20; see "Crash campaign" below) |
 | 8-22-02 | 22 | 7 | all (docs; OBS-01 not green without B2 evidence) | check | grep checks on VALIDATION/DECISIONS/docs | n/a | ✅ green |
 | 8-23-01 | 23 | gap | BACK-02/SC3 (RPO = loss window <= seal; fixed seal/2 cadence, parallel uploads, one cut per manifest) | integration + failpoint | `cargo test -p ostro-backup --features failpoints -- --test-threads=1` (uploader incl. parallel_uploads_name_one_consistent_cut + run_starts_rounds_on_a_fixed_cadence, chain_start, cut_consistency, fencing, remote_gc, restore) | ✅ | ✅ green |
-| 8-23-02 | 23 | gap | BACK-02/SC3 (loss window asserted <= seal + 500 ms) | crash loop | `cargo nextest run -P crash -p ostro-crashtest --run-ignored only -E 'test(restore_rpo)'` | ✅ | ✅ green at load 19–33 (quiet-machine re-run ⚠ follow-up) |
+| 8-23-02 | 23 | gap | BACK-02/SC3 (loss window asserted <= seal + 500 ms) | crash loop | `cargo nextest run -P crash -p ostro-crashtest --run-ignored only -E 'test(restore_rpo)'` | ✅ | ✅ green at load 19–33; quiet machine: loss window p50 460 ms / max 712 ms |
 | 8-23-03 | 23 | gap | TRIG-01 (`[triggers] webhook_tolerance` fallback) | unit + integration | `cargo test -p ostro-server --lib -- webhooks && cargo test -p ostro-server --test webhooks --test config --test bottomless_service` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠ flaky / human_needed*
@@ -225,15 +225,24 @@ Phase 8 suites in this run, all green:
 | clock gate (the 08-22 verify grep over the Phase 8 paths) | no hits. Exemptions are listed in 08-22-SUMMARY. The pre-Phase-8 hits found by the wide grep are a Phase 10 follow-up |
 | reservations script | `RESERVATIONS CHECK: PASS (66 checks)` (04cedcb). Cmd 27, keyspace 16 and InvalidCode 22/23 are `exists (P8, 08-01)`; the §11 names that shipped are `exists (P8, 08-NN)`; unused slots are `reserved P8` |
 
-### Crash campaign (Phase 8 scenarios, 10,000 faults): ⚠ human_needed
+### Crash campaign (Phase 8 scenarios, 10,000 faults): ✅ PASS (2026-11-22)
 
-- `target/campaign-p8-gate` was configured with SHARDS=20, FAULTS=10000, seed 1305 and `phase8=true`.
-- Only shards 0–5 have run, all partial, because a machine restart interrupted the run. Kills per shard: 73 / 95 / 90 / 94 / 99 / 90, **541 total**. Every shard tally is 0: `lost_acked_runs`, `lost_acked_signals`, `duplicate_journal_entries`, `non_terminal_runs`, `wrong_results`, `other_violations`; `failures=[]`.
-- All eight Phase 8 menu sites were hit.
-- `target/campaign-p8-gate/HUMAN_NEEDED` holds the state and the resume command (gate command 2 above).
-- Smaller-scale evidence:
-  - the 08-20 Phase 8 smoke: 200 faults, 4 shards, PASS, 4 bucket restores verified;
-  - this run's ci-local campaign smoke: 20 kills, PASS.
+`target/campaign-p8-gate/report.txt`: SHARDS=20, FAULTS=10000, seed 1305, `phase8=true`, binary built from main 02745dc (post-08-23):
+
+```
+kills=10000 lost_acked_runs=0 duplicate_journal_entries=0 non_terminal_runs=0 lost_acked_signals=0 wrong_results=0 other_violations=0
+faults_target=10000 shards=20/20 incomplete=[] by_variant=plain:4894 failpoint:1789 enospc:753 phase8:2564 failpoint_hits=12092 extra_kills=5131 rebuilds=2878 acked_runs=276245 phase8_scenarios=true
+RESULT: PASS
+```
+
+All 28 fault specs plus plain were hit, including all 8 Phase 8 specs (2,564 phase8 kills). Every shard has `restore_checked` (bucket restore verified), and no clean restart reported `snapshot required`.
+
+How it got there (p8-gate):
+- **First full run: FAIL, for two reasons that were not product bugs.** (1) 21 `WrongResult`s (shards 4: 4, 7: 1, 8: 4, 9: 11, 12: 1). Each run completed with `"go": null` because the go signal was journaled only after the go wait's 600 s timeout had fired. Under host load the harness's go POSTs were first accepted more than 10 minutes late (`.planning/debug/campaign-p8-go-null.md`). The checker had assumed that the first journaled signal won the wait. (2) Shard 10 stopped at kill 465 on a harness `Node::open` timeout in `rebuild_and_compare` (`open ... timed out`, load-sensitive).
+- **Checker fix (user-approved 2026-11-22, commit dd23bcc).** `check_final` takes each wait's winner from the journal (`signal_wait_started` op → `signal_matched` payload, or `null` after `wait_timed_out`). The new `LostWake` check flags a signal journaled before its wait's timeout fired (before `wait_timed_out`) on a wait that then timed out. Every journaled payload must still be one the harness sent. Covered by the control tests `late_signal_after_the_timeout_is_a_timeout_outcome` and `control_lost_wake`.
+- **Offline re-check of the 19 finished shards** (`server_campaign recheck`: a clean server on a copy of each shard's data dir, the stored ack log, the shard-end checks re-run): **0 violations in every shard, 0 lost wakes.** The 21 false positives are gone. One wrinkle: the runs' 24 h dev retention had already passed for the older shards, and a server start would purge them. So the re-check server ran with its wall clock shifted back to 2026-11-21T16:00Z, after every shard had finished and before any run expired, through an LD_PRELOAD `clock_gettime(CLOCK_REALTIME)` shim. Only that read-only server on the copies used the shim. A first attempt without it reported every run of shards 0–2 as lost (they had been purged on the copy); those results were discarded and the shard files restored.
+- **Shard 10 was rerun from scratch** (its finished runs were past retention too, so resuming would have reported them lost). The rerun used parallel 1 on a quieter host (load about 3–6): 500 kills, 10.25 s/kill, 15,640 acked runs, max clean restart 1,485 ms, final statuses completed 14,947 / cancelled 507 / terminated 186, bucket restore OK, 0 violations.
+- Evidence kept in `target/campaign-p8-gate/`: `superseded-pre-recheck/` holds the original `report.txt`, `HUMAN_NEEDED` and the 19 pre-re-check `shard-NN.json`. `superseded-shard10-open-timeout/` holds the original shard 10 (465 kills) dir and json. Each re-checked shard file records the re-check in `anomalies`.
 
 ### `#[ignore]` loops (re-run at the gate)
 
@@ -249,6 +258,7 @@ Phase 8 suites in this run, all green:
 
 - **RPO, from 08-20 `restore_rpo`:** cut lag p50 1,044 ms and max 1,203 ms at seal 1 s; every pre-cut ack was restored over 10 kill/restore iterations. The data-loss window (p50 1,680 ms / max 2,449 ms) did not meet SC3 (08-VERIFICATION gap).
 - **RPO after 08-23 (gap closure):** `restore_rpo` now asserts the loss window <= seal + 500 ms on every iteration. Measured at 1-minute load average 19–33: loss window p50 552 ms / max 1,049 ms, cut lag p50 280 ms / max 412 ms, restored-round upload p50 217 ms / max 576 ms (all 98 rounds p50 421 ms / max 1,958 ms), 18,276 acks; PASS in 291 s.
+- **RPO, quiet machine (08-23 follow-up):** `restore_rpo` loss window p50 460 ms / max 712 ms.
 - **Restore, from 08-18:** P=16 with about 10k runs takes 9.0 s in debug. Phase 8 smoke bucket restores take 9.7–14.9 s each.
 - **Snapshot/restore timings:** see docs/bottomless.md (measured values from 08-13, 08-18 and 08-20).
 
@@ -256,13 +266,13 @@ Phase 8 suites in this run, all green:
 
 Each item below is ⚠ human_needed.
 
-1. **The rest of the 10,000-fault campaign.** Run gate command 2 above and write the report to `target/campaign-p8-gate/report.txt`. Gate: `kills >= 10000`, `lost_acked_runs=0`, `duplicate_journal_entries=0`, `non_terminal_runs=0`, `snapshot_required_with_valid_snapshot=0`, and `restore_checked` on every shard. Expect about 8–12 h.
+1. **Done 2026-11-22 (p8-gate): 10,000-fault campaign PASS** (see "Crash campaign" above). Original item: run gate command 2 above and write the report to `target/campaign-p8-gate/report.txt`. Gate: `kills >= 10000`, `lost_acked_runs=0`, `duplicate_journal_entries=0`, `non_terminal_runs=0`, `snapshot_required_with_valid_snapshot=0`, and `restore_checked` on every shard. Expect about 8–12 h.
 2. **SeaweedFS conditional PUT and the S3 legs (BACK-01).** Use a Docker machine, or CI after the first push. Run `docker run -d -p 8333:8333 -e AWS_ACCESS_KEY_ID=ostro -e AWS_SECRET_ACCESS_KEY=ostroseaweed -e S3_BUCKET=ostro-test chrislusf/seaweedfs:4.54 mini -dir=/data`, then `OSTRO_TEST_S3_URL=http://127.0.0.1:8333 OSTRO_TEST_S3_ACCESS_KEY=ostro OSTRO_TEST_S3_SECRET_KEY=ostroseaweed OSTRO_TEST_S3_BUCKET=ostro-test cargo test -p ostro-objstore --test s3 --locked && cargo test -p ostro-backup --test fencing --locked && cargo test -p ostro --test bottomless_s3 --locked`.
 3. **R2/AWS conditional PUT.** Run the same tests with the `OSTRO_TEST_S3_*` variables pointed at R2 or S3. If `If-Match` is unsupported, confirm the LOCK re-read fallback engages.
 4. **Fresh-machine `ostro restore --from s3://…` with timing (BACK-02/SC3).** Run a server with `[backup] url = s3://…` under load, kill -9 it, then run `ostro restore --from s3://… --data-dir /var/lib/ostro` on another machine. Record the report: hashes, cut_at, duration.
 5. **Jaeger/Tempo + Grafana visual check (OBS-01/02).** Set `[telemetry] otlp_endpoint` to a collector and scrape `/metrics`. Check that the run → activation → step tree, the `effect:<kind>` spans and the dashboards render.
 6. **TLS roots in a `FROM scratch` image (Phase 14 artefact).** Restore from HTTPS S3 with `tls_roots = "webpki"`.
-7. **Quiet-machine re-run of `restore_rpo` (08-23 follow-up, SC3).** 08-23 measured it at load 19–33, and it passed. Re-run `cargo nextest run -P crash -p ostro-crashtest --run-ignored only -E 'test(restore_rpo)'` on a quiet machine and record the loss window p50/max here. Expect it to be at most the loaded numbers.
+7. **Done: quiet-machine re-run of `restore_rpo` (08-23 follow-up, SC3): loss window p50 460 ms / max 712 ms** (at most the loaded numbers, within seal + 500 ms). 08-23 measured it at load 19–33, and it passed. Re-run `cargo nextest run -P crash -p ostro-crashtest --run-ignored only -E 'test(restore_rpo)'` on a quiet machine and record the loss window p50/max here. Expect it to be at most the loaded numbers.
 7. **The Phase 6 canary leg:** **not pending.** 08-21 ran it (`PHASE6_CANARY_LEG: run ... clean`), and `otlp_canary` passed again in this gate.
 8. **The outbound traceparent leg (B2, OBS-01):** **not pending.** 08-21 recorded `BRIDGE_TRACEPARENT_LEG: wired`, and `outbound_traceparent` passed in this gate. OBS-01 is complete.
 9. **User review** of P8-D3 (seal default and cost), P8-D9 (jiff 0.2 adapter), P8-D11 (Kafka out of scope), P8-D16 (in-memory log cap), P8-D21 (22 plans) and P8-D25 (SeaweedFS instead of MinIO). See 08-DECISIONS.md.
