@@ -5,16 +5,17 @@
 //! 2. only then construct the shared `GroupCommitWal` (inside the Tokio runtime, W10). The
 //!    WAL opens a NEW segment on a partition's first append (W4); recovery must have finished
 //!    cutting files before that can happen;
-//! 3. register ONE commit callback that advances each partition's HW through
-//!    [`compute_hw`] (monotonic, after fsync, W9) and publishes it through
-//!    [`HwVector::publish_hw`], the single HW publication point that also feeds the
-//!    consistent cut ([`LogNode::cut`], W7);
-//! 4. build an [`Rf1Log`] for every partition that recovered. Per-partition recovery errors
-//!    are returned per slot; the other partitions still open.
+//! 3. register ONE commit callback that reports each partition's durable end (after fsync,
+//!    W9) to that partition's replica core, which advances the HW through its replica
+//!    tracker and publishes it through [`HwVector::publish_hw`], the single HW publication
+//!    point that also feeds the consistent cut ([`LogNode::cut`], W7). RF=1 takes exactly
+//!    this path (D5, D-P12-15);
+//! 4. build a [`PartitionLog`] for every partition that recovered. Per-partition recovery
+//!    errors are returned per slot; the other partitions still open.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use ostro_types::envelope::DEFAULT_MAX_ENVELOPE_BYTES;
 use ostro_types::{Offset, PartitionCount, PartitionId};
@@ -23,9 +24,32 @@ use tracing::{error, info};
 
 use crate::cut::HwVector;
 use crate::error::LogError;
-use crate::hw::{ReplicaProgress, compute_hw};
+use crate::partition_log::{PartitionLog, ReplicaCore};
 use crate::recovery::{RecoveryReport, TOPIC, recover_partition};
-use crate::rf1::Rf1Log;
+
+/// Logic time for the replica tracker (milliseconds). `ostro-partition` adapts its injected
+/// `Clock` to this; the default is the system clock.
+pub trait LogClock: Send + Sync + std::fmt::Debug {
+    /// Milliseconds since an arbitrary fixed epoch (monotone enough for lag measurement).
+    fn now_ms(&self) -> u64;
+}
+
+/// [`LogClock`] over the system wall clock.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemLogClock;
+
+impl LogClock for SystemLogClock {
+    // The log's only wall-clock read: replica lag measurement (never apply).
+    #[allow(clippy::disallowed_methods)]
+    fn now_ms(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
+/// Default `replica_lag_max` (D-P12-5: 10 s).
+pub const DEFAULT_REPLICA_LAG_MAX_MS: u64 = 10_000;
 
 /// Node-level log configuration.
 #[derive(Clone, Debug)]
@@ -34,7 +58,7 @@ pub struct LogNodeConfig {
     pub wal_dir: PathBuf,
     /// Fixed partition count.
     pub partitions: PartitionCount,
-    /// This node's id (the RF=1 ISR).
+    /// This node's id.
     pub node_id: u64,
     /// Group-commit WAL configuration.
     pub wal: GroupCommitConfig,
@@ -42,10 +66,16 @@ pub struct LogNodeConfig {
     pub max_envelope_bytes: usize,
     /// Appends between enqueue and fsync, per partition (default 1024).
     pub max_inflight_appends: usize,
+    /// Logic time for the replica tracker (default [`SystemLogClock`]).
+    pub clock: Arc<dyn LogClock>,
+    /// Follower lag bound for the measured in-sync verdict in
+    /// [`ReplicaStatus`](crate::ReplicaStatus) (default [`DEFAULT_REPLICA_LAG_MAX_MS`]).
+    pub replica_lag_max_ms: u64,
 }
 
 impl LogNodeConfig {
-    /// Defaults: `GroupCommitConfig::default()`, `DEFAULT_MAX_ENVELOPE_BYTES`, 1024 in flight.
+    /// Defaults: `GroupCommitConfig::default()`, `DEFAULT_MAX_ENVELOPE_BYTES`, 1024 in flight,
+    /// the system clock, a 10 s replica lag bound.
     pub fn new(wal_dir: PathBuf, partitions: PartitionCount, node_id: u64) -> Self {
         Self {
             wal_dir,
@@ -54,6 +84,8 @@ impl LogNodeConfig {
             wal: GroupCommitConfig::default(),
             max_envelope_bytes: DEFAULT_MAX_ENVELOPE_BYTES,
             max_inflight_appends: 1024,
+            clock: Arc::new(SystemLogClock),
+            replica_lag_max_ms: DEFAULT_REPLICA_LAG_MAX_MS,
         }
     }
 }
@@ -75,19 +107,27 @@ impl std::fmt::Debug for LogNode {
 }
 
 /// Per-partition result of [`LogNode::open`].
-pub type PartitionLogs = Vec<Result<Arc<Rf1Log>, LogError>>;
+pub type PartitionLogs = Vec<Result<Arc<PartitionLog>, LogError>>;
 
 impl LogNode {
     /// Recover every partition, then open the shared WAL and build the logs.
     ///
-    /// `floors[p]` is partition `p`'s durable floor (the state store's `applied_offset`, or
-    /// `Offset(0)` when the state is being rebuilt); `floors.len()` must equal the partition
-    /// count. Must be called inside a Tokio runtime.
+    /// `floors[p]` is partition `p`'s durable floor: the state store's `applied_offset`
+    /// (`Offset(0)` when the state is being rebuilt, `Offset(u64::MAX)` when it is
+    /// unreadable); `floors.len()` must equal the partition count. Must be called inside a
+    /// Tokio runtime.
+    ///
+    /// **HW at open = the applied offset** (Phase 12 F4), clamped into `[log_start, LEO]`
+    /// (the unreadable sentinel clamps to LEO), never simply the recovered LEO: the HW rises
+    /// only through the replica tracker, to the durable LEO the moment the log
+    /// [becomes leader](crate::ReplicatedLog::become_leader) with ISR `{self}`, or to
+    /// `min(leader HW, durable end)` as a follower. Every log opens unassigned (role
+    /// `Offline`): appends need [`become_leader`](crate::ReplicatedLog::become_leader).
     ///
     /// A partition whose log has no records opens **anchored at its floor** (Phase 12 F3):
     /// `log_start = LEO = HW = floor`, and its first append is assigned offset `floor`. Seed
-    /// its epoch history afterwards with [`Rf1Log::seed_epochs`]. A floor above `i64::MAX`
-    /// (the "state unreadable" sentinel) anchors at 0.
+    /// its epoch history afterwards with [`PartitionLog::seed_epochs`]. A floor above
+    /// `i64::MAX` (the "state unreadable" sentinel) anchors at 0.
     pub async fn open(
         cfg: LogNodeConfig,
         floors: &[Offset],
@@ -121,18 +161,25 @@ impl LogNode {
         // (2) only now the shared WAL.
         let wal = Arc::new(GroupCommitWal::new(cfg.wal_dir.clone(), cfg.wal.clone()));
 
-        // (3) one commit callback: partition -> HwVector::publish_hw (vector, then watch),
-        //     monotonic via compute_hw.
+        // (3) one commit callback: partition -> its replica core (durable end -> tracker ->
+        //     next_hw -> HwVector::publish_hw, vector then watch). HW starts at the applied
+        //     offset (F4).
         let initial: Vec<Option<Offset>> = reports
             .iter()
-            .map(|r| r.as_ref().ok().map(|rep| rep.leo))
+            .zip(floors)
+            .map(|(r, floor)| {
+                r.as_ref()
+                    .ok()
+                    .map(|rep| (*floor).max(rep.log_start).min(rep.leo))
+            })
             .collect();
         let hw_vector = Arc::new(HwVector::new(&initial));
         let commit_batches = Arc::new(AtomicU64::new(0));
+        let cores: Arc<Vec<OnceLock<Arc<ReplicaCore>>>> =
+            Arc::new((0..p).map(|_| OnceLock::new()).collect());
         {
-            let hw_vector = Arc::clone(&hw_vector);
             let counter = Arc::clone(&commit_batches);
-            let node = cfg.node_id;
+            let cores = Arc::clone(&cores);
             wal.set_commit_callback(Arc::new(
                 move |topic: &str, partition: i32, _min: i64, max: i64| {
                     if topic != TOPIC {
@@ -145,12 +192,9 @@ impl LogNode {
                     let Some(durable_end) = max.checked_add(1).and_then(Offset::from_i64) else {
                         return;
                     };
-                    let hw = compute_hw(&[ReplicaProgress {
-                        node,
-                        leo: durable_end,
-                        in_isr: true,
-                    }]);
-                    hw_vector.publish_hw(pid, hw);
+                    if let Some(core) = cores.get(pid.index()).and_then(OnceLock::get) {
+                        core.on_durable(durable_end);
+                    }
                 },
             ));
         }
@@ -169,13 +213,16 @@ impl LogNode {
                         torn_cut = ?rep.torn.as_ref().map(|t| (t.segment.display().to_string(), t.byte_pos)),
                         "partition log recovered"
                     );
-                    Ok(Arc::new(Rf1Log::new(
+                    let log = Arc::new(PartitionLog::new(
                         pid,
                         &cfg,
                         Arc::clone(&wal),
                         Arc::clone(&hw_vector),
                         rep,
-                    )))
+                    ));
+                    // Registered before the log is handed out, so before any append.
+                    let _ = cores[pid.index()].set(log.core());
+                    Ok(log)
                 }
                 Err(e) => {
                     error!(partition = pid.0, error = %e, "partition log recovery failed");
@@ -210,8 +257,8 @@ impl LogNode {
         self.hw_vector.cut()
     }
 
-    /// The node's [`HwVector`] (Phase 12's tracker publishes through it; tests use it for
-    /// the negative control).
+    /// The node's [`HwVector`] (every partition's replica core publishes through it; tests
+    /// use it for the negative control).
     pub fn hw_vector(&self) -> &Arc<HwVector> {
         &self.hw_vector
     }

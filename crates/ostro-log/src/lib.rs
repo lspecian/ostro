@@ -5,7 +5,8 @@
 //! - [`verify`]: verified read of one WAL record (frame CRC + envelope CRC32C + trailer).
 //! - [`recovery`]: full verified scan at open, torn-tail cut, LEO / epoch-history rebuild.
 //! - [`replicated`]: the [`ReplicatedLog`] trait (`ostro-partition` codes against it).
-//! - [`rf1`] / [`node`]: the RF=1 implementation over one shared `GroupCommitWal` per node.
+//! - [`partition_log`] / [`node`]: the one log implementation ([`PartitionLog`], leader and
+//!   follower; RF=1 is a replica set of one) over one shared `GroupCommitWal` per node.
 //! - [`cut`]: [`HwVector`], the consistent cut of every partition's HW (bottomless, W7).
 //! - [`hw`]: high-watermark computation shared with the Phase 12 cluster.
 //! - [`epoch_cache`]: leader-epoch history (ported Kafka semantics).
@@ -22,10 +23,10 @@ pub mod hw;
 pub mod import;
 pub mod mutants;
 pub mod node;
+pub mod partition_log;
 pub mod recovery;
 pub mod replica;
 pub mod replicated;
-pub mod rf1;
 pub mod verify;
 
 pub use barrier::{ReadyBarrier, TrimPermit};
@@ -33,14 +34,18 @@ pub use cut::HwVector;
 pub use error::LogError;
 pub use hw::{ReplicaProgress, compute_hw};
 pub use import::{ImportMode, ImportReport, write_partition_log};
-pub use node::{LogNode, LogNodeConfig, PartitionLogs};
+pub use node::{
+    DEFAULT_REPLICA_LAG_MAX_MS, LogClock, LogNode, LogNodeConfig, PartitionLogs, SystemLogClock,
+};
 pub use ostro_wal;
+pub use partition_log::PartitionLog;
 pub use recovery::{RecoveryReport, TornCut, recover_partition};
 pub use replicated::{
     AppendReceipt, EpochHistory, FollowerProgress, FollowerStatus, Isr, LogHealth, RawBatch,
     ReplicaSet, ReplicaStatus, ReplicatedLog, Role,
 };
-pub use rf1::Rf1Log;
+/// Former name of [`PartitionLog`]; removed by the rename ripple later in plan 12-08.
+pub type Rf1Log = PartitionLog;
 pub use verify::{Corruption, VerifiedBatch, verify_record};
 
 // Dependencies wired in plan 02-01 ahead of their consuming plans.

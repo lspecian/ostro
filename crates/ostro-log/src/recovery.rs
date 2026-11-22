@@ -296,7 +296,7 @@ fn corrupt(pid: PartitionId, segment: &Path, pos: usize, bad: Bad) -> LogError {
 ///
 /// When no record survives (no segments, only empty segments, or nothing verified), the log
 /// is anchored at the floor: `log_start = leo = floor`, `epochs` empty. The caller seeds the
-/// epoch history from its cursor ([`Rf1Log::seed_epochs`](crate::Rf1Log::seed_epochs)).
+/// epoch history from its cursor ([`PartitionLog::seed_epochs`](crate::PartitionLog::seed_epochs)).
 /// Phase 8 restore of an idle partition and Phase 12 follower snapshot install both leave an
 /// empty log under a state with `applied_offset > 0`; without the anchor that state would be
 /// "ahead of the log". A non-empty log is unaffected: its start and end come from its

@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_log::recovery::{list_segments, segment_dir};
-use ostro_log::{LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicatedLog, Rf1Log};
+use ostro_log::{
+    LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicaSet, ReplicatedLog, Rf1Log,
+};
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 
 const PID: PartitionId = PartitionId(0);
@@ -17,7 +19,15 @@ fn cfg(dir: &Path) -> LogNodeConfig {
 
 async fn open(dir: &Path) -> (LogNode, Arc<Rf1Log>) {
     let (node, mut logs) = LogNode::open(cfg(dir), &[Offset::ZERO]).await.unwrap();
-    (node, logs.remove(0).unwrap())
+    let log = logs.remove(0).unwrap();
+    lead(&log);
+    (node, log)
+}
+
+/// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
+fn lead(log: &Rf1Log) {
+    let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
+    log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
 
 fn cmd(o: u64) -> Bytes {
@@ -30,7 +40,8 @@ async fn append_batches(log: &Rf1Log, batches: u64, per: u64) {
     for _ in 0..batches {
         let base = log.log_end();
         let cmds = (0..per).map(|i| cmd(base.0 + i)).collect();
-        last = Some(log.append(Epoch(1), cmds).await.unwrap().last);
+        let epoch = log.replica_status().epoch;
+        last = Some(log.append(epoch, cmds).await.unwrap().last);
     }
     log.wait_committed(last.unwrap()).await.unwrap();
 }
@@ -124,7 +135,8 @@ async fn trim_deletes_only_whole_segments_below_floor() {
     let left = non_empty_segments(tmp.path());
     assert_eq!(left.len(), 1, "only the active segment remains: {left:?}");
     check_read_all(&log).await;
-    assert_eq!(log.epochs().0, vec![(Epoch(1), Offset(30))]);
+    // Every session leads a new term: five writing sessions (epochs 1-5), then this one (6).
+    assert_eq!(log.epochs().0, vec![(Epoch(6), Offset(30))]);
 
     // Appends continue; a reopen agrees with the trimmed log.
     append_batches(&log, 2, 1).await;

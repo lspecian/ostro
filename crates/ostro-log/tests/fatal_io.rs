@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fail::FailScenario;
-use ostro_log::{LogError, LogHealth, LogNode, LogNodeConfig, ReplicatedLog, Rf1Log, Role};
+use ostro_log::{
+    LogError, LogHealth, LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log, Role,
+};
 use ostro_types::{Epoch, Offset, PartitionCount};
 use tokio::time::timeout;
 
@@ -22,7 +24,15 @@ fn cfg(dir: &Path) -> LogNodeConfig {
 
 async fn open(dir: &Path, floors: &[Offset]) -> (LogNode, Vec<Arc<Rf1Log>>) {
     let (node, logs) = LogNode::open(cfg(dir), floors).await.unwrap();
-    (node, logs.into_iter().map(Result::unwrap).collect())
+    let logs: Vec<Arc<Rf1Log>> = logs.into_iter().map(Result::unwrap).collect();
+    logs.iter().for_each(|l| lead(l));
+    (node, logs)
+}
+
+/// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
+fn lead(log: &Rf1Log) {
+    let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
+    log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
 
 fn cmd(p: usize, o: u64) -> Bytes {
@@ -31,7 +41,8 @@ fn cmd(p: usize, o: u64) -> Bytes {
 
 async fn append_one(log: &Rf1Log, p: usize) -> Result<ostro_log::AppendReceipt, LogError> {
     let o = log.log_end().0;
-    log.append(Epoch(1), vec![cmd(p, o), cmd(p, o + 1)]).await
+    let epoch = log.replica_status().epoch;
+    log.append(epoch, vec![cmd(p, o), cmd(p, o + 1)]).await
 }
 
 /// Commit 10 batches, inject `failpoint = action`, and check that nothing after the failure is
@@ -41,7 +52,7 @@ async fn failure_is_never_success(failpoint: &str, action: &str) {
     let tmp = ostro_testkit::fs::tempdir();
     let (node, logs) = open(tmp.path(), &[Offset::ZERO; 2]).await;
     let (log, other) = (&logs[0], &logs[1]);
-    log.set_role(Role::Leader { epoch: Epoch(1) });
+    assert_eq!(*log.role().borrow(), Role::Leader { epoch: Epoch(1) });
 
     for _ in 0..10 {
         let r = append_one(log, 0).await.unwrap();
@@ -98,7 +109,10 @@ async fn failure_is_never_success(failpoint: &str, action: &str) {
         timeout(T, log.wait_committed(hw_before)).await.unwrap(),
         Err(LogError::Failed(_))
     ));
-    log.set_role(Role::Leader { epoch: Epoch(2) });
+    assert!(matches!(
+        log.become_leader(Epoch(2), ReplicaSet::solo(1)),
+        Err(LogError::Failed(_))
+    ));
     assert_eq!(*log.role().borrow(), Role::Offline);
     assert_eq!(*log.high_watermark().borrow(), hw_before);
 

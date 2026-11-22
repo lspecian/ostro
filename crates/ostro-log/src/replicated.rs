@@ -1,8 +1,8 @@
 //! The `ReplicatedLog` trait: the crate boundary between `ostro-log` and `ostro-partition`
 //! (STOR-04, research Pattern 1).
 //!
-//! RF=1 ([`Rf1Log`](crate::Rf1Log)) implements it now with ISR = {self}; the Phase 12 cluster
-//! implements the same trait. Offsets are **exclusive ends** everywhere (HW, LEO, log start
+//! [`PartitionLog`](crate::PartitionLog) is the one implementation, at every replication
+//! factor (RF=1 is a replica set of one, [`ReplicaSet::solo`]). Offsets are **exclusive ends** everywhere (HW, LEO, log start
 //! follow Kafka semantics) and `log_start <= HW <= LEO` always holds.
 
 use std::future::Future;
@@ -154,6 +154,19 @@ pub struct ReplicaSet {
     pub min_insync: u8,
 }
 
+impl ReplicaSet {
+    /// The single-node replica set: replicas = ISR = `[node]`, `min_insync = 1` (RF=1 is
+    /// configuration, D5 / D-P12-15).
+    pub fn solo(node: u64) -> Self {
+        Self {
+            replicas: vec![node],
+            isr: vec![node],
+            isr_version: 0,
+            min_insync: 1,
+        }
+    }
+}
+
 /// One follower's fetch progress as seen by the leader (Phase 12, D-P12-5).
 ///
 /// Only `durable_leo` (fsynced, capped at `fetch_offset`) ever counts for the HW.
@@ -167,6 +180,9 @@ pub struct FollowerProgress {
     pub fetch_offset: Offset,
     /// Leader clock when the fetch arrived (injected `Clock`).
     pub now_ms: u64,
+    /// The leader's durable end sampled **before** the read that serves this fetch (W3, B5):
+    /// the caught-up target of the follower's next fetch.
+    pub leader_durable_end: Offset,
 }
 
 /// One follower in [`ReplicaStatus`].
@@ -253,7 +269,7 @@ pub trait ReplicatedLog: Send + Sync + 'static {
     ///
     /// The default re-encodes [`read`](Self::read)'s verified batches (envelope encoding is
     /// deterministic, so this is byte-identical to the stored bytes); implementations that
-    /// hold the raw bytes return them directly ([`Rf1Log`](crate::Rf1Log) does).
+    /// hold the raw bytes return them directly ([`PartitionLog`](crate::PartitionLog) does).
     fn read_envelopes(
         &self,
         from: Offset,

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ostro_blob::BlobStore;
-use ostro_log::{LogNode, LogNodeConfig, ReplicatedLog, Rf1Log, Role};
+use ostro_log::{LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log};
 use ostro_partition::{
     ApplyOutcome, Cursor, MachineConfig, MachineHandle, PartitionError, PartitionHandle,
     PartitionHealth, PartitionStore, PendingAcks, StoreConfig, apply_chunk,
@@ -123,6 +123,12 @@ where
     .await
     .expect("open log node");
     let rf1 = logs.remove(0).expect("recover partition log");
+    // Lead before catch-up, as `Node` does: the log opened with HW = applied (F4) and
+    // leading with ISR {self} raises it to the durable LEO. The log always leads at
+    // latest + 1; without `announce` the handle keeps the latest epoch (nothing is appended).
+    let latest = rf1.epochs().latest().map_or(0, |e| e.0);
+    rf1.become_leader(Epoch(latest + 1), ReplicaSet::solo(1))
+        .expect("become leader");
     let log = wrap(Arc::clone(&rf1));
     let store = Arc::new(store);
     let acks = Arc::new(PendingAcks::new());
@@ -151,14 +157,12 @@ where
         .expect("machine gone");
     assert_eq!(*health.borrow(), PartitionHealth::Healthy);
 
-    let latest = rf1.epochs().latest().map_or(0, |e| e.0);
     let epoch = if announce {
         Epoch(latest + 1)
     } else {
         Epoch(latest)
     };
     handle.set_epoch(epoch);
-    rf1.set_role(Role::Leader { epoch });
     if announce {
         let o = timeout(
             T,

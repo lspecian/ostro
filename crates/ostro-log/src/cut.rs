@@ -15,9 +15,9 @@
 //! is causally closed. Publishing first and updating after would open a window in which a
 //! cut sees B's append but not the A record it depends on (`tests/hw_cut.rs` shows it).
 //!
-//! At RF=1 the WAL commit callback calls `publish_hw` with the durable end
-//! ([`LogNode`](crate::LogNode)); at RF>1 (Phase 12, 12-04) the tracker-driven HW calls the
-//! same function. The only other writer of the HW watch is [`HwVector::retract_hw`], used by
+//! At every replication factor, RF=1 included, the partition log's replica core calls
+//! `publish_hw` with the tracker-driven HW ([`PartitionLog`](crate::PartitionLog), 12-08):
+//! the WAL commit callback reports the durable end to the tracker, `next_hw` computes the HW. The only other writer of the HW watch is [`HwVector::retract_hw`], used by
 //! suffix truncation (the single path that lowers an HW).
 //!
 //! Cost: one uncontended `std::sync::Mutex` lock per publication (one per group commit and

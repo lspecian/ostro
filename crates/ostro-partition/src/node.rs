@@ -22,7 +22,8 @@ use std::sync::Arc;
 use ostro_blob::BlobStore;
 use ostro_log::ostro_wal::GroupCommitConfig;
 use ostro_log::{
-    LogError, LogNode, LogNodeConfig, RawBatch, ReadyBarrier, ReplicatedLog, Rf1Log, Role,
+    LogClock, LogError, LogNode, LogNodeConfig, RawBatch, ReadyBarrier, ReplicaSet, ReplicatedLog,
+    Rf1Log,
 };
 use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId};
 use tokio::sync::{broadcast, watch};
@@ -268,6 +269,7 @@ impl Node {
             .collect();
         let mut lcfg = LogNodeConfig::new(cfg.data_dir.join("wal"), count, cfg.node_id);
         lcfg.wal = cfg.wal.clone();
+        lcfg.clock = Arc::new(LogClockAdapter(Arc::clone(&cfg.clock)));
         let (log, logs) = LogNode::open(lcfg, &floors).await?;
 
         let mut ready: Vec<Option<Recovered>> = Vec::with_capacity(stages.len());
@@ -791,6 +793,21 @@ async fn settle_state(
     }
 }
 
+/// The node's injected [`Clock`] as the partition log's replica-tracker clock.
+struct LogClockAdapter(Arc<dyn Clock>);
+
+impl std::fmt::Debug for LogClockAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogClockAdapter").finish_non_exhaustive()
+    }
+}
+
+impl LogClock for LogClockAdapter {
+    fn now_ms(&self) -> u64 {
+        self.0.now_ms()
+    }
+}
+
 /// Steps 4 and 5 of one partition.
 struct PartitionStart {
     p: PartitionId,
@@ -809,6 +826,17 @@ struct PartitionStart {
 impl PartitionStart {
     async fn run(self) -> Result<PartitionHandle<Rf1Log>, String> {
         self.seed_anchored_epochs().await?;
+        // The term's epoch is picked before catch-up (12-08): the log opened with HW =
+        // applied (F4), and leading with ISR {self} is what raises the HW to the durable LEO,
+        // so the replay below covers [applied, LEO) exactly as before. RF=1 bootstrap until
+        // the meta-first role lifecycle (12-13/12-14) assigns the epoch instead.
+        let epoch = next_term_epoch(
+            self.leadership.epoch_floor(self.p),
+            self.rf1.epochs().latest(),
+        );
+        self.rf1
+            .become_leader(epoch, ReplicaSet::solo(self.node_id))
+            .map_err(|e| format!("lead at epoch {}: {e}", epoch.0))?;
         let acks = Arc::new(PendingAcks::new());
         let machine = MachineHandle::spawn(
             Arc::clone(&self.store),
@@ -829,7 +857,7 @@ impl PartitionStart {
             acks,
             Arc::clone(&self.blobs),
         );
-        match self.catch_up_and_announce(&handle).await {
+        match self.catch_up_and_announce(&handle, epoch).await {
             Ok(()) => Ok(handle),
             Err(reason) => {
                 let _ = machine.shutdown().await;
@@ -868,7 +896,11 @@ impl PartitionStart {
         Ok(())
     }
 
-    async fn catch_up_and_announce(&self, handle: &PartitionHandle<Rf1Log>) -> Result<(), String> {
+    async fn catch_up_and_announce(
+        &self,
+        handle: &PartitionHandle<Rf1Log>,
+        epoch: Epoch,
+    ) -> Result<(), String> {
         let p = self.p.0;
         let machine = handle.machine();
 
@@ -899,12 +931,8 @@ impl PartitionStart {
         // 11-05: a stale or missing x_run_index rebuilds in the background (never in Inspect).
         self.store.start_run_index_rebuild();
 
-        // 5. a new term: LeaderAnnounced{epoch} is its first record.
-        let epoch = next_term_epoch(
-            self.leadership.epoch_floor(self.p),
-            self.rf1.epochs().latest(),
-        );
-        self.rf1.set_role(Role::Leader { epoch });
+        // 5. a new term: LeaderAnnounced{epoch} is its first record (the log already leads
+        //    at `epoch`, see `run`).
         handle.set_epoch(epoch);
         let la = Command::leader_announced(epoch.0, self.node_id, self.clock.now_ms());
         match handle.submit_one(la).await {

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use ostro_log::{LogNode, LogNodeConfig, ReplicatedLog, Rf1Log, recover_partition};
+use ostro_log::{LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log, recover_partition};
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 
 fn cfg(dir: &Path, p: u16) -> LogNodeConfig {
@@ -16,7 +16,15 @@ fn cfg(dir: &Path, p: u16) -> LogNodeConfig {
 async fn open(dir: &Path, p: u16) -> (LogNode, Vec<Arc<Rf1Log>>) {
     let floors = vec![Offset::ZERO; p as usize];
     let (node, logs) = LogNode::open(cfg(dir, p), &floors).await.unwrap();
-    (node, logs.into_iter().map(Result::unwrap).collect())
+    let logs: Vec<Arc<Rf1Log>> = logs.into_iter().map(Result::unwrap).collect();
+    logs.iter().for_each(|l| lead(l));
+    (node, logs)
+}
+
+/// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
+fn lead(log: &Rf1Log) {
+    let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
+    log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

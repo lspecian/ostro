@@ -3,7 +3,7 @@
 //!
 //! Every envelope becomes one standard WAL V2 record ([`WalRecord::new_v2`] +
 //! [`WalRecord::to_bytes`], the vendored writer's frame, unchanged), byte-identical to what
-//! [`Rf1Log`](crate::Rf1Log) appends for the same batch, so [`recover_partition`] and
+//! [`PartitionLog`](crate::PartitionLog) appends for the same batch, so [`recover_partition`] and
 //! [`LogNode::open`](crate::LogNode::open) read an imported log like any other:
 //! `log_start` = first base, `LEO` = `upto`, the epoch history rebuilt from the batch epochs.
 //!

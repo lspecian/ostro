@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_log::{
-    LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicaProgress, ReplicatedLog, Rf1Log, Role,
-    compute_hw,
+    LogError, LogNode, LogNodeConfig, ReadyBarrier, ReplicaProgress, ReplicaSet, ReplicatedLog,
+    Rf1Log, Role, compute_hw,
 };
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 
@@ -185,7 +185,13 @@ fn cfg(dir: &Path, p: u16) -> LogNodeConfig {
 async fn open(dir: &Path, p: u16) -> (LogNode, Vec<Arc<Rf1Log>>) {
     let floors = vec![Offset::ZERO; p as usize];
     let (node, logs) = LogNode::open(cfg(dir, p), &floors).await.unwrap();
-    (node, logs.into_iter().map(Result::unwrap).collect())
+    let logs: Vec<Arc<Rf1Log>> = logs.into_iter().map(Result::unwrap).collect();
+    // Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
+    for log in &logs {
+        let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
+        log.become_leader(Epoch(e), ReplicaSet::solo(NODE)).unwrap();
+    }
+    (node, logs)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -208,12 +214,13 @@ async fn rf1_conformance_suite() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rf1_role_follows_set_role() {
+async fn rf1_role_follows_become_leader() {
     let tmp = ostro_testkit::fs::tempdir();
     let (node, logs) = open(tmp.path(), 1).await;
     let log = &logs[0];
     let mut role = log.role();
-    log.set_role(Role::Leader { epoch: Epoch(4) });
+    assert_eq!(*role.borrow_and_update(), Role::Leader { epoch: Epoch(1) });
+    log.become_leader(Epoch(4), ReplicaSet::solo(NODE)).unwrap();
     role.changed().await.unwrap();
     assert_eq!(*role.borrow(), Role::Leader { epoch: Epoch(4) });
     assert_eq!(*log.role().borrow(), Role::Leader { epoch: Epoch(4) });
@@ -242,17 +249,20 @@ async fn rf1_reopen_preserves_leo_and_epochs() {
     assert_eq!(
         *log.high_watermark().borrow(),
         leo,
-        "HW == LEO after reopen"
+        "HW == LEO once leading after reopen"
     );
     assert_eq!(log.recovery().leo, leo);
     check_invariant(&**log);
     check_reads(&**log, &model).await;
-    // Appends continue contiguously after the reopen, and the stale epoch is still fenced.
-    assert!(matches!(
-        log.append(Epoch(2), vec![cmd("x", 0)]).await,
-        Err(LogError::StaleEpoch { current: Epoch(3) })
-    ));
-    let r = log.append(Epoch(3), vec![cmd("x", 1)]).await.unwrap();
+    // Appends continue contiguously after the reopen under the new term (B2: epoch 4), and
+    // older epochs are fenced.
+    for stale in [2, 3] {
+        assert!(matches!(
+            log.append(Epoch(stale), vec![cmd("x", 0)]).await,
+            Err(LogError::StaleEpoch { current: Epoch(4) })
+        ));
+    }
+    let r = log.append(Epoch(4), vec![cmd("x", 1)]).await.unwrap();
     assert_eq!(r.base, leo);
     log.wait_committed(r.last).await.unwrap();
     node.shutdown().await;

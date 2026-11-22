@@ -10,7 +10,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use common::{write_batches, write_log};
 use ostro_log::recovery::{recover_partition, segment_dir};
-use ostro_log::{EpochHistory, LogError, LogNode, LogNodeConfig, ReplicatedLog, Rf1Log};
+use ostro_log::{
+    EpochHistory, LogError, LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log,
+};
 use ostro_testkit::corrupt;
 use ostro_testkit::fs::tempdir;
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
@@ -21,6 +23,12 @@ async fn open(dir: &Path, floor: Offset) -> (LogNode, Arc<Rf1Log>) {
     let cfg = LogNodeConfig::new(dir.to_path_buf(), PartitionCount::new(1).unwrap(), 1);
     let (node, mut logs) = LogNode::open(cfg, &[floor]).await.unwrap();
     (node, logs.remove(0).unwrap())
+}
+
+/// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
+fn lead(log: &Rf1Log) {
+    let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
+    log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
 
 fn cmds(n: u64) -> Vec<Bytes> {
@@ -114,6 +122,7 @@ async fn anchored_log_appends_at_the_floor_and_reads_back() {
         Err(LogError::OutOfRange(_))
     ));
 
+    lead(&log);
     let a = log.append(Epoch(1), cmds(2)).await.unwrap();
     assert_eq!((a.base, a.last), (Offset(500), Offset(501)));
     let b = log.append(Epoch(1), cmds(3)).await.unwrap();
@@ -137,6 +146,9 @@ async fn anchored_log_appends_at_the_floor_and_reads_back() {
         assert_eq!(r.epochs, vec![(Epoch(1), Offset(500))]);
     }
     let (node, log) = open(d.path(), Offset(505)).await;
+    // HW at open = the applied offset (F4), here the end of the log.
+    assert_eq!(*log.high_watermark().borrow(), Offset(505));
+    lead(&log);
     let got = log.read(Offset(500), Offset(505), 1 << 20).await.unwrap();
     assert_eq!(
         got.iter().map(|b| b.base).collect::<Vec<_>>(),
@@ -152,6 +164,7 @@ async fn anchored_log_appends_at_the_floor_and_reads_back() {
 async fn anchored_log_truncates_back_to_the_anchor() {
     let d = tempdir();
     let (node, log) = open(d.path(), Offset(500)).await;
+    lead(&log);
     let a = log.append(Epoch(1), cmds(4)).await.unwrap();
     log.wait_committed(a.last).await.unwrap();
     assert_eq!(log.truncate_to(Offset(500)).await.unwrap(), Offset(500));
@@ -176,10 +189,16 @@ async fn seeded_epochs_answer_and_fence_older_epochs() {
         log.epochs().end_offset_for_epoch(Epoch(1)),
         Some(Offset(200))
     );
-    // older than the seeded latest: refused, nothing appended
+    // B2: a term must be above the seeded latest epoch
+    assert!(matches!(
+        log.become_leader(Epoch(3), ReplicaSet::solo(1)),
+        Err(LogError::StaleEpoch { current: Epoch(3) })
+    ));
+    log.become_leader(Epoch(4), ReplicaSet::solo(1)).unwrap();
+    // older than the leader epoch: refused, nothing appended
     assert!(matches!(
         log.append(Epoch(2), cmds(1)).await,
-        Err(LogError::StaleEpoch { current: Epoch(3) })
+        Err(LogError::StaleEpoch { current: Epoch(4) })
     ));
     assert_eq!(log.log_end(), Offset(500));
     let r = log.append(Epoch(4), cmds(1)).await.unwrap();

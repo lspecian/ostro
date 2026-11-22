@@ -1,8 +1,10 @@
 //! High-watermark computation shared by RF=1 and the Phase 12 cluster (D5: one code path).
 //!
-//! The HW is the exclusive end of the prefix every in-sync replica holds durably. At RF=1 the
-//! only replica is the local node and its durable LEO comes from the WAL commit callback (after
-//! fsync), so `compute_hw(&[self])` is that LEO. Phase 12 passes one entry per replica.
+//! The HW is the exclusive end of the prefix every in-sync replica holds durably. The
+//! replica tracker passes one entry per replica (through
+//! [`next_hw`](crate::replica::watermark::next_hw)); at RF=1 the only replica is the local
+//! node and its durable LEO comes from the WAL commit callback (after fsync), so the result
+//! is that LEO.
 
 use ostro_types::Offset;
 

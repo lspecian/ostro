@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_log::{
-    ImportMode, LogError, LogNode, LogNodeConfig, RawBatch, ReplicatedLog, Rf1Log,
+    ImportMode, LogError, LogNode, LogNodeConfig, RawBatch, ReplicaSet, ReplicatedLog, Rf1Log,
     write_partition_log,
 };
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId, envelope};
@@ -16,7 +16,15 @@ const P: PartitionId = PartitionId(0);
 async fn open(dir: &Path, floor: Offset) -> (LogNode, Arc<Rf1Log>) {
     let cfg = LogNodeConfig::new(dir.join("wal"), PartitionCount::new(1).unwrap(), 1);
     let (node, mut logs) = LogNode::open(cfg, &[floor]).await.unwrap();
-    (node, logs.remove(0).unwrap())
+    let log = logs.remove(0).unwrap();
+    lead(&log);
+    (node, log)
+}
+
+/// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
+fn lead(log: &Rf1Log) {
+    let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
+    log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
 
 fn cmds(base: u64, n: u64) -> Vec<Bytes> {

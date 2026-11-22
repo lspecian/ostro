@@ -10,7 +10,8 @@
 //! - `negative_control_publish_first_breaks_closure`: the test-only publish-first order (with
 //!   a delay on A's second step) must violate the property within 10,000 iterations.
 //! - `hw_watch_written_only_in_publish_point`: a source grep that the HW watch is written only
-//!   inside `publish_hw` (and `retract_hw`, the truncation path) in `cut.rs`.
+//!   inside `publish_hw` (and `retract_hw`, the truncation path) in `cut.rs`, and that only
+//!   the partition log's replica core calls `publish_hw` (12-08).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use ostro_log::{HwVector, LogNode, LogNodeConfig, ReplicatedLog, Rf1Log};
+use ostro_log::{HwVector, LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog, Rf1Log};
 use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
@@ -29,7 +30,15 @@ async fn open(dir: &Path) -> (LogNode, Vec<Arc<Rf1Log>>) {
     let cfg = LogNodeConfig::new(dir.join("wal"), PartitionCount::new(P).unwrap(), 1);
     let floors = vec![Offset::ZERO; usize::from(P)];
     let (node, logs) = LogNode::open(cfg, &floors).await.unwrap();
-    (node, logs.into_iter().map(Result::unwrap).collect())
+    let logs: Vec<Arc<Rf1Log>> = logs.into_iter().map(Result::unwrap).collect();
+    logs.iter().for_each(|l| lead(l));
+    (node, logs)
+}
+
+/// Lead the way `Node` does at RF=1: epoch above the logged history, ISR {self}.
+fn lead(log: &Rf1Log) {
+    let e = log.latest_epoch().map_or(1, |e| e.0 + 1);
+    log.become_leader(Epoch(e), ReplicaSet::solo(1)).unwrap();
 }
 
 fn cmds(tag: &str, n: usize) -> Vec<Bytes> {
@@ -237,11 +246,33 @@ fn hw_watch_written_only_in_publish_point() {
         vec!["publish_hw", "retract_hw"],
         "HW watch writers: {writers:?}"
     );
+    // 12-08: the commit callback reports the durable end to the partition's replica core,
+    // and the core's `publish` is the only caller of `publish_hw` (plus the `rf1_bypass`
+    // mutant site, which exists to prove that a shortcut is caught).
     let node = std::fs::read_to_string(src.join("node.rs")).unwrap();
     assert!(
-        node.contains("hw_vector.publish_hw("),
-        "the commit callback must call publish_hw"
+        node.contains("core.on_durable(") && !node.contains("publish_hw("),
+        "the commit callback must report to the replica core, never publish directly"
     );
+    let log = std::fs::read_to_string(src.join("partition_log.rs")).unwrap();
+    let code = log.split("#[cfg(test)]").next().unwrap();
+    let mut callers = Vec::new();
+    for chunk in code.split("fn ").skip(1) {
+        if chunk.contains("hw_vector.publish_hw(") {
+            let fname: String = chunk
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            callers.push(fname);
+        }
+    }
+    assert_eq!(
+        callers,
+        vec!["on_durable", "publish"],
+        "publish_hw callers: {callers:?}"
+    );
+    assert_eq!(code.matches("hw_vector.publish_hw(").count(), 2);
+    assert!(code.contains("mutants::RF1_BYPASS"));
 }
 
 /// Reports the per-publication overhead the cut adds (one uncontended lock + max): not an

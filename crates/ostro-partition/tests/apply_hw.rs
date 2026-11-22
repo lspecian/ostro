@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::manual_hw::ManualHwLog;
 use common::{T, cfg, new_run, open_single, open_with, rebuild_digest, start_cmd};
-use ostro_log::{LogNode, LogNodeConfig, ReplicatedLog};
+use ostro_log::{LogNode, LogNodeConfig, ReplicaSet, ReplicatedLog};
 use ostro_partition::{ApplyOutcome, MachineConfig};
 use ostro_types::command::encode_command;
 use ostro_types::{Epoch, Offset};
@@ -159,6 +159,9 @@ async fn restart_replays_exactly_the_missing_suffix() {
         .await
         .unwrap();
         let log = logs.remove(0).unwrap();
+        // A new term on the reopened log (B2: above the logged epoch).
+        let epoch = Epoch(epoch.0 + 1);
+        log.become_leader(epoch, ReplicaSet::solo(1)).unwrap();
         let cmds = (0..4)
             .map(|_| encode_command(&start_cmd(&new_run())))
             .collect();
@@ -172,7 +175,7 @@ async fn restart_replays_exactly_the_missing_suffix() {
     }
 
     let tp = open_with(tmp.path(), cfg(), false, |l| l).await;
-    assert_eq!(tp.handle.epoch(), Epoch(epoch.0));
+    assert_eq!(tp.handle.epoch(), Epoch(epoch.0 + 1));
     assert_eq!(
         tp.applied(),
         applied + 4,

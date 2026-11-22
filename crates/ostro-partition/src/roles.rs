@@ -29,7 +29,8 @@ pub type PartitionLogHandle = ostro_log::Rf1Log;
 /// Test/fixture constructor next to the alias (W6): opens a one-node log for
 /// `partition` (partition count `partition + 1`) under `wal_dir`, anchored at `floor`
 /// when empty. Keep the returned [`LogNode`] alive while using the log and call
-/// [`LogNode::shutdown`] at the end. Fixtures use this, never the type name.
+/// [`LogNode::shutdown`] at the end. Fixtures use this, never the type name. The log opens
+/// unassigned (role `Offline`, HW = `floor`); call `become_leader` / `become_follower`.
 #[doc(hidden)]
 pub async fn open_partition_log_for_tests(
     wal_dir: &Path,
@@ -187,6 +188,9 @@ mod tests {
                 .unwrap();
         assert_eq!(log.partition(), PartitionId(2));
         assert_eq!(log.log_start(), Offset(5));
+        // The fixture opens unassigned (role Offline); lead it the RF=1 way.
+        log.become_leader(Epoch(1), ostro_log::ReplicaSet::solo(1))
+            .unwrap();
         let r = log
             .append(Epoch(1), vec![Bytes::from_static(b"a")])
             .await
