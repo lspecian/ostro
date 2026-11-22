@@ -15,8 +15,9 @@ const GIB: u64 = 1024 * 1024 * 1024;
 /// Guest language class. Drives per-instance pool sizing (S2 measurements).
 ///
 /// `Mixed` (plan 09-07) sizes the pool for the largest class (Python) so any mix of
-/// languages fits; admission is weighted by each module's measured core-instance count
-/// ([`crate::core_budget`]), so a Rust instance never reserves Python's share.
+/// languages fits; admission is weighted by each module's measured core instances,
+/// memories and tables ([`crate::core_budget`]), so a Rust instance never reserves
+/// Python's share and a QuickJS instance is charged its 3 memories and 3 tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LanguageClass {
     Rust,
@@ -74,11 +75,15 @@ impl LanguageClass {
         2
     }
 
-    /// Minimum `max_memory_size` the language's runtime needs to start (S2).
+    /// Minimum `max_memory_size` the language's runtime needs to start: the largest
+    /// initial memory the SDK-built guests declare (Rust 17 pages, S2; Python 255 pages,
+    /// the componentize-py SDK guest, 09-19 / eng2-mem; TypeScript 145 pages, the
+    /// StarlingMonkey guest, S9; QuickJS needs less). `tests/polyglot_engine.rs` derives
+    /// the Python and TypeScript figures from the real guests.
     pub fn min_memory_bytes(self) -> u64 {
         match self {
             Self::Rust => 1_114_112,
-            Self::Python | Self::Mixed => 13_172_736,
+            Self::Python | Self::Mixed => 16_711_680,
             Self::TypeScript => 9_502_720,
         }
     }
@@ -199,6 +204,20 @@ impl EngineConfig {
         })
     }
 
+    /// Linear memories the pool can hold at once (`total_instances`). Also the capacity of
+    /// the memories admission budget ([`crate::core_budget::PoolBudget`]).
+    pub fn effective_total_memories(&self) -> u32 {
+        self.pool.total_instances
+    }
+
+    /// Tables the pool can hold at once (`total_instances × class.tables_per_instance()`).
+    /// Also the capacity of the tables admission budget.
+    pub fn effective_total_tables(&self) -> u32 {
+        self.pool
+            .total_instances
+            .saturating_mul(self.class.tables_per_instance())
+    }
+
     /// Effective per-instance memory cap: `engine.pool.max_memory_bytes` raised to the
     /// language class floor.
     pub fn effective_max_memory(&self) -> u64 {
@@ -232,12 +251,11 @@ fn base_config(c: &EngineConfig) -> wasmtime::Config {
 /// Pooling allocator sizing derived from the engine config and language class.
 pub fn pooling_allocation_config(c: &EngineConfig) -> PoolingAllocationConfig {
     let n = c.pool.total_instances;
-    let class = c.class;
     let mut p = PoolingAllocationConfig::default();
     p.total_component_instances(n)
         .total_core_instances(c.effective_total_core_instances())
-        .total_memories(n)
-        .total_tables(n.saturating_mul(class.tables_per_instance()))
+        .total_memories(c.effective_total_memories())
+        .total_tables(c.effective_total_tables())
         .total_stacks(n)
         .max_memory_size(usize::try_from(c.effective_max_memory()).unwrap_or(usize::MAX))
         .max_unused_warm_slots(c.pool.max_unused_warm_slots)
@@ -316,9 +334,9 @@ mod tests {
             },
             ..EngineConfig::default()
         };
-        assert_eq!(py.effective_max_memory(), 13_172_736);
+        assert_eq!(py.effective_max_memory(), 16_711_680);
         assert_eq!(LanguageClass::Mixed.core_instances_per_instance(), 38);
-        assert_eq!(LanguageClass::Mixed.min_memory_bytes(), 13_172_736);
+        assert_eq!(LanguageClass::Mixed.min_memory_bytes(), 16_711_680);
     }
 
     #[test]
@@ -342,5 +360,16 @@ mod tests {
         assert_eq!(c.effective_total_core_instances(), 38_000);
         c.pool.total_core_instances = Some(50_000);
         assert_eq!(c.effective_total_core_instances(), 50_000);
+    }
+
+    #[test]
+    fn memory_and_table_totals() {
+        let mut c = EngineConfig::default();
+        assert_eq!(c.effective_total_memories(), 1_000);
+        assert_eq!(c.effective_total_tables(), 2_000);
+        c.class = LanguageClass::Mixed;
+        c.pool.total_instances = 60;
+        assert_eq!(c.effective_total_memories(), 60);
+        assert_eq!(c.effective_total_tables(), 120);
     }
 }

@@ -12,15 +12,24 @@
 //! `class = "python"` 100 instances are live at once; with the default class (3,000 core
 //! instances, room for 78 Python instances) 100 concurrent runs still all complete because
 //! the 79th..100th wait for core-instance permits instead of failing to instantiate.
+//!
+//! Plan eng2-mem: admission also charges memories and tables. With `class = mixed` and
+//! `total_instances = 60` the core budget admits 175 QuickJS instances but the pool's 60
+//! memories hold 20 (3 each): 30 parked SDK `ts_conf_timer` runs now give 20 parked and
+//! 10 waiting, 0 `AttemptFailed` (09-19 measured 19-20 parked and the rest failing with
+//! "instance pool exhausted ... memory stripe 0"). The real SDK guests' memories, tables
+//! and declared memory floors pin `LanguageClass::min_memory_bytes`.
 #![cfg(feature = "polyglot")]
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use ostro_conformance::langs::{Lang, module_for, workflow_name};
 use ostro_conformance::polyglot::{Mode, build};
 use ostro_conformance::repo_root;
 use ostro_engine::config::{EngineConfig, LanguageClass};
+use ostro_engine::core_budget::PoolWeights;
 use ostro_engine::runtime::{Prepared, Runtime, RuntimeOptions};
 use ostro_engine::sink::{Activate, ActivationOutcome, RunRef};
 use ostro_engine::testkit::{
@@ -265,4 +274,134 @@ async fn default_class_admits_100_python_runs_by_waiting() {
     assert!(peak <= 3_000);
     assert!(peak >= 78 * 38, "budget never filled (peak {peak})");
     assert_eq!(rt.core_budget().in_use(), 0);
+}
+
+fn sdk_module(lang: Lang) -> Vec<u8> {
+    module_for(lang, None).unwrap_or_else(|e| panic!("conformance module: {e}"))
+}
+
+#[tokio::test]
+async fn sdk_guest_shapes_pin_class_memory_floors() {
+    let mut floors = Vec::new();
+    for (lang, shape) in [
+        (Lang::Rust, (1, 2)),
+        (Lang::Py, (1, 2)),
+        (Lang::Ts, (3, 3)),
+        (Lang::TsSm, (1, 2)),
+    ] {
+        let p = rt().prepare(&sdk_module(lang)).expect("prepare");
+        println!(
+            "{lang:?}: memories {} tables {} floor {} B, weights {:?}",
+            p.memories,
+            p.tables,
+            p.min_memory_bytes,
+            rt().admission_weights(&p).await
+        );
+        assert_eq!((p.memories, p.tables), shape, "{lang:?}");
+        floors.push((lang, p.min_memory_bytes));
+    }
+    let floor = |l: Lang| floors.iter().find(|(x, _)| *x == l).expect("lang").1;
+    assert!(floor(Lang::Rust) <= LanguageClass::Rust.min_memory_bytes());
+    // The class floors are exactly what the SDK guests declare (09-19 open issue 2).
+    assert_eq!(floor(Lang::Py), LanguageClass::Python.min_memory_bytes());
+    assert_eq!(
+        floor(Lang::Ts).max(floor(Lang::TsSm)),
+        LanguageClass::TypeScript.min_memory_bytes()
+    );
+    let all = floors.iter().map(|(_, f)| *f).max().expect("floors");
+    assert_eq!(all, LanguageClass::Mixed.min_memory_bytes());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn quickjs_memories_wait_for_admission() {
+    let rt = Arc::new(runtime(EngineConfig {
+        class: LanguageClass::Mixed,
+        // Longer than ts_conf_timer's 1 h sleep: it parks hot (the FakeClock is frozen).
+        hot_wait: Duration::from_secs(7_200),
+        node_memory_budget: 64 << 30,
+        pool: ostro_engine::config::PoolConfig {
+            total_instances: 60,
+            ..Default::default()
+        },
+        ..EngineConfig::default()
+    }));
+    let p = Arc::new(rt.prepare(&sdk_module(Lang::Ts)).expect("prepare"));
+    let w = rt.admission_weights(&p).await;
+    assert_eq!(
+        w,
+        PoolWeights {
+            instances: 1,
+            core_instances: 13,
+            memories: 3,
+            tables: 3
+        }
+    );
+    assert_eq!(
+        rt.core_budget().capacity() / 13,
+        175,
+        "core alone admits 175"
+    );
+    let wf = workflow_name(Lang::Ts, "conf_timer");
+    let sink = Arc::new(FakeSink::new());
+    let mut running = Vec::new();
+    for i in 0..30 {
+        let run = run_ref(&format!("qjs-mem-{i}"));
+        let mut spec = RunSpec::new(run.clone(), &wf, b"null");
+        spec.input.content_type = "application/json".into();
+        sink.seed(
+            run.clone(),
+            vec![spec.run_started_event(&p.module_hash_hex)],
+            1,
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let act = Activate {
+            run: run.clone(),
+            attempt: 1,
+            module_sha: p.sha,
+            journal: sink.journal(&run),
+            inputs: Some(rx),
+            cancel: Default::default(),
+        };
+        let cancel = act.cancel.clone();
+        let (rt2, p2, sink2) = (rt.clone(), p.clone(), sink.clone());
+        let h = tokio::spawn(async move { rt2.activate(&p2, act, sink2).await });
+        running.push((h, cancel, tx));
+    }
+    wait_until(
+        "20 parked QuickJS instances",
+        Duration::from_secs(120),
+        || rt.parked().parked_count() == 20 || !sink.outcomes().is_empty(),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(sink.outcomes().is_empty(), "{:?}", sink.outcomes());
+    assert_eq!(rt.parked().parked_count(), 20);
+    assert_eq!(rt.pool_budget().in_use().memories, 60);
+    assert!(running.iter().all(|(h, _, _)| !h.is_finished()), "10 wait");
+
+    // Cancel the first 10 spawned. Whether each was parked or still waiting, every
+    // parked one cancelled frees 3 memories for one remaining waiter, so 20 park again.
+    for (_, cancel, _tx) in &running[..10] {
+        cancel.cancel();
+    }
+    wait_until(
+        "10 cancelled, 20 parked again",
+        Duration::from_secs(120),
+        || sink.outcomes().len() == 10 && rt.parked().parked_count() == 20,
+    )
+    .await;
+    for (h, cancel, _tx) in running {
+        cancel.cancel();
+        let out = h.await.expect("join");
+        assert!(matches!(out, ActivationOutcome::Evicted { .. }), "{out:?}");
+    }
+    let outcomes = sink.outcomes();
+    assert_eq!(outcomes.len(), 30);
+    assert!(
+        !outcomes
+            .iter()
+            .any(|(_, _, o)| matches!(o, ActivationOutcome::AttemptFailed(_))),
+        "{outcomes:?}"
+    );
+    assert_eq!(rt.pool_budget().in_use(), PoolWeights::default());
 }

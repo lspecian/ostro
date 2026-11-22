@@ -20,8 +20,8 @@
 //! - `pool_mixed`: `class = mixed` holds 100 parked Python runs (plus Rust and both TS
 //!   backends) with no core-instance error; the default class (3,000 core instances)
 //!   admits 100 Python runs by making them wait for permits; and the QuickJS memory
-//!   ceiling (3 memories per instance against `total_memories = total_instances`) is
-//!   measured.
+//!   ceiling (3 memories per instance against `total_memories = total_instances`) makes
+//!   runs wait for admission instead of failing (plan eng2-mem).
 //!
 //! Each measurement appends one JSON line to `docs/data/sdk-resources.jsonl` with the
 //! load average, build profile and host. SC5 thresholds (warm instantiate p50: Python
@@ -804,9 +804,10 @@ async fn pool_mixed() {
 
     // (3) QuickJS memory ceiling: class = mixed sizes core instances for Python (38 per
     // component instance) but the pool keeps total_memories = total_instances while a
-    // QuickJS instance needs 3 memories. With total_instances = 60 the budget admits
-    // 2,280 / 13 = 175 QuickJS instances, the pool's memories hold 20. Measured, not
-    // asserted (ENG-2 open issue, see docs/sdk-resources.md).
+    // QuickJS instance needs 3 memories. With total_instances = 60 the core budget alone
+    // admits 2,280 / 13 = 175 QuickJS instances, the pool's memories hold 20. Since plan
+    // eng2-mem admission charges memories too: 20 park, the other 10 wait, none fails
+    // (09-19 measured 19-20 parked and the rest AttemptFailed before the fix).
     let rt = parking_runtime(LanguageClass::Mixed, Some(60));
     let p = rt.prepare_cached(&module(Lang::Ts)).await.expect("prepare");
     let w = rt.core_weight(&p).await;
@@ -819,12 +820,11 @@ async fn pool_mixed() {
     wait_until(
         "QuickJS ceiling probe settles",
         Duration::from_secs(120),
-        || {
-            rt.parked().parked_count() + lives.iter().filter(|l| l.handle.is_finished()).count()
-                == tries
-        },
+        || rt.parked().parked_count() == 20 || !sink.outcomes().is_empty(),
     )
     .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let waiting = lives.iter().filter(|l| !l.handle.is_finished()).count() - 20;
     let parked = rt.parked().parked_count();
     let failures: Vec<String> = sink
         .outcomes()
@@ -842,16 +842,26 @@ async fn pool_mixed() {
             "weight": w,
             "capacity": rt.core_budget().capacity(),
             "budget_admits": rt.core_budget().capacity() / w,
+            "memories_admit": rt.pool_budget().capacity().memories / 3,
             "n": tries,
             "parked": parked,
+            "waiting": waiting,
             "failed": failures.len(),
             "first_failure": failures.first(),
         })),
     );
     println!(
-        "QuickJS under class=mixed, total_instances=60: {parked} parked, {} failed",
+        "QuickJS under class=mixed, total_instances=60: {parked} parked, {waiting} waiting, {} \
+         failed",
         failures.len()
     );
-    let _ = release(lives).await;
-    assert!(parked >= 1);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!((parked, waiting), (20, 10));
+    let outs = release(lives).await;
+    assert!(
+        !outs
+            .iter()
+            .any(|o| matches!(o, ActivationOutcome::AttemptFailed(_))),
+        "{outs:?}"
+    );
 }

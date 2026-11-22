@@ -154,10 +154,32 @@ a miss is printed and recorded but not asserted.
 
 ## Pool sizing (ENG-2)
 
-Admission is weighted: each instantiation takes `core_weight` permits (Rust 3, Python 38,
-QuickJS 13, StarlingMonkey 3) from a FIFO budget of `engine.pool_total_core_instances`.
-The default budget is `total_instances × class.core_instances_per_instance()`. A full
-budget makes activations **wait**; they do not fail.
+Admission is weighted over **every pooled resource** an instantiation takes (ENG-2, plan
+09-07; memories and tables since plan eng2-mem). Each activation, `describe` and warm
+probe acquires, from one FIFO budget per resource:
+
+| resource | weight (Rust / Python / QuickJS / StarlingMonkey) | capacity |
+|---|---|---|
+| component instances (also the async stacks) | 1 / 1 / 1 / 1 | `total_instances` |
+| core instances | 3 / 38 / 13 / 3 (calibrated once per module) | `pool_total_core_instances`, default `total_instances × class.core_instances_per_instance()` |
+| linear memories | 1 / 1 / 3 / 1 | `total_memories = total_instances` |
+| tables | 2 / 2 / 3 / 2 | `total_tables = 2 × total_instances` |
+
+- Memory and table weights are exact and static: Wasmtime's
+  `Component::resources_required` counts every core module the compiled component
+  instantiates, adapter modules included. The core-instance weight is calibrated as before.
+- The budgets are acquired in that fixed order, with one deadline, so waiters cannot
+  deadlock. A waiter that times out releases what it already holds.
+- When any resource is full, activations **wait**; they do not fail. At the activation
+  deadline they evict with `BudgetPressure` and are re-activated by the executor; a
+  cancelled waiter evicts with `External`; `describe` and the warm probe wait 5 s and then
+  fail with an error naming the resource (e.g. `memory budget: no 3 free slots before the
+  deadline`).
+- A module needing more memories or tables than the whole pool holds is rejected at deploy
+  validation, like one needing more core instances.
+- The pool reservation and the default engine-config snapshot are unchanged. For Rust-only
+  nodes the four budgets bind at the same point (1,000 instances at defaults), so
+  admission behaves exactly as before.
 
 Measured (`pool_mixed`, all runs `conf_timer`):
 
@@ -165,35 +187,30 @@ Measured (`pool_mixed`, all runs `conf_timer`):
 |---|---|
 | `class = mixed` (38,000 core instances): 100 Python + 50 Rust + 50 QuickJS + 50 StarlingMonkey parked at once | all 250 parked in 97 ms; 4,750 / 38,000 slots in use; **0 failures** |
 | default `class = rust` (3,000 core instances, 78 Python at once): 100 concurrent Python runs, timers fire after 300 ms | peak 3,000 / 3,000 slots; the 79th–100th waited for permits; **all 100 completed** in 630 ms, 0 `AttemptFailed` |
-| `class = mixed`, `total_instances = 60`: 30 QuickJS runs | the budget admits 175; **19 parked / 11 failed (run 1), 20 parked / 10 failed (run 2)**, the failures with `AttemptFailed(Trap("instance pool exhausted (engine.pool.total_instances=60): maximum concurrent limit of 60 for memory stripe 0 reached"))` |
+| `class = mixed`, `total_instances = 60`: 30 QuickJS runs | 09-19, before the fix (core budget only, admits 175): **19 parked / 11 failed (run 1), 20 parked / 10 failed (run 2)**, the failures with `AttemptFailed(Trap("instance pool exhausted (engine.pool.total_instances=60): maximum concurrent limit of 60 for memory stripe 0 reached"))`. Since eng2-mem (memories budget admits 20): **20 parked, 10 waiting, 0 failed**; the waiters park as soon as parked runs release memories (also the non-ignored `quickjs_memories_wait_for_admission` in `tests/polyglot_engine.rs`) |
 
 How many live instances fit per node at the default `total_instances = 1000`. The limit
-is the smallest of the core budget, `total_memories = 1000` and `total_tables = 2000`:
+is the smallest of the four budgets; past it, runs wait:
 
 | `[engine] class` | core budget | Rust | Python | QuickJS | StarlingMonkey |
 |---|---|---|---|---|---|
 | `rust` (default) | 3,000 | 1,000 | 78 | 230 | 1,000 |
 | `typescript` | 3,000 | 1,000 | 78 | 230 | 1,000 |
-| `python` | 38,000 | 1,000 | 1,000 | **333 by memories** (budget admits 2,923) | 1,000 |
-| `mixed` | 38,000 | 1,000 | 1,000 | **333 by memories** (budget admits 2,923) | 1,000 |
+| `python` | 38,000 | 1,000 | 1,000 | **333 by memories** (core alone: 2,923) | 1,000 |
+| `mixed` | 38,000 | 1,000 | 1,000 | **333 by memories** (core alone: 2,923) | 1,000 |
 
 Guidance:
 - **Pure Rust nodes:** keep the default.
 - **Nodes that run Python:** set `class = "python"` or `"mixed"`. With the default class a
   node holds only 78 live Python instances, and the rest queue.
 - **`class = "typescript"` is sized for StarlingMonkey** (3 core instances per instance),
-  which gives 230 QuickJS instances. More QuickJS density needs an override:
-  `pool_total_core_instances = 13 × total_instances`.
-- **Open ENG-2 issue (not fixed here, see the summary of 09-19):** the core budget does
-  not cover memories or tables. A QuickJS instance needs 3 memories and 3 tables, but the
-  pool has `total_memories = total_instances` and `total_tables = 2 × total_instances`.
-  - Under `python` / `mixed`, or with a large `pool_total_core_instances`, a node with
-    more than about `total_instances / 3` live QuickJS instances gets `AttemptFailed`
-    pool-exhaustion traps instead of waiting. The measurement above shows 19–20 of a
-    theoretical 20.
-  - Until fixed: keep live QuickJS instances below `total_instances / 3`. Either do not
-    raise the core budget past `13 × total_instances / 3` for QuickJS-heavy nodes, or
-    raise `total_instances`.
+  which gives 230 QuickJS instances. More QuickJS density needs an override, up to the
+  memories limit: `pool_total_core_instances = 13 × total_instances / 3` (4,333 at
+  defaults, 333 QuickJS instances).
+- **QuickJS-heavy nodes:** a QuickJS instance takes 3 of the `total_instances` memory
+  slots, so at most `total_instances / 3` are live at once; the rest wait for admission
+  (they no longer fail, plan eng2-mem). Raising `pool_total_core_instances` past
+  `13 × total_instances / 3` adds no QuickJS density. Raise `total_instances` instead.
 - **Node memory budget:** `engine.node_memory_budget` (default 1 GiB) is charged with each
   instance's linear memory. Parked instances above it are LRU-evicted (`BudgetPressure`,
   re-activated later, not failed). Per instance the charge is the declared linear memory:
@@ -204,10 +221,11 @@ Guidance:
 
   With the default budget, a node keeps that many parked instances hot. Raise
   `node_memory_budget` for Python-heavy nodes.
-- **Memory floor:** `LanguageClass::Python::min_memory_bytes` (13,172,736 B, from S2) is
-  below the SDK guest's declared 15.94 MiB. With the default `pool.max_memory_bytes`
-  (256 MiB) this is irrelevant. An operator who lowers `max_memory_bytes` under 16 MiB on
-  a Python node gets instantiation failures, because the floor no longer protects them.
+- **Memory floor:** `pool.max_memory_bytes` is raised to the class floor
+  (`LanguageClass::min_memory_bytes`): Rust 1,114,112 B, TypeScript 9,502,720 B (the
+  StarlingMonkey guest; QuickJS declares 2.13 MiB), Python and mixed 16,711,680 B (the
+  SDK guest's 255 pages; S2's 13,172,736 B was stale until plan eng2-mem).
+  `tests/polyglot_engine.rs` derives these from the real SDK guests.
 
 ## Fuel per language (PF-W6, from 09-07 / S9)
 

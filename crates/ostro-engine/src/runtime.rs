@@ -20,6 +20,16 @@
 //! modules are invisible statically: QuickJS has 11 static entries but needs 13, S9). `activate` holds the permit around the whole activation, hot-wait
 //! parking included, and evicts with `BudgetPressure` (re-activated by the executor) when
 //! the budget stays exhausted until the activation deadline.
+//!
+//! Every pooled resource (plan eng2-mem): the same admission also charges the module's
+//! component-instance slot (1), linear memories and tables against the pool's
+//! `total_component_instances`, `total_memories` and `total_tables`
+//! ([`PoolBudget`], acquired in one fixed order with one deadline). Memories and tables
+//! are exact and static: [`Component::resources_required`] walks every core module the
+//! compiled component instantiates (Wasmtime's adapter modules included). Without this
+//! a QuickJS instance (3 memories, 3 tables) passed the core budget and failed
+//! instantiation with "instance pool exhausted ... memory stripe" once more than
+//! `total_instances / 3` were live.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,7 +45,7 @@ use wasmtime::component::{Component, Linker};
 use crate::cache::{AotCache, CacheStatsSnapshot, load_or_create_key, module_sha};
 
 use crate::config::EngineConfig;
-use crate::core_budget::{CoreBudget, CorePermit};
+use crate::core_budget::{CoreBudget, PoolBudget, PoolPermit, PoolWeights};
 use crate::engine::{OstroEngine, PoolMode, configure_store};
 use crate::env::{Clock, SystemClock};
 use crate::error::{EngineError, EvictReason};
@@ -103,8 +113,8 @@ pub struct Runtime {
     l2: Mutex<InstancePreLru>,
     /// Activations currently inside [`Runtime::activate`] (see [`LiveGuard`]).
     live: AtomicU64,
-    /// Weighted core-instance admission (plan 09-07).
-    core_budget: CoreBudget,
+    /// Weighted admission over every pooled resource (plans 09-07, eng2-mem).
+    pool_budget: PoolBudget,
     pub(crate) opts: RuntimeOptions,
 }
 
@@ -182,6 +192,14 @@ pub struct Prepared {
     /// Static core-instance count from validation (a lower bound of the admission
     /// weight, see [`Runtime::core_weight`]) (09-07).
     pub core_instances: u32,
+    /// Linear memories one instantiation defines (exact, [`Component::resources_required`];
+    /// its weight in the memories budget) (eng2-mem).
+    pub memories: u32,
+    /// Tables one instantiation defines (exact; its weight in the tables budget).
+    pub tables: u32,
+    /// Largest initial linear memory any of its core modules declares, in bytes (the
+    /// smallest `max_memory_size` it can start with).
+    pub min_memory_bytes: u64,
     /// Calibrated weight, measured once (09-07).
     weight: tokio::sync::OnceCell<u32>,
     component: Component,
@@ -193,6 +211,8 @@ impl std::fmt::Debug for Prepared {
         f.debug_struct("Prepared")
             .field("module_hash_hex", &self.module_hash_hex)
             .field("core_instances", &self.core_instances)
+            .field("memories", &self.memories)
+            .field("tables", &self.tables)
             .finish_non_exhaustive()
     }
 }
@@ -241,9 +261,17 @@ impl Runtime {
             }
             None => None,
         };
-        let core_budget = CoreBudget::new(match engine.pool_mode() {
-            PoolMode::Pooling => engine.config().effective_total_core_instances(),
-            PoolMode::OnDemand { .. } => CoreBudget::UNBOUNDED,
+        let pool_budget = PoolBudget::new(match engine.pool_mode() {
+            PoolMode::Pooling => {
+                let c = engine.config();
+                PoolWeights {
+                    instances: c.pool.total_instances,
+                    core_instances: c.effective_total_core_instances(),
+                    memories: c.effective_total_memories(),
+                    tables: c.effective_total_tables(),
+                }
+            }
+            PoolMode::OnDemand { .. } => PoolWeights::UNBOUNDED,
         });
         Ok(Self {
             engine,
@@ -252,32 +280,64 @@ impl Runtime {
             aot,
             l2: Mutex::new(InstancePreLru::default()),
             live: AtomicU64::new(0),
-            core_budget,
+            pool_budget,
             opts,
         })
     }
 
-    /// The node's core-instance admission budget (plan 09-07).
+    /// The node's core-instance admission budget (plan 09-07): the core-instance part of
+    /// [`Self::pool_budget`].
     pub fn core_budget(&self) -> &CoreBudget {
-        &self.core_budget
+        self.pool_budget
+            .budget(crate::core_budget::PoolResource::CoreInstances)
+    }
+
+    /// The node's admission budget over every pooled resource (plan eng2-mem).
+    pub fn pool_budget(&self) -> &PoolBudget {
+        &self.pool_budget
     }
 
     /// Core-instance capacity a module must fit in (`None`: on-demand, unbounded).
     fn max_core_instances(&self) -> Option<u32> {
         match self.engine.pool_mode() {
-            PoolMode::Pooling => Some(self.core_budget.capacity()),
+            PoolMode::Pooling => Some(self.core_budget().capacity()),
             PoolMode::OnDemand { .. } => None,
         }
     }
 
     /// Permit for one short-lived instantiation (`describe`, warm probe).
-    async fn probe_permit(&self, p: &Prepared) -> Result<CorePermit, EngineError> {
+    async fn probe_permit(&self, p: &Prepared) -> Result<PoolPermit, EngineError> {
         let deadline = Instant::now() + BUDGET_PROBE_TIMEOUT;
-        let weight = self.core_weight_by(p, deadline).await;
-        self.core_budget
-            .acquire(weight, deadline)
+        self.admit(p, deadline)
             .await
             .map_err(|e| EngineError::Wasmtime(wasmtime::format_err!("{e}")))
+    }
+
+    /// Acquire `p`'s admission weights ([`Self::admission_weights`]) until `deadline`.
+    async fn admit(
+        &self,
+        p: &Prepared,
+        deadline: Instant,
+    ) -> Result<PoolPermit, crate::core_budget::PoolBudgetError> {
+        let w = self.weights_by(p, deadline).await;
+        self.pool_budget.acquire(w, deadline).await
+    }
+
+    /// Pool slots one instantiation of `p` takes, per resource: 1 component instance, the
+    /// calibrated core-instance weight ([`Self::core_weight`]) and its exact memories and
+    /// tables (plan eng2-mem).
+    pub async fn admission_weights(&self, p: &Prepared) -> PoolWeights {
+        self.weights_by(p, Instant::now() + BUDGET_PROBE_TIMEOUT)
+            .await
+    }
+
+    async fn weights_by(&self, p: &Prepared, deadline: Instant) -> PoolWeights {
+        PoolWeights {
+            instances: 1,
+            core_instances: self.core_weight_by(p, deadline).await,
+            memories: p.memories,
+            tables: p.tables,
+        }
     }
 
     /// Admission weight of `p`: the core instances one instantiation really creates.
@@ -293,7 +353,7 @@ impl Runtime {
     }
 
     async fn core_weight_by(&self, p: &Prepared, deadline: Instant) -> u32 {
-        let cap = self.core_budget.capacity();
+        let cap = self.core_budget().capacity();
         if self.max_core_instances().is_none() {
             return p.core_instances.min(cap);
         }
@@ -304,9 +364,17 @@ impl Runtime {
         let calibrated = p
             .weight
             .get_or_try_init(|| async {
+                // The calibration instantiates from the same pool: it takes the module's
+                // full admission weights, with the conservative core-instance count.
+                let w = PoolWeights {
+                    instances: 1,
+                    core_instances: fallback,
+                    memories: p.memories,
+                    tables: p.tables,
+                };
                 let _permit = self
-                    .core_budget
-                    .acquire(fallback, deadline)
+                    .pool_budget
+                    .acquire(w, deadline)
                     .await
                     .map_err(|_| ())?;
                 self.calibrate(p, fallback).await.ok_or(())
@@ -405,11 +473,49 @@ impl Runtime {
         sha: [u8; 32],
         validated: &ValidatedComponent,
     ) -> Result<Prepared, EngineError> {
+        // Memories and tables are exact: every core module the compiled component
+        // instantiates, adapter modules included. `None` only for a component importing
+        // core modules, which the allow-list rules out; fall back to the per-instance share
+        // the pool is sized with (1 memory, `tables_per_instance` tables).
+        let cfg = self.engine.config();
+        let (memories, tables, min_memory_bytes) = match validated.component.resources_required() {
+            Some(r) => (
+                r.num_memories,
+                r.num_tables,
+                r.max_initial_memory_size
+                    .map_or(0, |pages| pages.saturating_mul(65_536)),
+            ),
+            None => (1, cfg.class.tables_per_instance(), 0),
+        };
+        if matches!(self.engine.pool_mode(), PoolMode::Pooling) {
+            let mut violations = Vec::new();
+            let (max_mem, max_tab) = (cfg.effective_total_memories(), cfg.effective_total_tables());
+            if memories > max_mem {
+                violations.push(format!(
+                    "component needs {memories} linear memories per instance, more than the \
+                     node's pool holds ({max_mem}, engine.pool_total_instances): it could \
+                     never be instantiated"
+                ));
+            }
+            if tables > max_tab {
+                violations.push(format!(
+                    "component needs {tables} tables per instance, more than the node's pool \
+                     holds ({max_tab}, engine.pool_total_instances × 2): it could never be \
+                     instantiated"
+                ));
+            }
+            if !violations.is_empty() {
+                return Err(EngineError::Validation(violations));
+            }
+        }
         let pre = WorkflowPre::new(self.linker.instantiate_pre(&validated.component)?)?;
         Ok(Prepared {
             sha,
             module_hash_hex: hex(&sha),
             core_instances: validated.core_instances,
+            memories,
+            tables,
+            min_memory_bytes,
             weight: tokio::sync::OnceCell::new(),
             component: validated.component.clone(),
             pre,
@@ -565,14 +671,12 @@ impl Runtime {
     ) -> ActivationOutcome {
         let _live = LiveGuard::enter(&self.live);
         self.publish_gauges();
-        // 09-07 (ENG-2): admit by core-instance weight; the permit is held across the
-        // whole activation (instantiate, run, hot-wait parking) and released on return.
+        // 09-07 (ENG-2) / eng2-mem: admit by core-instance, memory, table and instance
+        // weight; the permit is held across the whole activation (instantiate, run,
+        // hot-wait parking) and released on return.
         let deadline = Instant::now() + self.engine.config().activation_timeout;
         let permit = tokio::select! {
-            r = async {
-                let weight = self.core_weight_by(p, deadline).await;
-                self.core_budget.acquire(weight, deadline).await
-            } => r.ok(),
+            r = self.admit(p, deadline) => r.ok(),
             () = act.cancel.cancelled() => None,
         };
         let Some(_permit) = permit else {

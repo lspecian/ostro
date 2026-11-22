@@ -11,6 +11,12 @@
 //!   waits for it, and a budget that stays exhausted until the activation deadline evicts
 //!   with `BudgetPressure` (exactly one `done`) instead of failing; `describe` waits and
 //!   fails with its ordinary error type.
+//! - Plan eng2-mem: `PoolBudget` admits only when every pooled resource (component
+//!   instances, core instances, memories, tables) fits, releases partial permits on
+//!   timeout, and `Runtime::activate` waits (then evicts with `BudgetPressure`, or
+//!   `External` on cancel) when the pool's instance/memory slots, not its core instances,
+//!   are the binding limit. The QuickJS memories case runs with the real guest in
+//!   `ostro-conformance/tests/polyglot_engine.rs`.
 
 mod common;
 
@@ -18,7 +24,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ostro_engine::config::{EngineConfig, Fallback, PoolConfig};
-use ostro_engine::core_budget::{BudgetError, CoreBudget};
+use ostro_engine::core_budget::{
+    BudgetError, CoreBudget, PoolBudget, PoolBudgetError, PoolResource, PoolWeights,
+};
 use ostro_engine::engine::OstroEngine;
 use ostro_engine::error::{EngineError, EvictReason};
 use ostro_engine::runtime::{Prepared, Runtime, RuntimeOptions};
@@ -395,4 +403,214 @@ fn oversized_module_rejected_at_validation() {
             .any(|m| m.contains("needs 3 core instances") && m.contains("(2,")),
         "{v:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PoolBudget: every pooled resource (plan eng2-mem)
+// ---------------------------------------------------------------------------
+
+/// QuickJS-shaped weights: 1 instance, 13 core instances, 3 memories, 3 tables.
+const QJS: PoolWeights = PoolWeights {
+    instances: 1,
+    core_instances: 13,
+    memories: 3,
+    tables: 3,
+};
+
+/// The pool `class = mixed, total_instances = 60` sizes.
+fn mixed_60() -> PoolWeights {
+    PoolWeights {
+        instances: 60,
+        core_instances: 60 * 38,
+        memories: 60,
+        tables: 120,
+    }
+}
+
+#[tokio::test]
+async fn pool_budget_admits_only_when_every_resource_fits() {
+    let b = Arc::new(PoolBudget::new(mixed_60()));
+    let mut held = Vec::new();
+    // The core budget alone would admit 175; the memories hold 20.
+    for _ in 0..20 {
+        held.push(b.acquire(QJS, soon(10)).await.expect("immediate"));
+    }
+    assert_eq!(
+        b.in_use(),
+        PoolWeights {
+            instances: 20,
+            core_instances: 260,
+            memories: 60,
+            tables: 60,
+        }
+    );
+    // The 21st waits on memories and times out; its partial permits are released.
+    assert_eq!(
+        b.acquire(QJS, soon(100)).await.unwrap_err(),
+        PoolBudgetError {
+            resource: PoolResource::Memories,
+            source: BudgetError::Timeout { weight: 3 },
+        }
+    );
+    assert_eq!(b.in_use().core_instances, 260, "partial permits released");
+    assert_eq!(b.in_use().instances, 20);
+    // A waiting 21st is admitted once one instance is released.
+    let waiter = {
+        let b = b.clone();
+        tokio::spawn(async move { b.acquire(QJS, soon(5_000)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiter.is_finished());
+    drop(held.pop());
+    let p = waiter.await.expect("join").expect("admitted after release");
+    assert_eq!(p.weights(), QJS);
+    drop(p);
+    drop(held);
+    assert_eq!(b.in_use(), PoolWeights::default());
+}
+
+#[tokio::test]
+async fn pool_budget_rejects_too_large_without_holding_anything() {
+    let b = PoolBudget::new(mixed_60());
+    let w = PoolWeights {
+        memories: 61,
+        ..QJS
+    };
+    assert_eq!(
+        b.acquire(w, soon(1_000)).await.unwrap_err(),
+        PoolBudgetError {
+            resource: PoolResource::Memories,
+            source: BudgetError::TooLarge {
+                weight: 61,
+                capacity: 60
+            },
+        }
+    );
+    assert_eq!(b.in_use(), PoolWeights::default());
+    let e = b
+        .acquire(PoolWeights { tables: 121, ..QJS }, soon(1_000))
+        .await
+        .unwrap_err();
+    assert_eq!(e.resource, PoolResource::Tables);
+    assert!(e.to_string().starts_with("table budget: "), "{e}");
+}
+
+/// Pooling runtime with room for 30 Rust instances by core instances but only `slots`
+/// component instances (and so `slots` memories): the core budget is not the binding
+/// limit, the other pool totals are.
+fn slot_bound_runtime(slots: u32, activation_timeout: Duration) -> Arc<Runtime> {
+    Arc::new(
+        Runtime::new(
+            EngineConfig {
+                hot_wait: Duration::from_secs(30),
+                activation_timeout,
+                pool: PoolConfig {
+                    total_instances: slots,
+                    total_core_instances: Some(90),
+                    fallback: Fallback::Fail,
+                    ..PoolConfig::default()
+                },
+                ..EngineConfig::default()
+            },
+            RuntimeOptions {
+                clock: Arc::new(FakeClock::with_step(DEFAULT_ACCEPTED_AT, 0)),
+                token_key: [5; 32],
+                ..RuntimeOptions::default()
+            },
+        )
+        .expect("runtime"),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pool_slots_not_core_instances_bound_admission() {
+    let rt = slot_bound_runtime(2, Duration::from_secs(60));
+    let p = prepare(&rt);
+    assert_eq!((p.memories, p.tables), (1, 2), "det-basic shape");
+    assert_eq!(
+        rt.admission_weights(&p).await,
+        PoolWeights {
+            instances: 1,
+            core_instances: 3,
+            memories: 1,
+            tables: 2,
+        }
+    );
+    let sink = Arc::new(FakeSink::new());
+    let a = start(&rt, &p, &sink, "slots-a");
+    let b = start(&rt, &p, &sink, "slots-b");
+    wait_until("A and B parked", || rt.parked().parked_count() == 2).await;
+    // Before plan eng2-mem C was admitted (6 of 90 core slots in use) and failed to
+    // instantiate with pool exhaustion; now it waits for a slot.
+    let c = start(&rt, &p, &sink, "slots-c");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!c.handle.is_finished(), "C waits for a pool slot");
+    assert!(sink.outcomes().is_empty(), "{:?}", sink.outcomes());
+    assert_eq!(rt.pool_budget().in_use().memories, 2);
+    assert_eq!(rt.core_budget().in_use(), 6);
+
+    // Releasing A admits C, which parks.
+    a.cancel.cancel();
+    a.handle.await.expect("join");
+    wait_until("C parked", || {
+        rt.parked().parked_count() == 2 && dones(&sink, &c.run).is_empty()
+    })
+    .await;
+
+    // D waits; cancelled while waiting it evicts External with exactly one done.
+    let d = start(&rt, &p, &sink, "slots-d");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    d.cancel.cancel();
+    let out_d = d.handle.await.expect("join");
+    assert_eq!(
+        out_d,
+        ActivationOutcome::Evicted {
+            reason: EvictReason::External
+        }
+    );
+    assert_eq!(dones(&sink, &d.run), vec![out_d]);
+    assert_eq!(sink.journal(&d.run).len(), 1, "D never ran");
+
+    for r in [b, c] {
+        r.cancel.cancel();
+        let out = r.handle.await.expect("join");
+        assert!(matches!(out, ActivationOutcome::Evicted { .. }), "{out:?}");
+    }
+    assert!(
+        !sink
+            .outcomes()
+            .iter()
+            .any(|(_, _, o)| matches!(o, ActivationOutcome::AttemptFailed(_))),
+        "{:?}",
+        sink.outcomes()
+    );
+    assert_eq!(rt.pool_budget().in_use(), PoolWeights::default());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exhausted_pool_slots_evict_with_budget_pressure() {
+    let rt = slot_bound_runtime(1, Duration::from_millis(400));
+    let p = prepare(&rt);
+    let sink = Arc::new(FakeSink::new());
+    let a = start(&rt, &p, &sink, "slot1-a");
+    wait_until("A parked", || rt.parked().parked_count() == 1).await;
+    let b = start(&rt, &p, &sink, "slot1-b");
+    let out_b = b.handle.await.expect("join");
+    assert_eq!(
+        out_b,
+        ActivationOutcome::Evicted {
+            reason: EvictReason::BudgetPressure
+        }
+    );
+    assert_eq!(dones(&sink, &b.run), vec![out_b]);
+    // describe waits its 5 s and fails with the resource in the message.
+    let err = rt.describe(&p).await.unwrap_err();
+    assert!(
+        err.to_string().contains("component-instance budget"),
+        "{err}"
+    );
+    a.cancel.cancel();
+    a.handle.await.expect("join");
+    assert!(!rt.describe(&p).await.expect("describe").is_empty());
+    assert_eq!(rt.pool_budget().in_use(), PoolWeights::default());
 }
