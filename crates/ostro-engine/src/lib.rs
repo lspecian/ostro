@@ -16,6 +16,7 @@ pub mod error;
 pub mod host;
 pub mod limits;
 pub mod replay;
+pub mod replay_check;
 pub mod retry;
 /// Per-run limits (Phase 11, plan 11-02; enforced by 11-06).
 pub mod run_limits;

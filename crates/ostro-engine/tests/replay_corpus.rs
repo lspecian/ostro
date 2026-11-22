@@ -31,9 +31,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_engine::config::EngineConfig;
+use ostro_engine::replay_check::{ReplayVerdict, journaled_outcome, replay_check};
 use ostro_engine::runtime::{Runtime, RuntimeOptions};
-use ostro_engine::sink::{Activate, ActivationOutcome, RunRef};
-use ostro_engine::testkit::{FakeClock, FakeSink};
+use ostro_engine::sink::{ActivationOutcome, RunRef};
+use ostro_engine::testkit::FakeClock;
 use ostro_types::PayloadRef;
 use ostro_types::command::JournalEvent;
 use ostro_types::journal::{Event, EventBody, Failure, decode_event, encode_event, encode_result};
@@ -41,7 +42,6 @@ use ostro_types::payload::payload_ref;
 use prost::Message;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio_util::sync::CancellationToken;
 
 /// The three files of an entry; anything else in an entry directory is an error.
 const ENTRY_FILES: [&str; 3] = ["entry.toml", "journal.bin", "module.wasm"];
@@ -278,26 +278,9 @@ fn terminal_of(outcome: &ActivationOutcome) -> Option<(&'static str, Vec<u8>)> {
     })
 }
 
-/// The outcome the journal's last event records.
-fn journaled_outcome(journal: &[Event]) -> Result<ActivationOutcome, String> {
-    match journal.last().map(|e| &e.body) {
-        Some(EventBody::RunCompleted(c)) => Ok(ActivationOutcome::Completed {
-            output: c.output.clone(),
-        }),
-        Some(EventBody::RunFailed(f)) => Ok(ActivationOutcome::Failed {
-            failure: f.failure.clone(),
-        }),
-        Some(EventBody::RunContinuedAsNew(c)) => Ok(ActivationOutcome::ContinuedAsNew {
-            continuation: c.continuation.clone(),
-        }),
-        other => Err(format!(
-            "journal does not end in a terminal event: {other:?}"
-        )),
-    }
-}
-
-/// Replay `l` over its whole journal; `Ok` iff the outcome, terminal payload and appended
-/// count are as recorded.
+/// Replay `l` over its whole journal through [`ostro_engine::replay_check`] (the verdict
+/// logic: outcome compare and appended count); `Ok` iff the verdict is `Ok{appended: 0}`
+/// and the outcome kind and terminal payload hash are as recorded.
 async fn replay(l: &Loaded) -> Result<(), String> {
     let e = &l.entry;
     let last_ts = l.journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
@@ -319,42 +302,29 @@ async fn replay(l: &Loaded) -> Result<(), String> {
         partition: e.partition,
         run_id: e.run_id.clone(),
     };
-    let sink = Arc::new(FakeSink::new());
-    sink.seed(run.clone(), l.journal.clone(), 1);
-    let outcome = rt
-        .activate(
-            &p,
-            Activate {
-                run: run.clone(),
-                attempt: 1,
-                module_sha: p.sha,
-                journal: l.journal.clone(),
-                inputs: None,
-                cancel: CancellationToken::new(),
-            },
-            sink.clone(),
-        )
-        .await;
-    let appended = sink.appended_events(&run);
-    if appended != 0 {
-        return Err(format!(
-            "replay appended {appended} event(s) (outcome {outcome:?}); first: {:?}",
-            sink.journal(&run).get(l.journal.len())
-        ));
+    match replay_check(&rt, &p, run, &l.journal).await {
+        ReplayVerdict::Ok { appended: 0 } => {}
+        ReplayVerdict::Ok { appended } | ReplayVerdict::OkFrontier { appended } => {
+            return Err(format!(
+                "replay appended {appended} event(s): the journal does not end in its terminal event"
+            ));
+        }
+        ReplayVerdict::Diverged { seq, detail } => {
+            return Err(format!(
+                "nondeterminism / divergence at seq {seq}: {detail}"
+            ));
+        }
+        ReplayVerdict::Error(err) => return Err(format!("replay error: {err}")),
     }
-    let Some((kind, bytes)) = terminal_of(&outcome) else {
-        return Err(format!("replay outcome is not terminal: {outcome:?}"));
+    let journaled = journaled_outcome(&l.journal)
+        .ok_or_else(|| "journal does not end in a terminal event".to_owned())?;
+    let Some((kind, bytes)) = terminal_of(&journaled) else {
+        return Err(format!("journaled outcome is not terminal: {journaled:?}"));
     };
     if kind != e.expected {
         return Err(format!(
-            "outcome kind {kind:?} != expected {:?} ({outcome:?})",
+            "outcome kind {kind:?} != expected {:?} ({journaled:?})",
             e.expected
-        ));
-    }
-    let journaled = journaled_outcome(&l.journal)?;
-    if outcome != journaled {
-        return Err(format!(
-            "terminal payload differs from the journal: replayed {outcome:?}, journaled {journaled:?}"
         ));
     }
     let got = sha_hex(&bytes);
@@ -541,6 +511,89 @@ async fn negative_wrong_expected_or_payload_sha_is_reported() {
         replay(&l).await.is_err(),
         "bad token key hex must be an error"
     );
+}
+
+// ------------------------------------------------------------------- replay_check verdicts
+
+/// Runtime + prepared module of a loaded entry, for direct [`replay_check`] calls.
+fn runtime_of(l: &Loaded) -> (Runtime, ostro_engine::runtime::Prepared, RunRef) {
+    let last_ts = l.journal.iter().map(|e| e.ts_nanos).max().unwrap_or(0);
+    let rt = Runtime::new(
+        EngineConfig::default(),
+        RuntimeOptions {
+            clock: Arc::new(FakeClock::with_step(last_ts + 3_600_000_000_000, 0)),
+            token_key: unhex32(&l.entry.token_key_hex).expect("token key"),
+            ..RuntimeOptions::default()
+        },
+    )
+    .expect("runtime");
+    let p = rt.prepare(&l.module).expect("prepare");
+    let run = RunRef {
+        partition: l.entry.partition,
+        run_id: l.entry.run_id.clone(),
+    };
+    (rt, p, run)
+}
+
+/// Terminal entries are `Ok{appended: 0}`; a truncated (non-terminal) journal is
+/// `OkFrontier` (live progress past the end, refused by the check); a journal whose command
+/// identity no longer matches what the module issues is `Diverged` at that seq.
+#[tokio::test]
+async fn replay_check_verdicts_ok_frontier_and_diverged() {
+    let Some(src) = control_entry() else {
+        println!("replay-corpus: empty, replay_check verdicts skipped");
+        return;
+    };
+    let l = load(&src).expect("load");
+    let (rt, p, run) = runtime_of(&l);
+    assert_eq!(
+        replay_check(&rt, &p, run.clone(), &l.journal).await,
+        ReplayVerdict::Ok { appended: 0 }
+    );
+
+    // Every proper prefix (non-terminal) is a frontier.
+    for cut in 1..l.journal.len() {
+        let v = replay_check(&rt, &p, run.clone(), &l.journal[..cut]).await;
+        assert!(
+            matches!(v, ReplayVerdict::OkFrontier { .. }),
+            "prefix 0..{cut}: {v:?}"
+        );
+    }
+    let v = replay_check(&rt, &p, run.clone(), &l.journal[..l.journal.len() - 1]).await;
+    assert!(
+        matches!(v, ReplayVerdict::OkFrontier { appended } if appended >= 1),
+        "truncated journal re-runs its tail: {v:?}"
+    );
+
+    // Divergence: flip the command hash of the first StepCompleted.
+    let mut j = l.journal.clone();
+    let seq = j
+        .iter_mut()
+        .find_map(|e| match &mut e.body {
+            EventBody::StepCompleted(s) => {
+                s.meta.hash.0[0] ^= 0xff;
+                Some(e.seq)
+            }
+            _ => None,
+        })
+        .expect("a StepCompleted in the control entry");
+    for journal in [&j[..], &j[..j.len() - 1]] {
+        let v = replay_check(&rt, &p, run.clone(), journal).await;
+        assert!(
+            matches!(&v, ReplayVerdict::Diverged { seq: s, .. } if *s == seq),
+            "diverged at {seq}: {v:?}"
+        );
+    }
+
+    // Malformed journals are errors, never verdicts about the module.
+    assert!(matches!(
+        replay_check(&rt, &p, run.clone(), &[]).await,
+        ReplayVerdict::Error(_)
+    ));
+    assert!(matches!(
+        replay_check(&rt, &p, run, &l.journal[1..]).await,
+        ReplayVerdict::Error(_)
+    ));
 }
 
 // ---------------------------------------------------------------- det-basic golden snapshot
