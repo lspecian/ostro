@@ -2,8 +2,18 @@
 name = "ostro-client"
 version = "0.1.0"
 description = "Python client for the Ostro REST API (no runtime dependencies)"
+readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
+keywords = ["ostro", "workflows", "durable-execution", "client"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
 # Hand-written client over the standard library only (D-P10): no runtime dependencies.
 dependencies = []
 
@@ -14,6 +24,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ostro_client"]
+# `ostro_client/**` includes the `py.typed` marker.
 include = ["ostro_client/**"]
 exclude = ["**/__pycache__", "**/*.pyc"]
 
