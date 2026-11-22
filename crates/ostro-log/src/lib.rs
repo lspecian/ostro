@@ -38,7 +38,7 @@ pub use node::{
     DEFAULT_REPLICA_LAG_MAX_MS, LogClock, LogNode, LogNodeConfig, PartitionLogs, SystemLogClock,
 };
 pub use ostro_wal;
-pub use partition_log::PartitionLog;
+pub use partition_log::{IsrView, PartitionLog};
 pub use recovery::{RecoveryReport, TornCut, recover_partition};
 pub use replicated::{
     AppendReceipt, EpochHistory, FollowerProgress, FollowerStatus, Isr, LogHealth, RawBatch,

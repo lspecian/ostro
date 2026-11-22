@@ -66,7 +66,7 @@ use crate::error::LogError;
 use crate::mutants;
 use crate::node::{LogClock, LogNodeConfig};
 use crate::recovery::{RecoveryReport, TOPIC, list_segments, segment_dir};
-use crate::replica::isr::IsrState;
+use crate::replica::isr::{IsrState, PendingChange};
 use crate::replica::tracker::ReplicaTracker;
 use crate::replica::watermark::{append_allowed, next_hw};
 use crate::replicated::{
@@ -280,6 +280,23 @@ impl ReplicaCore {
     }
 }
 
+/// The leader's ISR decision inputs ([`PartitionLog::isr_view`]).
+#[derive(Clone, Debug)]
+pub struct IsrView {
+    /// The epoch this replica leads.
+    pub epoch: Epoch,
+    /// Measured progress of every replica.
+    pub tracker: ReplicaTracker,
+    /// Published ISR, its CAS version and the in-flight change.
+    pub isr: IsrState,
+    /// Minimum ISR size.
+    pub min_insync: usize,
+    /// Current HW.
+    pub hw: Offset,
+    /// First offset of the leader's epoch (KIP-101 expansion floor).
+    pub epoch_start: Offset,
+}
+
 /// A partition log (leader or follower). Created by [`LogNode::open`](crate::LogNode::open).
 pub struct PartitionLog {
     pid: PartitionId,
@@ -435,6 +452,71 @@ impl PartitionLog {
             seq.current_epoch = latest;
         }
         Ok(())
+    }
+
+    /// Leader only: the inputs of the next ISR decision (12-11 ISR publisher): the
+    /// tracker, the ISR state (published + pending), the HW and the start offset of the
+    /// leader's epoch (its first record, or the LEO before one was written). `None` off the
+    /// leader role.
+    pub fn isr_view(&self) -> Option<IsrView> {
+        let st = self.core.lock();
+        let Mode::Leader { epoch } = st.mode else {
+            return None;
+        };
+        let tracker = st.tracker.clone()?;
+        let epoch_start = self
+            .epochs_lock()
+            .to_pairs()
+            .iter()
+            .find(|(e, _)| *e == epoch)
+            .map_or_else(|| self.log_end(), |(_, s)| *s);
+        Some(IsrView {
+            epoch,
+            tracker,
+            isr: st.isr.clone(),
+            min_insync: st.min_insync,
+            hw: self.hw_now(),
+            epoch_start,
+        })
+    }
+
+    /// Leader of `epoch`: mark `change` as the one in-flight `AlterIsr` (KIP-497: from now
+    /// on the HW counts the maximal ISR, a pending add included, a pending remove still
+    /// counted). `Ok(false)` while another change is pending.
+    pub fn propose_isr_change(
+        &self,
+        epoch: Epoch,
+        change: PendingChange,
+    ) -> Result<bool, LogError> {
+        let mut st = self.core.lock();
+        Self::check_leader_of(&st, epoch)?;
+        let accepted = st.isr.propose(change);
+        self.core.republish(&mut st);
+        Ok(accepted)
+    }
+
+    /// Leader of `epoch`: drop the in-flight `AlterIsr` (meta rejected it, or its outcome
+    /// became visible and [`set_published_isr`](ReplicatedLog::set_published_isr) adopted
+    /// the result). The HW then follows the published ISR alone.
+    pub fn clear_isr_change(&self, epoch: Epoch) -> Result<(), LogError> {
+        let mut st = self.core.lock();
+        Self::check_leader_of(&st, epoch)?;
+        st.isr.reject();
+        self.core.republish(&mut st);
+        Ok(())
+    }
+
+    fn check_leader_of(st: &ReplicaState, epoch: Epoch) -> Result<(), LogError> {
+        match st.mode {
+            Mode::Leader { epoch: cur } if cur == epoch => Ok(()),
+            Mode::Leader { epoch: cur } if cur > epoch => {
+                Err(LogError::StaleEpoch { current: cur })
+            }
+            Mode::Follower { leader, .. } => Err(LogError::NotLeader {
+                leader: Some(leader),
+            }),
+            _ => Err(LogError::NotLeader { leader: None }),
+        }
     }
 
     fn hw_now(&self) -> Offset {
