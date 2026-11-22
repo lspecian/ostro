@@ -1,42 +1,43 @@
-//! Bulk job API (Phase 11, D-P11-20): create / list / get / cancel node-local bulk jobs
-//! over [`crate::services::bulk::BulkRegistry`] (`P11Ctx::bulk`). Declared by 11-04
-//! (D-P11-23); implemented by **11-13**. Called by [`crate::p11::P11Controllers`].
+//! Bulk job API (Phase 11, D-P11-20, plan 11-13): create / list / get / cancel node-local
+//! bulk jobs over [`crate::services::bulk::BulkRegistry`] (`P11Ctx::bulk`). Called by
+//! [`crate::p11::P11Controllers`]; the adapters (11-09) validate the request first.
+//!
+//! - `create_bulk`: a dry run counts the matches (snapshot bound applied) and returns up
+//!   to 20 samples without creating anything; otherwise a `blk_<uuidv7>` job is created,
+//!   its file written and its runner started. More than `[bulk] max_matches` matches is
+//!   400 `bulk_too_many_matches` (dry run too); `[bulk] max_jobs` unfinished jobs is 429
+//!   `bulk_too_many_jobs` with `retry_after_ms`.
+//! - `list_bulk` / `get_bulk`: progress (matched, done, skipped, failed with up to 100
+//!   reasons, rate, eta). Unknown job: 404.
+//! - `cancel_bulk`: no new op starts; an op in flight finishes. A finished job is
+//!   returned unchanged.
 
 use ostro_api::ApiError;
 use ostro_api::phase11::{BulkCreateRequest, BulkCreateResponse, BulkJobView};
 
 use crate::p11::P11Ctx;
 
-fn stub(method: &str) -> ApiError {
-    ApiError::unimplemented(method).with_details(serde_json::json!({
-        "method": method,
-        "lands_in": "11-13",
-    }))
-}
-
-/// Create a bulk job (or count it on a dry run). Stub (11-13).
+/// Create a bulk job (or count it on a dry run).
 pub async fn create_bulk(
     ctx: &P11Ctx,
     req: BulkCreateRequest,
 ) -> Result<BulkCreateResponse, ApiError> {
-    let _ = (ctx, req);
-    Err(stub("create_bulk"))
+    ctx.bulk.create(ctx, req).await
 }
 
-/// Every bulk job on this node. Stub (11-13).
+/// Every bulk job on this node, in creation order.
 pub async fn list_bulk(ctx: &P11Ctx) -> Result<Vec<BulkJobView>, ApiError> {
-    let _ = ctx;
-    Err(stub("list_bulk"))
+    Ok(ctx.bulk.list())
 }
 
-/// One bulk job. Stub (11-13).
+/// One bulk job.
 pub async fn get_bulk(ctx: &P11Ctx, job_id: String) -> Result<BulkJobView, ApiError> {
-    let _ = (ctx, job_id);
-    Err(stub("get_bulk"))
+    ctx.bulk
+        .get(&job_id)
+        .ok_or_else(|| ApiError::not_found(format!("bulk job {job_id} not found")))
 }
 
-/// Cancel a bulk job. Stub (11-13).
+/// Cancel a bulk job.
 pub async fn cancel_bulk(ctx: &P11Ctx, job_id: String) -> Result<BulkJobView, ApiError> {
-    let _ = (ctx, job_id);
-    Err(stub("cancel_bulk"))
+    ctx.bulk.cancel(&job_id).await
 }

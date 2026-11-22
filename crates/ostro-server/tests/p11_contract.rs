@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ostro_api::ErrorCode;
 use ostro_api::phase11::{InventoryApi, OpsApi};
 use ostro_server::config::{EnvSource, Overrides, ServerConfig, load_layered};
 use ostro_server::p11::{P11Controllers, P11Feature, extensions, p11_feature_enabled, ui_config};
@@ -224,7 +223,7 @@ async fn seam_is_wired_after_start_and_released_at_shutdown() {
     assert!(ext.schedules.is_some(), "Phase 8 slots kept");
 
     // Controllers delegate to the control::p11_* functions (11-11 implemented limits and
-    // inventory; the bulk stub still names its plan).
+    // inventory, 11-13 bulk jobs).
     let c = P11Controllers(ctx.clone());
     let limits = c.limits().await.expect("limits (11-11)");
     assert!(
@@ -233,9 +232,8 @@ async fn seam_is_wired_after_start_and_released_at_shutdown() {
             .iter()
             .any(|l| l.name == "max_history_events" && l.value == 777)
     );
-    let err = c.list_bulk().await.expect_err("stub");
-    assert_eq!(err.code, ErrorCode::Unimplemented);
-    assert_eq!(err.details.as_ref().expect("details")["lands_in"], "11-13");
+    let jobs = c.list_bulk().await.expect("list_bulk (11-13)");
+    assert!(jobs.is_empty(), "{jobs:?}");
     let parts = c.list_partitions().await.expect("partitions (11-11)");
     assert_eq!(parts.len(), usize::from(s.cfg.node.partitions));
     drop((c, ext, ctx));
