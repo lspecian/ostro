@@ -413,7 +413,7 @@ Plans:
 - [x] 11-15-PLAN.md — UI foundation: security layer (CSP, CSRF, Host/:authority allowlist on all routes), embedded assets, run list/filters/tags/DLQ tab, run detail + published status, timeline with replay markers, logs (UI-01) (W5)
 - [x] 11-16-PLAN.md — UI actions: cancel/terminate/retry/signal/pause/resume, rerun-from-step with preview, DLQ requeue/dismiss, bulk create/progress/cancel (UI-02) (W6)
 - [x] 11-17-PLAN.md — UI inventory: modules, workflows/versions, queues (+pause/resume), schedules (+pause/resume/trigger), workers (+drain), partition health (UI-03, UI-02) (W7)
-- [ ] 11-18-PLAN.md — PHASE-11 GATE: spawned-binary SC1–SC5 e2e (ops_e2e, ui_e2e), kill tests, rerun corpus entries, docs/operations.md + docs/ui.md, binary size vs NFR-2.1, full ci-local, RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION + human_needed browser checklist (all) (W8)
+- [x] 11-18-PLAN.md — PHASE-11 GATE: spawned-binary SC1–SC5 e2e (ops_e2e, ui_e2e), kill tests, rerun corpus entries, docs/operations.md + docs/ui.md, binary size vs NFR-2.1, full ci-local, RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION + human_needed browser checklist (all) (W8)
 
 ### Phase 12: Replicated Partition Logs
 **Goal**: Partition logs replicate across nodes with no acknowledged-write loss. Chronik's pure algorithms are ported behind the existing `ReplicatedLog`, and the conformance suite gates everything.
@@ -543,7 +543,7 @@ Phases execute in numeric order: 1 → 2 → 3 → ... → 14. Allowed paralleli
 | 8. Triggers, Bottomless & Observability | 0/TBD | Not started | - |
 | 9. Polyglot SDKs & Conformance | 0/TBD | Not started | - |
 | 10. Developer CLI & Test Kits | 1/20 | In progress (10-01 gate passed 2026-11-22) | - |
-| 11. Run Operations & Embedded UI | 0/TBD | Not started | - |
+| 11. Run Operations & Embedded UI | 18/18 | Plans complete; phase verification pending | - |
 | 12. Replicated Partition Logs | 0/TBD | Not started | - |
 | 13. Cluster Membership, Routing & Upgrades | 0/TBD | Not started | - |
 | 14. Multi-Tenancy, Security & 1.0 Release | 0/TBD | Not started | - |

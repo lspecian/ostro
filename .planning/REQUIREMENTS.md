@@ -134,12 +134,12 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 ### Run Operations & Retention
 
 - [x] **OPS-01**: Operator can pause and resume a run, a workflow or a queue; runs can auto-pause when retries are exhausted
-- [ ] **OPS-02**: Operator can rerun a run from a chosen step (journal prefix copied into a new run)
-- [ ] **OPS-03**: Operator can bulk cancel/retry/rerun runs matching a filter, rate-spread
-- [ ] **OPS-04**: Failed runs land in a DLQ with reason; an optional `on_failure` workflow hook runs; DLQ entries can be requeued
-- [ ] **OPS-05**: Runs carry tags with bounded indexed search
+- [x] **OPS-02**: Operator can rerun a run from a chosen step (journal prefix copied into a new run)
+- [x] **OPS-03**: Operator can bulk cancel/retry/rerun runs matching a filter, rate-spread
+- [x] **OPS-04**: Failed runs land in a DLQ with reason; an optional `on_failure` workflow hook runs; DLQ entries can be requeued
+- [x] **OPS-05**: Runs carry tags with bounded indexed search
 - [x] **OPS-06**: Terminal runs and journals are deleted after a per-workflow/queue TTL; dedupe entries have retention [FR-6.3]
-- [ ] **OPS-07**: Published limits (payload sizes, history length, children per run) are documented and enforced with clear errors
+- [x] **OPS-07**: Published limits (payload sizes, history length, children per run) are documented and enforced with clear errors
 
 ### SDKs & Conformance
 
@@ -164,9 +164,9 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### UI
 
-- [ ] **UI-01**: Embedded web UI served from the binary: run list/filter/tags, history timeline with replay markers, published status [FR-0.5]
-- [ ] **UI-02**: UI actions: cancel, terminate, retry, rerun-from-step, pause/resume, DLQ requeue, bulk operations
-- [ ] **UI-03**: UI views for modules, workflows/versions, queues, schedules, workers and cluster/partition health
+- [x] **UI-01**: Embedded web UI served from the binary: run list/filter/tags, history timeline with replay markers, published status [FR-0.5]
+- [x] **UI-02**: UI actions: cancel, terminate, retry, rerun-from-step, pause/resume, DLQ requeue, bulk operations
+- [x] **UI-03**: UI views for modules, workflows/versions, queues, schedules, workers and cluster/partition health
 
 ### Observability
 
@@ -332,12 +332,12 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | BACK-03 | Phase 8 | Complete |
 | BACK-04 | Phase 8 | Complete |
 | OPS-01 | Phase 7 | Complete |
-| OPS-02 | Phase 11 | Pending |
-| OPS-03 | Phase 11 | Pending |
-| OPS-04 | Phase 11 | Pending |
-| OPS-05 | Phase 11 | Pending |
+| OPS-02 | Phase 11 | Complete (11-18 ops_e2e SC1: fix-and-rerun from s3 through the spawned binary, one completion per step, prefix identical; UI rerun preview + submit in ui_e2e; kill test rerun::before_rearm; rerun_api / rerun_rearm / apply_rerun; corpus rerun-fixed-from-step + rerun-rearmed-timer) |
+| OPS-03 | Phase 11 | Complete (11-18 ops_e2e SC2: ostro bulk retry + bulk rerun over a tag at rate 20, snapshot bound = exactly one op per matched run, ops spread after the burst; kill test bulk::after_op resumes without duplicate cancels; bulk_ops 13; UI bulk create/cancel in ui_e2e) |
+| OPS-04 | Phase 11 | Complete (11-18 ops_e2e SC1: DLQ entry with reason, on_failure hook exactly once, requeue restart; SC3 requeue resume; kill test dlq::hook_after_start; dlq_api 11; UI DLQ requeue in ui_e2e) |
+| OPS-05 | Phase 11 | Complete (11-18 ops_e2e SC2: tags=batch&order=newest&limit=25 pages bounded, newest first, complete; ostro ls --tag --newest; search_api, run_index proptest) |
 | OPS-06 | Phase 5 | Complete (1 s policy retention: GET/history/list gone, idempotency key reused, resumed run survives the old timer, expiry after restart: 05-15 retention; 50,000-event expiry blocks apply 34-45 ms in release: 05-16 perf expiry) |
-| OPS-07 | Phase 11 | Pending |
+| OPS-07 | Phase 11 | Complete (11-18 ops_e2e SC3: lowered [limits] on ostro server: resumable limit_exceeded history/children failures, 413 payload_bytes and rerun_prefix_too_large details, retry/requeue resume after raising; GET /v1/limits == docs/limits.md; run_limits, limits_run, limits_api, limits_doc) |
 | SDK-01 | Phase 4 | Complete |
 | SDK-02 | Phase 9 | Complete (PyPI publishing human_needed, D-P9-19) |
 | SDK-03 | Phase 9 | Complete (npm publishing human_needed, D-P9-19) |
@@ -353,9 +353,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | CLI-06 | Phase 5 | Complete (spawned-binary cli_verbs suite + --json snapshots: 05-14; order-saga happy/compensated/cancelled/kill -9 driven only by the CLI: 05-17 order_saga) |
 | CLI-07 | Phase 10 | Pending |
 | CLI-08 | Phase 10 | Pending |
-| UI-01 | Phase 11 | Pending |
-| UI-02 | Phase 11 | Pending |
-| UI-03 | Phase 11 | Pending |
+| UI-01 | Phase 11 | Complete (11-18 ui_e2e: run list/filter, run detail, timeline/logs/status fragments, DLQ, published-status pages over HTTP on real runs with the D-P11-15 headers; ostro-ui pages/hardening/security; real-browser checks human_needed, 11-VALIDATION Manual-Only) |
+| UI-02 | Phase 11 | Complete (11-18 ui_e2e: terminate, cancel, retry, pause/resume run + queue, rerun preview + submit, DLQ requeue, bulk create + cancel change real state via same-origin CSRF requests; cross-site / foreign Host 403; ostro-ui actions; browser checks human_needed) |
+| UI-03 | Phase 11 | Complete (11-18 ui_e2e: modules, workflows, queues, schedules, workers and partition health with live data on a TLS ostro server with a real worker and a schedule; ostro-ui inventory; browser checks human_needed) |
 | OBS-01 | Phase 8 | Complete |
 | OBS-02 | Phase 8 | Complete |
 | OBS-03 | Phase 8 | Complete |

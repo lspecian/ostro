@@ -18,6 +18,7 @@
      **Phase 9 gate 2026-11-21 (09-01):** the code was re-verified against this file before any Phase 9 code (`09-01-rescheck.py`, output in 09-01-SUMMARY: every Cmd tag, intent, outbox kind, TerminalStatus, StartRun field, journal kind, keyspace, RejectReason, InvalidCode and MetaRecord in code is `exists` or a canonical placeholder; RESERVATIONS CHECK: PASS). PF-F1 (`CompleteRun.parent_event` 5, outbox `ChildCompleted.event` 6) and PF-F2 (`RunRecord.continued_to`, CancelRun forwarding) landed in Phase 5, so Phase 9 allocates **no ordinal** (D-P9-6): every P9 row (Cmd 34–40, StartRun 36–39, Intent 19–22, EventKind 98–105, TerminalStatus 10–11, keyspace 19 `p9_a`, RejectReason 20–22, InvalidCode 25–28, Outbox 11–12, MetaRecord 22–23, meta ext tags 64–79) is empty in code and stays reserved, unused (fallback only). Phase 9 names: §11 (D-P9-6 rows plus the D-P9-20 rows added by 09-01).
      **Phase 9 end gate 2026-11-22 (09-20):** the code was re-verified against this file (`09-20` reservations check, output in 09-20-SUMMARY: RESERVATIONS CHECK: PASS). Phase 9 used exactly one ordinal, Intent 19 `ChildJournal` (09-05, D-P9-31, coordinator decision option (a)), flipped to `exists (P9, 09-05)`. Every other P9 slot (Cmd 34–40, StartRun 36–39, Intent 20–22, EventKind 98–105, TerminalStatus 10–11, keyspace 19 `p9_a`, RejectReason 20–22, InvalidCode 25–28 (canonical `ReservedP9_25..28` placeholders declared by 11-02), Outbox 11–12, MetaRecord 22–23, meta ext tags 64–79) is empty in code and reads "unused at Phase 9 end; fallback not needed". Every Phase 9 §11 name row now reads `exists (P9, <plan>)`.
      **Phase 12 gate 2026-11-22 (12-01):** the code was re-verified against this file before any Phase 12 code (`12-01-rescheck.py`, output in 12-01-SUMMARY: every Cmd tag, StartRun field, intent, outbox kind, TerminalStatus, journal kind, keyspace, RejectReason, InvalidCode, MetaRecord/MetaKind, MetaCommand and ext tag in code is `exists` or a canonical placeholder; MetaCommand is exactly 0–3; Cmd 41–42, MetaRecord 26 and ext tags 80–95 are empty; RESERVATIONS CHECK: PASS). F7 landed in 05-07, so Cmd 41–42 and MetaRecord 26 stay **unused**. Phase 12 allocations: MetaCommand 4 `ElectLeader`, 5 `AlterIsr`, 6 `ResignLeader` (7 spare), ext tag 80 `ElectionInfo` (81–95 spare) and the §11 Phase 12 names (D-P12-11/12).
+     **Phase 11 end gate 2026-11-22 (11-18):** every Phase 11 ordinal in code was re-verified against this file (`11-18-rescheck.py`, output in 11-18-SUMMARY: every Cmd tag in code is `exists`; StartRun 40/41, JournalEvent.4, InvalidCode 29/30, meta ext 144/145 and `x_run_index` are in code; RESERVATIONS CHECK: PASS). Used rows read `exists (P11, <plan>)`: Cmd 45 `DlqUpdate`, StartRun 40/41, JournalEvent.4, InvalidCode 29/30, ext 144 `OnFailure` / 145 `DlqPolicy` and `x_run_index`. Unused P11 slots stay `reserved P11`: Cmd 46–49, StartRun 42–43, InvalidCode 31 (no `ReservedP11_31` placeholder is declared yet), ext 146–159, and the metric prefix `ostro_ui_`. The §11 Phase 11 names that shipped read `exists (P11, <plan>)`; 11-18 added the CLI verb row and `index_rebuilding`. **Not allocated (follow-up):** `RunInfo.retry_of` / `RunInfo.status_seq` and a `RunPage` order-fallback flag (header `X-Ostro-Order-Fallback`) need `ostro.api.v1` proto field numbers, and this file has no API-proto block to take them from; they are left to a later plan that adds such a block (no numbers invented).
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -179,7 +180,7 @@ Rules:
 | 17 | p7_a | reserved P7, **unused** (F1 landed in 05-02: `RunRecord.pause: Option<PauseMark>`; verified by 07-01). Never declared by Phase 7; a later phase landing keyspace 19+ declares it as an empty placeholder under the placeholder rule. |
 | 18 | p7_b | reserved P7, **unused** (F1 landed in 05-02; verified by 07-01). Never declared by Phase 7. |
 | 19 | p9_a | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only). Never declared by Phase 9 (D-P9-6); a later phase landing keyspace 20+ declares it as an empty placeholder under the placeholder rule. (unused at Phase 9 end; fallback not needed) |
-| (none) | `x_*` derived keyspaces (PF-11-2): outside TABLES, the digest, OSNP and blob GC; rebuilt from digest state. Reserved name: `x_run_index` (P11) | rule frozen in 05-20 |
+| (none) | `x_*` derived keyspaces (PF-11-2): outside TABLES, the digest, OSNP and blob GC; rebuilt from digest state. Reserved name: `x_run_index` (P11) | rule frozen in 05-20; `x_run_index` exists (P11, 11-05) |
 | 20+ | — | unallocated |
 
 ## 7. Apply outcome `RejectReason` (outcome code = 16 + index; folded into the state hash)
@@ -318,8 +319,8 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 102 | `ModuleRecord` / `WorkflowVersion` Retired `{retired_at_ms}` | reserved P13 |
 | 103–111 | spare | reserved P13 |
 | 112–143 | reserved P14 (ApiToken name/description/created_by/rotation link, ModuleRecord signature evidence + uploader tenants, ClusterInfo security policy, SealedSecret created/rotated, further Tenant knobs) | — |
-| 144 | `WorkflowPolicy` / `QueuePolicy` OnFailure | reserved P11 |
-| 145 | DlqPolicy `{enabled, hook_catchup_ms}` | reserved P11 |
+| 144 | `WorkflowPolicy` / `QueuePolicy` OnFailure | exists (P11, 11-12) |
+| 145 | DlqPolicy `{enabled, hook_catchup_ms}` | exists (P11, 11-12) |
 | 146–159 | spare | reserved P11 |
 | 160+ | unallocated | — |
 
@@ -403,23 +404,24 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Object key (bottomless layout) | `p/<pppp>/head` | planned P12 |
 | Metrics | `ostro_repl_*`, incl. `ostro_repl_upload_fenced{partition}` and `ostro_repl_self_demotions_total` | planned P12 |
 | Env vars | `OSTRO_REPL_RED_RUN`, `OSTRO_REPL_REQUIRE_ALL`, `OSTRO_FAILOVER_ITERS`, `OSTRO_FAILOVER_ASSERT`, `OSTRO_FAILOVER_SWEEP`, `OSTRO_CAMPAIGN_FAULTS` (shared with the P5 campaign knob), `OSTRO_REPL_BENCH_SECS`, `OSTRO_PROC_ITERS`, `OSTRO_FAILPOINT_BIN`, `OSTRO_PROC_BUILD` | planned P12 |
-| Crate / dirs | `ostro-ui` (`crates/ostro-ui/{templates,assets}`), `<data>/bulk/` | P11 |
-| REST | `/ui/*`, `GET /v1/dlq`, `POST /v1/dlq/{run}/requeue\|dismiss`, `POST /v1/runs/{id}/rerun`, `GET\|POST /v1/bulk`, `GET /v1/bulk/{id}`, `POST /v1/bulk/{id}/cancel`, list endpoints `GET /v1/modules`, `GET /v1/queues`, `GET /v1/partitions`, `GET /v1/limits` | P11 |
-| gRPC services | `ostro.api.v1.RunOps`, `ostro.api.v1.Inventory` | P11 |
-| Dedupe namespaces | `__rerun/`, `__onfail/`, `__bulk/`, `__dlq/` | P11 |
-| System run tag | `__ostro/rerun_from=<seq>` (zero-format rerun lineage, PF-11-4 fallback) | P11 |
-| System run tag | `__ostro/on_failure_of=<run>` (on-failure hook runs: the failed run they handle; D-P11-25) | P11 (11-01) |
-| Error kinds | `limit_exceeded`, `payload_too_large` (documented in WIT by 05-20) | P11 |
-| Config sections | `[limits]`, `[ui]`, `[bulk]`, `[dlq]` (D-P11-25) | P11 (11-01) |
-| Env var | `OSTRO_UI_ALLOWED_HOSTS` (D-P11-25) | P11 (11-01) |
-| Metric prefixes | `ostro_bulk_`, `ostro_rerun_`, `ostro_ui_`; `ostro_dlq_` is shared with P8 (`ostro_dlq_total` exists, P8): Phase 11 adds the series `ostro_dlq_hooks_total`, `ostro_dlq_requeues_total` (D-P11-25) | P11 (11-01) |
-| Failpoint prefixes | `bulk::`, `rerun::`, `dlq::` (D-P11-25) | P11 (11-01) |
-| Id prefix | `blk_` (bulk jobs) (D-P11-25) | P11 (11-01) |
-| Guest names | `p11-limits`, `p11-rerun`, `p11-rerun-v2`, `p11-hook` (D-P11-25) | P11 (11-01) |
-| UI cookie / header | cookie `ostro_csrf`, header `X-Ostro-Csrf` (D-P11-25) | P11 (11-01) |
-| API error `details.reason` values | `run_not_terminal`, `rerun_cut_unsafe`, `rerun_nondeterministic`, `rerun_prefix_too_large`, `dlq_not_member`, `bulk_too_many_jobs`, `bulk_too_many_matches`, `limit_exceeded` (documented API vocabulary, not a registry space; D-P11-25) | P11 (11-01) |
-| Engine module | `run_limits` (run limits; the existing ENG-05 `limits.rs` is untouched) (D-P11-25) | P11 (11-01) |
-| REST paths | `GET\|PUT /v1/workflows/{name}/failure-policy`, `GET\|PUT /v1/queues/{name}/failure-policy`, `GET /v1/runs/{id}/rerun-cuts` (D-P11-29) | P11 (11-01) |
+| Crate / dirs | `ostro-ui` (`crates/ostro-ui/{templates,assets}`), `<data>/bulk/` | exists (P11, 11-03 crate; 11-13 `<data>/bulk/`) |
+| REST | `/ui/*`, `GET /v1/dlq`, `POST /v1/dlq/{run}/requeue\|dismiss`, `POST /v1/runs/{id}/rerun`, `GET\|POST /v1/bulk`, `GET /v1/bulk/{id}`, `POST /v1/bulk/{id}/cancel`, list endpoints `GET /v1/modules`, `GET /v1/queues`, `GET /v1/partitions`, `GET /v1/limits` | exists (P11, 11-09 routes; 11-10..11-17) |
+| gRPC services | `ostro.api.v1.RunOps`, `ostro.api.v1.Inventory` | exists (P11, 11-09) |
+| Dedupe namespaces | `__rerun/`, `__onfail/`, `__bulk/`, `__dlq/` | exists (P11, 11-10 / 11-12 / 11-13) |
+| System run tag | `__ostro/rerun_from=<seq>` (zero-format rerun lineage, PF-11-4 fallback) | exists (P11, 11-07) |
+| System run tag | `__ostro/on_failure_of=<run>` (on-failure hook runs: the failed run they handle; D-P11-25) | exists (P11, 11-12) |
+| Error kinds | `limit_exceeded`, `payload_too_large` (documented in WIT by 05-20) | exists (P11, 11-06) |
+| Config sections | `[limits]`, `[ui]`, `[bulk]`, `[dlq]` (D-P11-25) | exists (P11, 11-04) |
+| Env var | `OSTRO_UI_ALLOWED_HOSTS` (D-P11-25) | exists (P11, 11-04) |
+| Metric prefixes | `ostro_bulk_`, `ostro_rerun_`, `ostro_ui_`; `ostro_dlq_` is shared with P8 (`ostro_dlq_total` exists, P8): Phase 11 adds the series `ostro_dlq_hooks_total`, `ostro_dlq_requeues_total` (D-P11-25) | exists (P11, 11-10 / 11-12 / 11-13); `ostro_ui_` unused, stays reserved P11 |
+| Failpoint prefixes | `bulk::`, `rerun::`, `dlq::` (D-P11-25) | exists (P11, 11-07 / 11-12 / 11-13) |
+| Id prefix | `blk_` (bulk jobs) (D-P11-25) | exists (P11, 11-13) |
+| Guest names | `p11-limits`, `p11-rerun`, `p11-rerun-v2`, `p11-hook` (D-P11-25) | exists (P11, 11-06 / 11-07 / 11-12) |
+| UI cookie / header | cookie `ostro_csrf`, header `X-Ostro-Csrf` (D-P11-25) | exists (P11, 11-15) |
+| API error `details.reason` values | `run_not_terminal`, `rerun_cut_unsafe`, `rerun_nondeterministic`, `rerun_prefix_too_large`, `dlq_not_member`, `bulk_too_many_jobs`, `bulk_too_many_matches`, `limit_exceeded`, `index_rebuilding` (503 while the run index rebuilds, 11-11) (documented API vocabulary, not a registry space; D-P11-25) | exists (P11, 11-09 / 11-11) |
+| Engine module | `run_limits` (run limits; the existing ENG-05 `limits.rs` is untouched) (D-P11-25) | exists (P11, 11-06) |
+| REST paths | `GET\|PUT /v1/workflows/{name}/failure-policy`, `GET\|PUT /v1/queues/{name}/failure-policy`, `GET /v1/runs/{id}/rerun-cuts` (D-P11-29) | exists (P11, 11-09 routes; 11-10 / 11-12) |
+| CLI verbs | `ostro rerun`, `ostro dlq ls\|requeue\|dismiss`, `ostro bulk cancel\|terminate\|retry\|rerun\|requeue\|pause\|resume\|signal\|ls\|status`, `ostro limits`; `ostro ls` flags `--tag` (repeatable), `--newest`, `--dlq` (11-14) | exists (P11, 11-14) |
 | Crates | `ostro-worker`, `ostro-worker-proto` | P7 (07-02) |
 | Config sections | `[workers]`, `[worker]`, `[cluster]` (P7 creates; P12 extends with `[[cluster.peers]]`, `replication_listen`), `[cluster.tls]`, `[api.tls]`, `[flow]` | P7 (07-02) |
 | gRPC services | `ostro.worker.v1.Execute` (cluster listener, mTLS); `ostro.api.v1.Queues`, `ostro.api.v1.Workers` | P7 (07-02 / 07-11) |
