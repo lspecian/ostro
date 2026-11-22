@@ -411,7 +411,7 @@ Plans:
 - [ ] 11-13-PLAN.md — Bulk operations: snapshot bound, pinned cursor + processed set, Phase 7 GCRA pacing, backpressure, per-run idempotency, checkpoints + crash resume (OPS-03) (W7)
 - [ ] 11-14-PLAN.md — CLI: ostro rerun, dlq, bulk, limits, ls --tag/--newest/--dlq, completions presence (CLI-06 contract; exclusive with 10-09) (OPS-02..05, OPS-07) (W7)
 - [x] 11-15-PLAN.md — UI foundation: security layer (CSP, CSRF, Host/:authority allowlist on all routes), embedded assets, run list/filters/tags/DLQ tab, run detail + published status, timeline with replay markers, logs (UI-01) (W5)
-- [ ] 11-16-PLAN.md — UI actions: cancel/terminate/retry/signal/pause/resume, rerun-from-step with preview, DLQ requeue/dismiss, bulk create/progress/cancel (UI-02) (W6)
+- [x] 11-16-PLAN.md — UI actions: cancel/terminate/retry/signal/pause/resume, rerun-from-step with preview, DLQ requeue/dismiss, bulk create/progress/cancel (UI-02) (W6)
 - [ ] 11-17-PLAN.md — UI inventory: modules, workflows/versions, queues (+pause/resume), schedules (+pause/resume/trigger), workers (+drain), partition health (UI-03, UI-02) (W7)
 - [ ] 11-18-PLAN.md — PHASE-11 GATE: spawned-binary SC1–SC5 e2e (ops_e2e, ui_e2e), kill tests, rerun corpus entries, docs/operations.md + docs/ui.md, binary size vs NFR-2.1, full ci-local, RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION + human_needed browser checklist (all) (W8)
 
