@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -276,6 +276,10 @@ pub struct FakeControlPlane {
     ready: AtomicBool,
     /// Woken on every run status change (long-poll).
     changed: tokio::sync::Notify,
+    /// Phase 10 (10-05): dev-clock mode (default `Auto`).
+    dev_mode: Mutex<DevTimeMode>,
+    /// Phase 10: total dev-clock skip, ms (only grows).
+    dev_offset_ms: AtomicU64,
 }
 
 impl Default for FakeControlPlane {
@@ -291,6 +295,21 @@ impl FakeControlPlane {
             state: Mutex::new(State::default()),
             ready: AtomicBool::new(true),
             changed: tokio::sync::Notify::new(),
+            dev_mode: Mutex::new(DevTimeMode::Auto),
+            dev_offset_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Test helper (10-05): set the dev-clock mode (`Off` = every dev-time call is 409).
+    pub fn set_dev_mode(&self, mode: DevTimeMode) {
+        *self.dev_mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+    }
+
+    /// The dev-clock mode, or 409 `time_skipping_disabled` when it is off.
+    fn dev_mode_on(&self) -> Result<DevTimeMode, ApiError> {
+        match *self.dev_mode.lock().unwrap_or_else(|p| p.into_inner()) {
+            DevTimeMode::Off => Err(time_skipping_disabled()),
+            m => Ok(m),
         }
     }
 
@@ -1545,6 +1564,123 @@ impl ControlPlane for FakeControlPlane {
             endpoints: vec![FAKE_CLUSTER_ENDPOINT.to_owned()],
             renew_after_ms: FAKE_RENEW_AFTER_MS,
             cluster_id: FAKE_CLUSTER_ID.to_owned(),
+        })
+    }
+
+    // --- Phase 10 (10-05) ---
+
+    /// The fake clock plus the skipped offset; always idle, nothing due.
+    async fn dev_time(&self) -> Result<DevTimeInfo, ApiError> {
+        let mode = self.dev_mode_on()?;
+        let offset_ms = self.dev_offset_ms.load(Ordering::SeqCst);
+        Ok(DevTimeInfo {
+            now_ms: self.lock().now_ms().saturating_add(offset_ms),
+            offset_ms,
+            mode,
+            idle: true,
+            next_due_ms: None,
+        })
+    }
+
+    /// Grows the offset (a target in the past skips 0). Does not tick the fake clock.
+    async fn dev_skip(&self, s: DevSkip) -> Result<DevSkipResult, ApiError> {
+        // The mode lock serialises skips, so the read-modify-write of the offset is atomic.
+        let mode = self.dev_mode.lock().unwrap_or_else(|p| p.into_inner());
+        if *mode == DevTimeMode::Off {
+            return Err(time_skipping_disabled());
+        }
+        let base = self.lock().now_ms();
+        let prev = self.dev_offset_ms.load(Ordering::SeqCst);
+        let skipped_ms = match s {
+            DevSkip::By { ms } => ms,
+            DevSkip::To { ms } => ms.saturating_sub(base.saturating_add(prev)),
+        };
+        let offset_ms = prev.saturating_add(skipped_ms);
+        self.dev_offset_ms.store(offset_ms, Ordering::SeqCst);
+        drop(mode);
+        Ok(DevSkipResult {
+            now_ms: base.saturating_add(offset_ms),
+            offset_ms,
+            skipped_ms,
+        })
+    }
+
+    /// `ok` for every selected run whose workflow the module exports, `skipped`
+    /// otherwise; unknown module or run = NotFound. A sample takes the newest `n` runs
+    /// per exported workflow.
+    async fn replay_module(&self, r: ReplayRequest) -> Result<ReplayResult, ApiError> {
+        r.validate()?;
+        let st = self.lock();
+        let module = st
+            .modules
+            .get(&r.module_sha256)
+            .ok_or_else(|| ApiError::not_found(format!("module {} not found", r.module_sha256)))?;
+        let exported: BTreeSet<&str> = module.workflows.iter().map(|w| w.name.as_str()).collect();
+        let runs: Vec<&RunInfo> = match &r.select {
+            ReplaySelect::Runs(ids) => ids
+                .iter()
+                .map(|id| {
+                    st.runs
+                        .get(id)
+                        .ok_or_else(|| ApiError::not_found(format!("run {id} not found")))
+                })
+                .collect::<Result<_, _>>()?,
+            ReplaySelect::Sample {
+                n,
+                workflow,
+                status,
+            } => {
+                let status = status.as_deref().and_then(RunStatus::parse);
+                let mut newest: Vec<&RunInfo> = st
+                    .runs
+                    .values()
+                    .filter(|run| exported.contains(run.workflow.as_str()))
+                    .filter(|run| workflow.as_ref().is_none_or(|w| *w == run.workflow))
+                    .filter(|run| status.is_none_or(|s| s == run.status))
+                    .collect();
+                newest.sort_by(|a, b| {
+                    (
+                        a.workflow.as_str(),
+                        std::cmp::Reverse((a.created_at_ms, &a.run_id)),
+                    )
+                        .cmp(&(
+                            b.workflow.as_str(),
+                            std::cmp::Reverse((b.created_at_ms, &b.run_id)),
+                        ))
+                });
+                let mut taken: BTreeMap<&str, u32> = BTreeMap::new();
+                newest.retain(|run| {
+                    let c = taken.entry(run.workflow.as_str()).or_default();
+                    *c += 1;
+                    *c <= *n
+                });
+                newest
+            }
+        };
+        let verdicts: Vec<ReplayVerdictInfo> = runs
+            .into_iter()
+            .map(|run| {
+                let known = exported.contains(run.workflow.as_str());
+                ReplayVerdictInfo {
+                    run_id: run.run_id.clone(),
+                    workflow: run.workflow.clone(),
+                    verdict: if known {
+                        ReplayVerdictKind::Ok
+                    } else {
+                        ReplayVerdictKind::Skipped
+                    },
+                    seq: None,
+                    detail: (!known).then(|| {
+                        format!("workflow {} is not exported by the module", run.workflow)
+                    }),
+                    appended: 0,
+                }
+            })
+            .collect();
+        Ok(ReplayResult {
+            module_sha256: r.module_sha256,
+            summary: ReplaySummary::of(&verdicts),
+            verdicts,
         })
     }
 }

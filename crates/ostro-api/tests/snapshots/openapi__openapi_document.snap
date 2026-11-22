@@ -545,6 +545,90 @@ expression: pretty
         }
       }
     },
+    "/v1/dev/time": {
+      "get": {
+        "tags": [
+          "dev"
+        ],
+        "summary": "The dev clock.",
+        "description": "REST-only tooling endpoint (no gRPC). Available only with `ostro dev --ephemeral --time-skipping`; otherwise 409 with details.reason = time_skipping_disabled.",
+        "operationId": "dev_time",
+        "responses": {
+          "200": {
+            "description": "The dev clock",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevTimeDto"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Time skipping is off (details.reason = time_skipping_disabled)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dev/time/skip": {
+      "post": {
+        "tags": [
+          "dev"
+        ],
+        "summary": "Skip the dev clock forward.",
+        "description": "REST-only tooling endpoint (no gRPC). Available only with `ostro dev --ephemeral --time-skipping`; otherwise 409 with details.reason = time_skipping_disabled. Exactly one of `by` / `to_ms`; time never moves backwards.",
+        "operationId": "dev_skip",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevSkipBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Skipped",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevSkipDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither or both of by / to_ms, or an invalid duration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Time skipping is off (details.reason = time_skipping_disabled)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/dlq": {
       "get": {
         "tags": [
@@ -1271,6 +1355,69 @@ expression: pretty
           },
           "413": {
             "description": "Module exceeds api.max_module_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/modules/{sha}/replay": {
+      "post": {
+        "tags": [
+          "tooling"
+        ],
+        "summary": "Replay stored journals against a module.",
+        "description": "REST-only tooling endpoint (no gRPC). Replays the selected runs' journals against the uploaded module on the server (`ostro replay`); the module need not be active.",
+        "operationId": "replay_module",
+        "parameters": [
+          {
+            "name": "sha",
+            "in": "path",
+            "description": "Lowercase hex sha256 of an uploaded module",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "One verdict per run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed sha, neither or both of runs / sample, or sample > 1000 (details.reason = sample_too_large)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown module or run",
             "content": {
               "application/json": {
                 "schema": {
@@ -5217,6 +5364,108 @@ expression: pretty
           }
         }
       },
+      "DevSkipBody": {
+        "type": "object",
+        "description": "`POST /v1/dev/time/skip` body: exactly one of `by` (friendly duration, e.g. `\"72h\"`;\nwrite days as hours) or `to_ms` (absolute target, ms since the epoch; a target in\nthe past skips nothing).",
+        "properties": {
+          "by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Relative skip (`\"30s\"`, `\"72h\"`)."
+          },
+          "to_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Absolute target, ms since the Unix epoch.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DevSkipDto": {
+        "type": "object",
+        "description": "`POST /v1/dev/time/skip` response.",
+        "required": [
+          "now_ms",
+          "offset_ms",
+          "skipped_ms"
+        ],
+        "properties": {
+          "now_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The server's time after the skip, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "offset_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total skipped so far, ms.",
+            "minimum": 0
+          },
+          "skipped_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Milliseconds this skip advanced (0 for a target in the past).",
+            "minimum": 0
+          }
+        }
+      },
+      "DevTimeDto": {
+        "type": "object",
+        "description": "`GET /v1/dev/time` response.",
+        "required": [
+          "now_ms",
+          "offset_ms",
+          "mode",
+          "idle"
+        ],
+        "properties": {
+          "idle": {
+            "type": "boolean",
+            "description": "The node has no ready, granting or executing work."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/DevTimeModeDto",
+            "description": "Time-skipping mode."
+          },
+          "next_due_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Earliest due timer or delayed start, ms since the epoch; null when none.",
+            "minimum": 0
+          },
+          "now_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The server's current (skipped) time, ms since the Unix epoch.",
+            "minimum": 0
+          },
+          "offset_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total skipped so far, ms (only grows).",
+            "minimum": 0
+          }
+        }
+      },
+      "DevTimeModeDto": {
+        "type": "string",
+        "description": "Time-skipping mode.",
+        "enum": [
+          "off",
+          "auto",
+          "manual"
+        ]
+      },
       "DismissBody": {
         "type": "object",
         "description": "`{\"reason\"}` body of `POST /v1/dlq/{run_id}/dismiss`.",
@@ -6428,6 +6677,179 @@ expression: pretty
             "minimum": 0
           }
         }
+      },
+      "ReplayBody": {
+        "type": "object",
+        "description": "`POST /v1/modules/{sha}/replay` body: exactly one of `runs` or `sample`.",
+        "properties": {
+          "allow_missing": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "A run whose workflow the module does not export is `skipped`, not a failure."
+          },
+          "runs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Explicit run ids (1..=1000)."
+          },
+          "sample": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The newest N runs per workflow the module describes (1..=1000; above:\n400 `sample_too_large`).",
+            "minimum": 0
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "With `sample`: only runs in this status."
+          },
+          "workflow": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "With `sample`: only this workflow."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplayDto": {
+        "type": "object",
+        "description": "`POST /v1/modules/{sha}/replay` response.",
+        "required": [
+          "module_sha256",
+          "verdicts",
+          "summary"
+        ],
+        "properties": {
+          "module_sha256": {
+            "type": "string",
+            "description": "The replayed module."
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ReplaySummaryDto",
+            "description": "Verdict counts."
+          },
+          "verdicts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayRunDto"
+            },
+            "description": "One verdict per checked run."
+          }
+        }
+      },
+      "ReplayRunDto": {
+        "type": "object",
+        "description": "One run's replay outcome.",
+        "required": [
+          "run_id",
+          "workflow",
+          "verdict",
+          "appended"
+        ],
+        "properties": {
+          "appended": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Events the replay appended past the stored journal.",
+            "minimum": 0
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Divergence, skip or error detail."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          },
+          "seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Journal sequence number of the divergence.",
+            "minimum": 0
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/ReplayVerdictDto",
+            "description": "Verdict."
+          },
+          "workflow": {
+            "type": "string",
+            "description": "The run's workflow."
+          }
+        }
+      },
+      "ReplaySummaryDto": {
+        "type": "object",
+        "description": "Verdict counts.",
+        "required": [
+          "ok",
+          "ok_frontier",
+          "diverged",
+          "skipped",
+          "error"
+        ],
+        "properties": {
+          "diverged": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`diverged` verdicts.",
+            "minimum": 0
+          },
+          "error": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`error` verdicts.",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`ok` verdicts.",
+            "minimum": 0
+          },
+          "ok_frontier": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`ok_frontier` verdicts.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`skipped` verdicts.",
+            "minimum": 0
+          }
+        }
+      },
+      "ReplayVerdictDto": {
+        "type": "string",
+        "description": "One run's replay verdict.",
+        "enum": [
+          "ok",
+          "ok_frontier",
+          "diverged",
+          "skipped",
+          "error"
+        ]
       },
       "RequeueBody": {
         "type": "object",
@@ -8252,6 +8674,14 @@ expression: pretty
     {
       "name": "inventory",
       "description": "Modules, queues and partitions (Phase 11)"
+    },
+    {
+      "name": "dev",
+      "description": "Dev clock / time skipping; REST-only, only with `ostro dev --ephemeral --time-skipping` (Phase 10)"
+    },
+    {
+      "name": "tooling",
+      "description": "Server-side module replay; REST-only (Phase 10)"
     },
     {
       "name": "health",

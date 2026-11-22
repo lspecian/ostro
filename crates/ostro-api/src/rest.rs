@@ -2565,6 +2565,348 @@ fn phase7_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
         .routes(routes!(join_worker))
 }
 
+// ---------------------------------------------------------------------------------
+// Phase 10 (10-05): dev time skipping (SDK-06, D-P10-6) and server-side replay
+// (CLI-07, D-P10-7). REST-only tooling endpoints: no gRPC twin (D-P10-18).
+// ---------------------------------------------------------------------------------
+
+/// Time-skipping mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DevTimeModeDto {
+    /// Disabled (dev-time routes answer 409 `time_skipping_disabled`).
+    Off,
+    /// Skips to the next due timer whenever the node is idle.
+    Auto,
+    /// Moves only through explicit skips.
+    Manual,
+}
+
+impl From<domain::DevTimeMode> for DevTimeModeDto {
+    fn from(m: domain::DevTimeMode) -> Self {
+        match m {
+            domain::DevTimeMode::Off => DevTimeModeDto::Off,
+            domain::DevTimeMode::Auto => DevTimeModeDto::Auto,
+            domain::DevTimeMode::Manual => DevTimeModeDto::Manual,
+        }
+    }
+}
+
+/// `GET /v1/dev/time` response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DevTimeDto {
+    /// The server's current (skipped) time, ms since the Unix epoch.
+    pub now_ms: u64,
+    /// Total skipped so far, ms (only grows).
+    pub offset_ms: u64,
+    /// Time-skipping mode.
+    pub mode: DevTimeModeDto,
+    /// The node has no ready, granting or executing work.
+    pub idle: bool,
+    /// Earliest due timer or delayed start, ms since the epoch; null when none.
+    pub next_due_ms: Option<u64>,
+}
+
+impl From<domain::DevTimeInfo> for DevTimeDto {
+    fn from(t: domain::DevTimeInfo) -> Self {
+        DevTimeDto {
+            now_ms: t.now_ms,
+            offset_ms: t.offset_ms,
+            mode: t.mode.into(),
+            idle: t.idle,
+            next_due_ms: t.next_due_ms,
+        }
+    }
+}
+
+/// `POST /v1/dev/time/skip` body: exactly one of `by` (friendly duration, e.g. `"72h"`;
+/// write days as hours) or `to_ms` (absolute target, ms since the epoch; a target in
+/// the past skips nothing).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DevSkipBody {
+    /// Relative skip (`"30s"`, `"72h"`).
+    pub by: Option<String>,
+    /// Absolute target, ms since the Unix epoch.
+    pub to_ms: Option<u64>,
+}
+
+/// `POST /v1/dev/time/skip` response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DevSkipDto {
+    /// The server's time after the skip, ms since the Unix epoch.
+    pub now_ms: u64,
+    /// Total skipped so far, ms.
+    pub offset_ms: u64,
+    /// Milliseconds this skip advanced (0 for a target in the past).
+    pub skipped_ms: u64,
+}
+
+/// `POST /v1/modules/{sha}/replay` body: exactly one of `runs` or `sample`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayBody {
+    /// Explicit run ids (1..=1000).
+    pub runs: Option<Vec<String>>,
+    /// The newest N runs per workflow the module describes (1..=1000; above:
+    /// 400 `sample_too_large`).
+    pub sample: Option<u64>,
+    /// With `sample`: only this workflow.
+    pub workflow: Option<String>,
+    /// With `sample`: only runs in this status.
+    pub status: Option<String>,
+    /// A run whose workflow the module does not export is `skipped`, not a failure.
+    pub allow_missing: Option<bool>,
+}
+
+/// One run's replay verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayVerdictDto {
+    /// Terminal journal reproduced with nothing appended.
+    Ok,
+    /// Non-terminal journal replayed cleanly; may append past its frontier.
+    OkFrontier,
+    /// Non-determinism inside the journaled prefix.
+    Diverged,
+    /// The module does not export the run's workflow.
+    Skipped,
+    /// The check failed.
+    Error,
+}
+
+impl From<domain::ReplayVerdictKind> for ReplayVerdictDto {
+    fn from(k: domain::ReplayVerdictKind) -> Self {
+        use domain::ReplayVerdictKind as K;
+        match k {
+            K::Ok => ReplayVerdictDto::Ok,
+            K::OkFrontier => ReplayVerdictDto::OkFrontier,
+            K::Diverged => ReplayVerdictDto::Diverged,
+            K::Skipped => ReplayVerdictDto::Skipped,
+            K::Error => ReplayVerdictDto::Error,
+        }
+    }
+}
+
+/// One run's replay outcome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReplayRunDto {
+    /// Run id.
+    pub run_id: String,
+    /// The run's workflow.
+    pub workflow: String,
+    /// Verdict.
+    pub verdict: ReplayVerdictDto,
+    /// Journal sequence number of the divergence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Divergence, skip or error detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Events the replay appended past the stored journal.
+    pub appended: u64,
+}
+
+/// Verdict counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReplaySummaryDto {
+    /// `ok` verdicts.
+    pub ok: u32,
+    /// `ok_frontier` verdicts.
+    pub ok_frontier: u32,
+    /// `diverged` verdicts.
+    pub diverged: u32,
+    /// `skipped` verdicts.
+    pub skipped: u32,
+    /// `error` verdicts.
+    pub error: u32,
+}
+
+/// `POST /v1/modules/{sha}/replay` response.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReplayDto {
+    /// The replayed module.
+    pub module_sha256: String,
+    /// One verdict per checked run.
+    pub verdicts: Vec<ReplayRunDto>,
+    /// Verdict counts.
+    pub summary: ReplaySummaryDto,
+}
+
+impl From<domain::ReplayResult> for ReplayDto {
+    fn from(r: domain::ReplayResult) -> Self {
+        let s = r.summary;
+        ReplayDto {
+            module_sha256: r.module_sha256,
+            verdicts: r
+                .verdicts
+                .into_iter()
+                .map(|v| ReplayRunDto {
+                    run_id: v.run_id,
+                    workflow: v.workflow,
+                    verdict: v.verdict.into(),
+                    seq: v.seq,
+                    detail: v.detail,
+                    appended: v.appended,
+                })
+                .collect(),
+            summary: ReplaySummaryDto {
+                ok: s.ok,
+                ok_frontier: s.ok_frontier,
+                diverged: s.diverged,
+                skipped: s.skipped,
+                error: s.error,
+            },
+        }
+    }
+}
+
+/// [`parse_friendly_ms`] for `by`, with a "write it as <N>h" hint for calendar units
+/// (`7d` -> `168h`).
+fn parse_skip_by(s: &str) -> Result<u64, ApiError> {
+    parse_friendly_ms("by", s).map_err(|mut e| {
+        let hint = s
+            .trim()
+            .parse::<jiff::Span>()
+            .ok()
+            .filter(|sp| sp.get_years() == 0 && sp.get_months() == 0)
+            .filter(|sp| sp.get_weeks() != 0 || sp.get_days() != 0)
+            .and_then(|sp| {
+                sp.total((
+                    jiff::Unit::Millisecond,
+                    jiff::SpanRelativeTo::days_are_24_hours(),
+                ))
+                .ok()
+            })
+            .filter(|ms| ms.is_finite() && *ms >= 0.0 && *ms < u64::MAX as f64);
+        match hint {
+            Some(ms) => {
+                // Whole milliseconds by construction (a friendly span of integer units).
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let ms = ms as u64;
+                e.message = format!(
+                    "by: days and weeks are not accepted ({s:?}); write it as {}",
+                    friendly_ms(ms)
+                );
+            }
+            None => e.message.push_str(" (write days as hours, e.g. \"168h\")"),
+        }
+        e
+    })
+}
+
+/// The dev clock.
+#[utoipa::path(
+    get,
+    path = "/v1/dev/time",
+    tag = "dev",
+    description = "REST-only tooling endpoint (no gRPC). Available only with `ostro dev --ephemeral --time-skipping`; otherwise 409 with details.reason = time_skipping_disabled.",
+    responses(
+        (status = 200, description = "The dev clock", body = DevTimeDto),
+        (status = 409, description = "Time skipping is off (details.reason = time_skipping_disabled)", body = ErrorBody),
+    )
+)]
+async fn dev_time(State(cp): State<Arc<dyn ControlPlane>>) -> Result<Json<DevTimeDto>, ApiError> {
+    Ok(Json(cp.dev_time().await?.into()))
+}
+
+/// Skip the dev clock forward.
+#[utoipa::path(
+    post,
+    path = "/v1/dev/time/skip",
+    tag = "dev",
+    description = "REST-only tooling endpoint (no gRPC). Available only with `ostro dev --ephemeral --time-skipping`; otherwise 409 with details.reason = time_skipping_disabled. Exactly one of `by` / `to_ms`; time never moves backwards.",
+    request_body = DevSkipBody,
+    responses(
+        (status = 200, description = "Skipped", body = DevSkipDto),
+        (status = 400, description = "Neither or both of by / to_ms, or an invalid duration", body = ErrorBody),
+        (status = 409, description = "Time skipping is off (details.reason = time_skipping_disabled)", body = ErrorBody),
+    )
+)]
+async fn dev_skip(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<DevSkipDto>, ApiError> {
+    let b: DevSkipBody = optional_json_body(body)?;
+    let skip = match (b.by, b.to_ms) {
+        (Some(by), None) => domain::DevSkip::By {
+            ms: parse_skip_by(&by)?,
+        },
+        (None, Some(ms)) => domain::DevSkip::To { ms },
+        _ => {
+            return Err(ApiError::invalid_argument(
+                "exactly one of `by` (e.g. \"72h\") or `to_ms` is required",
+            ));
+        }
+    };
+    let r = cp.dev_skip(skip).await?;
+    Ok(Json(DevSkipDto {
+        now_ms: r.now_ms,
+        offset_ms: r.offset_ms,
+        skipped_ms: r.skipped_ms,
+    }))
+}
+
+/// Replay stored journals against a module.
+#[utoipa::path(
+    post,
+    path = "/v1/modules/{sha}/replay",
+    tag = "tooling",
+    description = "REST-only tooling endpoint (no gRPC). Replays the selected runs' journals against the uploaded module on the server (`ostro replay`); the module need not be active.",
+    params(("sha" = String, Path, description = "Lowercase hex sha256 of an uploaded module")),
+    request_body = ReplayBody,
+    responses(
+        (status = 200, description = "One verdict per run", body = ReplayDto),
+        (status = 400, description = "Malformed sha, neither or both of runs / sample, or sample > 1000 (details.reason = sample_too_large)", body = ErrorBody),
+        (status = 404, description = "Unknown module or run", body = ErrorBody),
+    )
+)]
+async fn replay_module(
+    State(cp): State<Arc<dyn ControlPlane>>,
+    Path(sha): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<ReplayDto>, ApiError> {
+    let b: ReplayBody = optional_json_body(body)?;
+    let select = match (b.runs, b.sample) {
+        (Some(runs), None) => {
+            if b.workflow.is_some() || b.status.is_some() {
+                return Err(ApiError::invalid_argument(
+                    "`workflow` and `status` apply only with `sample`",
+                ));
+            }
+            domain::ReplaySelect::Runs(runs)
+        }
+        (None, Some(n)) => domain::ReplaySelect::Sample {
+            n: u32::try_from(n)
+                .ok()
+                .filter(|n| *n <= domain::MAX_REPLAY_SAMPLE)
+                .ok_or_else(|| domain::sample_too_large(n))?,
+            workflow: b.workflow,
+            status: b.status,
+        },
+        _ => {
+            return Err(ApiError::invalid_argument(
+                "exactly one of `runs` or `sample` is required",
+            ));
+        }
+    };
+    let req = domain::ReplayRequest {
+        module_sha256: sha,
+        select,
+        allow_missing: b.allow_missing.unwrap_or(false),
+    };
+    req.validate()?;
+    Ok(Json(cp.replay_module(req).await?.into()))
+}
+
+/// Phase 10 tooling routes (10-05), merged into [`api_routes`]. The replay route is
+/// documented as `/v1/modules/{sha}/replay` but mounted under the `{sha256}` parameter
+/// name `GET|PUT /v1/modules/{sha256}` already uses (one router node per segment).
+fn phase10_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
+    let r = r.routes(routes!(dev_time)).routes(routes!(dev_skip));
+    wildcard_routes(r, routes!(replay_module), "/v1/modules/{sha256}/replay")
+}
+
 /// Base OpenAPI metadata; paths are added by [`api_routes`].
 #[derive(OpenApi)]
 #[openapi(
@@ -2586,6 +2928,8 @@ fn phase7_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
         (name = "workers", description = "Worker administration, join tokens and join (Phase 7)"),
         (name = "operations", description = "Rerun, dead-letter queue, bulk jobs, limits and failure policies (Phase 11)"),
         (name = "inventory", description = "Modules, queues and partitions (Phase 11)"),
+        (name = "dev", description = "Dev clock / time skipping; REST-only, only with `ostro dev --ephemeral --time-skipping` (Phase 10)"),
+        (name = "tooling", description = "Server-side module replay; REST-only (Phase 10)"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )
@@ -2620,7 +2964,7 @@ pub fn api_routes(max_module_bytes: usize) -> OpenApiRouter<CpState> {
         .routes(routes!(readyz))
         .routes(routes!(openapi_json))
         .routes(routes!(ui_shell));
-    phase7_routes(bridge_routes(r))
+    phase10_routes(phase7_routes(bridge_routes(r)))
 }
 
 #[cfg(test)]

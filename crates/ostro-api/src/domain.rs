@@ -280,6 +280,26 @@ pub trait ControlPlane: Send + Sync + 'static {
         let _ = req;
         Err(ApiError::unavailable(P7_PENDING))
     }
+
+    // --- Phase 10 (10-05, D-P10-6 / D-P10-7 / D-P10-18): REST-only tooling. Default
+    // bodies answer Unimplemented so every control plane compiles unchanged
+    // (ostro-server: 10-10 time skipping, 10-11 replay).
+
+    /// The dev clock (`GET /v1/dev/time`). Time skipping off = Conflict
+    /// `details.reason = time_skipping_disabled` ([`time_skipping_disabled`]).
+    async fn dev_time(&self) -> Result<DevTimeInfo, ApiError> {
+        Err(ApiError::unimplemented("dev_time"))
+    }
+    /// Move the dev clock forward (`POST /v1/dev/time/skip`); never backwards.
+    async fn dev_skip(&self, s: DevSkip) -> Result<DevSkipResult, ApiError> {
+        let _ = s;
+        Err(ApiError::unimplemented("dev_skip"))
+    }
+    /// Replay stored journals against a module (`POST /v1/modules/{sha}/replay`).
+    async fn replay_module(&self, r: ReplayRequest) -> Result<ReplayResult, ApiError> {
+        let _ = r;
+        Err(ApiError::unimplemented("replay_module"))
+    }
 }
 
 /// Upload request: raw module bytes plus the client-claimed digest.
@@ -1269,6 +1289,284 @@ pub fn validate_egress_entry(field: &str, entry: &str) -> Result<(), ApiError> {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Phase 10 (10-05): dev time skipping (SDK-06, D-P10-6) and server-side replay
+// (CLI-07, D-P10-7). REST-only tooling endpoints (D-P10-18).
+// ---------------------------------------------------------------------------------
+
+/// `details.reason` of the 409 every dev-time call answers while time skipping is off.
+pub const REASON_TIME_SKIPPING_DISABLED: &str = "time_skipping_disabled";
+/// `details.reason` of the 400 for a replay `sample` above [`MAX_REPLAY_SAMPLE`].
+pub const REASON_SAMPLE_TOO_LARGE: &str = "sample_too_large";
+/// Hard cap of a replay sample, and of an explicit replay run list.
+pub const MAX_REPLAY_SAMPLE: u32 = 1000;
+/// Longest run id a replay request accepts.
+pub const MAX_REPLAY_RUN_ID_LEN: usize = 128;
+
+/// Conflict, `details.reason = "time_skipping_disabled"`: the dev clock is off.
+pub fn time_skipping_disabled() -> ApiError {
+    ApiError::conflict("time skipping is off; start `ostro dev --ephemeral --time-skipping`")
+        .with_details(serde_json::json!({ "reason": REASON_TIME_SKIPPING_DISABLED }))
+}
+
+/// InvalidArgument, `details.reason = "sample_too_large"`.
+pub fn sample_too_large(requested: u64) -> ApiError {
+    ApiError::invalid_argument(format!(
+        "sample {requested} is larger than the limit {MAX_REPLAY_SAMPLE}"
+    ))
+    .with_details(serde_json::json!({
+        "reason": REASON_SAMPLE_TOO_LARGE,
+        "limit": MAX_REPLAY_SAMPLE,
+        "requested": requested,
+    }))
+}
+
+/// Time-skipping mode of the dev clock (`[dev] time_skipping`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevTimeMode {
+    /// Time skipping is disabled (every dev-time call answers 409).
+    Off,
+    /// The server skips to the next due timer whenever the node is idle.
+    Auto,
+    /// Time moves only through explicit skips.
+    Manual,
+}
+
+impl DevTimeMode {
+    /// Wire name: `off`, `auto` or `manual`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DevTimeMode::Off => "off",
+            DevTimeMode::Auto => "auto",
+            DevTimeMode::Manual => "manual",
+        }
+    }
+}
+
+/// The dev clock as seen by `GET /v1/dev/time`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevTimeInfo {
+    /// The server's current (skipped) time, ms since the Unix epoch.
+    pub now_ms: u64,
+    /// Total skipped so far, ms (only grows).
+    pub offset_ms: u64,
+    /// Time-skipping mode.
+    pub mode: DevTimeMode,
+    /// The node has no ready, granting or executing work.
+    pub idle: bool,
+    /// Earliest due timer or delayed start, ms since the epoch, when there is one.
+    pub next_due_ms: Option<u64>,
+}
+
+/// A skip of the dev clock: exactly one of a relative or an absolute target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevSkip {
+    /// Advance by `ms`.
+    By {
+        /// Milliseconds to advance.
+        ms: u64,
+    },
+    /// Advance to `ms` since the epoch; a target in the past skips nothing.
+    To {
+        /// Target time, ms since the Unix epoch.
+        ms: u64,
+    },
+}
+
+/// The outcome of a skip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DevSkipResult {
+    /// The server's time after the skip, ms since the Unix epoch.
+    pub now_ms: u64,
+    /// Total skipped so far, ms.
+    pub offset_ms: u64,
+    /// Milliseconds this skip advanced (0 for a target in the past).
+    pub skipped_ms: u64,
+}
+
+/// Which runs a replay checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplaySelect {
+    /// Exactly these runs (1..=[`MAX_REPLAY_SAMPLE`] ids).
+    Runs(Vec<String>),
+    /// The newest `n` runs per workflow the module describes (any status unless
+    /// `status` is set), optionally only workflow `workflow`.
+    Sample {
+        /// Runs per workflow (1..=[`MAX_REPLAY_SAMPLE`]).
+        n: u32,
+        /// Only this workflow.
+        workflow: Option<String>,
+        /// Only runs in this status ([`RunStatus`] wire name).
+        status: Option<String>,
+    },
+}
+
+/// `POST /v1/modules/{sha}/replay`: replay stored journals against a module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayRequest {
+    /// Lowercase hex sha256 of an uploaded module.
+    pub module_sha256: String,
+    /// The runs to check.
+    pub select: ReplaySelect,
+    /// A run whose workflow the module does not export is `skipped`, not a failure.
+    pub allow_missing: bool,
+}
+
+impl ReplayRequest {
+    /// Shape checks shared by every transport and control plane: a 64-hex sha, 1..=1000
+    /// well-formed run ids, `1 <= n <= 1000` (else `sample_too_large`), a known status.
+    pub fn validate(&self) -> Result<(), ApiError> {
+        let sha = &self.module_sha256;
+        if sha.len() != 64 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(ApiError::invalid_argument(format!(
+                "module sha256 {sha:?} is not 64 lowercase hex characters"
+            ))
+            .with_details(serde_json::json!({ "field": "sha" })));
+        }
+        match &self.select {
+            ReplaySelect::Runs(runs) => {
+                if runs.is_empty() {
+                    return Err(ApiError::invalid_argument("runs: at least one run id")
+                        .with_details(serde_json::json!({ "field": "runs" })));
+                }
+                if runs.len() > MAX_REPLAY_SAMPLE as usize {
+                    return Err(ApiError::invalid_argument(format!(
+                        "runs: {} ids, the limit is {MAX_REPLAY_SAMPLE}",
+                        runs.len()
+                    ))
+                    .with_details(serde_json::json!({ "field": "runs" })));
+                }
+                for id in runs {
+                    let ok = !id.is_empty()
+                        && id.len() <= MAX_REPLAY_RUN_ID_LEN
+                        && id.bytes().all(|b| b.is_ascii_graphic());
+                    if !ok {
+                        return Err(ApiError::invalid_argument(format!(
+                            "runs: {id:?} is not a run id"
+                        ))
+                        .with_details(serde_json::json!({ "field": "runs" })));
+                    }
+                }
+            }
+            ReplaySelect::Sample {
+                n,
+                workflow,
+                status,
+            } => {
+                if *n == 0 {
+                    return Err(ApiError::invalid_argument("sample: must be at least 1")
+                        .with_details(serde_json::json!({ "field": "sample" })));
+                }
+                if *n > MAX_REPLAY_SAMPLE {
+                    return Err(sample_too_large(u64::from(*n)));
+                }
+                if workflow.as_deref().is_some_and(str::is_empty) {
+                    return Err(ApiError::invalid_argument("workflow: must not be empty")
+                        .with_details(serde_json::json!({ "field": "workflow" })));
+                }
+                if let Some(s) = status
+                    && RunStatus::parse(s).is_none()
+                {
+                    return Err(ApiError::invalid_argument(format!(
+                        "status: unknown run status {s:?}"
+                    ))
+                    .with_details(serde_json::json!({ "field": "status" })));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One run's replay verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayVerdictKind {
+    /// A terminal journal reproduced its terminal with nothing appended.
+    Ok,
+    /// A non-terminal journal replayed cleanly and may append past its frontier.
+    OkFrontier,
+    /// Non-determinism inside the journaled prefix (`seq`, `detail`).
+    Diverged,
+    /// The module does not export the run's workflow.
+    Skipped,
+    /// The check itself failed (`detail`).
+    Error,
+}
+
+impl ReplayVerdictKind {
+    /// Wire name: `ok`, `ok_frontier`, `diverged`, `skipped` or `error`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReplayVerdictKind::Ok => "ok",
+            ReplayVerdictKind::OkFrontier => "ok_frontier",
+            ReplayVerdictKind::Diverged => "diverged",
+            ReplayVerdictKind::Skipped => "skipped",
+            ReplayVerdictKind::Error => "error",
+        }
+    }
+}
+
+/// One run's replay outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayVerdictInfo {
+    /// Run id.
+    pub run_id: String,
+    /// The run's workflow.
+    pub workflow: String,
+    /// Verdict.
+    pub verdict: ReplayVerdictKind,
+    /// Journal sequence number of the divergence, when diverged.
+    pub seq: Option<u64>,
+    /// Human-readable detail (divergence, skip or error reason).
+    pub detail: Option<String>,
+    /// Events the replay appended past the stored journal.
+    pub appended: u64,
+}
+
+/// Verdict counts of one replay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplaySummary {
+    /// `ok` verdicts.
+    pub ok: u32,
+    /// `ok_frontier` verdicts.
+    pub ok_frontier: u32,
+    /// `diverged` verdicts.
+    pub diverged: u32,
+    /// `skipped` verdicts.
+    pub skipped: u32,
+    /// `error` verdicts.
+    pub error: u32,
+}
+
+impl ReplaySummary {
+    /// Counts of `verdicts`.
+    pub fn of(verdicts: &[ReplayVerdictInfo]) -> Self {
+        let mut s = ReplaySummary::default();
+        for v in verdicts {
+            let c = match v.verdict {
+                ReplayVerdictKind::Ok => &mut s.ok,
+                ReplayVerdictKind::OkFrontier => &mut s.ok_frontier,
+                ReplayVerdictKind::Diverged => &mut s.diverged,
+                ReplayVerdictKind::Skipped => &mut s.skipped,
+                ReplayVerdictKind::Error => &mut s.error,
+            };
+            *c = c.saturating_add(1);
+        }
+        s
+    }
+}
+
+/// The outcome of a replay request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayResult {
+    /// The replayed module.
+    pub module_sha256: String,
+    /// One verdict per checked run.
+    pub verdicts: Vec<ReplayVerdictInfo>,
+    /// Verdict counts.
+    pub summary: ReplaySummary,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1363,6 +1661,87 @@ mod tests {
         fn ready(&self) -> bool {
             true
         }
+    }
+
+    #[tokio::test]
+    async fn phase10_defaults_are_unimplemented() {
+        let cp = Bare;
+        for (e, m) in [
+            (cp.dev_time().await.unwrap_err(), "dev_time"),
+            (
+                cp.dev_skip(DevSkip::By { ms: 1 }).await.unwrap_err(),
+                "dev_skip",
+            ),
+            (
+                cp.replay_module(ReplayRequest {
+                    module_sha256: "a".repeat(64),
+                    select: ReplaySelect::Runs(vec!["r".into()]),
+                    allow_missing: false,
+                })
+                .await
+                .unwrap_err(),
+                "replay_module",
+            ),
+        ] {
+            assert_eq!(e.code, ErrorCode::Unimplemented, "{m}");
+            assert_eq!(e.details.unwrap()["method"], m);
+        }
+    }
+
+    #[test]
+    fn replay_request_validation() {
+        let ok = ReplayRequest {
+            module_sha256: "0f".repeat(32),
+            select: ReplaySelect::Sample {
+                n: MAX_REPLAY_SAMPLE,
+                workflow: Some("w".into()),
+                status: Some("completed".into()),
+            },
+            allow_missing: false,
+        };
+        ok.validate().expect("valid");
+        let with = |select: ReplaySelect| ReplayRequest {
+            select,
+            ..ok.clone()
+        };
+        let big = with(ReplaySelect::Sample {
+            n: MAX_REPLAY_SAMPLE + 1,
+            workflow: None,
+            status: None,
+        })
+        .validate()
+        .unwrap_err();
+        assert_eq!(big.code, ErrorCode::InvalidArgument);
+        assert_eq!(big.reason(), Some(REASON_SAMPLE_TOO_LARGE));
+        for bad in [
+            ReplaySelect::Sample {
+                n: 0,
+                workflow: None,
+                status: None,
+            },
+            ReplaySelect::Sample {
+                n: 1,
+                workflow: None,
+                status: Some("bogus".into()),
+            },
+            ReplaySelect::Runs(vec![]),
+            ReplaySelect::Runs(vec!["has space".into()]),
+            ReplaySelect::Runs(vec!["r".into(); MAX_REPLAY_SAMPLE as usize + 1]),
+        ] {
+            let e = with(bad.clone()).validate().unwrap_err();
+            assert_eq!(e.code, ErrorCode::InvalidArgument, "{bad:?}");
+            assert_eq!(e.reason(), None, "{bad:?}");
+        }
+        for sha in ["ABC", &"A".repeat(64), &"a".repeat(63)] {
+            let mut r = ok.clone();
+            r.module_sha256 = sha.to_owned();
+            assert_eq!(r.validate().unwrap_err().code, ErrorCode::InvalidArgument);
+        }
+        let e = time_skipping_disabled();
+        assert_eq!(e.code, ErrorCode::Conflict);
+        assert_eq!(e.reason(), Some(REASON_TIME_SKIPPING_DISABLED));
+        assert_eq!(DevTimeMode::Manual.as_str(), "manual");
+        assert_eq!(ReplayVerdictKind::OkFrontier.as_str(), "ok_frontier");
     }
 
     #[tokio::test]

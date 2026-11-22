@@ -29,6 +29,17 @@ type Out = Result<Value, (ErrorCode, Option<Value>)>;
 
 const MIB: usize = 1024 * 1024;
 
+/// REST-only tooling routes (D-P10-18, 10-05): they have no gRPC twin by design, so the
+/// parity scenario never exercises them. Exactly these three (method, OpenAPI path)
+/// pairs; [`rest_only_exclusions_are_exactly_the_phase10_tooling_routes`] pins the list.
+const REST_ONLY: &[(&str, &str)] = &[
+    // Dev clock (time skipping, D-P10-6): `ostro dev --ephemeral --time-skipping` only.
+    ("get", "/v1/dev/time"),
+    ("post", "/v1/dev/time/skip"),
+    // Server-side replay (D-P10-7): `ostro replay`.
+    ("post", "/v1/modules/{sha}/replay"),
+];
+
 fn cfg() -> ApiConfig {
     ApiConfig {
         max_module_bytes: 8 * MIB,
@@ -5148,5 +5159,35 @@ mod phase11 {
             .list(pb::ListRunsRequest::default())
             .await
             .expect("Runs is mounted");
+    }
+}
+
+/// The REST-only exclusion list (D-P10-18) names exactly the Phase 10 tooling routes,
+/// each documented in OpenAPI under the `dev` / `tooling` tags and described as
+/// REST-only, and no gRPC service of the API package is named after them.
+#[test]
+fn rest_only_exclusions_are_exactly_the_phase10_tooling_routes() {
+    let doc = serde_json::to_value(ostro_api::openapi()).expect("serialize");
+    let mut tagged = Vec::new();
+    for (path, item) in doc["paths"].as_object().expect("paths") {
+        for (method, op) in item.as_object().expect("path item") {
+            let tags = op["tags"].as_array().cloned().unwrap_or_default();
+            if tags.iter().any(|t| t == "dev" || t == "tooling") {
+                tagged.push((method.clone(), path.clone()));
+            }
+        }
+    }
+    tagged.sort();
+    let mut expected: Vec<(String, String)> = REST_ONLY
+        .iter()
+        .map(|(m, p)| ((*m).to_owned(), (*p).to_owned()))
+        .collect();
+    expected.sort();
+    assert_eq!(tagged, expected, "REST-only routes drifted from REST_ONLY");
+    for (method, path) in REST_ONLY {
+        let desc = doc["paths"][*path][*method]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(desc.contains("REST-only"), "{method} {path}: {desc}");
     }
 }
