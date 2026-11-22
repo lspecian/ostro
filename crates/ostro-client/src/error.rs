@@ -34,6 +34,16 @@ impl ClientError {
         self.details.get("reason").and_then(Value::as_str)
     }
 
+    /// A client-side decode failure of a 2xx body.
+    pub(crate) fn decode(status: u16, what: &str, e: &serde_json::Error) -> Self {
+        Self {
+            status: Some(status),
+            code: "decode".to_owned(),
+            message: format!("cannot decode the {what} response: {e}"),
+            details: Value::Null,
+        }
+    }
+
     fn render(&self) -> String {
         match (self.status, self.reason()) {
             (Some(s), Some(r)) => format!("{} (HTTP {s} {}, reason {r})", self.message, self.code),
