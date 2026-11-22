@@ -786,10 +786,18 @@ fn step_guard() {
         StepBegin::Live { .. } => panic!("expected replay"),
     }
     assert_eq!(cmd(&mut st, CommandKind::Http, h(2)).unwrap(), (2, true));
-    // Step hash mismatch on replay is nondeterminism.
+    // Step hash mismatch on replay is nondeterminism once the step records an outcome
+    // (before that it may be a step the live run abandoned, 09-07).
     let journal = st.journal().to_vec();
     let mut st = replay(journal);
-    assert_eq!(nd(st.begin_step(h(9), &actual).map(|_| ())).seq, 1);
+    let seq = match st.begin_step(h(9), &actual).unwrap() {
+        StepBegin::Live { seq, .. } => seq,
+        StepBegin::Replayed(_) => panic!("expected an unrecorded step"),
+    };
+    assert_eq!(seq, 1);
+    let e = nd(st.complete_step(seq, step_body(h(9))));
+    assert_eq!(e.seq, 1);
+    assert!(e.actual.ends_with("#09090909"), "{e:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -881,15 +889,25 @@ fn fresh_live_step_is_attempt_one() {
 fn attempt_chain_divergence() {
     let actual = || "step".to_string();
     // SAF recorded for a different step hash.
+    // The divergence surfaces when the (unrecorded, 09-07) step records an outcome.
+    let deferred = |st: &mut ReplayState| {
+        let (seq, attempt) = match st.begin_step(h(1), &actual).unwrap() {
+            StepBegin::Live { seq, attempt, .. } => (seq, attempt),
+            StepBegin::Replayed(_) => panic!("expected an unrecorded step"),
+        };
+        let e = nd(st.record_attempt_failed(seq, saf_body(h(1), attempt, 0)));
+        assert_eq!(e.seq, seq);
+        (seq, attempt)
+    };
     let mut st = replay(vec![run_started(), recorded(1, saf_body(h(9), 1, 0))]);
-    assert_eq!(nd(st.begin_step(h(1), &actual).map(|_| ())).seq, 1);
+    assert_eq!(deferred(&mut st), (1, 1));
     // Chain followed by a different command.
     let mut st = replay(vec![
         run_started(),
         recorded(1, saf_body(h(1), 1, 0)),
         recorded(2, body_for(CommandKind::Http, h(2))),
     ]);
-    assert_eq!(nd(st.begin_step(h(1), &actual).map(|_| ())).seq, 2);
+    assert_eq!(deferred(&mut st), (2, 2));
     // A non-step command where the journal has a SAF.
     let mut st = replay(vec![run_started(), recorded(1, saf_body(h(1), 1, 0))]);
     assert_eq!(nd(cmd(&mut st, CommandKind::Http, h(1))).seq, 1);
@@ -2118,4 +2136,84 @@ fn patched_v1_v2_v3_lifecycle() {
     let mut st = replay(v2);
     assert_eq!(run(&mut st, false, true), vec!['A', 'C', 'B']);
     assert_eq!(st.pending_len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Abandoned live steps on replay (09-07 regression)
+// ---------------------------------------------------------------------------
+
+fn live_seq(b: StepBegin<'_>) -> u64 {
+    match b {
+        StepBegin::Live { seq, .. } => seq,
+        StepBegin::Replayed(ev) => panic!("expected live, replayed seq {}", ev.seq),
+    }
+}
+
+/// A guest that begins a step and returns without completing it journals nothing for
+/// the step (its seq is released). Replaying the recorded journal must not report
+/// nondeterminism: the step runs again unrecorded and the terminal still matches.
+#[test]
+fn abandoned_step_then_return_replays() {
+    let actual = || "step".to_string();
+    // Record: begin "s" (live), return, terminal.
+    let mut st = fresh();
+    assert_eq!(live_seq(st.begin_step(h(1), &actual).unwrap()), 1);
+    st.finish().unwrap();
+    assert_eq!(
+        cmd(&mut st, CommandKind::Terminal, h(14)).unwrap(),
+        (1, false)
+    );
+    let journal = st.journal().to_vec();
+    assert_eq!(journal.len(), 2);
+
+    // Replay the same guest: identical command sequence, nothing appended.
+    let mut st = replay(journal.clone());
+    assert_eq!(live_seq(st.begin_step(h(1), &actual).unwrap()), 1);
+    // The open-step rule holds exactly as live.
+    assert!(is_open_step(cmd(&mut st, CommandKind::Http, h(2))));
+    st.finish().unwrap();
+    assert_eq!(
+        cmd(&mut st, CommandKind::Terminal, h(14)).unwrap(),
+        (1, true)
+    );
+    assert_eq!(st.pending_len(), 0);
+
+    // A replay whose step completes where the live run recorded none diverged.
+    let mut st = replay(journal);
+    let seq = live_seq(st.begin_step(h(1), &actual).unwrap());
+    let e = nd(st.complete_step(seq, step_body(h(1))));
+    assert_eq!(e.seq, 1);
+    assert_eq!(st.pending_len(), 0);
+}
+
+/// Begin, drop (abandon), then a journaled command: replay reproduces the abandon
+/// and matches the following command at the released seq.
+#[test]
+fn abandoned_step_then_command_replays() {
+    let actual = || "step".to_string();
+    let mut st = fresh();
+    let seq = live_seq(st.begin_step(h(1), &actual).unwrap());
+    st.abandon_step(seq);
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(2)).unwrap(), (1, false));
+    st.finish().unwrap();
+    cmd(&mut st, CommandKind::Terminal, h(14)).unwrap();
+    let journal = st.journal().to_vec();
+
+    let mut st = replay(journal.clone());
+    let seq = live_seq(st.begin_step(h(1), &actual).unwrap());
+    assert_eq!(seq, 1);
+    st.abandon_step(seq);
+    assert_eq!(cmd(&mut st, CommandKind::Http, h(2)).unwrap(), (1, true));
+    st.finish().unwrap();
+    assert_eq!(
+        cmd(&mut st, CommandKind::Terminal, h(14)).unwrap(),
+        (2, true)
+    );
+    assert_eq!(st.pending_len(), 0);
+
+    // A failed attempt of the unrecorded step is a divergence too.
+    let mut st = replay(journal);
+    let seq = live_seq(st.begin_step(h(1), &actual).unwrap());
+    let e = nd(st.record_attempt_failed(seq, saf_body(h(1), 1, 0)));
+    assert_eq!(e.seq, 1);
 }

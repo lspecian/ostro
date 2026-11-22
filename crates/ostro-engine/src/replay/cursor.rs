@@ -35,6 +35,18 @@
 //! of the decision (the `CancelRequested` seq and the guest's own command sequence up to the
 //! retry point) come from the journal, so record and replay agree.
 //!
+//! Abandoned live steps (09-07): a live `begin_step` reserves a seq but journals nothing
+//! until the step completes or fails an attempt; a step the guest drops or leaves open
+//! when its run function returns is abandoned and its seq released, so the journal has
+//! no trace of it. On replay the same guest issues the same `begin_step` and finds the
+//! next recorded guest command is not this step (the following command, or the
+//! terminal). That alone is not a divergence: the step is opened *unrecorded* at the seq
+//! of that next event (the seq the live run reserved), its body runs exactly as it did
+//! live (the open-step rule still applies, so it cannot issue journaled commands), and
+//! the divergence is reported only if the guest then records an outcome for it
+//! (`complete_step` / `record_attempt_failed`), which the live run never did. Dropping it
+//! or returning matches the live run, and the next command is compared as usual.
+//!
 //! Completion index (05-03): `completions` maps every op to the seq of the first event
 //! that completes it ([`completion_target`](super::wait::completion_target): an input
 //! with `completes_op`, or the guest's own `OpCancelled`). It is filled when the journal
@@ -154,6 +166,9 @@ pub struct ReplayState {
     pub(super) outer_rng: Option<RngStreams>,
     /// Seq reserved by a live `begin_step` that has not completed yet.
     pub(super) open_step: Option<u64>,
+    /// The open step is an unrecorded replay of an abandoned live step (see the module
+    /// doc): recording an outcome for it is this divergence.
+    pub(super) unrecorded_step: Option<NonDeterminism>,
     /// Ts of the most recent consumed/appended guest command (`accepted_at` before any),
     /// raised to `retry_at` for a re-run step attempt (D22, see the module doc).
     pub(super) last_cmd_ts: u64,
@@ -233,6 +248,7 @@ impl ReplayState {
             rng: RngStreams::new(&run.rng_seed),
             outer_rng: None,
             open_step: None,
+            unrecorded_step: None,
             last_cmd_ts: run.accepted_at_nanos,
             last_cmd_seq: 0,
             run,
@@ -468,7 +484,10 @@ impl ReplayState {
     /// completion recorded): reserves `seq = next_seq`, opens the step guard and reports
     /// the attempt number; nothing is appended until
     /// [`complete_step`](Self::complete_step) or
-    /// [`record_attempt_failed`](Self::record_attempt_failed).
+    /// [`record_attempt_failed`](Self::record_attempt_failed). A step the recorded run
+    /// abandoned (the next recorded command is something else) is opened unrecorded at
+    /// that command's seq; recording an outcome for it reports the divergence (see the
+    /// module doc).
     pub fn begin_step(
         &mut self,
         hash: CommandHash,
@@ -477,7 +496,29 @@ impl ReplayState {
         self.check_no_open_step()?;
         let mut failed: u32 = 0;
         let mut last_retry_at_nanos = None;
-        while let Some(i) = self.match_next(CommandKind::Step, hash, actual)? {
+        loop {
+            let i = match self.match_next(CommandKind::Step, hash, actual) {
+                Ok(Some(i)) => i,
+                Ok(None) => break,
+                // The live run abandoned this step (see the module doc): open it
+                // unrecorded at the seq it reserved, the seq of the next recorded event.
+                Err(ReplayError::NonDeterminism(nd)) => {
+                    let seq = nd.seq;
+                    if let Some(at) = last_retry_at_nanos
+                        && at <= self.live_now_nanos()
+                    {
+                        self.raise_to_retry_at(at);
+                    }
+                    self.open_live_step(seq);
+                    self.unrecorded_step = Some(nd);
+                    return Ok(StepBegin::Live {
+                        seq,
+                        attempt: failed.saturating_add(1),
+                        last_retry_at_nanos,
+                    });
+                }
+                Err(e) => return Err(e),
+            };
             let ev = &self.journal[i];
             match &ev.body {
                 EventBody::StepAttemptFailed(f) => {
@@ -534,6 +575,7 @@ impl ReplayState {
                 "attempt-failed for step {seq} that is not open"
             )));
         }
+        self.check_recorded_step()?;
         let EventBody::StepAttemptFailed(f) = &body else {
             return Err(protocol(format!(
                 "attempt-failed with {} instead of a step attempt failure",
@@ -558,8 +600,17 @@ impl ReplayState {
     /// Close the open step (if any) and restore the run-level random streams.
     fn close_step(&mut self) {
         self.open_step = None;
+        self.unrecorded_step = None;
         if let Some(outer) = self.outer_rng.take() {
             self.rng = outer;
+        }
+    }
+
+    /// An outcome for an unrecorded (abandoned-live) step: the live run recorded none.
+    fn check_recorded_step(&self) -> Result<(), ReplayError> {
+        match &self.unrecorded_step {
+            Some(nd) => Err(ReplayError::NonDeterminism(nd.clone())),
+            None => Ok(()),
         }
     }
 
@@ -570,6 +621,7 @@ impl ReplayState {
                 "complete-step for step {seq} that is not open"
             )));
         }
+        self.check_recorded_step()?;
         if !matches!(body, EventBody::StepCompleted(_)) {
             return Err(protocol(format!(
                 "complete-step with {} instead of a step completion",
