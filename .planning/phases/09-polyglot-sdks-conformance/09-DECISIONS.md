@@ -106,3 +106,64 @@ Never `git add -A`, `git add .`, `git add -u`, `git commit -a`, `git stash`, `gi
 - **Phase 7 (parallel):** workers execute polyglot modules unchanged (same engine); ENG-2's core budget is per process, so workers inherit it.
 - **Phase 8 (parallel):** child runs get spans through the normal run path; no Phase 9 metric is added (no `ostro_engine_*` series), avoiding 08-16's file.
 - **Phase 10:** consumes `sdks/scripts/build-guest.sh` as the reference recipe for hermetic `ostro build`, and the conformance suite as the `ostro replay` regression set.
+
+## Amendments during execution
+
+Folded in by 09-20 from S9 (09-04) and every executor-recorded deviation and open issue (09-02..09-19, eng2-mem). Adopted rows above are not rewritten; each amendment names the plan that made it. "Open" items are carried in 09-VALIDATION.md and STATE.md.
+
+### Toolchains, builds and packaging
+
+| # | Amends | Amendment | Plan |
+|---|--------|-----------|------|
+| A1 | D-P9-1, D-P9-14 | Exact build commands. py: `uv tool run --from componentize-py==0.25.1 componentize-py -d wit/ostro-runtime-0.1.0 -w ostro:runtime/workflow@0.1.0 componentize --stub-wasi -p <stage> app -o <out>`; ts: `jco componentize <stage>/src/index.ts --wit wit/ostro-runtime-0.1.0 --world-name workflow --backend quickjs --backend-qjs-disable-async --backend-qjs-stub-wasi --bundle-config sdks/scripts/toolchain/rolldown.ostro.mjs`; ts-sm: `--disable all` instead of the three QuickJS flags. Staging: `sdks/python/ostro` next to `app.py`; `sdks/ts` as `node_modules/ostro`. | 09-02 |
+| A2 | D-P9-14 | componentize-py export naming: the entry module must define `class Workflows(wit_world.exports.Workflows)` (a re-export also works); no `WitWorld` class. componentize-py and jco always import the type-only `ostro:runtime/types@0.1.0`, so "imports ⊆ {context, journal, effects, log}" reads "⊆ `ostro:runtime/*@0.1.0`, context/journal/effects/log required". | 09-02, 09-04, 09-09, 09-10 |
+| A3 | D-P9-14 | No `sdks/python/ostro/componentize-py.toml`: staged together with `-d wit/...` it fails ("attempting to re-add package"). The script keeps `-d`. | 09-09 |
+| A4 | D-P9-1 | `rolldown.ostro.mjs` (both byte-identical copies) gained `transform.inject` for `console`, `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `queueMicrotask` (else jco binds its own shims at module evaluation and QuickJS `console` adds a `jco:node/console` import, breaking SDK-03), and `external: [/^ostro:/]` (silences UNRESOLVED_IMPORT). | 09-10, 09-17 |
+| A5 | D-P9-3 | Ladder outcome: Rust bit-reproducible (3 builds, sha256 `debb9349…eb79f2770`). Python step 1 insufficient (S9: per-build str hash secret, core-module order, mtimes); step 2 fork built (6.5 min cold, 3.6 GB) and patch vendored (`sdks/python/toolchain/componentize-py-0.25.1-deterministic.patch`, also covering `stubwasi.rs` adapter order and atime/mtime pins), residual 73–76 B at fixed length (wasmtime-wasi birth/access times plus ~35 B unattributed); step 3 taken: `RESIDUAL-ACCEPTED: py`. QuickJS: wrapper only, 4 B first diff then layout drift, `RESIDUAL-ACCEPTED: ts`. SC2 for Python and TS is human_needed; the upstream PR and issue texts are in `sdks/python/toolchain/README.md`. **USER REVIEW** of D-P9-3 still open. | 09-04, 09-17 |
+| A6 | D-P9-14 | The polyglot cache key also hashes the componentize-py selection (`OSTRO_COMPONENTIZE_PY` path, size, mtime), so fork and wheel builds never share entries. | 09-17 |
+| A7 | D-P9-12 | ci.yml `polyglot` job pins: setup-node v7.1.0 `949feb24…`, setup-python v7.1.0 `6d4fd22b…`, setup-uv v10.4.0 `1db35dd8…` (40-hex SHAs in ci.yml). The job does not build the fork. `ostro-server:children_failpoints` was appended to both failpoint lists. Node 24's `node --test` needs `--test-reporter=tap` for `# pass` lines, and a directory argument resolves to `sdks/ts/test/index.js`. | 09-03, 09-12, 09-17 |
+| A8 | D-P9-19 | Dry runs: wheel `ostro-0.1.0-py3-none-any.whl` (13 modules, `py.typed`, `wit/runtime.wit`), sdist without tests; `npm pack --dry-run` lists package.json, rolldown.ostro.mjs, 16 `src/*.ts`, `wit/runtime.wit` and (from 09-20) README.md. `pyproject.toml` still has no `readme` field (09-03 left it out because no README existed). | 09-17, 09-20 |
+
+### Engine (ENG-1 / ENG-2)
+
+| # | Amends | Amendment | Plan |
+|---|--------|-----------|------|
+| A9 | D-P9-17 | Core instances are counted as core `instantiate` entries only (from-exports bags allocate nothing): Rust 3, Python 38, QuickJS 11. Wasmtime needs 13 for QuickJS (adapter modules are invisible in the binary), so the admission weight is **calibrated** once per `Prepared` (grow `StoreLimits::instances` from the static count until instantiation succeeds; fallback static + 16). The static count stays the validation lower bound. `validate_loaded` gained `bytes, max_core_instances`. `[engine] class` is a typed `EngineClass` enum. | 09-04, 09-07 |
+| A10 | D-P9-17 | Eviction on admission timeout: `sink.done(Evicted{BudgetPressure})` exactly once, mapped to `Reactivate` by the executor; a cancel while waiting gives `Evicted{External}`; `describe`/`instantiate_probe` wait at most 5 s, then `EngineError::Wasmtime("<resource> budget: ...")`. | 09-07 |
+| A11 | D-P9-17 | **eng2-mem:** admission charges every pooled resource (`PoolBudget`: component-instance slots, core instances, memories, tables; acquired in one fixed order under one deadline). QuickJS needs 3 memories and 3 tables per instance; before the fix more than ~`total_instances/3` live QJS instances failed with "memory stripe" pool exhaustion instead of waiting. `LanguageClass::Python/Mixed::min_memory_bytes` = 16,711,680 (SDK guest). Default config snapshot unchanged. | 09-07, 09-19, eng2-mem |
+| A12 | D-P9-17 | Open: `class = "typescript"` still sizes core instances with the StarlingMonkey figure (3), admitting 230 QuickJS instances at defaults; guidance (docs/sdk-resources.md) is a `pool_total_core_instances` override capped at `13 × total_instances / 3`. | 09-19, eng2-mem |
+| A13 | — | Replay fix (coordinator addition): a step the live run began and abandoned (handle dropped, or `run` returned with it open) replays as an unrecorded open step at the reserved seq; recording an outcome for it still reports the original NonDeterminism. Live behaviour unchanged; SDKs always close their steps. | 09-04 (finding), 09-07 |
+| A14 | PF-W6 | Fuel: Python hello 185k–417k (≤ 0.02% of `activation_fuel`), QuickJS 0.78M, StarlingMonkey 2.54M. No `[USER REVIEW]` fuel candidate. | 09-04, 09-07 |
+
+### Children
+
+| # | Amends | Amendment | Plan |
+|---|--------|-----------|------|
+| A15 | D-P9-6, D-P9-9 | D-P9-31 (row above): opt-in journaling via intent 19 `ChildJournal`, the only Phase 9 ordinal. Hard-stop journal ts = the parent's `created_at_ms`. `check_msg` not tightened for `event` (v0.1 validation unchanged). `ModuleResolver::default_queue` added as a provided trait method. | 09-05 |
+| A16 | D-P9-9 | A `ChildCompleted` with **no matching row keeps the v0.1 path** (legacy inbox row + wake), not a per-message drop (Phase 5 `can_chain_keeps_the_parent_and_reports_once_pf_f2` depends on it); no row removal or counter decrement for a missing row. Exactly-once holds because journaling needs a marked row and consumes it. | 09-08 |
+| A17 | D-P9-11 | Hard stops (Terminated, TimedOut) keep their own cascade reason and 05-09's outbox order (parent notification first); only Completed/Failed/Cancelled/ContinuedAsNew use `parent_closed`. 05-09's `cascade_cancel` now delegates to `terminal::close_children`, which also removes the rows. C-CHILD-10 asserts the terminate reason. | 09-08, 09-13 |
+| A18 | D-P9-27 | `chain_done` is reserved by convention only: a user cancel with that exact reason cascades as `chain_done` and children drop it. Deferred-expiry mark = `ContinuedAsNew && parent && next_seq == 0`. `continued_to` is cleared once `chain_done` passes, so chain walkers fall back to `continued_from` links. | 09-08, 09-13 |
+| A19 | D-P9-11 | A cancelled attached child op keeps its `children` row; the child's later completion is journaled for an op the engine already resolved `Err(Cancelled)` (first completion wins). Removing the row would need a new intent. | 09-08 |
+| A20 | D-P9-10, D-P9-25 | Detached starts insert no `children` row (`run.rs` + CAN batch); `ChildJournal` after a detached start is `BadIntent`. `child::start_child_after_flush` also fires for batches whose target was unresolvable (needed by the W1 deploy-between test). W-b is tested with a synthetic journal. A duplicate StartChild forwarded to an expired successor creates a fresh run (same class as W-b). | 09-08 |
+| A21 | docs | storage-format.md §18.1 documents the row guard, detached-row rule, duplicate StartChild and deferred-expiry mark; docs/children.md documents the whole contract. | 09-20 |
+
+### SDK semantics (Python / TS)
+
+| # | Amends | Amendment | Plan |
+|---|--------|-----------|------|
+| A22 | D-P9-2, D11 | Python: an unshielded `asyncio.sleep` fails with `ostro.Cancelled` on cancellation and is remembered (no new timer); `wait_for`/`timeout` timers keep their durable timer and fail their inner op. Fired timers are removed from `_timers`, so `asyncio.sleep`'s `finally: h.cancel()` journals no `cancel-op`. `create_task` accepts `**kwargs` (3.14 `eager_start`). | 09-04, 09-09 |
+| A23 | D-P9-15 | No lazy imports in Python guests (a first import inside `run` traps under `--stub-wasi`); the SDK imports everything at `import ostro`. Iterate sets of `str` through `sorted()` (per-build hash seed). | 09-04, 09-09 |
+| A24 | D-P9-16 | Journaled calls inside an open step raise (B1 exclusivity makes queueing unnecessary). Only exceptions escaping a scheduled callback fail a Python activation; GC-timed reports are ignored. | 09-09 |
+| A25 | — | Uncaught exceptions: workflow level non-retryable `python_exception`/`js_exception`; inside a step body retryable. Python `decode_payload` returns raw bytes for non-JSON content types. TS: return the plain `run-result`, throw only the WIT `failure` variant, catch everything else at the export (S9 result-mapping probe). | 09-04, 09-09, 09-10 |
+| A26 | D11, D-P9-18 | TS shielding is explicit (`ctx.shielded((s) => ...)`, ops created through `s`; no AsyncContext on QJS/SM). Saga compensations: Python no arguments (context carries the shield), TS the shielded ctx, Rust `&Ctx`. Rust `WorkflowError` gained `with_details`/`details()`; `ostro_sdk::codec` made public. TS Ctx methods are camelCase with snake_case random aliases. | 09-06, 09-10, 09-12 |
+| A27 | — | SQL params are WIT `sql-value` records in all three SDKs (the plan said JSON). Top-level await is not lowered by Rolldown (runs at pre-init on the native Promise): documented as unsupported. | 09-04, 09-12 |
+
+### Conformance harness
+
+| # | Amends | Amendment | Plan |
+|---|--------|-----------|------|
+| A28 | D-P9-21 | Projection vocabulary as implemented (facts / values / inputs; docs/conformance.md). The uuid stream is separate from `random_u64`, and step-body draws do not consume the ctx stream. C-VAL-01 pinned values (seed 42): `16357943517170225811`, `0.8693496500947742`, `018bcfe5-6800-7e6d-b89c-fc7a01337ce6`, `ostro-43ff999e924f58fa3b089b017dab68df`. | 09-11 |
+| A29 | D-P9-22 | conf_patch / conf_ndet v1 sleep 1 s between `a` and `b` (else swap_module cannot land mid-run). Server-leg roles are positional with `wf:`/`wfN:` refs; server-only checks are `expect` extras. Parents take `delay_ms`; leaves take `delay_ms`/`ms`. python-v2 is a full copy (one `app.py` per staged guest) with a drift check; ts-v2 is minimal. C-SAGA-03 per-key checks live in the test; C-CHILD-08 cancel is a spec variant. | 09-11, 09-13, 09-14, 09-15, 09-16 |
+| A30 | D-P9-22 | Crash leg: `child::start_child_after_flush` armed with `pause` (journal-visible marker), the others with `1*print(...)`; half of the kill delays fall in [0, 80] / [0, 40] ms so kills land in flight; one data dir per test run; `child::detached_after_flush` cannot fire in an attached chain (covered by `children_failpoints`). The crash leg is not in ci-local/ci.yml (decision for the phase owner). | 09-18 |
+| A31 | D15 | SC5 harness parks with `hot_wait = 2 h`; extra metrics PSS/private/node-budget charge (RSS overstates Python by ~9 MB of shared CoW pages). | 09-19 |
+| A32 | D-P9-12, 09-02 verify | `cargo tree -d` lists `wasmparser 0.261.0` twice on unmodified main (same-version feature split); the invariant is one `wasmparser` entry in Cargo.lock. | 09-02 |
