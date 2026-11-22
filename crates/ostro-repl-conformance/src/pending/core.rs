@@ -17,4 +17,15 @@ pub const PENDING: &[&str] = &[
     // stale_epoch
     "fetch_with_stale_epoch_fenced",
     "fetch_with_future_epoch_unknown",
+    // divergence
+    "leader_dies_with_unreplicated_writes",
+    "isolated_leader_rejoin_truncates",
+    "two_quick_leader_changes_truncate",
+    // failover
+    "failover_elects_isr_member",
+    "whole_isr_dead_goes_offline",
+    "resigned_leader_moves",
+    // min_insync
+    "writes_stop_below_min_insync",
+    "writes_resume_when_follower_rejoins",
 ];
