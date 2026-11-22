@@ -70,6 +70,7 @@
 //! | `Evicted{External}` without revoke (flush `Unavailable`) | short pause | `Reactivate` |
 //! | `AttemptFailed(f)`, `f.retryable()` and `attempt_failures + 1 < max_attempt_failures` | - | `Retry{after_ms}` |
 //! | `AttemptFailed(f)` otherwise (incl. NonDeterminism / ProtocolViolation) | `CompleteRun{Failed, failure JSON, resumable}` | `Released` |
+//! | `AttemptFailed(AttemptFailure::LimitExceeded)` (11-06, non-retryable): the row above; message `limit_exceeded: <limit> <actual> > <max>`, raise the limit and `RetryRun` resumes | `CompleteRun{Failed, failure JSON, resumable: true}` | `Released` |
 //! | the same, `f.retryable()` and the [`ExhaustPolicy`] says `Pause` (07-08, OPS-01) | `PauseRun{retries_exhausted, failure JSON, token}` | `Released`; `Fenced` / `StaleEpoch` -> `Fenced` |
 //! | `Fenced` | - | `Fenced` |
 //!

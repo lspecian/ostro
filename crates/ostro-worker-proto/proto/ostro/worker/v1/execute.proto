@@ -92,6 +92,10 @@ message EngineLimits {
   uint64 max_table_elements = 7;
   uint64 async_stack_size = 8;
   uint64 epoch_tick_ms = 9;
+  // Run limits (11-06, D-P11-13; `[limits]`); 0 = worker engine default.
+  uint64 max_history_events = 10;
+  uint64 max_children_per_run = 11;
+  uint64 max_payload_bytes = 12;
 }
 
 // A cluster member the worker should also connect to.

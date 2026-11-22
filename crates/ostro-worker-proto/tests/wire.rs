@@ -81,6 +81,21 @@ fn every_outcome() -> Vec<ActivationOutcome> {
         AttemptFailure::GuestExit(3),
         AttemptFailure::ProtocolViolation("twice".into()),
         AttemptFailure::Trap("unreachable".into()),
+        AttemptFailure::LimitExceeded {
+            limit: "history_events",
+            max: 20,
+            actual: 21,
+        },
+        AttemptFailure::LimitExceeded {
+            limit: "children_per_run",
+            max: 3,
+            actual: 4,
+        },
+        AttemptFailure::LimitExceeded {
+            limit: "payload_bytes",
+            max: 1_048_576,
+            actual: 2_097_152,
+        },
     ] {
         v.push(ActivationOutcome::AttemptFailed(f));
     }
@@ -90,7 +105,7 @@ fn every_outcome() -> Vec<ActivationOutcome> {
 #[test]
 fn every_variant_round_trips_through_postcard() {
     let all = every_outcome();
-    assert_eq!(all.len(), 23);
+    assert_eq!(all.len(), 26);
     for o in all {
         let wire = WireOutcome::from(&o);
         let bytes = wire.encode();
@@ -98,6 +113,54 @@ fn every_variant_round_trips_through_postcard() {
         assert_eq!(back, wire);
         assert_eq!(back.into_engine(), o);
     }
+}
+
+#[test]
+fn limit_exceeded_is_appended_last_and_old_encodings_are_unchanged() {
+    // WireOutcome::AttemptFailed = 4; Trap = 7 (pre-11-06), LimitExceeded = 8 (appended).
+    let trap = WireOutcome::from(&ActivationOutcome::AttemptFailed(AttemptFailure::Trap(
+        "x".into(),
+    )));
+    assert_eq!(trap.encode(), vec![4, 7, 1, b'x']);
+    let le = WireOutcome::from(&ActivationOutcome::AttemptFailed(
+        AttemptFailure::LimitExceeded {
+            limit: "history_events",
+            max: 20,
+            actual: 21,
+        },
+    ));
+    let mut want = vec![4, 8, 14];
+    want.extend_from_slice(b"history_events");
+    want.extend_from_slice(&[20, 21]);
+    assert_eq!(le.encode(), want);
+}
+
+#[test]
+fn unknown_limit_name_from_a_worker_is_a_protocol_violation() {
+    let w = WireOutcome::AttemptFailed(ostro_worker_proto::WireAttemptFailure::LimitExceeded {
+        limit: "galaxies".into(),
+        max: 1,
+        actual: 2,
+    });
+    match w.into_engine() {
+        ActivationOutcome::AttemptFailed(AttemptFailure::ProtocolViolation(m)) => {
+            assert!(m.contains("galaxies"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn engine_limits_run_limit_fields_are_appended() {
+    // Fields 10..12 (11-06); 0 = worker default.
+    let l = v1::EngineLimits {
+        max_history_events: 1,
+        max_children_per_run: 2,
+        max_payload_bytes: 3,
+        ..Default::default()
+    };
+    assert_eq!(l.encode_to_vec(), vec![10 << 3, 1, 11 << 3, 2, 12 << 3, 3]);
+    assert!(v1::EngineLimits::default().encode_to_vec().is_empty());
 }
 
 #[test]

@@ -70,6 +70,16 @@ pub fn engine_config(l: &v1::EngineLimits, cfg: &WorkerConfig) -> EngineConfig {
     if l.epoch_tick_ms > 0 {
         c.epoch_tick = ms(l.epoch_tick_ms);
     }
+    // Run limits (11-06): enforced by the worker's engine exactly as on the server.
+    if l.max_history_events > 0 {
+        c.run_limits.max_history_events = l.max_history_events;
+    }
+    if l.max_children_per_run > 0 {
+        c.run_limits.max_children_per_run = l.max_children_per_run;
+    }
+    if l.max_payload_bytes > 0 {
+        c.run_limits.max_payload_bytes = l.max_payload_bytes;
+    }
     // Live instances on a worker: its slots plus hot-parked activations.
     c.pool.total_instances = cfg.slots.saturating_mul(4).clamp(8, 1000);
     c.node_memory_budget = cfg.memory_bytes;

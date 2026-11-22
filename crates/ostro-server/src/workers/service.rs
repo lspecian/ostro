@@ -220,9 +220,10 @@ pub fn advertised_endpoints(cluster: &ClusterSection, bound: SocketAddr) -> Vec<
         .collect()
 }
 
-/// The `Welcome.limits` of this server (its `[engine]` configuration, Pitfall 5).
+/// The `Welcome.limits` of this server (its `[engine]` configuration plus the `[limits]`
+/// run limits, Pitfall 5).
 pub fn engine_limits(cfg: &ServerConfig) -> v1::EngineLimits {
-    let e = cfg.engine.to_engine_config();
+    let e = cfg.to_engine_config();
     let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
     v1::EngineLimits {
         hot_wait_ms: ms(e.hot_wait),
@@ -234,6 +235,9 @@ pub fn engine_limits(cfg: &ServerConfig) -> v1::EngineLimits {
         max_table_elements: e.max_table_elements as u64,
         async_stack_size: e.async_stack_size as u64,
         epoch_tick_ms: ms(e.epoch_tick),
+        max_history_events: e.run_limits.max_history_events,
+        max_children_per_run: e.run_limits.max_children_per_run,
+        max_payload_bytes: e.run_limits.max_payload_bytes,
     }
 }
 
