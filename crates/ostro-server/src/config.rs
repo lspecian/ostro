@@ -57,6 +57,11 @@ pub const SECTIONS: &[&str] = &[
     "workers",
     "cluster",
     "flow",
+    // Phase 11 (D-P11-25, RESERVATIONS §11), parsed since 11-04.
+    "limits",
+    "ui",
+    "bulk",
+    "dlq",
 ];
 
 static PARSER: SpanParser = SpanParser::new();
@@ -415,6 +420,11 @@ pub struct ServerConfig {
     pub workers: WorkersSection,
     pub cluster: ClusterSection,
     pub flow: FlowSection,
+    // Phase 11 sections (D-P11-25, plan 11-04).
+    pub limits: LimitsSection,
+    pub ui: UiSection,
+    pub bulk: BulkSection,
+    pub dlq: DlqSection,
 }
 
 impl ServerConfig {
@@ -434,6 +444,9 @@ impl ServerConfig {
         c.secrets.auto_sealing_key = true;
         // D-W16: an ephemeral loopback cluster port, so parallel `ostro dev` never collide.
         c.cluster.listen = SocketAddr::from(([127, 0, 0, 1], 0));
+        // D-P11-17: the dev profile serves the UI because its listener is loopback
+        // (`[ui] enabled` stays unset, so a printed config reloads identically on either
+        // profile).
         c
     }
 
@@ -446,6 +459,15 @@ impl ServerConfig {
     /// (backup credentials, OTLP header values) are printed as `<redacted>`.
     pub fn to_toml_string(&self) -> String {
         toml_render(self)
+    }
+
+    /// The engine configuration: `[engine]` mapped by [`EngineSection::to_engine_config`]
+    /// plus `[limits]` as `run_limits` (D-P11-13).
+    pub fn to_engine_config(&self) -> EngineConfig {
+        EngineConfig {
+            run_limits: self.limits.to_run_limits(),
+            ..self.engine.to_engine_config()
+        }
     }
 
     /// The node log format: `[telemetry] log_format` when set, else `[log] format`.
@@ -519,6 +541,59 @@ impl ServerConfig {
         self.connectors.to_bridge()?;
         // Phase 7 sections (07-02).
         self.validate_phase7()?;
+        // Phase 11 sections (11-04).
+        self.validate_phase11()?;
+        Ok(())
+    }
+
+    /// Phase 11 value checks (`[limits]`, `[bulk]`, `[dlq]`; 11-04).
+    pub fn validate_phase11(&self) -> Result<(), ConfigError> {
+        let l = &self.limits;
+        for (key, v) in [
+            ("limits.max_history_events", l.max_history_events),
+            ("limits.max_children_per_run", l.max_children_per_run),
+            ("limits.max_payload_bytes", l.max_payload_bytes.get()),
+        ] {
+            if v == 0 {
+                return Err(ConfigError::Invalid(format!("{key} must be at least 1")));
+            }
+        }
+        if l.max_payload_bytes.get() > self.api.max_request_bytes {
+            return Err(ConfigError::Invalid(format!(
+                "limits.max_payload_bytes ({}) must not exceed api.max_request_bytes ({})",
+                l.max_payload_bytes.get(),
+                self.api.max_request_bytes
+            )));
+        }
+        let b = &self.bulk;
+        for (key, v) in [
+            ("bulk.max_jobs", u64::from(b.max_jobs)),
+            ("bulk.max_matches", b.max_matches),
+            ("bulk.default_rate", u64::from(b.default_rate)),
+            ("bulk.max_rate", u64::from(b.max_rate)),
+            ("bulk.burst", u64::from(b.burst)),
+            ("bulk.max_in_flight", u64::from(b.max_in_flight)),
+            ("bulk.backlog_high", b.backlog_high),
+            ("bulk.checkpoint_ops", b.checkpoint_ops),
+        ] {
+            if v == 0 {
+                return Err(ConfigError::Invalid(format!("{key} must be at least 1")));
+            }
+        }
+        if b.default_rate > b.max_rate {
+            return Err(ConfigError::Invalid(format!(
+                "bulk.default_rate ({}) must not exceed bulk.max_rate ({})",
+                b.default_rate, b.max_rate
+            )));
+        }
+        for (key, d) in [
+            ("bulk.checkpoint_every", b.checkpoint_every),
+            ("dlq.hook_catchup", self.dlq.hook_catchup),
+        ] {
+            if d.get().is_zero() {
+                return Err(ConfigError::Invalid(format!("{key} must be non-zero")));
+            }
+        }
         Ok(())
     }
 
@@ -1433,6 +1508,130 @@ impl Default for FlowSection {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Phase 11 sections (D-P11-25; plan 11-04)
+// ---------------------------------------------------------------------------------
+
+/// Environment overlay of `[ui] allowed_hosts` (comma-separated; D-P11-25).
+pub const UI_ALLOWED_HOSTS_ENV: &str = "OSTRO_UI_ALLOWED_HOSTS";
+
+/// `[limits]`: per-run limits (OPS-07, D-P11-13), mapped onto
+/// [`ostro_engine::RunLimits`] (`EngineConfig.run_limits`). Enforced only on new live
+/// commands (11-06 engine, 11-11 API caps), never during replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LimitsSection {
+    /// Journal events per run (default 50,000).
+    pub max_history_events: u64,
+    /// Child runs started by one run (default 10,000).
+    pub max_children_per_run: u64,
+    /// One payload (input, output, signal, step result; default `"4MiB"`). Must not
+    /// exceed `[api] max_request_bytes`.
+    pub max_payload_bytes: ByteSize,
+}
+
+impl Default for LimitsSection {
+    fn default() -> Self {
+        let d = ostro_engine::RunLimits::default();
+        Self {
+            max_history_events: d.max_history_events,
+            max_children_per_run: d.max_children_per_run,
+            max_payload_bytes: ByteSize(d.max_payload_bytes),
+        }
+    }
+}
+
+impl LimitsSection {
+    /// As the engine's [`ostro_engine::RunLimits`].
+    pub fn to_run_limits(&self) -> ostro_engine::RunLimits {
+        ostro_engine::RunLimits {
+            max_history_events: self.max_history_events,
+            max_children_per_run: self.max_children_per_run,
+            max_payload_bytes: self.max_payload_bytes.get(),
+        }
+    }
+}
+
+/// `[ui]`: the embedded operator UI (D-P11-17).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiSection {
+    /// Serve `/ui`. Unset (both profiles): on exactly when the API listener is loopback,
+    /// which the dev profile's is ([`UiSection::effective_enabled`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Extra `Host` values accepted besides the bound address and loopback names
+    /// (overlay: `OSTRO_UI_ALLOWED_HOSTS`, comma-separated).
+    pub allowed_hosts: Vec<String>,
+}
+
+impl UiSection {
+    /// Whether the UI is served for an API listener on `listen`: the explicit
+    /// `enabled`, else whether `listen` is loopback.
+    pub fn effective_enabled(&self, listen: SocketAddr) -> bool {
+        self.enabled.unwrap_or_else(|| listen.ip().is_loopback())
+    }
+}
+
+/// `[bulk]`: node-local bulk operation jobs (OPS-03, D-P11-20; implemented by 11-13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BulkSection {
+    /// Concurrent jobs per node (default 4).
+    pub max_jobs: u32,
+    /// Runs one job may select (default 100,000).
+    pub max_matches: u64,
+    /// Ops per second when the request names none (default 20).
+    pub default_rate: u32,
+    /// Highest accepted rate (default 500).
+    pub max_rate: u32,
+    /// GCRA burst (default 10).
+    pub burst: u32,
+    /// Concurrent ops per job (default 4).
+    pub max_in_flight: u32,
+    /// Target-partition ready backlog that pauses a job (default 10,000).
+    pub backlog_high: u64,
+    /// Checkpoint cadence (default 1 s).
+    pub checkpoint_every: FriendlyDuration,
+    /// Checkpoint after this many ops (default 500).
+    pub checkpoint_ops: u64,
+}
+
+impl Default for BulkSection {
+    fn default() -> Self {
+        Self {
+            max_jobs: 4,
+            max_matches: 100_000,
+            default_rate: 20,
+            max_rate: 500,
+            burst: 10,
+            max_in_flight: 4,
+            backlog_high: 10_000,
+            checkpoint_every: FriendlyDuration::from_secs(1),
+            checkpoint_ops: 500,
+        }
+    }
+}
+
+/// `[dlq]`: DLQ and on_failure hooks (OPS-04/05, D-P11-9..12; implemented by 11-12).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DlqSection {
+    /// Default on_failure hook catch-up window at leader start (default 24 h).
+    pub hook_catchup: FriendlyDuration,
+    /// Run on_failure hooks at all (default true).
+    pub hooks_enabled: bool,
+}
+
+impl Default for DlqSection {
+    fn default() -> Self {
+        Self {
+            hook_catchup: FriendlyDuration::from_secs(24 * 3600),
+            hooks_enabled: true,
+        }
+    }
+}
+
 /// Explicit overrides from CLI flags; they win over every other layer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Overrides {
@@ -1532,6 +1731,14 @@ pub fn load_layered(
         return Err(ConfigError::Invalid(
             "runs.retention must be non-zero (terminal runs always expire, D9)".into(),
         ));
+    }
+    if let Some(hosts) = env.lookup(UI_ALLOWED_HOSTS_ENV) {
+        cfg.ui.allowed_hosts = hosts
+            .split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(str::to_owned)
+            .collect();
     }
     cfg.resolve_and_validate(env)?;
     if let Some(listen) = overrides.listen {

@@ -34,10 +34,21 @@
 //! A stub method answers `Unavailable` (HTTP 503, gRPC `UNAVAILABLE`) with the message
 //! `not yet implemented (08-NN)`. Feature plans fill only their controller file;
 //! `server.rs` and this wiring stay untouched.
+//!
+//! Phase 11 (11-04, D-P11-23): free functions over [`crate::p11::P11Ctx`], called by
+//! [`crate::p11::P11Controllers`] (`ostro_api::phase11::{OpsApi, InventoryApi}`):
+//!
+//! | File | Operations | Owner |
+//! |---|---|---|
+//! | [`p11_search`] | indexed `list_runs` (tried first by [`ServerControlPlane`]) | 11-11 |
+//! | [`p11_inventory`] | limits, modules, queues, partitions | 11-11 |
+//! | [`p11_rerun`] | rerun, rerun cuts | 11-10 |
+//! | [`p11_dlq`] | DLQ list / requeue / dismiss, failure policy, `is_dlq_member` | 11-12 |
+//! | [`p11_bulk`] | bulk jobs | 11-13 |
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use ostro_api::domain::{
     ActivateWorkflow, AwaitResultRequest, AwaitResultResponse, CancelRequest, CancelResponse,
@@ -64,6 +75,7 @@ use ostro_types::{PartitionCount, PartitionId};
 use crate::bridge_services::BridgeServices;
 use crate::config::ServerConfig;
 use crate::p7::P7Shared;
+use crate::p11::P11Ctx;
 use crate::services::guest_logs::GuestLogSink;
 pub use watch::RunWatchers;
 
@@ -74,6 +86,11 @@ pub mod lifecycle;
 pub mod list;
 pub mod modules;
 pub mod names;
+pub mod p11_bulk;
+pub mod p11_dlq;
+pub mod p11_inventory;
+pub mod p11_rerun;
+pub mod p11_search;
 pub mod p7_flow;
 pub mod p7_pause;
 pub mod p7_workers;
@@ -106,6 +123,10 @@ pub struct ServerControlPlane {
     /// Phase 7 shared state (07-02 seam, B3): worker registry, flow control, gauges, TLS,
     /// join. 07-14 implements the Phase 7 control-plane methods over it.
     pub(crate) p7: Arc<P7Shared>,
+    /// The Phase 11 context (W7), set once by `p11::wire`. Weak: `P11Ctx::cc` holds this
+    /// control plane, so a strong reference would be a cycle. Read it through
+    /// [`ServerControlPlane::p11`].
+    pub(crate) p11: Arc<OnceLock<Weak<P11Ctx>>>,
 }
 
 impl std::fmt::Debug for ServerControlPlane {
@@ -148,7 +169,13 @@ impl ServerControlPlane {
             watchers,
             bridge,
             p7,
+            p11: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// The Phase 11 context: `None` before `p11::wire` ran and after the API stopped.
+    pub fn p11(&self) -> Option<Arc<P11Ctx>> {
+        self.p11.get().and_then(Weak::upgrade)
     }
 
     /// The effects bridge (06-14).
@@ -249,6 +276,11 @@ impl ControlPlane for ServerControlPlane {
     }
 
     async fn list_runs(&self, req: ListRunsRequest) -> Result<RunPage, ApiError> {
+        if let Some(ctx) = self.p11()
+            && let Some(page) = p11_search::list_runs_indexed(&ctx, &req).await
+        {
+            return page;
+        }
         list::list_runs(self, req).await
     }
 

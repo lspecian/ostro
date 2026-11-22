@@ -94,7 +94,7 @@ use tracing::{error, info, warn};
 
 use crate::bridge_services::{BridgeEnv, BridgeServices};
 use crate::config::ServerConfig;
-use crate::control::{ControlCtx, ServerControlPlane, phase8_extensions};
+use crate::control::{ControlCtx, ServerControlPlane};
 use crate::derive::MetaModules;
 use crate::executor::{EngineExecutor, ExecutorConfig, ExecutorHooks};
 use crate::leadership::MetaLeadership;
@@ -358,7 +358,7 @@ async fn start_inner(
     // 3. engine runtime.
     let t = Instant::now();
     let runtime = match Runtime::new(
-        cfg.engine.to_engine_config(),
+        cfg.to_engine_config(),
         RuntimeOptions {
             token_key,
             cache_dir: Some(data_dir.join("cache").join("aot")),
@@ -534,7 +534,7 @@ async fn start_inner(
         Arc::clone(&bridge),
         Arc::clone(&p7.shared),
     ));
-    let api_cfg = ApiConfig {
+    let mut api_cfg = ApiConfig {
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
         max_request_bytes: usize::try_from(cfg.api.max_request_bytes).unwrap_or(usize::MAX),
         ..Default::default()
@@ -550,10 +550,15 @@ async fn start_inner(
         Arc::clone(&clock),
         data_dir.clone(),
     );
-    let mut app = ostro_api::router_with(
-        Arc::clone(&control) as Arc<dyn ControlPlane>,
-        api_cfg,
-        phase8_extensions(&ctl),
+    // Phase 11 (11-04): the single seam call; builds the API + UI router.
+    let mut app = crate::p11::wire(
+        &ctl,
+        Arc::clone(&runtime),
+        &services,
+        &control.p11,
+        &mut api_cfg,
+        axum::Router::new(),
+        &cfg,
     );
     drop(ctl);
     if cfg.telemetry.metrics {

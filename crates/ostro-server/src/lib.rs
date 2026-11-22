@@ -34,6 +34,11 @@
 //! Phase 7 modules [`tls`] (client-listener TLS, cluster CA), [`flow`] (node flow control)
 //! and [`workers`] (registry, worker protocol, placement, spill, demand) are stubs with
 //! fixed signatures until their plans (07-06 .. 07-16) fill them.
+//!
+//! Phase 11 (11-04): [`p11`] is the single wiring seam (D-P11-23) called once from
+//! [`server`]: the `P11Ctx`, the `ApiExtensions::{ops, inventory}` slots, the UI router
+//! and the emission gate [`p11::p11_feature_enabled`]; [`rerun`] (11-07) and
+//! [`onfailure`] (11-12) are stubs until their plans.
 
 pub mod bridge_services;
 pub mod children;
@@ -48,7 +53,10 @@ pub mod journal_io;
 pub mod leadership;
 pub mod logging;
 pub mod meta_view;
+pub mod onfailure;
+pub mod p11;
 pub mod p7;
+pub mod rerun;
 pub mod retention;
 pub mod run_started;
 pub mod server;
@@ -83,12 +91,6 @@ mod phase8_dep_anchors {
 // Phase 8 ones above (ostro-bridge itself is consumed by 06-14's `bridge_services`).
 mod phase6_dep_anchors {
     use base64 as _;
-}
-
-// Phase 11 (plan 11-03, D-P11-14): the UI crate, merged into the router by `p11.rs`
-// (11-04/11-15); anchored like the ones above until then.
-mod phase11_dep_anchors {
-    use ostro_ui as _;
 }
 
 // Phase 7 dependencies declared once by plan 07-02 (D-W17) for 07-06 (CA, TLS listener),

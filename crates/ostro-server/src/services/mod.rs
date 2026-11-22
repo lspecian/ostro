@@ -11,6 +11,13 @@
 //! | [`metrics_poll`] | gauge poller (queues, lag, HW, ISR) | 08-16 |
 //! | [`guest_logs`] | guest log sink (rate limits, ring buffer, OTLP) | 08-17 |
 //! | [`blob_gc`] | local blob garbage collection | 08-19 |
+//! | [`dlq_hook`] | `on_failure` hook leader service (Phase 11) | 11-12 |
+//! | [`bulk`] | bulk job registry and runner (Phase 11) | 11-13 |
+//!
+//! The Phase 11 services need the `P11Ctx`, which exists only once the API is wired:
+//! `p11::wire` calls [`Services::attach_p11`], which starts them with a clone of the
+//! [`ServiceCtx`] kept by [`Services::start`]; [`Services::shutdown`] joins them with the
+//! others.
 //!
 //! # Lifecycle
 //!
@@ -26,13 +33,15 @@
 //! `Arc<dyn Clock>` instance the node uses (Phase 10 F5: one injectable clock).
 
 pub mod blob_gc;
+pub mod bulk;
+pub mod dlq_hook;
 pub mod guest_logs;
 pub mod metrics_poll;
 pub mod run_spans;
 pub mod uploader;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ostro_blob::BlobStore;
 use ostro_meta::MetaHandle;
@@ -42,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::config::ServerConfig;
+use crate::p11::P11Ctx;
 
 /// What every service gets. Cheap to clone (all shared handles).
 #[derive(Clone)]
@@ -77,6 +87,11 @@ pub struct Services {
     tasks: Vec<(&'static str, JoinHandle<()>)>,
     guest_logs: Arc<guest_logs::GuestLogSink>,
     clock: Arc<dyn Clock>,
+    /// The context the services started with (`None` when idle); used by
+    /// [`Services::attach_p11`].
+    ctx: Option<ServiceCtx>,
+    /// Tasks started by [`Services::attach_p11`] (Phase 11).
+    p11_tasks: Mutex<Vec<(&'static str, JoinHandle<()>)>>,
 }
 
 impl std::fmt::Debug for Services {
@@ -111,6 +126,8 @@ impl Services {
             tasks,
             guest_logs,
             clock: Arc::clone(&ctx.clock),
+            ctx: Some(ctx),
+            p11_tasks: Mutex::new(Vec::new()),
         }
     }
 
@@ -122,6 +139,26 @@ impl Services {
             tasks: Vec::new(),
             guest_logs,
             clock,
+            ctx: None,
+            p11_tasks: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Start the Phase 11 services ([`dlq_hook`], [`bulk`]) over `p11` (called once by
+    /// `p11::wire`). Idle services start nothing.
+    pub fn attach_p11(&self, p11: &Arc<P11Ctx>) {
+        let Some(ctx) = &self.ctx else {
+            return;
+        };
+        let spawned = [
+            ("dlq_hook", dlq_hook::spawn(ctx, p11)),
+            ("bulk", bulk::spawn(ctx, p11)),
+        ];
+        let mut tasks = self.p11_tasks.lock().unwrap_or_else(|p| p.into_inner());
+        for (name, task) in spawned {
+            if let Some(task) = task {
+                tasks.push((name, task));
+            }
         }
     }
 
@@ -137,14 +174,24 @@ impl Services {
 
     /// Names of the running service tasks.
     pub fn running(&self) -> Vec<&'static str> {
-        self.tasks.iter().map(|(n, _)| *n).collect()
+        let p11 = self.p11_tasks.lock().unwrap_or_else(|p| p.into_inner());
+        self.tasks
+            .iter()
+            .chain(p11.iter())
+            .map(|(n, _)| *n)
+            .collect()
     }
 
     /// Cancel every service and wait for it to exit. Releases every `ServiceCtx` clone
     /// held by the tasks (so the node and meta handles are unique again afterwards).
     pub async fn shutdown(self) {
         self.shutdown.cancel();
-        for (name, task) in self.tasks {
+        drop(self.ctx);
+        let p11 = self
+            .p11_tasks
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner());
+        for (name, task) in self.tasks.into_iter().chain(p11) {
             if let Err(e) = task.await {
                 warn!(service = name, error = %e, "service task failed");
             }
