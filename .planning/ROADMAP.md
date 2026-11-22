@@ -347,7 +347,7 @@ Plans:
 - [x] 09-18-PLAN.md — Crash leg SC3: TS→Python→Rust chain under kill -9 + child failpoints, cancel reaches every descendant, 100-iteration gate run (WF-06, SDK-05) (W8)
 - [x] 09-19-PLAN.md — SC5 measurements with real SDKs: warm instantiate, first call, start-to-first-step, idle RSS, mixed pool sizing; docs/sdk-resources.md (SDK-02/03) (W9)
   - [x] eng2-mem (follow-up fix, outside the 20-plan count) — ENG-2 admission over every pooled resource (instances, core instances, memories, tables; PoolBudget), Python min_memory_bytes 16,711,680; QuickJS waits instead of memory-stripe AttemptFailed
-- [ ] 09-20-PLAN.md — PHASE-9 GATE: full gate + evidence, SDK READMEs, docs/conformance.md + docs/children.md, RESERVATIONS flip, REQUIREMENTS ticks (WF-07 only with C-NATIVE-01 evidence), VALIDATION, DECISIONS fold-in, STATE (all) (W10)
+- [x] 09-20-PLAN.md — PHASE-9 GATE: full gate + evidence, SDK READMEs, docs/conformance.md + docs/children.md, RESERVATIONS flip, REQUIREMENTS ticks (WF-07 only with C-NATIVE-01 evidence), VALIDATION, DECISIONS fold-in, STATE (all) (W10)
 **Research flag**: componentize-py/jco event-loop internals; QuickJS / `--script-only` maturity
 
 ### Phase 10: Developer CLI & Test Kits
