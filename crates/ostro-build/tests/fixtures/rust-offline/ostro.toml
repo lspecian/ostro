@@ -1,0 +1,6 @@
+[project]
+name = "hello-offline"
+lang = "rust"
+
+[build]
+toolchain = "auto"

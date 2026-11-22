@@ -1,0 +1,25 @@
+# 10-12 offline fixture: a Rust workflow project that depends only on the bundled SDK
+# (materialised into target/ostro/sdk by `ostro build`), with a committed Cargo.lock and
+# no dev-dependencies, so it builds with CARGO_NET_OFFLINE=true from the local cargo cache.
+# Reused by 10-16 / 10-18. Tests copy it into a temp dir before building.
+[package]
+name = "hello-offline"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+exclude = ["target"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ostro-sdk = { path = "target/ostro/sdk/rust/ostro-sdk" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

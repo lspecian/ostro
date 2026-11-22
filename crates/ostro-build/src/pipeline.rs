@@ -478,6 +478,11 @@ pub fn build_with(
     };
 
     let sha256 = sha256_hex(&bytes);
+    // The step may have created a lockfile (cargo without Cargo.lock): record the hash of
+    // the sources as they are after the build, so the next run is up to date.
+    let input = input_hash(&project, mode, &set.id, &bundle_id).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp_wasm);
+    })?;
     std::fs::rename(&tmp_wasm, &wasm_path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp_wasm);
         BuildError::io(format!("writing {}", wasm_path.display()), e)

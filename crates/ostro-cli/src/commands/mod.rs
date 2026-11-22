@@ -706,13 +706,4 @@ mod p10_tests {
         usage(&["replay", "--corpus", "d", "--workflow", "w"]);
         usage(&["replay", "--workflow", "w", "--module", "x.wasm"]);
     }
-
-    #[test]
-    fn local_stubs_exit_2() {
-        // `replay` is implemented (10-11): replay.rs tests its exit codes.
-        let args = &["build"][..];
-        let cmd = parse(args).unwrap();
-        assert_eq!(run(cmd.clone()), Outcome::Usage, "{args:?}");
-        assert_eq!(block_on(dispatch(cmd)), Outcome::Usage, "{args:?}");
-    }
 }
