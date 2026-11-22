@@ -34,6 +34,8 @@ crc32c.workspace = true
 sha2.workspace = true
 # 08-14: the cron driver evaluates schedules (next_after / latest_at_or_before / plan_catchup)
 ostro-triggers = { path = "../ostro-triggers" }
+# Phase 12 (12-01 declares): BoxFuture-returning role contracts (12-02 roles.rs)
+futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,0 +1,58 @@
+[package]
+name = "ostro-cluster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Phase 12 replicated partition logs (CLUS-01..04): cluster transport (ostro.cluster.v1
+# Replication + MetaPeer on the mTLS cluster listener), metadata peer transport, controller
+# (liveness, election, ISR publication), follower fetch, snapshot install. Module list: 12-02.
+# Every dependency is declared here by 12-01; later Phase 12 plans add none (12-DECISIONS W1).
+
+[features]
+# Fault injection (repl::, fetch::, isr::, elect::, install:: failpoints; RESERVATIONS §11).
+# Its suite runs in the "Failpoint suites" step (FAILPOINT_CRATES in scripts/ci-local.sh).
+failpoints = ["dep:fail", "fail/failpoints", "ostro-log/failpoints", "ostro-partition/failpoints"]
+
+[dependencies]
+ostro-types.workspace = true
+ostro-log = { path = "../ostro-log" }
+ostro-meta = { path = "../ostro-meta" }
+ostro-proto = { path = "../ostro-proto" }
+ostro-blob = { path = "../ostro-blob" }
+ostro-partition = { path = "../ostro-partition" }
+# raft::eraftpb::Message for MetaPeer.Raft batches (12-05)
+ostro-raft-driver.workspace = true
+# same TLS features as ostro-server / ostro-worker (Phase 7): never tls-ring / webpki / native roots
+tonic = { workspace = true, features = ["tls-aws-lc", "tls-connect-info"] }
+tonic-prost.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+# peer node identity from the client certificate (12-05 authz)
+x509-parser.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
+# whole-file sha256 of a fetched snapshot (12-12 install)
+sha2.workspace = true
+# GET /v1/admin/replication status document (12-14)
+serde.workspace = true
+serde_json.workspace = true
+fail = { workspace = true, optional = true }
+
+[dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+proptest.workspace = true
+
+[lints]
+workspace = true

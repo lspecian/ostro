@@ -57,3 +57,9 @@ mod tests {
     use proptest_state_machine as _;
     use tempfile as _;
 }
+
+// Phase 12 dependency declared once by plan 12-01 for the BoxFuture-returning role
+// contracts (12-02 roles.rs); anchored so cargo's unused-dependency lint stays quiet.
+mod phase12_dep_anchors {
+    use futures_util as _;
+}

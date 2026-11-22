@@ -67,6 +67,9 @@ axum-server.workspace = true
 instant-acme.workspace = true
 arc-swap.workspace = true
 libc.workspace = true
+# Phase 12 (12-01 declares every Phase 12 dependency): cluster transport, meta peer,
+# controller, fetch and install (wired by 12-14)
+ostro-cluster = { path = "../ostro-cluster" }
 
 [features]
 # Fault injection (plan 05-18): the executor's own failpoints (executor::before_append,
@@ -83,6 +86,7 @@ failpoints = [
     "ostro-engine/failpoints",
     "ostro-backup/failpoints",
     "ostro-bridge/failpoints",
+    "ostro-cluster/failpoints",
 ]
 
 [dev-dependencies]

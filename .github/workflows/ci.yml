@@ -284,6 +284,8 @@ jobs:
           cargo test -p ostro --features failpoints --test fx_redrive --locked -- --test-threads=1
           cargo test -p ostro --features failpoints --test fx_sql_crash --locked -- --test-threads=1
           cargo test -p ostro-worker --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro-cluster --features failpoints --locked -- --test-threads=1
+          cargo test -p ostro-repl-conformance --features failpoints --locked -- --test-threads=1
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Phase 7 failpoint legs + manifests
         # keep in sync with check_phase7 in scripts/ci-local.sh (07-22): the SIGSTOP zombie

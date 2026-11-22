@@ -1,0 +1,63 @@
+[package]
+name = "ostro-repl-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Phase 12 replication conformance suite (CLUS-01, D-P12-18/19): tier-B in-process clusters
+# over an in-memory tonic transport with a seeded fault layer, tier-C multi-process loopback
+# clusters behind a Rust TCP chaos proxy, oracles, scenarios and the mutant matrix. Test-only
+# (never published). P9 owns `ostro-conformance`. Every dependency is declared here by 12-01.
+
+[features]
+# Failpoint mutants (repl::mutant::*) and fault legs; runs in the "Failpoint suites" step.
+failpoints = [
+    "dep:fail",
+    "fail/failpoints",
+    "ostro-cluster/failpoints",
+    "ostro-server/failpoints",
+    "ostro-log/failpoints",
+    "ostro-backup/failpoints",
+    "ostro-meta/failpoints",
+]
+
+[dependencies]
+ostro-cluster = { path = "../ostro-cluster" }
+ostro-server = { path = "../ostro-server" }
+ostro-log = { path = "../ostro-log" }
+ostro-partition = { path = "../ostro-partition" }
+ostro-meta = { path = "../ostro-meta" }
+ostro-backup = { path = "../ostro-backup" }
+ostro-types.workspace = true
+ostro-proto = { path = "../ostro-proto" }
+ostro-objstore = { path = "../ostro-objstore" }
+ostro-testkit.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-stream.workspace = true
+futures-util.workspace = true
+tonic = { workspace = true, features = ["tls-aws-lc", "tls-connect-info"] }
+hyper-util.workspace = true
+tower.workspace = true
+reqwest = { workspace = true, features = ["rustls", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+# test CA + per-node certs with node SAN URIs (harness/certs.rs)
+rcgen.workspace = true
+x509-parser.workspace = true
+# module upload key (PUT /v1/modules/{sha256})
+sha2.workspace = true
+# seeded FaultLayer RNG (12-03)
+rand.workspace = true
+# kill -9 / SIGSTOP of spawned nodes (tier C)
+libc.workspace = true
+proptest.workspace = true
+fail = { workspace = true, optional = true }
+
+[lints]
+workspace = true

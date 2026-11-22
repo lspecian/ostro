@@ -100,3 +100,9 @@ mod phase7_dep_anchors {
     use tokio_rustls as _;
     use x509_parser as _;
 }
+
+// Phase 12 dependency declared once by plan 12-01 for the cluster wiring (12-02 stub,
+// 12-14 server wiring); anchored like the Phase 6/7/8 ones above until it is consumed.
+mod phase12_dep_anchors {
+    use ostro_cluster as _;
+}

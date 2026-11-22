@@ -3176,6 +3176,8 @@ dependencies = [
  "ostro-api",
  "ostro-backup",
  "ostro-cli",
+ "ostro-cluster",
+ "ostro-meta",
  "ostro-proto",
  "ostro-server",
  "ostro-testkit",
@@ -3309,6 +3311,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "ostro-cluster"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "fail",
+ "futures-util",
+ "hyper-util",
+ "metrics",
+ "ostro-blob",
+ "ostro-log",
+ "ostro-meta",
+ "ostro-partition",
+ "ostro-proto",
+ "ostro-raft-driver",
+ "ostro-types",
+ "proptest",
+ "prost",
+ "rcgen",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tower",
+ "tracing",
+ "x509-parser",
+]
+
+[[package]]
 name = "ostro-conformance"
 version = "0.1.0"
 dependencies = [
@@ -3390,6 +3426,7 @@ dependencies = [
  "ostro-types",
  "ostro-wal",
  "proptest",
+ "proptest-state-machine",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3442,6 +3479,7 @@ dependencies = [
  "crc32c",
  "fail",
  "fjall",
+ "futures-util",
  "lz4_flex",
  "metrics",
  "ostro-blob",
@@ -3520,6 +3558,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "ostro-repl-conformance"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "fail",
+ "futures-util",
+ "hyper-util",
+ "libc",
+ "ostro-backup",
+ "ostro-cluster",
+ "ostro-log",
+ "ostro-meta",
+ "ostro-objstore",
+ "ostro-partition",
+ "ostro-proto",
+ "ostro-server",
+ "ostro-testkit",
+ "ostro-types",
+ "proptest",
+ "rand 0.9.5",
+ "rcgen",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower",
+ "tracing",
+ "x509-parser",
+]
+
+[[package]]
 name = "ostro-server"
 version = "0.1.0"
 dependencies = [
@@ -3546,6 +3620,7 @@ dependencies = [
  "ostro-backup",
  "ostro-blob",
  "ostro-bridge",
+ "ostro-cluster",
  "ostro-engine",
  "ostro-log",
  "ostro-meta",
@@ -5821,6 +5896,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -20,6 +20,8 @@ fail = { workspace = true, optional = true }
 tempfile.workspace = true
 proptest.workspace = true
 ostro-testkit.workspace = true
+# Phase 12 (12-01 declares): replica model test vs replica::* (12-04)
+proptest-state-machine.workspace = true
 
 [features]
 # Fault-injection suites (tests/fatal_io.rs): enables the vendored WAL's failpoints.

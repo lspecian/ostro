@@ -15,7 +15,9 @@ path = "src/main.rs"
 # (ostro-server and everything under it) and calls `fail::FailScenario::setup()` in `main`,
 # so the FAILPOINTS env var configures them. Build it out of the way of the release binary:
 #   cargo build --release -p ostro --features failpoints --target-dir target/failpoints
-failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints", "ostro-backup/failpoints", "ostro-worker/failpoints"]
+# Phase 12 (12-01): the chain also reaches ostro-cluster (repl::/fetch::/isr::/install::) and
+# ostro-meta (elect::) directly; tier-C replication tests spawn this binary.
+failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints", "ostro-backup/failpoints", "ostro-worker/failpoints", "ostro-cluster/failpoints", "ostro-meta/failpoints"]
 
 [dependencies]
 mimalloc.workspace = true
@@ -31,6 +33,9 @@ ostro-cli = { path = "../ostro-cli" }
 ostro-backup = { path = "../ostro-backup" }
 # Phase 7: `ostro worker` (07-15)
 ostro-worker = { path = "../ostro-worker" }
+# Phase 12 (12-01): failpoint feature chain (see [features])
+ostro-cluster = { path = "../ostro-cluster" }
+ostro-meta = { path = "../ostro-meta" }
 fail = { workspace = true, optional = true }
 
 [dev-dependencies]
