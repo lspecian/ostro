@@ -18,6 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/ostro/api/v1/workers.proto",
         // Phase 11 (11-09): RunOps (rerun, DLQ, bulk, limits, failure policy) + Inventory.
         "proto/ostro/api/v1/ops.proto",
+        // Phase 12 (12-02): node-to-node Replication + MetaPeer (cluster listener only).
+        "proto/ostro/cluster/v1/cluster.proto",
     ];
     for proto in PROTOS {
         println!("cargo:rerun-if-changed={proto}");

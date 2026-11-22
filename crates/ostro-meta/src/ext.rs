@@ -196,3 +196,89 @@ pub fn ext_put_value<T: Serialize>(ext: &[u8], tag: u32, value: &T) -> Result<Ve
     })?;
     ext_put(ext, tag, &bytes)
 }
+
+/// Phase 12 (12-02, RESERVATIONS §10b): `PartitionAssignment` election info,
+/// written by meta apply of `ElectLeader` / `ResignLeader` (12-05). Value:
+/// postcard [`ElectionInfo`].
+pub const EXT_ELECTION_INFO: u32 = 80;
+
+/// [`ElectionInfo::reason`]: the bootstrap placement (epoch 0 → 1).
+pub const ELECTION_REASON_BOOTSTRAP: u8 = 0;
+/// [`ElectionInfo::reason`]: a fresh term on node startup.
+pub const ELECTION_REASON_STARTUP: u8 = 1;
+/// [`ElectionInfo::reason`]: the controller replaced a dead leader.
+pub const ELECTION_REASON_FAILOVER: u8 = 2;
+/// [`ElectionInfo::reason`]: the leader resigned (`ResignLeader`).
+pub const ELECTION_REASON_RESIGN: u8 = 3;
+/// [`ElectionInfo::reason`]: no live ISR member; the partition is offline (`leader = 0`).
+pub const ELECTION_REASON_OFFLINE: u8 = 4;
+
+/// Why and when a partition got its current leader (ext tag 80).
+///
+/// Field order is positional postcard and frozen once shipped; a new field
+/// would need a new tag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElectionInfo {
+    /// One of the `ELECTION_REASON_*` constants (unknown values are kept as-is).
+    pub reason: u8,
+    /// Proposer's clock when the election was proposed (Unix ms).
+    pub elected_at_ms: u64,
+    /// The leader before this election (0 = none).
+    pub prev_leader: u64,
+}
+
+/// The [`ElectionInfo`] stored in a record's `ext`, if any.
+pub fn get_election_info(ext: &[u8]) -> Result<Option<ElectionInfo>, ExtError> {
+    ext_get_value(ext, EXT_ELECTION_INFO)
+}
+
+/// `ext` with tag 80 set to `info`; every other entry is kept byte for byte.
+pub fn put_election_info(ext: &[u8], info: &ElectionInfo) -> Result<Vec<u8>, ExtError> {
+    ext_put_value(ext, EXT_ELECTION_INFO, info)
+}
+
+#[cfg(test)]
+mod election_info_tests {
+    use super::*;
+
+    #[test]
+    fn election_info_roundtrips_and_keeps_other_tags() {
+        let info = ElectionInfo {
+            reason: ELECTION_REASON_FAILOVER,
+            elected_at_ms: 1_700_000_000_123,
+            prev_leader: 2,
+        };
+        let base = ext_put(&[], EXT_TAG_TEST, &[7]).unwrap();
+        let ext = put_election_info(&base, &info).unwrap();
+        assert_eq!(get_election_info(&ext).unwrap(), Some(info));
+        assert_eq!(ext_get(&ext, EXT_TAG_TEST), Some(&[7u8][..]));
+        // Tag 80 sorts after the test tag; the encoding is canonical.
+        let entries = ext_entries(&ext).unwrap();
+        assert_eq!(entries.iter().map(|e| e.tag).collect::<Vec<_>>(), [15, 80]);
+        assert_eq!(get_election_info(&base).unwrap(), None);
+        // Replacing keeps a single entry.
+        let again = put_election_info(
+            &ext,
+            &ElectionInfo {
+                reason: ELECTION_REASON_RESIGN,
+                ..info
+            },
+        )
+        .unwrap();
+        assert_eq!(ext_entries(&again).unwrap().len(), 2);
+        assert_eq!(
+            get_election_info(&again).unwrap().map(|i| i.reason),
+            Some(ELECTION_REASON_RESIGN)
+        );
+        assert_eq!(
+            [
+                ELECTION_REASON_BOOTSTRAP,
+                ELECTION_REASON_STARTUP,
+                ELECTION_REASON_FAILOVER,
+                ELECTION_REASON_RESIGN,
+                ELECTION_REASON_OFFLINE
+            ],
+            [0, 1, 2, 3, 4]
+        );
+    }
+}

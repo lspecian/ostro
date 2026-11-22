@@ -238,4 +238,44 @@ impl ReplicatedLog for CappedLog {
     async fn trim_prefix(&self, permit: TrimPermit) -> Result<Offset, LogError> {
         self.inner.trim_prefix(permit).await
     }
+    async fn read_replica(
+        &self,
+        from: Offset,
+        max_bytes: usize,
+    ) -> Result<Vec<RawBatch>, LogError> {
+        self.inner.read_replica(from, max_bytes).await
+    }
+    async fn append_replica(&self, batches: Vec<RawBatch>) -> Result<Offset, LogError> {
+        self.inner.append_replica(batches).await
+    }
+    fn durable_end(&self) -> Offset {
+        self.inner.durable_end()
+    }
+    fn durable_end_watch(&self) -> watch::Receiver<Offset> {
+        self.inner.durable_end_watch()
+    }
+    fn latest_epoch(&self) -> Option<Epoch> {
+        self.inner.latest_epoch()
+    }
+    fn become_leader(&self, epoch: Epoch, set: ostro_log::ReplicaSet) -> Result<(), LogError> {
+        self.inner.become_leader(epoch, set)
+    }
+    fn become_follower(&self, epoch: Epoch, leader: u64) -> Result<(), LogError> {
+        self.inner.become_follower(epoch, leader)
+    }
+    fn set_follower_hw(&self, leader_hw: Offset) {
+        self.inner.set_follower_hw(leader_hw)
+    }
+    fn record_progress(&self, p: ostro_log::FollowerProgress) -> Result<(), LogError> {
+        self.inner.record_progress(p)
+    }
+    fn set_published_isr(&self, epoch: Epoch, set: ostro_log::ReplicaSet) -> Result<(), LogError> {
+        self.inner.set_published_isr(epoch, set)
+    }
+    async fn reset_to(&self, start: Offset, epochs: EpochHistory) -> Result<(), LogError> {
+        self.inner.reset_to(start, epochs).await
+    }
+    fn replica_status(&self) -> ostro_log::ReplicaStatus {
+        self.inner.replica_status()
+    }
 }

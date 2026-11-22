@@ -191,9 +191,25 @@ fn negative_control_publish_first_breaks_closure() {
 #[test]
 fn hw_watch_written_only_in_publish_point() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for entry in std::fs::read_dir(&src).unwrap() {
-        let path = entry.unwrap().path();
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
+    // Every source file, including module directories (Phase 12 `replica/`).
+    let mut files = Vec::new();
+    let mut dirs = vec![src.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    for path in files {
+        let name = path
+            .strip_prefix(&src)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let text = std::fs::read_to_string(&path).unwrap();
         if name == "cut.rs" {
             continue;

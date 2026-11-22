@@ -139,6 +139,76 @@ impl EpochHistory {
     }
 }
 
+/// The replica set a leader serves (Phase 12, D-P12-5): the meta-published assignment.
+///
+/// `isr` is the **published** ISR (meta), never derived from `replicas`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReplicaSet {
+    /// Every assigned replica (node ids), leader included.
+    pub replicas: Vec<u64>,
+    /// The published in-sync replicas.
+    pub isr: Vec<u64>,
+    /// Meta CAS token of `isr` (`AlterIsr` / `ElectLeader` expect it).
+    pub isr_version: u64,
+    /// Minimum ISR size for appends and HW advance.
+    pub min_insync: u8,
+}
+
+/// One follower's fetch progress as seen by the leader (Phase 12, D-P12-5).
+///
+/// Only `durable_leo` (fsynced, capped at `fetch_offset`) ever counts for the HW.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FollowerProgress {
+    /// The follower's node id.
+    pub replica: u64,
+    /// The follower's fsynced log end.
+    pub durable_leo: Offset,
+    /// The offset the follower asked for (its LEO).
+    pub fetch_offset: Offset,
+    /// Leader clock when the fetch arrived (injected `Clock`).
+    pub now_ms: u64,
+}
+
+/// One follower in [`ReplicaStatus`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FollowerStatus {
+    /// The follower's node id.
+    pub replica: u64,
+    /// Last reported fsynced log end.
+    pub durable_leo: Offset,
+    /// Last fetch offset.
+    pub fetch_offset: Offset,
+    /// When the follower last caught up (leader clock, ms).
+    pub last_caught_up_ms: u64,
+    /// Measured in-sync verdict (`now - last_caught_up_ms <= replica_lag_max`).
+    pub in_sync: bool,
+}
+
+/// The replication view of one partition log (`GET /v1/admin/replication`, 12-14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplicaStatus {
+    /// Current role.
+    pub role: Role,
+    /// Newest epoch of the local log.
+    pub epoch: Epoch,
+    /// High watermark.
+    pub hw: Offset,
+    /// Fsynced log end.
+    pub durable_end: Offset,
+    /// The meta-published ISR the leader follows.
+    pub published_isr: Vec<u64>,
+    /// CAS token of `published_isr`.
+    pub isr_version: u64,
+    /// Minimum ISR size.
+    pub min_insync: u8,
+    /// Measured follower progress (leader only; empty otherwise).
+    pub followers: Vec<FollowerStatus>,
+    /// HW publications by the replica tracker (D-P12-15: `> 0` on an RF=1 node).
+    pub hw_publishes: u64,
+    /// Fetch response cap in envelopes (replication tuning).
+    pub max_envelopes_per_fetch: u32,
+}
+
 /// A partition's replicated log.
 pub trait ReplicatedLog: Send + Sync + 'static {
     /// The partition.
@@ -222,6 +292,60 @@ pub trait ReplicatedLog: Send + Sync + 'static {
         &self,
         permit: TrimPermit,
     ) -> impl Future<Output = Result<Offset, LogError>> + Send;
+
+    // ---- Phase 12 replica API (12-02 contract; implemented in 12-08). No format change. ----
+
+    /// Leader side of `Fetch`: verified raw batches from `from` (a batch boundary), capped
+    /// at the leader's **durable end** (not at HW), up to about `max_bytes`.
+    fn read_replica(
+        &self,
+        from: Offset,
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<Vec<RawBatch>, LogError>> + Send;
+
+    /// Follower append of verbatim leader envelopes (`batches[0].base == log_end()`, epochs
+    /// non-decreasing). Returns the new LEO once enqueued; durability shows on
+    /// [`durable_end_watch`](Self::durable_end_watch).
+    fn append_replica(
+        &self,
+        batches: Vec<RawBatch>,
+    ) -> impl Future<Output = Result<Offset, LogError>> + Send;
+
+    /// Fsynced log end (exclusive).
+    fn durable_end(&self) -> Offset;
+
+    /// Watch of [`durable_end`](Self::durable_end) (fetch long-poll, follower progress).
+    fn durable_end_watch(&self) -> watch::Receiver<Offset>;
+
+    /// Newest epoch in the local log, including seeded history (anchored empty log).
+    fn latest_epoch(&self) -> Option<Epoch>;
+
+    /// Lead at `epoch` with the published `set`. 12-08: `Err(StaleEpoch)` unless
+    /// `epoch > latest_epoch()`.
+    fn become_leader(&self, epoch: Epoch, set: ReplicaSet) -> Result<(), LogError>;
+
+    /// Follow `leader` at `epoch`.
+    fn become_follower(&self, epoch: Epoch, leader: u64) -> Result<(), LogError>;
+
+    /// Follower: adopt the leader's HW (capped at the local durable end).
+    fn set_follower_hw(&self, leader_hw: Offset);
+
+    /// Leader: record a follower's fetch progress (after the divergence check passed).
+    fn record_progress(&self, p: FollowerProgress) -> Result<(), LogError>;
+
+    /// Leader: meta committed a new ISR for `epoch`.
+    fn set_published_isr(&self, epoch: Epoch, set: ReplicaSet) -> Result<(), LogError>;
+
+    /// Snapshot install (D-P12-8): delete every segment, fsync, anchor at `start` with the
+    /// snapshot's `epochs`.
+    fn reset_to(
+        &self,
+        start: Offset,
+        epochs: EpochHistory,
+    ) -> impl Future<Output = Result<(), LogError>> + Send;
+
+    /// Replication view for status endpoints and tests.
+    fn replica_status(&self) -> ReplicaStatus;
 }
 
 #[cfg(test)]

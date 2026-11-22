@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ext::ElectionInfo;
 use crate::state::MetaState;
 
 use crate::records::{
@@ -459,6 +460,33 @@ pub enum MetaCommand {
         leader: u64,
         isr: Vec<u64>,
     },
+    /// Phase 12 (D-P12-7; shape 12-02, apply 12-05): elect `leader` at `epoch`
+    /// with the (shrunk-only) `isr`, CAS on the partition's `isr_version`.
+    /// `leader = 0` marks the partition offline. Writes ext tag 80 from `info`.
+    ElectLeader {
+        partition: u16,
+        epoch: u32,
+        leader: u64,
+        isr: Vec<u64>,
+        expected_isr_version: u64,
+        info: ElectionInfo,
+    },
+    /// Phase 12 (D-P12-7; shape 12-02, apply 12-05): the leader at `epoch`
+    /// publishes a new ISR, CAS on `isr_version`.
+    AlterIsr {
+        partition: u16,
+        epoch: u32,
+        expected_isr_version: u64,
+        isr: Vec<u64>,
+    },
+    /// Phase 12 (D-P12-7; shape 12-02, apply 12-05): `node`, the leader at
+    /// `epoch`, steps down (`epoch + 1`, `leader = 0`).
+    ResignLeader {
+        partition: u16,
+        epoch: u32,
+        node: u64,
+        info: ElectionInfo,
+    },
 }
 
 /// The verdict of applying a [`MetaCommand`].
@@ -547,4 +575,109 @@ pub fn encode_result(result: &MetaResult) -> Vec<u8> {
 
 pub fn decode_result(bytes: &[u8]) -> Result<MetaResult, DecodeError> {
     decode(bytes)
+}
+
+#[cfg(test)]
+mod phase12_tests {
+    use super::*;
+
+    fn variant_byte(cmd: &MetaCommand) -> u8 {
+        let bytes = encode_command(cmd);
+        assert_eq!(bytes[0], META_FORMAT);
+        bytes[1]
+    }
+
+    #[test]
+    fn phase12_commands_take_ordinals_4_to_6_and_roundtrip() {
+        let info = ElectionInfo {
+            reason: crate::ext::ELECTION_REASON_FAILOVER,
+            elected_at_ms: 5,
+            prev_leader: 1,
+        };
+        let cmds = [
+            (
+                4u8,
+                MetaCommand::ElectLeader {
+                    partition: 3,
+                    epoch: 7,
+                    leader: 2,
+                    isr: vec![2, 3],
+                    expected_isr_version: 9,
+                    info,
+                },
+            ),
+            (
+                5,
+                MetaCommand::AlterIsr {
+                    partition: 3,
+                    epoch: 7,
+                    expected_isr_version: 10,
+                    isr: vec![1, 2, 3],
+                },
+            ),
+            (
+                6,
+                MetaCommand::ResignLeader {
+                    partition: 3,
+                    epoch: 7,
+                    node: 2,
+                    info,
+                },
+            ),
+        ];
+        for (ordinal, cmd) in cmds {
+            assert_eq!(variant_byte(&cmd), ordinal, "{cmd:?}");
+            assert_eq!(decode_command(&encode_command(&cmd)).unwrap(), cmd);
+        }
+    }
+
+    #[test]
+    fn existing_command_encodings_are_unchanged() {
+        // Byte-exact pins of ordinals 0-3 (the golden file covers them too).
+        let spl = MetaCommand::SetPartitionLeader {
+            partition: 1,
+            epoch: 2,
+            leader: 3,
+            isr: vec![3],
+        };
+        assert_eq!(encode_command(&spl), [META_FORMAT, 3, 1, 2, 3, 1, 3]);
+        let del = MetaCommand::Delete {
+            key: MetaKey::Member(5),
+            expected_version: 4,
+        };
+        assert_eq!(encode_command(&del), [META_FORMAT, 2, 1, 5, 4]);
+        let init = MetaCommand::InitCluster {
+            cluster_id: "c".into(),
+            node_id: 1,
+            partitions: 4,
+            created_at_ms: 0,
+            token_key: [0; 32],
+        };
+        let bytes = encode_command(&init);
+        assert_eq!(&bytes[..6], [META_FORMAT, 0, 1, b'c', 1, 4]);
+        let put = MetaCommand::Put {
+            key: MetaKey::Cluster,
+            expected_version: None,
+            record: MetaRecord::sample(MetaKind::Cluster, 1, 1),
+        };
+        assert_eq!(&encode_command(&put)[..4], [META_FORMAT, 1, 0, 0]);
+    }
+
+    #[test]
+    fn phase12_apply_is_stubbed_until_12_05() {
+        let mut st = MetaState::default();
+        let r = st.apply(
+            1,
+            MetaCommand::AlterIsr {
+                partition: 0,
+                epoch: 1,
+                expected_isr_version: 0,
+                isr: vec![1],
+            },
+        );
+        assert_eq!(
+            r,
+            MetaResult::Invalid("Phase 12: implemented in 12-05".into())
+        );
+    }
 }

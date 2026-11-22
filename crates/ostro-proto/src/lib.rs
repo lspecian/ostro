@@ -47,6 +47,144 @@ pub mod api {
     }
 }
 
+/// `ostro.cluster.v1` node-to-node protocol (Phase 12, 12-02).
+///
+/// `Replication` {Fetch, FetchSnapshot, FetchBlob, PushBlob} and `MetaPeer`
+/// {Raft, Propose, ReportSuspect}, served only on the mTLS cluster listener.
+pub mod cluster {
+    /// Version 1 of the cluster protocol.
+    pub mod v1 {
+        tonic::include_proto!("ostro.cluster.v1");
+    }
+}
+
+#[cfg(test)]
+mod cluster_tests {
+    use super::cluster::v1::*;
+    use prost::Message;
+
+    fn rt<M: Message + Default + PartialEq + std::fmt::Debug>(m: M) {
+        let back = M::decode(m.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn fetch_messages_roundtrip() {
+        rt(FetchRequest {
+            partition: 3,
+            replica_id: 2,
+            leader_epoch: 7,
+            fetch_offset: 100,
+            last_fetched_epoch: 6,
+            durable_leo: 99,
+            max_bytes: 8 << 20,
+            max_wait_ms: 500,
+            min_bytes: 1,
+        });
+        rt(FetchResponse {
+            error: FetchError::SnapshotRequired as i32,
+            leader_epoch: 7,
+            high_watermark: 90,
+            log_start: 10,
+            leader_durable_end: 120,
+            diverging: Some(DivergingEpoch {
+                epoch: 5,
+                end_offset: 80,
+            }),
+            envelopes: vec![b"OSTR1".to_vec(), b"OSTR2".to_vec()],
+        });
+        // `diverging` keeps presence even when zero-valued.
+        let r = FetchResponse {
+            diverging: Some(DivergingEpoch::default()),
+            ..Default::default()
+        };
+        assert!(
+            FetchResponse::decode(r.encode_to_vec().as_slice())
+                .expect("decode")
+                .diverging
+                .is_some()
+        );
+        for (v, e) in [
+            (0, FetchError::None),
+            (1, FetchError::FencedLeaderEpoch),
+            (2, FetchError::UnknownLeaderEpoch),
+            (3, FetchError::NotLeader),
+            (4, FetchError::NotReplica),
+            (5, FetchError::SnapshotRequired),
+        ] {
+            assert_eq!(e as i32, v);
+        }
+    }
+
+    #[test]
+    fn snapshot_and_blob_messages_roundtrip() {
+        rt(FetchSnapshotRequest {
+            partition: 1,
+            replica_id: 3,
+            resume_frame: 4,
+        });
+        rt(SnapshotFrame {
+            index: 4,
+            bytes: vec![1, 2, 3],
+            last: true,
+        });
+        rt(FetchBlobRequest {
+            sha256: vec![0xab; 32],
+        });
+        rt(BlobChunk {
+            sha256: vec![0xab; 32],
+            offset: 65536,
+            bytes: vec![9; 10],
+            last: false,
+        });
+        rt(PushBlobAck {
+            sha256: vec![0xcd; 32],
+            stored: true,
+        });
+    }
+
+    #[test]
+    fn meta_peer_messages_roundtrip() {
+        rt(RaftBatch {
+            from: 2,
+            messages: vec![vec![1], vec![2, 3]],
+        });
+        rt(RaftAck {});
+        rt(ProposeRequest {
+            command: vec![4, 5],
+        });
+        rt(ProposeResponse {
+            index: 10,
+            term: 2,
+            result: vec![0],
+            error_kind: "not_leader".into(),
+            leader_hint: 3,
+        });
+        rt(SuspectReport {
+            reporter: 1,
+            suspect: 2,
+            partition: Some(0),
+            reason: "connection refused".into(),
+        });
+        rt(SuspectAck {});
+    }
+
+    #[test]
+    fn services_are_generated() {
+        fn name<T: ?Sized>() -> &'static str {
+            std::any::type_name::<T>()
+        }
+        use super::cluster::v1::{
+            meta_peer_client::MetaPeerClient, meta_peer_server::MetaPeerServer,
+            replication_client::ReplicationClient, replication_server::ReplicationServer,
+        };
+        assert!(name::<ReplicationClient<tonic::transport::Channel>>().contains("Replication"));
+        assert!(name::<ReplicationServer<()>>().contains("ReplicationServer"));
+        assert!(name::<MetaPeerClient<tonic::transport::Channel>>().contains("MetaPeer"));
+        assert!(name::<MetaPeerServer<()>>().contains("MetaPeerServer"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::api::v1::{

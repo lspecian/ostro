@@ -79,6 +79,12 @@ impl MetaState {
                 leader,
                 isr,
             } => self.set_partition_leader(index, partition, epoch, leader, isr),
+            // Phase 12 (D-P12-7): shapes fixed by 12-02; validated apply lands in 12-05.
+            MetaCommand::ElectLeader { .. }
+            | MetaCommand::AlterIsr { .. }
+            | MetaCommand::ResignLeader { .. } => {
+                MetaResult::Invalid("Phase 12: implemented in 12-05".into())
+            }
         }
     }
 

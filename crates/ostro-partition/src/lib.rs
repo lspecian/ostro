@@ -12,6 +12,8 @@
 //! - [`leader`]: leader services (shuffler, timers, retention, dispatcher) started after
 //!   readiness.
 //! - [`leadership`], [`clock`], [`router`]: term epochs, wall clock, cross-partition delivery.
+//! - [`roles`]: Phase 12 role contracts (assignment source, follower driver, install control).
+//! - [`replica_services`]: Phase 12 role lifecycle (12-13).
 
 pub mod acks;
 pub mod apply;
@@ -22,6 +24,8 @@ pub mod leadership;
 pub mod machine;
 pub mod node;
 pub mod query;
+pub mod replica_services;
+pub mod roles;
 pub mod router;
 pub mod startup;
 pub mod store;
@@ -47,6 +51,10 @@ pub use leader::placement::{
 pub use leader::{LeaderConfig, LeaderCtx, LeaderTasks};
 pub use leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 pub use node::{Node, NodeConfig, NodeError, PartitionSlot, StartMode};
+pub use roles::{
+    AssignmentSource, FollowerDriver, FollowerTask, InstallGuard, PartitionAssignmentView,
+    PartitionControl, PartitionLogHandle, PartitionRoles,
+};
 pub use router::{InProcessRouter, PartitionRouter, RouteFuture};
 pub use startup::StartupEvent;
 
@@ -56,10 +64,4 @@ mod tests {
     use proptest as _;
     use proptest_state_machine as _;
     use tempfile as _;
-}
-
-// Phase 12 dependency declared once by plan 12-01 for the BoxFuture-returning role
-// contracts (12-02 roles.rs); anchored so cargo's unused-dependency lint stays quiet.
-mod phase12_dep_anchors {
-    use futures_util as _;
 }

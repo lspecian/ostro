@@ -11,6 +11,8 @@
 //! - [`epoch_cache`]: leader-epoch history (ported Kafka semantics).
 //! - [`barrier`]: readiness barrier and trim permits (STOR-08).
 //! - [`import`]: write a partition log from raw envelope batches up to a cut (restore, 08-18).
+//! - [`replica`]: Phase 12 replica tracker, ISR, HW, divergence and failover rules.
+//! - [`mutants`]: the permanent `repl::mutant::*` failpoint names (D-P12-19).
 
 pub mod barrier;
 pub mod cut;
@@ -18,8 +20,10 @@ pub mod epoch_cache;
 pub mod error;
 pub mod hw;
 pub mod import;
+pub mod mutants;
 pub mod node;
 pub mod recovery;
+pub mod replica;
 pub mod replicated;
 pub mod rf1;
 pub mod verify;
@@ -32,7 +36,10 @@ pub use import::{ImportMode, ImportReport, write_partition_log};
 pub use node::{LogNode, LogNodeConfig, PartitionLogs};
 pub use ostro_wal;
 pub use recovery::{RecoveryReport, TornCut, recover_partition};
-pub use replicated::{AppendReceipt, EpochHistory, Isr, LogHealth, RawBatch, ReplicatedLog, Role};
+pub use replicated::{
+    AppendReceipt, EpochHistory, FollowerProgress, FollowerStatus, Isr, LogHealth, RawBatch,
+    ReplicaSet, ReplicaStatus, ReplicatedLog, Role,
+};
 pub use rf1::Rf1Log;
 pub use verify::{Corruption, VerifiedBatch, verify_record};
 

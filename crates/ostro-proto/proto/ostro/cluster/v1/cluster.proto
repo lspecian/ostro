@@ -1,0 +1,139 @@
+// Node-to-node replication and metadata peering (Phase 12, 12-02; CLUS-01..04).
+//
+// Served only on the mTLS cluster listener: every caller is a node whose
+// certificate carries `ostro://<cluster_id>/node/<id>` (Phase 7, 07-06), and the
+// transport puts that id into the request extensions (`PeerNode`). Never part of
+// the public control-plane API (no REST mirror, no parity check).
+//
+// This file is fixed by 12-02 and never edited by a later Phase 12 plan.
+syntax = "proto3";
+
+package ostro.cluster.v1;
+
+// Partition log replication (follower pull, research Pattern 3).
+service Replication {
+  // Unary long-poll: the follower fetches raw envelopes from the leader.
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+  // The leader's newest OSNP v1 snapshot, frame by frame, resumable at frame boundaries.
+  rpc FetchSnapshot(FetchSnapshotRequest) returns (stream SnapshotFrame);
+  // A payload/module blob by sha256 (F11).
+  rpc FetchBlob(FetchBlobRequest) returns (stream BlobChunk);
+  // Push a blob to a replica before the envelope that references it.
+  rpc PushBlob(stream BlobChunk) returns (PushBlobAck);
+}
+
+message FetchRequest {
+  uint32 partition = 1;
+  uint64 replica_id = 2;
+  // Follower's current view of the leader epoch (KIP-320 CurrentLeaderEpoch).
+  uint32 leader_epoch = 3;
+  // Next offset wanted (follower LEO).
+  uint64 fetch_offset = 4;
+  // Epoch of the follower's last batch (KIP-595); the snapshot's latest_epoch
+  // for an anchored empty log.
+  uint32 last_fetched_epoch = 5;
+  // Follower's fsynced end: the only value used for the high watermark.
+  uint64 durable_leo = 6;
+  uint32 max_bytes = 7;
+  uint32 max_wait_ms = 8;
+  uint32 min_bytes = 9;
+}
+
+enum FetchError {
+  FETCH_ERROR_NONE = 0;
+  FETCH_ERROR_FENCED_LEADER_EPOCH = 1;
+  FETCH_ERROR_UNKNOWN_LEADER_EPOCH = 2;
+  FETCH_ERROR_NOT_LEADER = 3;
+  FETCH_ERROR_NOT_REPLICA = 4;
+  FETCH_ERROR_SNAPSHOT_REQUIRED = 5;
+}
+
+// Truncate to `min(end_offset, own end of epoch)`, then refetch (KIP-279).
+message DivergingEpoch {
+  uint32 epoch = 1;
+  uint64 end_offset = 2;
+}
+
+message FetchResponse {
+  FetchError error = 1;
+  uint32 leader_epoch = 2;
+  uint64 high_watermark = 3;
+  uint64 log_start = 4;
+  uint64 leader_durable_end = 5;
+  optional DivergingEpoch diverging = 6;
+  // Raw OSTR envelopes, verbatim, whole batches only.
+  repeated bytes envelopes = 7;
+}
+
+message FetchSnapshotRequest {
+  uint32 partition = 1;
+  uint64 replica_id = 2;
+  // First frame wanted (0 = from the start; resume after a broken stream).
+  uint64 resume_frame = 3;
+}
+
+message SnapshotFrame {
+  uint64 index = 1;
+  bytes bytes = 2;
+  bool last = 3;
+}
+
+message FetchBlobRequest {
+  bytes sha256 = 1;
+}
+
+message BlobChunk {
+  bytes sha256 = 1;
+  uint64 offset = 2;
+  bytes bytes = 3;
+  bool last = 4;
+}
+
+message PushBlobAck {
+  bytes sha256 = 1;
+  // False when the replica already had the blob.
+  bool stored = 2;
+}
+
+// Static multi-voter metadata Raft transport (D-P12-2, D-P12-13).
+service MetaPeer {
+  // Raft messages from one peer, batched (each entry an encoded eraftpb::Message).
+  rpc Raft(stream RaftBatch) returns (RaftAck);
+  // Forward a MetaCommand proposal to the meta leader.
+  rpc Propose(ProposeRequest) returns (ProposeResponse);
+  // A follower reports a suspected-dead leader (D-P12-9); the controller confirms.
+  rpc ReportSuspect(SuspectReport) returns (SuspectAck);
+}
+
+message RaftBatch {
+  uint64 from = 1;
+  repeated bytes messages = 2;
+}
+
+message RaftAck {}
+
+message ProposeRequest {
+  // An encoded MetaCommand.
+  bytes command = 1;
+}
+
+message ProposeResponse {
+  uint64 index = 1;
+  uint64 term = 2;
+  // An encoded MetaResult (empty on error).
+  bytes result = 3;
+  // Empty on success; otherwise a stable error kind (e.g. "not_leader").
+  string error_kind = 4;
+  // The current meta leader when known (0 = unknown).
+  uint64 leader_hint = 5;
+}
+
+message SuspectReport {
+  uint64 reporter = 1;
+  uint64 suspect = 2;
+  // The partition whose fetch failed, when known.
+  optional uint32 partition = 3;
+  string reason = 4;
+}
+
+message SuspectAck {}

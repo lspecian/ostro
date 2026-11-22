@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ostro_log::{
-    AppendReceipt, EpochHistory, Isr, LogError, LogHealth, ReplicatedLog, Role, TrimPermit,
-    VerifiedBatch,
+    AppendReceipt, EpochHistory, FollowerProgress, Isr, LogError, LogHealth, RawBatch, ReplicaSet,
+    ReplicaStatus, ReplicatedLog, Role, TrimPermit, VerifiedBatch,
 };
 use ostro_types::{Epoch, Offset, PartitionId};
 use tokio::sync::watch;
@@ -134,5 +134,64 @@ impl<L: ReplicatedLog> ReplicatedLog for ManualHwLog<L> {
         permit: TrimPermit,
     ) -> impl Future<Output = Result<Offset, LogError>> + Send {
         self.inner.trim_prefix(permit)
+    }
+
+    fn read_replica(
+        &self,
+        from: Offset,
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<Vec<RawBatch>, LogError>> + Send {
+        self.inner.read_replica(from, max_bytes)
+    }
+
+    fn append_replica(
+        &self,
+        batches: Vec<RawBatch>,
+    ) -> impl Future<Output = Result<Offset, LogError>> + Send {
+        self.inner.append_replica(batches)
+    }
+
+    fn durable_end(&self) -> Offset {
+        self.inner.durable_end()
+    }
+
+    fn durable_end_watch(&self) -> watch::Receiver<Offset> {
+        self.inner.durable_end_watch()
+    }
+
+    fn latest_epoch(&self) -> Option<Epoch> {
+        self.inner.latest_epoch()
+    }
+
+    fn become_leader(&self, epoch: Epoch, set: ReplicaSet) -> Result<(), LogError> {
+        self.inner.become_leader(epoch, set)
+    }
+
+    fn become_follower(&self, epoch: Epoch, leader: u64) -> Result<(), LogError> {
+        self.inner.become_follower(epoch, leader)
+    }
+
+    fn set_follower_hw(&self, leader_hw: Offset) {
+        self.inner.set_follower_hw(leader_hw)
+    }
+
+    fn record_progress(&self, p: FollowerProgress) -> Result<(), LogError> {
+        self.inner.record_progress(p)
+    }
+
+    fn set_published_isr(&self, epoch: Epoch, set: ReplicaSet) -> Result<(), LogError> {
+        self.inner.set_published_isr(epoch, set)
+    }
+
+    fn reset_to(
+        &self,
+        start: Offset,
+        epochs: EpochHistory,
+    ) -> impl Future<Output = Result<(), LogError>> + Send {
+        self.inner.reset_to(start, epochs)
+    }
+
+    fn replica_status(&self) -> ReplicaStatus {
+        self.inner.replica_status()
     }
 }

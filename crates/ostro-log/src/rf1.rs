@@ -42,7 +42,8 @@ use crate::error::LogError;
 use crate::node::LogNodeConfig;
 use crate::recovery::{RecoveryReport, TOPIC, list_segments, segment_dir};
 use crate::replicated::{
-    AppendReceipt, EpochHistory, Isr, LogHealth, RawBatch, ReplicatedLog, Role, push_raw,
+    AppendReceipt, EpochHistory, FollowerProgress, Isr, LogHealth, RawBatch, ReplicaSet,
+    ReplicaStatus, ReplicatedLog, Role, push_raw,
 };
 use crate::verify::{VerifiedBatch, verify_record};
 
@@ -715,5 +716,153 @@ impl ReplicatedLog for Rf1Log {
             if deleted.is_empty() { ": nothing to trim" } else { "" }
         );
         Ok(new_start)
+    }
+
+    // ---- Phase 12 replica API: stubs until 12-08 (RF=1 behaviour is unchanged). ----
+
+    async fn read_replica(
+        &self,
+        _from: Offset,
+        _max_bytes: usize,
+    ) -> Result<Vec<RawBatch>, LogError> {
+        Err(phase12_stub())
+    }
+
+    async fn append_replica(&self, _batches: Vec<RawBatch>) -> Result<Offset, LogError> {
+        Err(phase12_stub())
+    }
+
+    fn durable_end(&self) -> Offset {
+        // RF=1 today: the HW is published only after fsync, so it is the durable end.
+        self.hw_now()
+    }
+
+    fn durable_end_watch(&self) -> watch::Receiver<Offset> {
+        self.hw.subscribe()
+    }
+
+    fn latest_epoch(&self) -> Option<Epoch> {
+        self.epochs().latest()
+    }
+
+    fn become_leader(&self, _epoch: Epoch, _set: ReplicaSet) -> Result<(), LogError> {
+        Err(phase12_stub())
+    }
+
+    fn become_follower(&self, _epoch: Epoch, _leader: u64) -> Result<(), LogError> {
+        Err(phase12_stub())
+    }
+
+    fn set_follower_hw(&self, _leader_hw: Offset) {}
+
+    fn record_progress(&self, _p: FollowerProgress) -> Result<(), LogError> {
+        Err(phase12_stub())
+    }
+
+    fn set_published_isr(&self, _epoch: Epoch, _set: ReplicaSet) -> Result<(), LogError> {
+        Err(phase12_stub())
+    }
+
+    async fn reset_to(&self, _start: Offset, _epochs: EpochHistory) -> Result<(), LogError> {
+        Err(phase12_stub())
+    }
+
+    fn replica_status(&self) -> ReplicaStatus {
+        ReplicaStatus {
+            role: self.status.role.borrow().clone(),
+            epoch: self.latest_epoch().unwrap_or_default(),
+            hw: self.hw_now(),
+            durable_end: self.durable_end(),
+            published_isr: vec![self.node_id],
+            isr_version: 0,
+            min_insync: 1,
+            followers: Vec::new(),
+            hw_publishes: 0,
+            max_envelopes_per_fetch: 0,
+        }
+    }
+}
+
+/// The error every not-yet-implemented Phase 12 replica method returns.
+fn phase12_stub() -> LogError {
+    LogError::Failed("Phase 12: implemented in 12-08".into())
+}
+
+#[cfg(test)]
+mod phase12_stub_tests {
+    use super::*;
+    use crate::node::{LogNode, LogNodeConfig};
+    use ostro_types::PartitionCount;
+
+    #[tokio::test]
+    async fn replica_api_is_stubbed_and_reports_current_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = LogNodeConfig::new(dir.path().join("wal"), PartitionCount::new(1).unwrap(), 7);
+        let (node, mut logs) = LogNode::open(cfg, &[Offset::ZERO]).await.unwrap();
+        let log = logs.remove(0).unwrap();
+        let r = log
+            .append(Epoch(2), vec![Bytes::from_static(b"x")])
+            .await
+            .unwrap();
+        log.wait_committed(r.last).await.unwrap();
+
+        assert_eq!(log.durable_end(), Offset(1));
+        assert_eq!(*log.durable_end_watch().borrow(), Offset(1));
+        assert_eq!(log.latest_epoch(), Some(Epoch(2)));
+        let st = log.replica_status();
+        assert_eq!(
+            (st.hw, st.durable_end, st.epoch),
+            (Offset(1), Offset(1), Epoch(2))
+        );
+        assert_eq!(st.published_isr, vec![7]);
+        assert!(st.followers.is_empty());
+
+        let stub = |e: LogError| matches!(e, LogError::Failed(m) if m.contains("12-08"));
+        assert!(stub(
+            log.read_replica(Offset::ZERO, 1 << 20).await.unwrap_err()
+        ));
+        assert!(stub(log.append_replica(Vec::new()).await.unwrap_err()));
+        assert!(stub(
+            log.become_leader(Epoch(3), ReplicaSet::default())
+                .unwrap_err()
+        ));
+        assert!(stub(log.become_follower(Epoch(3), 1).unwrap_err()));
+        assert!(stub(
+            log.record_progress(FollowerProgress {
+                replica: 1,
+                durable_leo: Offset::ZERO,
+                fetch_offset: Offset::ZERO,
+                now_ms: 0,
+            })
+            .unwrap_err()
+        ));
+        assert!(stub(
+            log.set_published_isr(Epoch(2), ReplicaSet::default())
+                .unwrap_err()
+        ));
+        assert!(stub(
+            log.reset_to(Offset::ZERO, EpochHistory::default())
+                .await
+                .unwrap_err()
+        ));
+        // No-op: the RF=1 HW is untouched.
+        log.set_follower_hw(Offset(100));
+        assert_eq!(*log.high_watermark().borrow(), Offset(1));
+        // Normal operation continues after the stubs.
+        let r = log
+            .append(Epoch(2), vec![Bytes::from_static(b"y")])
+            .await
+            .unwrap();
+        log.wait_committed(r.last).await.unwrap();
+        assert_eq!(
+            LogError::NotEnoughReplicas { isr: 1, min: 2 }.to_string(),
+            "not enough replicas: isr 1 < min_insync 2"
+        );
+        assert!(
+            LogError::NotLeader { leader: Some(3) }
+                .to_string()
+                .contains('3')
+        );
+        node.shutdown().await;
     }
 }

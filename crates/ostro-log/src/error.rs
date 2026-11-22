@@ -54,4 +54,19 @@ pub enum LogError {
     /// The log was truncated underneath the caller.
     #[error("truncated")]
     Truncated,
+    /// Phase 12 (D-P12-5): the published ISR is smaller than `min_insync`; appends are
+    /// refused and the HW is frozen.
+    #[error("not enough replicas: isr {isr} < min_insync {min}")]
+    NotEnoughReplicas {
+        /// Published ISR size.
+        isr: usize,
+        /// Required minimum.
+        min: usize,
+    },
+    /// Phase 12: this replica does not lead the partition (`leader` when known).
+    #[error("not leader (leader: {leader:?})")]
+    NotLeader {
+        /// The current leader, when known.
+        leader: Option<u64>,
+    },
 }
