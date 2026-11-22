@@ -49,13 +49,20 @@ pub fn image_tag() -> String {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DockerStep;
 
-/// The docker CLI: `OSTRO_DOCKER` (must exist), else `docker` on the host `PATH`.
+/// The docker CLI: `OSTRO_DOCKER` (a path that must exist, or a name looked up on the host
+/// `PATH`), else `docker` on the host `PATH`.
 pub fn docker_bin(host: HostEnv) -> Result<PathBuf, BuildError> {
-    if let Some(p) = host("OSTRO_DOCKER").filter(|v| !v.is_empty()) {
-        let p = PathBuf::from(p);
-        if p.is_file() {
+    if let Some(v) = host("OSTRO_DOCKER").filter(|v| !v.is_empty()) {
+        // A bare name is looked up on PATH (as `ostro doctor` does).
+        let found = if v.contains('/') {
+            Some(PathBuf::from(&v)).filter(|p| p.is_file())
+        } else {
+            which_in(host, &v)
+        };
+        if let Some(p) = found {
             return Ok(p);
         }
+        let p = PathBuf::from(v);
         return Err(step_err(
             "docker",
             format!(

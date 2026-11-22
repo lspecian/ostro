@@ -240,6 +240,12 @@ impl LangStep for PythonStep {
     }
 
     fn run(&self, ctx: &StepCtx) -> Result<(), BuildError> {
+        if ctx.mode == crate::project::ToolchainMode::System {
+            eprintln!(
+                "ostro: warning: --toolchain system is not supported for Python builds; \
+                 using the pinned hermetic toolchain"
+            );
+        }
         if let Some(msg) = unsupported_libc("Python") {
             return Err(step_err("python toolchain", msg));
         }

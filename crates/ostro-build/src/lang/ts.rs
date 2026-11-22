@@ -125,6 +125,12 @@ impl LangStep for TsStep {
     }
 
     fn run(&self, ctx: &StepCtx) -> Result<(), BuildError> {
+        if ctx.mode == crate::project::ToolchainMode::System {
+            eprintln!(
+                "ostro: warning: --toolchain system is not supported for TypeScript builds; \
+                 using the pinned hermetic toolchain"
+            );
+        }
         if let Some(msg) = unsupported_libc("TypeScript") {
             return Err(step_err("node", msg));
         }
