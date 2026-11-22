@@ -408,7 +408,7 @@ Plans:
 - [x] 11-10-PLAN.md — Rerun control plane: cut resolution, mandatory 4-arg replay_check with the new run id (created if absent), envelope fitting, idempotency, rerun-cuts, DLQ rerun requeue (OPS-02) (W6)
 - [x] 11-11-PLAN.md — Indexed search with scan fallback (via the P11Ctx OnceLock), inventory (modules/queues/partitions) and limits endpoints, API-cap e2e incl. gRPC, docs/limits.md sync test, history attempts (OPS-05, OPS-07, UI-03) (W5)
 - [x] 11-12-PLAN.md — DLQ server (view, requeue, dismiss, failure-policy ext tags) + on_failure hook service (one hook per failure episode, loop guard, catch-up with index fallback, metrics) (OPS-04) (W5)
-- [ ] 11-13-PLAN.md — Bulk operations: snapshot bound, pinned cursor + processed set, Phase 7 GCRA pacing, backpressure, per-run idempotency, checkpoints + crash resume (OPS-03) (W7)
+- [x] 11-13-PLAN.md — Bulk operations: snapshot bound, pinned cursor + processed set, Phase 7 GCRA pacing, backpressure, per-run idempotency, checkpoints + crash resume (OPS-03) (W7)
 - [x] 11-14-PLAN.md — CLI: ostro rerun, dlq, bulk, limits, ls --tag/--newest/--dlq, completions presence (CLI-06 contract; exclusive with 10-09) (OPS-02..05, OPS-07) (W7)
 - [x] 11-15-PLAN.md — UI foundation: security layer (CSP, CSRF, Host/:authority allowlist on all routes), embedded assets, run list/filters/tags/DLQ tab, run detail + published status, timeline with replay markers, logs (UI-01) (W5)
 - [x] 11-16-PLAN.md — UI actions: cancel/terminate/retry/signal/pause/resume, rerun-from-step with preview, DLQ requeue/dismiss, bulk create/progress/cancel (UI-02) (W6)
