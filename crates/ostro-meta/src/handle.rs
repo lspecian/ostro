@@ -383,7 +383,8 @@ impl MetaHandle {
     ///
     /// Multi-voter (12-05): on a follower the proposal goes to the leader through the
     /// [`ProposeForwarder`], then waits until this node applied the leader's index. While
-    /// no leader is known, or the leader moved, it retries for up to 30 s.
+    /// no leader is known, the leader moved, or the outcome is unknown (failover), it
+    /// retries for up to 30 s.
     pub async fn propose(&self, cmd: MetaCommand) -> Result<MetaResult, MetaError> {
         let bytes = encode_command(&cmd);
         let deadline = Instant::now() + PROPOSE_DEADLINE;
@@ -406,10 +407,20 @@ impl MetaHandle {
                     return decode_result(&applied.result)
                         .map_err(|e| MetaError::Decode(e.to_string()));
                 }
-                Err(ProposeError::OutcomeUnknown) if attempt < OUTCOME_UNKNOWN_RETRIES => {
+                // Multi-voter: a failover (or a forwarded call that lost its leader) can take
+                // an election timeout, so retries run until the deadline instead of a count.
+                Err(ProposeError::OutcomeUnknown)
+                    if attempt < OUTCOME_UNKNOWN_RETRIES
+                        || (self.multi && Instant::now() < deadline) =>
+                {
                     attempt += 1;
                     tracing::warn!(attempt, "metadata proposal outcome unknown; retrying");
-                    tokio::time::sleep(OUTCOME_UNKNOWN_BACKOFF).await;
+                    tokio::time::sleep(if self.multi {
+                        LEADER_RETRY_BACKOFF
+                    } else {
+                        OUTCOME_UNKNOWN_BACKOFF
+                    })
+                    .await;
                 }
                 Err(ProposeError::NotLeader { leader })
                     if self.multi && Instant::now() < deadline =>

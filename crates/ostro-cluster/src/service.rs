@@ -85,11 +85,12 @@ mod tests {
     }
 
     #[test]
-    fn require_node_is_stubbed_until_12_05() {
+    fn require_node_without_identity_is_unauthenticated() {
+        // 12-05 implemented require_node (authz.rs); its full matrix is tested there.
         let req = Request::new(());
         assert_eq!(
             crate::authz::require_node(&req).unwrap_err().code(),
-            tonic::Code::Unimplemented
+            tonic::Code::Unauthenticated
         );
     }
 }
