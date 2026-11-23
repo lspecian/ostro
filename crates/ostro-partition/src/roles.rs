@@ -730,10 +730,13 @@ impl RoleDriver {
         }
         info!(partition = self.p.0, from = ?self.role, to = ?role, "partition role changed");
         self.role = role;
-        self.cell.role.send_replace(role);
+        // Record before publishing: whoever wakes on the role (Node::open waits for Leader)
+        // must find the event already in startup_events (ci-fix6: a fresh node returned
+        // from open without its last `RoleChanged` Leader).
         self.env
             .events
             .push(StartupEvent::RoleChanged { p: self.p.0, role });
+        self.cell.role.send_replace(role);
     }
 
     /// The ISR follows meta only (AlterIsr adoption while leading).
