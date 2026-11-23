@@ -173,13 +173,19 @@ async fn trim_above(
     }
     for a in parts {
         let p = a.partition;
-        let start = log_start(c, a.leader, p)?;
+        // The current leader (12-16: `parts` may predate the late node's kill, and a
+        // partition it led has failed over since).
+        let leader = wait_assignment(c, p, "led by a running node", CHANGE_T, |x| {
+            x.leader != 0 && x.leader != LATE
+        })
+        .await?
+        .leader;
+        let start = log_start(c, leader, p)?;
         if start <= above(p) {
             return Err(fail(
                 "bootstrap",
                 format!(
-                    "partition {p}: leader {} log starts at {} after snapshot + retention, not above {}: no snapshot install would be needed",
-                    a.leader,
+                    "partition {p}: leader {leader} log starts at {} after snapshot + retention, not above {}: no snapshot install would be needed",
                     start.0,
                     above(p).0
                 ),
