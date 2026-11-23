@@ -20,6 +20,12 @@
 //!    until the published version moves; only then does it propose anything new. A pending
 //!    shrink is never dropped on an unknown outcome alone.
 //!
+//! A replica that a published ISR dropped (the controller's shrink of a node liveness
+//! declared dead, or this publisher's own shrink) is re-added only after it fetched again
+//! since that ISR was adopted: its tracker row may still look caught up for up to
+//! `replica_lag_max`, and re-adding a dead node at once undoes the controller's shrink,
+//! stalls the HW on it and ping-pongs `AlterIsr` with the controller (12-16).
+//!
 //! The loop ends when the log no longer leads the epoch or meta shows a newer epoch (the
 //! role lifecycle, 12-13, starts a fresh publisher per term). At RF=1 there is nothing to
 //! change and the publisher stays idle.
@@ -129,6 +135,8 @@ pub struct IsrPublisher {
     cfg: IsrPublisherConfig,
     epoch: Epoch,
     in_flight: Option<InFlight>,
+    /// Replica → clock time when an adopted published ISR dropped it (module docs).
+    removed_at: std::collections::BTreeMap<u64, u64>,
 }
 
 impl fmt::Debug for IsrPublisher {
@@ -166,6 +174,7 @@ impl IsrPublisher {
             cfg,
             epoch: view.epoch,
             in_flight: None,
+            removed_at: std::collections::BTreeMap::new(),
         };
         info!(partition = p.0, epoch = me.epoch.0, "ISR publisher started");
         let exit = me.main(shutdown).await;
@@ -244,6 +253,10 @@ impl IsrPublisher {
 
         // 3. Adopt a newer published ISR (the only way the log's ISR changes).
         if a.isr_version > view.isr.version {
+            let now = self.clock.now_ms();
+            for r in view.isr.published.iter().filter(|r| !a.isr.contains(r)) {
+                self.removed_at.insert(*r, now);
+            }
             let set = ReplicaSet {
                 replicas: a.replicas.clone(),
                 isr: a.isr.clone(),
@@ -304,6 +317,14 @@ impl IsrPublisher {
             now,
             self.cfg.lag_max_ms(),
         )?;
+        if let isr::PendingChange::Add(r) = change
+            && let Some(&at) = self.removed_at.get(&r)
+        {
+            if view.tracker.last_fetch_ms(r).is_none_or(|f| f <= at) {
+                return None;
+            }
+            self.removed_at.remove(&r);
+        }
         let proposed = view.isr.proposed(change);
         match self.log.propose_isr_change(self.epoch, change) {
             Ok(true) => {}

@@ -509,6 +509,41 @@ async fn hung_alter_isr_is_retried_after_the_propose_timeout() {
     c.shutdown().await;
 }
 
+/// 12-16: a replica the controller shrank out (liveness said dead) is not re-added while
+/// its tracker row merely still looks caught up: it must fetch again first. Before, the
+/// leader re-added it at once and the two ping-ponged `AlterIsr` for `replica_lag_max`,
+/// stalling the HW on the dead node each time.
+#[tokio::test]
+async fn controller_shrink_is_not_undone_without_a_new_fetch() {
+    let mut c = full_isr(Inject::None).await;
+    c.stop_fetcher(3).await;
+    // The controller's shrink (meta proposal from outside the publisher).
+    let a = c.g.assignment(0).await;
+    let r =
+        c.g.propose(MetaCommand::AlterIsr {
+            partition: 0,
+            epoch: a.epoch,
+            expected_isr_version: a.isr_version,
+            isr: vec![1, 2],
+        })
+        .await;
+    assert!(matches!(r, MetaResult::Ok { .. }), "{r:?}");
+    c.wait_isr(&[1, 2], Duration::from_secs(5)).await;
+    let calls = c.meta.calls.load(Ordering::SeqCst);
+    // Within replica_lag_max replica 3 still looks caught up; it must stay out.
+    tokio::time::sleep(LAG_MAX / 2).await;
+    assert!(!c.meta_isr().contains(&3), "{:?}", c.meta_isr());
+    assert_eq!(
+        c.meta.calls.load(Ordering::SeqCst),
+        calls,
+        "no AlterIsr re-adding 3"
+    );
+    // Once it fetches again it is re-added as usual.
+    c.start_fetcher(3, FetcherHooks::default());
+    c.wait_isr(&[1, 2, 3], Duration::from_secs(10)).await;
+    c.shutdown().await;
+}
+
 #[tokio::test]
 async fn alter_isr_rejected_by_a_concurrent_election_kip497() {
     let mut c = full_isr(Inject::ElectFirst).await;
