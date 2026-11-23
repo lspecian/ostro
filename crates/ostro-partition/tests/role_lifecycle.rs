@@ -428,3 +428,56 @@ async fn failed_leader_steps_down_and_resigns_once() {
     );
     node.shutdown().await.expect("shutdown");
 }
+
+#[cfg(feature = "failpoints")]
+mod failpoints {
+    use super::*;
+
+    /// 12-16 `isolated_leader_cannot_commit`: a demoted leader fails its pending submits and
+    /// refuses new ones at once, even while its leader services take long to stop (they may
+    /// wait out the dispatcher's grace for executor jobs).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn demotion_refuses_submits_before_the_services_stop() {
+        let _scenario = fail::FailScenario::setup();
+        let tmp = ostro_testkit::fs::tempdir();
+        let asg = FakeAssignments::new(1, vec![view(0, 1, 1, &[1, 2], &[1], 1, 1)]);
+        let fol = FakeFollower::new();
+        let node = open(roles_cfg(tmp.path(), 1, 1, &asg, &fol)).await;
+        wait_leader(&node, 0, 1).await;
+        asg.set(view(0, 1, 1, &[1, 2], &[1, 2], 2, 1));
+        let h = node.handle(P0).expect("ready");
+        p12_roles::eventually("ISR {1,2} adopted", || {
+            h.log().replica_status().published_isr == vec![1, 2]
+        })
+        .await;
+        let pending = {
+            let h = h.clone();
+            tokio::spawn(async move {
+                h.submit_one(Command::start_run(common::start_run(&common::run_on(0))))
+                    .await
+            })
+        };
+        sleep(Duration::from_millis(200)).await;
+        assert!(!pending.is_finished(), "the submit waits for the HW");
+
+        fail::cfg("roles::before_services_stop", "return(2000)").expect("cfg");
+        // Self-demotion: meta's view masked as leaderless.
+        asg.set(view(0, 0, 1, &[1, 2], &[1, 2], 2, 1));
+        let r = timeout(Duration::from_millis(800), pending)
+            .await
+            .expect("pending submit fails before the services stopped")
+            .expect("join");
+        assert!(matches!(r, Err(PartitionError::NotLeader)), "{r:?}");
+        let r = timeout(
+            Duration::from_millis(800),
+            h.submit_one(Command::start_run(common::start_run(&common::run_on(0)))),
+        )
+        .await
+        .expect("a new submit is refused at once");
+        assert!(r.is_err(), "{r:?}");
+        assert!(node.roles().led().borrow().is_empty());
+        fail::remove("roles::before_services_stop");
+        wait_role(&node, 0, "Offline", |r| *r == PartitionRole::Offline).await;
+        node.shutdown().await.expect("shutdown");
+    }
+}

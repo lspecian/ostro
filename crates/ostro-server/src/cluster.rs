@@ -1210,7 +1210,15 @@ impl crate::control::LeaderHints for NodeLeaderHints {
     fn not_leader(&self, p: PartitionId) -> Option<ostro_api::ApiError> {
         let node = self.node.upgrade()?;
         let role = node.role(p).map(|r| *r.borrow())?;
-        if matches!(role, PartitionRole::Leader { .. }) {
+        // A leader stepping down leaves the led set first; its role changes only after its
+        // services stopped (which can take the dispatcher's grace period).
+        let stepping_down = || {
+            !ostro_partition::roles::PartitionRoles::led(&*node)
+                .borrow()
+                .iter()
+                .any(|(q, _)| *q == p)
+        };
+        if matches!(role, PartitionRole::Leader { .. }) && !stepping_down() {
             return None;
         }
         let (leader, addr) = self.view.read(|s| {

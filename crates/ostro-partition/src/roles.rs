@@ -771,21 +771,29 @@ impl RoleDriver {
         }
     }
 
-    /// Leave Leader/Announcing: leader services stop, pending submits fail `NotLeader`, the
-    /// handle can no longer append (epoch 0), the router stops routing here.
+    /// Leave Leader/Announcing: the router stops routing here, pending and new submits fail
+    /// `NotLeader` and the handle can no longer append (epoch 0) **before** the leader
+    /// services stop: their shutdown may wait for executor jobs (up to the dispatcher's
+    /// grace), and a leader that lost meta contact must answer clients at once instead of
+    /// holding their requests until the services are gone (12-16,
+    /// `isolated_leader_cannot_commit`).
     async fn step_down(&mut self, hint: Option<u64>) {
         let p = self.p;
         self.env.led.remove(p);
         self.env.router.unregister(p);
         self.env.router.set_leader_hint(p, hint);
-        self.stop_upload_fwd().await;
-        if let Some(t) = self.leader.take() {
-            t.shutdown().await;
-        }
         if let Some(run) = self.cell.running() {
             run.handle.machine().set_emit_actions(false);
             run.handle.set_epoch(Epoch(0));
             run.acks.refuse_not_leader();
+        }
+        self.stop_upload_fwd().await;
+        #[cfg(feature = "failpoints")]
+        if let Some(ms) = services_stop_delay() {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        if let Some(t) = self.leader.take() {
+            t.shutdown().await;
         }
     }
 
@@ -1241,6 +1249,16 @@ impl RoleDriver {
         }
         self.stop_upload_fwd().await;
     }
+}
+
+/// Test hook: `roles::before_services_stop` = `return(<ms>)` holds a step-down for that long
+/// before the leader services stop (a slow services shutdown, as an executor job in the
+/// dispatcher's grace period makes it).
+#[cfg(feature = "failpoints")]
+fn services_stop_delay() -> Option<u64> {
+    fail::fail_point!("roles::before_services_stop", |a| a
+        .and_then(|s| s.parse().ok()));
+    None
 }
 
 #[cfg(test)]
