@@ -51,7 +51,9 @@ pub use leader::placement::{
 };
 pub use leader::{LeaderConfig, LeaderCtx, LeaderTasks};
 pub use leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
-pub use node::{Node, NodeConfig, NodeError, PartitionSlot, StartMode};
+pub use node::{
+    Node, NodeConfig, NodeError, PartitionSlot, StartMode, bind_cluster_id, bind_node_id,
+};
 pub use replica_services::{ReplicaTasks, spawn_replica_services};
 pub use roles::{
     AssignmentSource, FollowerDriver, FollowerTask, InstallGuard, NodeTestHooks,

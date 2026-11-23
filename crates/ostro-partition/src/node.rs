@@ -2,9 +2,11 @@
 //! (STOR-03, STOR-08, STOR-09, STOR-10; see [`startup`](crate::startup) for the sequence).
 //!
 //! Layout under `data_dir`:
-//! - `node.toml`: `format_version = 1`, the fixed partition count (STOR-09) and the
-//!   additive `incarnation` key (08-08, P8-D4: 128-bit random, 32 lowercase hex chars,
-//!   written on first open, preserved afterwards; older readers ignore unknown keys);
+//! - `node.toml`: `format_version = 1`, the fixed partition count (STOR-09), the additive
+//!   `incarnation` key (08-08, P8-D4: 128-bit random, 32 lowercase hex chars, written on
+//!   first open, preserved afterwards) and the additive identity keys `node_id` /
+//!   `cluster_id` (12-13, D-P12-16: written by [`bind_node_id`] / [`bind_cluster_id`] before
+//!   meta / partitions open); older readers ignore unknown keys (D18);
 //! - `state/pNNNN`: one fjall state store per partition (also records the count);
 //! - `wal/`: the shared group-commit WAL of every partition log;
 //! - `blobs/`: the content-addressed blob store shared by all partitions;
@@ -172,6 +174,16 @@ pub enum NodeError {
     PartitionCountMismatch { configured: u16, stored: u16 },
     #[error("node file: {0}")]
     NodeFile(String),
+    /// `node.toml` binds this data directory to another identity (12-13, D-P12-16).
+    #[error(
+        "node.toml {key} mismatch: the data directory belongs to {key} {stored}, configured {configured} \
+         (use the data directory of that {key}, or a fresh one)"
+    )]
+    IdentityMismatch {
+        key: &'static str,
+        stored: String,
+        configured: String,
+    },
     #[error("log: {0}")]
     Log(#[from] LogError),
     #[error("io: {0}")]
@@ -388,7 +400,7 @@ impl Node {
         std::fs::create_dir_all(&cfg.data_dir)?;
 
         // 0. the fixed partition count (and the node incarnation).
-        let incarnation = check_node_file(&cfg.data_dir, count)?;
+        let incarnation = check_node_file(&cfg.data_dir, count, cfg.node_id)?;
         events.push(StartupEvent::NodeFileChecked);
 
         let term = match (cfg.mode, &cfg.assignments) {
@@ -1318,15 +1330,44 @@ pub(crate) fn term_offset(log: &PartitionLog, epoch: Epoch) -> Option<Offset> {
         .map(|(_, o)| *o)
 }
 
-/// Create `node.toml` or check its partition count against `count`; returns the node
-/// incarnation. A file without `incarnation` (written before 08-08) gains one through an
-/// append-only atomic rewrite (tmp + fsync + rename + dir fsync); the existing lines are
-/// kept byte for byte.
-fn check_node_file(dir: &Path, count: PartitionCount) -> Result<[u8; 16], NodeError> {
+/// Create `node.toml` or check its partition count against `count` (and the bound
+/// `node_id`, 12-13, against `node_id`); returns the node incarnation. A file without
+/// `incarnation` (written before 08-08) gains one through an append-only atomic rewrite (tmp +
+/// fsync + rename + dir fsync); the existing lines are kept byte for byte. A file holding only
+/// identity keys (written by [`bind_node_id`] / [`bind_cluster_id`] before the first open)
+/// gains `format_version`, `partitions` and `incarnation` the same way.
+fn check_node_file(dir: &Path, count: PartitionCount, node_id: u64) -> Result<[u8; 16], NodeError> {
     let path = dir.join(NODE_FILE);
     match std::fs::read_to_string(&path) {
         Ok(s) => {
-            let f = parse_node_file(&s)?;
+            let keys = parse_node_keys(&s)?;
+            if let Some(stored) = keys.node_id
+                && stored != node_id
+            {
+                return Err(NodeError::IdentityMismatch {
+                    key: "node_id",
+                    stored: stored.to_string(),
+                    configured: node_id.to_string(),
+                });
+            }
+            if keys.version.is_none() && keys.partitions.is_none() {
+                // Identity keys only (bound before the first open).
+                let inc = keys.incarnation.unwrap_or_else(new_incarnation);
+                let mut body = s;
+                if !body.is_empty() && !body.ends_with('\n') {
+                    body.push('\n');
+                }
+                body.push_str(&format!(
+                    "format_version = {NODE_FILE_VERSION}\npartitions = {}\n",
+                    count.get()
+                ));
+                if keys.incarnation.is_none() {
+                    body.push_str(&incarnation_line(&inc));
+                }
+                write_durably(dir, NODE_FILE, body.as_bytes())?;
+                return Ok(inc);
+            }
+            let f = node_file_of(keys)?;
             if f.version != NODE_FILE_VERSION {
                 return Err(NodeError::NodeFile(format!(
                     "{}: unsupported format_version {}",
@@ -1365,6 +1406,93 @@ fn check_node_file(dir: &Path, count: PartitionCount) -> Result<[u8; 16], NodeEr
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Bind `data_dir` to `node_id` (12-13, D-P12-16; the server calls it before meta opens).
+/// `node.toml` without `node_id` (or no `node.toml` yet) gains `node_id = N` through an
+/// append-only durable rewrite (tmp + fsync + rename + dir fsync) that keeps every existing
+/// line, Phase 8's included, byte for byte; the same id again is a no-op; a different stored
+/// id is [`NodeError::IdentityMismatch`] and nothing is written. `node_id == 0` is refused
+/// (0 means "no node" in assignments).
+pub fn bind_node_id(data_dir: &Path, node_id: u64) -> Result<(), NodeError> {
+    if node_id == 0 {
+        return Err(NodeError::NodeFile(
+            "node_id 0 is reserved (0 means no node); configure a node id >= 1".into(),
+        ));
+    }
+    bind_key(data_dir, IdentityKey::NodeId, &node_id.to_string())
+}
+
+/// Bind `data_dir` to `cluster_id` (12-13, D-P12-16; the server calls it before any partition
+/// opens). Same rules as [`bind_node_id`]; the id must be non-empty printable ASCII without
+/// quotes or backslashes (it is stored as `cluster_id = "<id>"`).
+pub fn bind_cluster_id(data_dir: &Path, cluster_id: &str) -> Result<(), NodeError> {
+    if cluster_id.is_empty()
+        || !cluster_id
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\\')
+    {
+        return Err(NodeError::NodeFile(format!(
+            "cluster_id {cluster_id:?}: want non-empty printable ASCII without quotes or backslashes"
+        )));
+    }
+    bind_key(data_dir, IdentityKey::ClusterId, cluster_id)
+}
+
+#[derive(Copy, Clone)]
+enum IdentityKey {
+    NodeId,
+    ClusterId,
+}
+
+impl IdentityKey {
+    fn name(self) -> &'static str {
+        match self {
+            IdentityKey::NodeId => "node_id",
+            IdentityKey::ClusterId => "cluster_id",
+        }
+    }
+
+    fn line(self, value: &str) -> String {
+        match self {
+            IdentityKey::NodeId => format!("node_id = {value}\n"),
+            IdentityKey::ClusterId => format!("cluster_id = \"{value}\"\n"),
+        }
+    }
+}
+
+fn bind_key(dir: &Path, key: IdentityKey, value: &str) -> Result<(), NodeError> {
+    std::fs::create_dir_all(dir)?;
+    let existing = match std::fs::read_to_string(dir.join(NODE_FILE)) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    if let Some(s) = &existing {
+        let keys = parse_node_keys(s)?;
+        let stored = match key {
+            IdentityKey::NodeId => keys.node_id.map(|v| v.to_string()),
+            IdentityKey::ClusterId => keys.cluster_id,
+        };
+        if let Some(stored) = stored {
+            if stored == value {
+                return Ok(());
+            }
+            return Err(NodeError::IdentityMismatch {
+                key: key.name(),
+                stored,
+                configured: value.to_string(),
+            });
+        }
+    }
+    let mut body = existing.unwrap_or_default();
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&key.line(value));
+    write_durably(dir, NODE_FILE, body.as_bytes())?;
+    info!(key = key.name(), value, "node.toml: identity bound");
+    Ok(())
 }
 
 /// The `incarnation = "<32 hex>"` line of `node.toml`.
@@ -1413,12 +1541,22 @@ pub fn new_incarnation() -> [u8; 16] {
     out
 }
 
-/// The keys of `node.toml` this version reads.
+/// The keys of `node.toml` this version reads (required ones present).
 #[derive(Debug, PartialEq, Eq)]
 struct NodeFile {
     version: u64,
     partitions: u16,
     incarnation: Option<[u8; 16]>,
+}
+
+/// Every known key of `node.toml`, each optional (identity keys may precede the rest).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NodeKeys {
+    version: Option<u64>,
+    partitions: Option<u16>,
+    incarnation: Option<[u8; 16]>,
+    node_id: Option<u64>,
+    cluster_id: Option<String>,
 }
 
 fn parse_incarnation(v: &str) -> Result<[u8; 16], NodeError> {
@@ -1438,46 +1576,73 @@ fn parse_incarnation(v: &str) -> Result<[u8; 16], NodeError> {
 }
 
 /// The known keys from the `key = value` lines of `node.toml` (unknown keys are ignored).
-fn parse_node_file(s: &str) -> Result<NodeFile, NodeError> {
-    let mut version = None;
-    let mut partitions = None;
-    let mut incarnation = None;
+fn parse_node_keys(s: &str) -> Result<NodeKeys, NodeError> {
+    let mut k = NodeKeys::default();
     for line in s.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (k, v) = line
+        let (key, v) = line
             .split_once('=')
             .ok_or_else(|| NodeError::NodeFile(format!("malformed line {line:?}")))?;
         let v = v.trim();
-        match k.trim() {
+        match key.trim() {
             "format_version" => {
-                version = Some(
+                k.version = Some(
                     v.parse::<u64>()
                         .map_err(|e| NodeError::NodeFile(format!("format_version {v:?}: {e}")))?,
                 );
             }
             "partitions" => {
-                partitions = Some(
+                k.partitions = Some(
                     v.parse::<u16>()
                         .map_err(|e| NodeError::NodeFile(format!("partitions {v:?}: {e}")))?,
                 );
             }
-            "incarnation" => incarnation = Some(parse_incarnation(v)?),
+            "incarnation" => k.incarnation = Some(parse_incarnation(v)?),
+            "node_id" => {
+                let id = v
+                    .parse::<u64>()
+                    .map_err(|e| NodeError::NodeFile(format!("node_id {v:?}: {e}")))?;
+                if id == 0 {
+                    return Err(NodeError::NodeFile("node_id 0 is reserved".into()));
+                }
+                k.node_id = Some(id);
+            }
+            "cluster_id" => {
+                let id = v
+                    .strip_prefix('"')
+                    .and_then(|x| x.strip_suffix('"'))
+                    .filter(|x| !x.is_empty())
+                    .ok_or_else(|| {
+                        NodeError::NodeFile(format!("cluster_id {v:?}: want a quoted string"))
+                    })?;
+                k.cluster_id = Some(id.to_string());
+            }
             _ => {}
         }
     }
-    match (version, partitions) {
+    Ok(k)
+}
+
+fn node_file_of(k: NodeKeys) -> Result<NodeFile, NodeError> {
+    match (k.version, k.partitions) {
         (Some(version), Some(partitions)) => Ok(NodeFile {
             version,
             partitions,
-            incarnation,
+            incarnation: k.incarnation,
         }),
         _ => Err(NodeError::NodeFile(
             "missing format_version or partitions".into(),
         )),
     }
+}
+
+/// The known keys of a complete `node.toml`.
+#[cfg(test)]
+fn parse_node_file(s: &str) -> Result<NodeFile, NodeError> {
+    node_file_of(parse_node_keys(s)?)
 }
 
 /// tmp + fsync + rename + dir fsync.
@@ -1540,5 +1705,22 @@ mod tests {
         assert!(parse_node_file("partitions = 4\n").is_err());
         assert!(parse_node_file("format_version = 1\npartitions = x\n").is_err());
         assert!(parse_node_file("garbage\n").is_err());
+    }
+
+    #[test]
+    fn identity_keys_parse() {
+        let k = parse_node_keys("node_id = 7\ncluster_id = \"c-1\"\nfuture = 3\n").unwrap();
+        assert_eq!(k.node_id, Some(7));
+        assert_eq!(k.cluster_id.as_deref(), Some("c-1"));
+        assert_eq!((k.version, k.partitions), (None, None));
+        assert!(parse_node_keys("node_id = 0\n").is_err());
+        assert!(parse_node_keys("node_id = x\n").is_err());
+        assert!(parse_node_keys("cluster_id = c\n").is_err());
+        assert!(parse_node_keys("cluster_id = \"\"\n").is_err());
+        let f = parse_node_file(
+            "format_version = 1\npartitions = 2\nnode_id = 3\ncluster_id = \"x\"\n",
+        )
+        .unwrap();
+        assert_eq!((f.version, f.partitions), (1, 2));
     }
 }
