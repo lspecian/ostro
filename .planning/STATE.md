@@ -639,6 +639,7 @@ Open:
 - Phase 10 polyglot legs (real toolchain downloads, Python/TS builds) need network + the ostro-build polyglot feature; ci-local shows them under --no-polyglot as SKIP. Go client tests need Go ≥ 1.23 (--no-go skips visibly). Docker is absent locally: --docker and SC1 are tested with a recording docker shim locally and for real only in the ci.yml clean-machine job (human_needed until a remote exists).
   - 10-01 note (2026-11-22): Docker IS now present on this machine (Docker Desktop WSL integration, client/server 29.1.3, `/usr/bin/docker` symlink dated 2026-11-22). 10-15/10-19 may run the real --docker and SC1 legs locally as an extra; the recording shim stays the CI-independent test.
   - Candidate for 10-10/10-13 (open user item, not implemented by the gate): macOS `ostro dev --ephemeral` misses the 1 s budget because macOS has no tmpfs; coordinator suggestion = an in-memory / fsync-free ephemeral mode.
+  - eph-fix (2026-11-23): `--ephemeral` uses /dev/shm only when it exists, is writable and has >= 512 MiB free (statvfs), else the OS temp dir; one log line says which. Fixes the 10-19 ENOSPC in default 64 MB Docker shm; `--shm-size` is now optional. See phases/10-developer-cli-test-kits/eph-fix-SUMMARY.md.
 
 Resolved in Phase 1:
 - ~~Do componentize-py/js reseed randomness after pre-init?~~ **Resolved** (S2, 01-05): no. Host-driven reseed works in all three languages; SDKs must reseed/patch from ctx. See docs/spikes/S2-guest-toolchains.md#determinism-probes
