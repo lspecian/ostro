@@ -46,4 +46,7 @@ pub fn hello(ctx: &Ctx, input: HelloInput) -> Result<HelloOutput, WorkflowError>
     })
 }
 
+// The component's exports exist only in the wasm32 build: `cargo test` links this crate
+// for the host, where the WIT export symbols cannot be linked into a cdylib.
+#[cfg(target_arch = "wasm32")]
 ostro_sdk::export!(HelloWorkflow);
