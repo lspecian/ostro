@@ -130,6 +130,33 @@ async fn not_leader_503_module_push_status_and_self_demotion() {
     }
     assert!(ok > 0 && not_leader > 0, "ok {ok} not_leader {not_leader}");
 
+    // 12-16: no server component pins a follower partition's state store. Node 1 follows
+    // partition 1; quiescing it for a snapshot install must succeed at once (a cached
+    // handle in the control plane, the bridge table or a service task used to hold the
+    // store until `quiesce_timeout`), and after the reopen the API looks up the new handle.
+    let t = std::time::Instant::now();
+    let guard = tokio::time::timeout(
+        Duration::from_secs(5),
+        hs[0].node().control().quiesce_for_install(PartitionId(1)),
+    )
+    .await
+    .expect("quiesce does not wait for the store's users")
+    .expect("a follower's store is not pinned by the server");
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    assert!(hs[0].node().handle(PartitionId(1)).is_none(), "quiesced");
+    guard.reopen().await.expect("reopen");
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            hs[0].node().handle(PartitionId(1)).is_some()
+                && matches!(
+                    hs[0].node().role(PartitionId(1)).map(|r| *r.borrow()),
+                    Some(PartitionRole::Follower { .. })
+                )
+        })
+        .await,
+        "partition 1 follows again after the reopen"
+    );
+
     // The status endpoint: published ISR (never node 3) and measured follower progress.
     let doc = status(&http, &hs[0]).await;
     println!("{}", serde_json::to_string_pretty(&doc).unwrap());

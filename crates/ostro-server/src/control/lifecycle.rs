@@ -164,7 +164,7 @@ pub(crate) async fn signal_run(
 ) -> Result<SignalResponse, ApiError> {
     r.validate()?;
     let run = parse_run_id(cp, &r.run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     if rec.status.is_terminal() {
         return Err(ApiError::run_terminal(&r.run_id, status(rec.status)));
@@ -232,7 +232,7 @@ pub(crate) async fn cancel_run(
 ) -> Result<CancelResponse, ApiError> {
     r.validate()?;
     let run = parse_run_id(cp, &r.run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     // A continued-as-new run forwards the cancel to its successor (PF-F2): not an error.
     let forwards = rec.status == values::RunStatus::ContinuedAsNew && rec.continued_to.is_some();
@@ -273,7 +273,7 @@ pub(crate) async fn terminate_run(
 ) -> Result<TerminateResponse, ApiError> {
     r.validate()?;
     let run = parse_run_id(cp, &r.run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     if rec.status.is_terminal() {
         return Err(ApiError::run_terminal(&r.run_id, status(rec.status)));
@@ -323,7 +323,7 @@ pub(crate) async fn retry_run(
     r: RetryRequest,
 ) -> Result<RetryResponse, ApiError> {
     let run = parse_run_id(cp, &r.run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     let mode = retry_mode(&r.run_id, &rec)?;
     if r.dry_run {
@@ -392,7 +392,7 @@ async fn restart(
     let uuid = uuid::Uuid::now_v7();
     let p = partition_for_new_run(&uuid, cp.partition_count());
     let run = RunId::new(p, uuid);
-    let handle = cp.partition(p)?;
+    let handle = &cp.partition(p)?;
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed)
         .map_err(|e| ApiError::internal(format!("OS random source unavailable: {e}")))?;
@@ -474,7 +474,7 @@ pub(crate) async fn complete_token(
         ));
     }
     let op = parts.op;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     let run_id = run.to_string();
     if rec.status.is_terminal() {

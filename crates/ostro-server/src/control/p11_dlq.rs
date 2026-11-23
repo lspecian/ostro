@@ -442,7 +442,7 @@ async fn indexed(ctx: &P11Ctx, req: &DlqListRequest, budget: usize) -> Result<Dl
                 queue_enabled(ctx, &rec.queue),
                 req.include_dismissed,
             ) {
-                let handle = cp.partition(run.partition()).map_err(api_as_index)?;
+                let handle = &cp.partition(run.partition()).map_err(api_as_index)?;
                 let e = entry(handle, &run, rec, marks)
                     .await
                     .map_err(api_as_index)?;
@@ -504,7 +504,7 @@ async fn scan_fallback(
             .run_id
             .parse()
             .map_err(|e| ApiError::internal(format!("listed run id: {e}")))?;
-        let handle = ctx.cc.partitions.partition(run.partition())?;
+        let handle = &ctx.cc.partitions.partition(run.partition())?;
         let reader = handle.reader();
         let (rec, row) = tokio::task::spawn_blocking(move || {
             Ok::<_, StoreError>((query::run_record(&reader, &run)?, dlq_row(&reader, &run)?))
@@ -583,7 +583,7 @@ fn mark_rejected(run_id: &str, r: RejectReason) -> ApiError {
 pub async fn dismiss_dlq(ctx: &P11Ctx, req: DlqDismissRequest) -> Result<DlqEntry, ApiError> {
     let cp = &ctx.cc.partitions;
     let run = parse_run_id(cp, &req.run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let (rec, row) = read_both(handle, run).await?;
     let marks = current_marks(row, &rec);
     if !member(&rec, marks.as_ref(), queue_enabled(ctx, &rec.queue), true)
@@ -627,7 +627,7 @@ pub async fn requeue_dlq(
 ) -> Result<DlqRequeueResponse, ApiError> {
     let cp = &ctx.cc.partitions;
     let run = parse_run_id(cp, &req.run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let (rec, row) = read_both(handle, run).await?;
     let marks = current_marks(row, &rec);
     // Idempotent re-issue: the episode was already requeued to a new run.
@@ -757,7 +757,7 @@ async fn restart_with_key(
     let uuid = uuid::Uuid::now_v7();
     let p = partition_for_key(&rec.workflow, key.as_bytes(), cp.partition_count());
     let run = RunId::new(p, uuid);
-    let handle = cp.partition(p)?;
+    let handle = &cp.partition(p)?;
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed)
         .map_err(|e| ApiError::internal(format!("OS random source unavailable: {e}")))?;

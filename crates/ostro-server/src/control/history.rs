@@ -296,7 +296,7 @@ pub(crate) async fn run_history(
 ) -> Result<HistoryPage, ApiError> {
     let run = parse_run_id(cp, &req.run_id)?;
     let limit = effective_limit(req.limit) as usize;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let reader = handle.reader();
     let from = req.from_seq;
     let rows = tokio::task::spawn_blocking(move || {

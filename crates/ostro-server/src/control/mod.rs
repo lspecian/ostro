@@ -106,8 +106,10 @@ pub mod webhooks;
 /// Shared state behind every API call.
 pub struct ServerControlPlane {
     pub(crate) meta: Arc<MetaHandle>,
-    /// One entry per partition: `Some` when the slot started (`PartitionSlot::Ready`).
-    pub(crate) partitions: Vec<Option<PartitionHandle<PartitionLog>>>,
+    /// The node: partition handles are looked up per call ([`ServerControlPlane::partition`]),
+    /// never cached (12-16: a cached handle pins a follower's state store, so a snapshot
+    /// install cannot close it, and goes stale when the partition restarts).
+    pub(crate) node: Weak<Node>,
     pub(crate) count: PartitionCount,
     /// The node-wide blob store (shared by every partition); `None` if no partition started.
     pub(crate) blobs: Option<Arc<BlobStore>>,
@@ -193,25 +195,24 @@ impl std::fmt::Debug for ServerControlPlane {
 impl ServerControlPlane {
     pub(crate) fn new(
         meta: Arc<MetaHandle>,
-        partitions: Vec<Option<PartitionHandle<PartitionLog>>>,
+        node: &Arc<Node>,
         count: PartitionCount,
         runtime: Arc<Runtime>,
         cfg: Arc<ServerConfig>,
         bridge: Arc<BridgeServices>,
         p7: Arc<P7Shared>,
     ) -> Self {
-        let blobs = partitions
-            .iter()
-            .flatten()
-            .next()
+        let blobs = count
+            .ids()
+            .find_map(|p| node.handle(p))
             .map(|h| Arc::clone(h.blobs()));
         let watchers = RunWatchers::new(usize::from(count.get()));
-        for h in partitions.iter().flatten() {
-            watchers.watch_partition(h.partition(), h.machine().subscribe_actions());
+        for p in count.ids() {
+            watchers.follow_partition(Arc::downgrade(node), p);
         }
         Self {
             meta,
-            partitions,
+            node: Arc::downgrade(node),
             count,
             blobs,
             runtime,
@@ -290,16 +291,28 @@ impl ServerControlPlane {
 
     /// Partition `p`'s handle, or `Unavailable` when its slot failed to start or this node
     /// does not lead it (Phase 12: details name the leader, D-P12-21).
-    pub fn partition(&self, p: PartitionId) -> Result<&PartitionHandle<PartitionLog>, ApiError> {
+    pub fn partition(&self, p: PartitionId) -> Result<PartitionHandle<PartitionLog>, ApiError> {
         if let Some(hints) = &self.leader_hints
             && let Some(e) = hints.not_leader(p)
         {
             return Err(e);
         }
-        self.partitions
-            .get(p.index())
-            .and_then(Option::as_ref)
+        self.handle(p)
             .ok_or_else(|| ApiError::unavailable(format!("partition {} is not available", p.0)))
+    }
+
+    /// Partition `p`'s current handle on this node, whatever its role (`None`: not running,
+    /// e.g. failed or quiesced for a snapshot install, or the node shut down).
+    pub(crate) fn handle(&self, p: PartitionId) -> Option<PartitionHandle<PartitionLog>> {
+        if p.index() >= usize::from(self.count.get()) {
+            return None;
+        }
+        self.node.upgrade()?.handle(p)
+    }
+
+    /// Every running partition's current handle on this node.
+    pub(crate) fn handles(&self) -> Vec<PartitionHandle<PartitionLog>> {
+        self.count.ids().filter_map(|p| self.handle(p)).collect()
     }
 
     /// The node-wide blob store.
@@ -580,8 +593,8 @@ impl ControlPlane for ServerControlPlane {
     fn ready(&self) -> bool {
         self.serving.load(Ordering::SeqCst)
             && self.meta.raft().status().leader_id.is_some()
-            && self.partitions.iter().all(|slot| {
-                slot.as_ref().is_some_and(|h| {
+            && self.count.ids().all(|p| {
+                self.handle(p).is_some_and(|h| {
                     !matches!(
                         *h.machine().health().borrow(),
                         PartitionHealth::Failed { .. }

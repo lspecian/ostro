@@ -98,9 +98,13 @@ fn test_root() -> Result<TempDir, HarnessError> {
 async fn boot(
     cfg: ServerConfig,
     transport: Arc<MemTransport>,
+    wal_rotation_bytes: Option<u64>,
 ) -> Result<ServerHandle, HarnessError> {
     let node = cfg.node.node_id;
-    let opts = ServerOptions::default().with_cluster_transport(transport);
+    let mut opts = ServerOptions::default().with_cluster_transport(transport);
+    if let Some(b) = wal_rotation_bytes {
+        opts = opts.with_wal_rotation_bytes(b);
+    }
     // clock-exempt: test timeout
     match tokio::time::timeout(START_T, ostro_server::server::start_with_options(cfg, opts)).await {
         Ok(Ok(h)) => Ok(h),
@@ -252,7 +256,11 @@ impl ClusterHarness for InProcCluster {
         let mut boots = Vec::new();
         for id in &ids {
             let cfg = c.node_config(*id, &ca);
-            boots.push(boot(cfg.clone(), c.net.transport(*id)));
+            boots.push(boot(
+                cfg.clone(),
+                c.net.transport(*id),
+                c.spec.wal_rotation_bytes,
+            ));
             c.nodes.insert(
                 *id,
                 NodeSlot {
@@ -365,7 +373,7 @@ impl ClusterHarness for InProcCluster {
         // Heal first (12-14): a node's start waits for its metadata group (meta before
         // partitions), so it must reach the other voters while it boots.
         self.net.faults().heal(node);
-        let h = boot(cfg, self.net.transport(node)).await?;
+        let h = boot(cfg, self.net.transport(node), self.spec.wal_rotation_bytes).await?;
         let slot = self.nodes.get_mut(&node).expect("slot");
         slot.api = h.local_addr();
         slot.handle = Some(h);

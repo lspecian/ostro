@@ -35,11 +35,9 @@ use std::time::Duration;
 use axum::Router;
 use ostro_blob::BlobStore;
 use ostro_engine::runtime::Runtime;
-use ostro_log::PartitionLog;
 use ostro_meta::{MetaHandle, MetaView};
 use ostro_partition::{
-    Clock, DispatcherConfig, DispatcherStats, Executor, Node, PartitionHandle, PartitionSlot,
-    QueueGauges,
+    Clock, DispatcherConfig, DispatcherStats, Executor, Node, PartitionSlot, QueueGauges,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -71,8 +69,9 @@ pub enum P7Error {
 /// The started node, late-bound by [`attach_node`] (no strong `Node` reference).
 #[derive(Clone)]
 pub struct NodeRefs {
-    /// One entry per partition: `Some` when the slot started.
-    pub partitions: Vec<Option<PartitionHandle<PartitionLog>>>,
+    /// One entry per partition: `true` when the slot started. Handles are not kept here
+    /// (12-16: a cached handle pins the partition's state store; look them up in the node).
+    pub partitions: Vec<bool>,
     /// The node-wide blob store (`None` if no partition started).
     pub blobs: Option<Arc<BlobStore>>,
 }
@@ -268,19 +267,15 @@ pub fn dispatcher_config(
 
 /// Record the opened node (partition handles + blob store) in [`P7Shared::node`].
 pub fn attach_node(ctx: &P7Ctx, node: &Node) {
-    let partitions: Vec<Option<PartitionHandle<PartitionLog>>> = node
+    let partitions: Vec<bool> = node
         .slots()
         .iter()
-        .map(|s| match s {
-            PartitionSlot::Ready(h) => Some(h.clone()),
-            PartitionSlot::Failed { .. } => None,
-        })
+        .map(|s| matches!(s, PartitionSlot::Ready(_)))
         .collect();
-    let blobs = partitions
-        .iter()
-        .flatten()
-        .next()
-        .map(|h| Arc::clone(h.blobs()));
+    let blobs = node.slots().iter().find_map(|s| match s {
+        PartitionSlot::Ready(h) => Some(Arc::clone(h.blobs())),
+        PartitionSlot::Failed { .. } => None,
+    });
     if ctx.shared.node.set(NodeRefs { partitions, blobs }).is_err() {
         warn!("p7::attach_node called twice; keeping the first node");
     }

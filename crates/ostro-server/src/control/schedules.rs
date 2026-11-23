@@ -572,7 +572,7 @@ impl ScheduleApi for ScheduleController {
         };
         let cp = &self.ctx.partitions;
         let owner = schedule_owner(&name, cp.partition_count());
-        let handle = cp.partition(owner)?;
+        let handle = &cp.partition(owner)?;
         let run = RunId::new_v7(owner);
         let now = self.ctx.now_ms();
         let start = build_schedule_start(

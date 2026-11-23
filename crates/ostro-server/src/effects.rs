@@ -72,9 +72,15 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 // ------------------------------------------------------------------- partition table
 
 /// Late-bound partition handles by partition number (see the module docs).
+///
+/// Once [`bind_node`](Self::bind_node) ran, every lookup asks the node for the partition's
+/// *current* handle and the table holds none itself (12-16): a cached handle would keep a
+/// follower's state store open (a snapshot install could never close it) and would go
+/// stale when the partition restarts with a new store and apply machine.
 #[derive(Default)]
 pub struct PartitionTable {
     slots: RwLock<BTreeMap<u16, Handle>>,
+    node: std::sync::OnceLock<std::sync::Weak<ostro_partition::Node>>,
     closed: std::sync::atomic::AtomicBool,
 }
 
@@ -99,11 +105,20 @@ impl PartitionTable {
         Self::default()
     }
 
-    /// Register (or replace) the handle of `h.partition()`. No-op once [`close`d](Self::close).
+    /// Look every partition up in `node` from now on (the node's current handle per call);
+    /// handles registered before are dropped.
+    pub fn bind_node(&self, node: &Arc<ostro_partition::Node>) {
+        let mut slots = self.slots.write().unwrap_or_else(PoisonError::into_inner);
+        let _ = self.node.set(Arc::downgrade(node));
+        slots.clear();
+    }
+
+    /// Register (or replace) the handle of `h.partition()`. No-op once [`close`d](Self::close)
+    /// or bound to a node.
     pub fn insert(&self, h: Handle) {
         let p = h.partition().0;
         let mut slots = self.slots.write().unwrap_or_else(PoisonError::into_inner);
-        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) || self.node.get().is_some() {
             return;
         }
         let fresh = slots.get(&p).is_none_or(|cur| cur.epoch() != h.epoch());
@@ -112,8 +127,14 @@ impl PartitionTable {
         }
     }
 
-    /// The handle of partition `p`, if registered.
+    /// The handle of partition `p`, if registered (bound: the node's current handle).
     pub fn get(&self, p: u16) -> Option<Handle> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        if let Some(node) = self.node.get() {
+            return node.upgrade()?.handle(ostro_types::PartitionId(p));
+        }
         self.slots
             .read()
             .unwrap_or_else(PoisonError::into_inner)

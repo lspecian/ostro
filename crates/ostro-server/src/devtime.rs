@@ -198,10 +198,10 @@ impl DevTime {
     /// `None` otherwise (a slot failed to start, or a command waits for apply). Watch
     /// borrows and atomic loads only.
     fn fence(cp: &ServerControlPlane) -> Option<Vec<u64>> {
-        cp.partitions
-            .iter()
-            .map(|slot| {
-                let h = slot.as_ref()?;
+        cp.count
+            .ids()
+            .map(|p| {
+                let h = cp.handle(p)?;
                 let applied = *h.machine().applied().borrow();
                 (applied == h.log().log_end()).then_some(applied.0)
             })
@@ -289,7 +289,7 @@ impl DevTime {
         }
         let mut v = StoreView::default();
         let min = |a: Option<u64>, b: u64| Some(a.map_or(b, |a| a.min(b)));
-        for h in cp.partitions.iter().flatten() {
+        for h in &cp.handles() {
             let reader = h.reader();
             match query::ready_entries(&reader, READY_SCAN_LIMIT) {
                 Ok(rows) => {

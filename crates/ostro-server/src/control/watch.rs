@@ -25,11 +25,13 @@
 //!
 //! # Leadership
 //!
-//! On this single-node (RF=1) server each partition's apply machine, and with it the action
-//! broadcast sender, lives as long as the node: the subscription taken at bootstrap stays
-//! valid across term changes, and actions are emitted whenever the partition leads
-//! (catch-up discards them, but nothing can wait on a partition that is not serving).
-//! Clustered leadership changes (Phase 12) must re-subscribe on the new leader.
+//! A partition's apply machine, and with it the action broadcast sender, lives until the
+//! partition restarts (a snapshot install or a failed-partition restart replaces the
+//! machine, 12-16). Each partition's forwarding task therefore follows the node's
+//! **current** machine ([`next_actions`]): when the old broadcast closes it wakes every
+//! waiter of the partition and subscribes to the new machine. Actions are emitted whenever
+//! the partition leads (catch-up discards them, but nothing can wait on a partition that is
+//! not serving).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -111,6 +113,49 @@ impl RunWatchers {
             }),
             tasks: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Forward partition `p`'s action broadcasts to the waiters for as long as `node` lives,
+    /// re-subscribing whenever the partition's apply machine is replaced (one task per
+    /// partition; the node's handles are never held between subscriptions).
+    pub fn follow_partition(&self, node: std::sync::Weak<ostro_partition::Node>, p: PartitionId) {
+        let inner = Arc::clone(&self.inner);
+        // The first subscription is taken now, so nothing applied after this call is missed.
+        let mut first = node
+            .upgrade()
+            .and_then(|n| n.handle(p))
+            .map(|h| h.machine().subscribe_actions());
+        let task = tokio::spawn(async move {
+            loop {
+                let mut actions = match first.take() {
+                    Some(rx) => rx,
+                    None => match next_actions(&node, p, None).await {
+                        Some(rx) => rx,
+                        None => break,
+                    },
+                };
+                loop {
+                    match actions.recv().await {
+                        Ok(batch) => {
+                            for a in batch.iter() {
+                                if let Action::RunCompleted { run, .. } = a {
+                                    inner.wake_run(run);
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => inner.wake_all(p),
+                        Err(broadcast::error::RecvError::Closed) => {
+                            inner.wake_all(p);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(task);
     }
 
     /// Forward partition `p`'s action broadcast to the waiters (one task per partition).
@@ -279,7 +324,7 @@ async fn read_outcome(
     cp: &ServerControlPlane,
     run: RunId,
 ) -> Result<(RunRecord, Option<bytes::Bytes>), ApiError> {
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let reader = handle.reader();
     let (rec, payload) = tokio::task::spawn_blocking(move || {
         let Some(rec) = query::run_record(&reader, &run)? else {
@@ -400,6 +445,43 @@ pub(crate) async fn await_result(
             }
             // A continuation completed right at the deadline: follow it with no wait
             // left (the loop answers at once).
+        }
+    }
+}
+
+/// How often [`next_actions`] looks for a partition that is not running (quiesced for a
+/// snapshot install, restarting).
+const RESUBSCRIBE_POLL: Duration = Duration::from_millis(100);
+
+/// A subscription to partition `p`'s **current** apply machine on `node`, waiting while the
+/// partition is not running; `None` once the node is gone or `stop` fired. The handle used to
+/// subscribe is dropped before returning, so a caller holding only the receiver never pins
+/// the partition's state store (a snapshot install must be able to close it, 12-16); the
+/// receiver reports `Closed` once that machine is gone, and the caller subscribes again.
+pub(crate) async fn next_actions(
+    node: &std::sync::Weak<ostro_partition::Node>,
+    p: PartitionId,
+    stop: Option<&tokio_util::sync::CancellationToken>,
+) -> Option<broadcast::Receiver<Arc<Vec<Action>>>> {
+    loop {
+        if stop.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return None;
+        }
+        let rx = {
+            let node = node.upgrade()?;
+            node.handle(p).map(|h| h.machine().subscribe_actions())
+        };
+        if let Some(rx) = rx {
+            return Some(rx);
+        }
+        match stop {
+            Some(stop) => {
+                tokio::select! {
+                    () = stop.cancelled() => return None,
+                    () = tokio::time::sleep(RESUBSCRIBE_POLL) => {}
+                }
+            }
+            None => tokio::time::sleep(RESUBSCRIBE_POLL).await,
         }
     }
 }

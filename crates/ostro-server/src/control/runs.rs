@@ -312,7 +312,7 @@ pub(crate) async fn start_run(
         Some(k) => partition_for_key(&workflow, k.as_bytes(), count),
         None => partition_for_new_run(&uuid, count),
     };
-    let handle = cp.partition(p)?;
+    let handle = &cp.partition(p)?;
     let policy = match req.conflict_policy {
         ConflictPolicy::ReturnExisting => cmd::ConflictPolicy::ReturnExisting,
         ConflictPolicy::Reject => cmd::ConflictPolicy::Reject,
@@ -465,7 +465,7 @@ fn status_row(
 
 pub(crate) async fn get_run(cp: &ServerControlPlane, run_id: String) -> Result<RunInfo, ApiError> {
     let run = parse_run_id(cp, &run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let reader = handle.reader();
     let rows_read = std::sync::Arc::clone(&cp.status_rows_read);
     let (rec, result, status_row) = tokio::task::spawn_blocking(move || {

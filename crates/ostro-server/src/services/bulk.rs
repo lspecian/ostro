@@ -1030,7 +1030,7 @@ async fn op_once(
     let Ok(run) = run_id.parse::<RunId>() else {
         return Ok(Outcome::Failed(format!("invalid run id {run_id:?}")));
     };
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     if created_by_job(job_id, &rec, job) {
         return Ok(Outcome::Skipped);
@@ -1140,7 +1140,7 @@ async fn restart_with_key(
     key: &str,
 ) -> Result<RunId, ApiError> {
     let cp = &ctx.cc.partitions;
-    let old_handle = cp.partition(old.partition())?;
+    let old_handle = &cp.partition(old.partition())?;
     let reader = old_handle.reader();
     let input = tokio::task::spawn_blocking(move || {
         query::run_payload(&reader, &old, query::PAYLOAD_INPUT)
@@ -1155,7 +1155,7 @@ async fn restart_with_key(
         .map_err(partition_error)?;
     let p = partition_for_key(&rec.workflow, key.as_bytes(), cp.partition_count());
     let run = RunId::new(p, uuid::Uuid::now_v7());
-    let handle = cp.partition(p)?;
+    let handle = &cp.partition(p)?;
     crate::flow::rate_limit::admit(
         cp,
         handle,

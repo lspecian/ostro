@@ -213,6 +213,10 @@ pub struct ServerOptions {
     /// Phase 12 (12-02 hook, wired by 12-14): the node-to-node transport. `None` = the
     /// production mTLS TCP transport; the conformance harness injects an in-memory one.
     pub cluster_transport: Option<Arc<dyn ostro_cluster::transport::ClusterTransport>>,
+    /// Test hook (12-16): rotate WAL segments at this size instead of the 250 MB default,
+    /// so retention can trim a small log (whole segments only) and replicas behind the
+    /// leader's `log_start` exercise snapshot installs. The binary never sets it.
+    pub wal_rotation_bytes: Option<u64>,
 }
 
 impl Default for ServerOptions {
@@ -223,6 +227,7 @@ impl Default for ServerOptions {
             hooks: Arc::new(ExecutorHooks::default()),
             tls_profile: None,
             cluster_transport: None,
+            wal_rotation_bytes: None,
         }
     }
 }
@@ -259,6 +264,12 @@ impl ServerOptions {
         transport: Arc<dyn ostro_cluster::transport::ClusterTransport>,
     ) -> Self {
         self.cluster_transport = Some(transport);
+        self
+    }
+
+    /// Rotate WAL segments at `bytes` (test hook, see [`ServerOptions::wal_rotation_bytes`]).
+    pub fn with_wal_rotation_bytes(mut self, bytes: u64) -> Self {
+        self.wal_rotation_bytes = Some(bytes);
         self
     }
 }
@@ -299,6 +310,7 @@ async fn start_inner(
         hooks,
         tls_profile,
         cluster_transport,
+        wal_rotation_bytes,
     } = opts;
     // Phase 10 (10-10, D-P10-6): with `[dev] time_skipping` on (ephemeral `ostro dev`
     // only), the dev clock over the seam clock becomes the one clock. Off: no DevClock.
@@ -480,6 +492,10 @@ async fn start_inner(
     node_cfg.node_id = node_id;
     node_cfg.leadership = Arc::new(MetaLeadership::new(meta.view().clone()));
     node_cfg.clock = Arc::clone(&clock);
+    if let Some(bytes) = wal_rotation_bytes {
+        node_cfg.wal.enable_rotation = true;
+        node_cfg.wal.rotation_size_bytes = bytes;
+    }
     // Phase 8 contracts (08-01): snapshots and cron from `[snapshots]` / `[triggers]`;
     // the upload floor exists only with bottomless on (B4, 08-09). The cron drivers read
     // the meta-backed schedule set (08-14).
@@ -513,25 +529,13 @@ async fn start_inner(
     wait_first_terms(&node, &cluster, count).await;
     timings.first_terms = t.elapsed();
     p7::attach_node(&p7, &node);
-    for slot in node.slots() {
-        if let PartitionSlot::Ready(h) = slot {
-            bridge.partitions().insert(h.clone());
-        }
-    }
-
-    let partitions: Vec<_> = node
-        .slots()
-        .iter()
-        .map(|s| match s {
-            PartitionSlot::Ready(h) => Some(h.clone()),
-            PartitionSlot::Failed { .. } => None,
-        })
-        .collect();
-    let blobs = partitions
-        .iter()
-        .flatten()
-        .next()
-        .map(|h| Arc::clone(h.blobs()));
+    // The bridge and the control plane look partition handles up in the node per use (a
+    // cached handle would pin a follower's state store and go stale on a restart, 12-16).
+    bridge.partitions().bind_node(&node);
+    let blobs = node.slots().iter().find_map(|s| match s {
+        PartitionSlot::Ready(h) => Some(Arc::clone(h.blobs())),
+        PartitionSlot::Failed { .. } => None,
+    });
     let ctl_blobs = blobs.clone();
     let cfg = Arc::clone(&p7.config);
 
@@ -560,7 +564,6 @@ async fn start_inner(
         Ok(h) => h,
         Err(e) => {
             drop(p7);
-            drop(partitions);
             services.shutdown().await;
             bridge.shutdown().await;
             cluster.stop_tasks().await;
@@ -576,7 +579,7 @@ async fn start_inner(
     let control = Arc::new(
         ServerControlPlane::new(
             Arc::clone(&meta),
-            partitions,
+            &node,
             count,
             Arc::clone(&runtime),
             Arc::clone(&cfg),
@@ -1207,7 +1210,7 @@ mod tests {
         assert!(p7.engine.get().is_some(), "p7::executor stored the engine");
         assert!(p7.bridge.is_some(), "the Phase 6 bridge is shared");
         let node = p7.node.get().expect("p7::attach_node ran");
-        assert_eq!(node.partitions.iter().flatten().count(), 2);
+        assert_eq!(node.partitions.iter().filter(|r| **r).count(), 2);
         assert!(node.blobs.is_some());
         assert_eq!(p7.embedded_slots.available_permits(), 7);
         assert_eq!(p7.registry.connected(), 0);

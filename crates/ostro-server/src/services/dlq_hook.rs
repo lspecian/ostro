@@ -62,9 +62,9 @@ use ostro_api::domain::{ConflictPolicy, StartRunRequest};
 use ostro_partition::query::{self, IndexError};
 use ostro_partition::store::derived::IndexState;
 use ostro_partition::store::values::{RunRecord, RunStatus};
-use ostro_partition::{Action, ApplyOutcome, PartitionSlot};
-use ostro_types::RunId;
+use ostro_partition::{Action, ApplyOutcome, PartitionRole, PartitionSlot};
 use ostro_types::command::dlq_update;
+use ostro_types::{PartitionId, RunId};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -72,6 +72,7 @@ use tracing::{debug, info, warn};
 
 use super::ServiceCtx;
 use crate::control::p11_dlq::{self, current_marks, dlq_prefixes, dlq_row, episode};
+use crate::control::watch::next_actions;
 use crate::onfailure::{self, HookInput};
 use crate::p11::P11Ctx;
 
@@ -88,28 +89,26 @@ pub fn spawn(svc: &ServiceCtx, p11: &Arc<P11Ctx>) -> Option<JoinHandle<()>> {
     if !svc.config.dlq.hooks_enabled {
         return None;
     }
-    let handles: Vec<_> = svc
+    // Subscribe before returning, so no action published after the start is missed. Only
+    // receivers are kept (12-16: a held handle pins the state store, so a snapshot install
+    // could never close it); each task re-subscribes when the partition's machine is
+    // replaced, and runs a catch-up pass for its partition whenever it becomes the leader
+    // after the start (the startup pass only covers partitions led then).
+    let subs: Vec<_> = svc
         .node
         .slots()
         .iter()
         .filter_map(|s| match s {
-            PartitionSlot::Ready(h) => Some(h.clone()),
+            PartitionSlot::Ready(h) => Some((h.partition(), h.machine().subscribe_actions())),
             PartitionSlot::Failed { .. } => None,
         })
         .collect();
-    if handles.is_empty() {
+    if subs.is_empty() {
         return None;
     }
     let shutdown = svc.shutdown.clone();
     let ctx = Arc::clone(p11);
-    // Subscribe before returning, so no action published after the start is missed.
-    let subs: Vec<_> = handles
-        .into_iter()
-        .map(|h| {
-            let rx = h.machine().subscribe_actions();
-            (h, rx)
-        })
-        .collect();
+    let node = Arc::downgrade(&svc.node);
     Some(tokio::spawn(async move {
         let mut set = JoinSet::new();
         {
@@ -120,35 +119,63 @@ pub fn spawn(svc: &ServiceCtx, p11: &Arc<P11Ctx>) -> Option<JoinHandle<()>> {
                 info!(?s, "on_failure hook catch-up done");
             });
         }
-        for (h, mut rx) in subs {
+        for (p, rx) in subs {
             let shutdown = shutdown.clone();
             let ctx = Arc::clone(&ctx);
+            let node = node.clone();
             set.spawn(async move {
+                let Some(mut role) = node.upgrade().and_then(|n| n.role(p)) else {
+                    return;
+                };
+                let mut leading = matches!(*role.borrow_and_update(), PartitionRole::Leader { .. });
+                let mut first = Some(rx);
                 loop {
-                    let batch = tokio::select! {
-                        biased;
-                        _ = shutdown.cancelled() => return,
-                        r = rx.recv() => r,
+                    let mut rx = match first.take() {
+                        Some(rx) => rx,
+                        None => match next_actions(&node, p, Some(&shutdown)).await {
+                            Some(rx) => rx,
+                            None => return,
+                        },
                     };
-                    let actions = match batch {
-                        Ok(a) => a,
-                        Err(RecvError::Lagged(n)) => {
-                            warn!(
-                                partition = h.partition().0,
-                                skipped = n,
-                                "dlq_hook lagged; the next leader start's catch-up re-drives \
-                                 missed hooks"
-                            );
-                            continue;
-                        }
-                        Err(RecvError::Closed) => return,
-                    };
-                    for a in actions.iter() {
-                        if let Action::RunCompleted { run, status } = a
-                            && matches!(status, RunStatus::Failed | RunStatus::TimedOut)
-                            && let Err(e) = drive(&ctx, *run).await
-                        {
-                            warn!(%run, error = %e, "on_failure hook not started");
+                    loop {
+                        let batch = tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => return,
+                            r = role.changed() => {
+                                if r.is_err() {
+                                    return;
+                                }
+                                let now = matches!(*role.borrow_and_update(), PartitionRole::Leader { .. });
+                                if now && !leading {
+                                    let mut stats = CatchUpStats::default();
+                                    catch_up_partition(&ctx, p, REBUILD_FALLBACK, &shutdown, &mut stats).await;
+                                    info!(partition = p.0, ?stats, "on_failure hook catch-up done (new leader)");
+                                }
+                                leading = now;
+                                continue;
+                            }
+                            r = rx.recv() => r,
+                        };
+                        let actions = match batch {
+                            Ok(a) => a,
+                            Err(RecvError::Lagged(n)) => {
+                                warn!(
+                                    partition = p.0,
+                                    skipped = n,
+                                    "dlq_hook lagged; the next leader start's catch-up re-drives \
+                                     missed hooks"
+                                );
+                                continue;
+                            }
+                            Err(RecvError::Closed) => break,
+                        };
+                        for a in actions.iter() {
+                            if let Action::RunCompleted { run, status } = a
+                                && matches!(status, RunStatus::Failed | RunStatus::TimedOut)
+                                && let Err(e) = drive(&ctx, *run).await
+                            {
+                                warn!(%run, error = %e, "on_failure hook not started");
+                            }
                         }
                     }
                 }
@@ -216,7 +243,7 @@ async fn source_input(
 /// module docs). Idempotent per episode.
 pub async fn drive(ctx: &P11Ctx, run: RunId) -> Result<HookOutcome, ApiError> {
     let cp = &ctx.cc.partitions;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let reader = handle.reader();
     let (rec, row) = tokio::task::spawn_blocking(move || {
         Ok::<_, ostro_partition::StoreError>((
@@ -355,19 +382,37 @@ pub async fn catch_up(
     shutdown: &CancellationToken,
 ) -> CatchUpStats {
     let mut stats = CatchUpStats::default();
+    for p in ctx.cc.partitions.partition_count().ids() {
+        if !catch_up_partition(ctx, p, rebuild_fallback, shutdown, &mut stats).await {
+            break;
+        }
+    }
+    stats
+}
+
+/// [`catch_up`] for one partition (skipped unless this node leads it); `false` once
+/// `shutdown` fired.
+pub async fn catch_up_partition(
+    ctx: &P11Ctx,
+    p: PartitionId,
+    rebuild_fallback: Duration,
+    shutdown: &CancellationToken,
+    stats: &mut CatchUpStats,
+) -> bool {
     let cp = &ctx.cc.partitions;
-    for p in cp.partition_count().ids() {
+    {
         let Ok(handle) = cp.partition(p) else {
-            continue;
+            return true;
         };
         let reader = handle.reader();
+        drop(handle);
         // Waited time is the sum of the backoff sleeps (no clock read: a manual test clock
         // never stalls the fallback).
         let mut waited = Duration::ZERO;
         let mut backoff = Duration::from_millis(250);
         let candidates = loop {
             if shutdown.is_cancelled() {
-                return stats;
+                return false;
             }
             let now = ctx.cc.clock.now_ms();
             if query::index_state(&reader) == IndexState::Ready {
@@ -394,7 +439,7 @@ pub async fn catch_up(
                 .min(rebuild_fallback.saturating_sub(waited))
                 .max(Duration::from_millis(10));
             tokio::select! {
-                _ = shutdown.cancelled() => return stats,
+                _ = shutdown.cancelled() => return false,
                 _ = tokio::time::sleep(nap) => {}
             }
             waited += nap;
@@ -403,7 +448,7 @@ pub async fn catch_up(
         stats.examined += candidates.0;
         for run in candidates.1 {
             if shutdown.is_cancelled() {
-                return stats;
+                return false;
             }
             stats.driven += 1;
             match drive(ctx, run).await {
@@ -413,7 +458,7 @@ pub async fn catch_up(
             }
         }
     }
-    stats
+    true
 }
 
 type Candidates = (usize, Vec<RunId>);

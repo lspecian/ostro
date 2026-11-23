@@ -43,6 +43,8 @@ use ostro_partition::query;
 use ostro_partition::store::values::{RunRecord, RunStatus};
 use ostro_partition::{Action, Clock, PartitionHandle, PartitionSlot};
 use tokio::sync::broadcast::error::RecvError;
+
+use crate::control::watch::next_actions;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
@@ -54,74 +56,85 @@ use super::ServiceCtx;
 pub fn spawn(ctx: &ServiceCtx) -> Option<JoinHandle<()>> {
     let t = &ctx.config.telemetry;
     let spans = t.otlp_endpoint.is_some() && t.traces;
-    let handles: Vec<_> = ctx
+    // Subscribe before returning, so no action published after `Services::start` is missed.
+    // Only receivers are kept: each task looks the partition's handle up per completion and
+    // re-subscribes when the partition's machine is replaced (12-16: a held handle pins the
+    // state store, so a snapshot install could never close it).
+    let subs: Vec<_> = ctx
         .node
         .slots()
         .iter()
         .filter_map(|s| match s {
-            PartitionSlot::Ready(h) => Some(h.clone()),
+            PartitionSlot::Ready(h) => Some((h.partition(), h.machine().subscribe_actions())),
             PartitionSlot::Failed { .. } => None,
         })
         .collect();
-    if handles.is_empty() {
+    if subs.is_empty() {
         return None;
     }
     let shutdown = ctx.shutdown.clone();
     let clock = Arc::clone(&ctx.clock);
-    // Subscribe before returning, so no action published after `Services::start` is missed.
-    let subs: Vec<_> = handles
-        .into_iter()
-        .map(|h| {
-            let rx = h.machine().subscribe_actions();
-            (h, rx)
-        })
-        .collect();
+    let node = Arc::downgrade(&ctx.node);
     Some(tokio::spawn(async move {
         let mut set = JoinSet::new();
-        for (h, mut rx) in subs {
+        for (p, rx) in subs {
             let shutdown = shutdown.clone();
             let clock = Arc::clone(&clock);
+            let node = node.clone();
             set.spawn(async move {
+                let mut first = Some(rx);
                 loop {
-                    let batch = tokio::select! {
-                        biased;
-                        _ = shutdown.cancelled() => return,
-                        r = rx.recv() => r,
+                    let mut rx = match first.take() {
+                        Some(rx) => rx,
+                        None => match next_actions(&node, p, Some(&shutdown)).await {
+                            Some(rx) => rx,
+                            None => return,
+                        },
                     };
-                    let actions = match batch {
-                        Ok(a) => a,
-                        Err(RecvError::Lagged(n)) => {
-                            warn!(
-                                partition = h.partition().0,
-                                skipped = n,
-                                "run_spans lagged; some workflow.run spans are lost"
-                            );
-                            continue;
-                        }
-                        Err(RecvError::Closed) => return,
-                    };
-                    for a in actions.iter() {
-                        let Action::RunCompleted { run, status } = a else {
-                            continue;
+                    loop {
+                        let batch = tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => return,
+                            r = rx.recv() => r,
                         };
-                        match h.read_run(run) {
-                            Ok(Some(rec)) => {
-                                count_completed(&h, run, &rec).await;
-                                if spans {
-                                    emit(&run.to_string(), &rec, clock.as_ref());
+                        let actions = match batch {
+                            Ok(a) => a,
+                            Err(RecvError::Lagged(n)) => {
+                                warn!(
+                                    partition = p.0,
+                                    skipped = n,
+                                    "run_spans lagged; some workflow.run spans are lost"
+                                );
+                                continue;
+                            }
+                            Err(RecvError::Closed) => break,
+                        };
+                        for a in actions.iter() {
+                            let Action::RunCompleted { run, status } = a else {
+                                continue;
+                            };
+                            let Some(h) = node.upgrade().and_then(|n| n.handle(p)) else {
+                                continue;
+                            };
+                            match h.read_run(run) {
+                                Ok(Some(rec)) => {
+                                    count_completed(&h, run, &rec).await;
+                                    if spans {
+                                        emit(&run.to_string(), &rec, clock.as_ref());
+                                    }
                                 }
-                            }
-                            Ok(None) => {
-                                metrics::counter!(
-                                    "ostro_runs_completed_total",
-                                    "workflow" => "",
-                                    "status" => status_label(*status)
-                                )
-                                .increment(1);
-                                debug!(%run, "completed run already gone; no run span");
-                            }
-                            Err(e) => {
-                                warn!(%run, error = %e, "run record read failed; no run span")
+                                Ok(None) => {
+                                    metrics::counter!(
+                                        "ostro_runs_completed_total",
+                                        "workflow" => "",
+                                        "status" => status_label(*status)
+                                    )
+                                    .increment(1);
+                                    debug!(%run, "completed run already gone; no run span");
+                                }
+                                Err(e) => {
+                                    warn!(%run, error = %e, "run record read failed; no run span")
+                                }
                             }
                         }
                     }

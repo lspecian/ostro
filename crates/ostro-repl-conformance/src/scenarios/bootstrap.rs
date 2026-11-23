@@ -63,6 +63,7 @@ pub fn scenarios() -> Vec<Scenario> {
 fn spec_empty() -> ClusterSpec {
     ClusterSpec {
         seed: 711,
+        wal_rotation_bytes: Some(WAL_ROTATION),
         ..ClusterSpec::default()
     }
 }
@@ -70,6 +71,7 @@ fn spec_empty() -> ClusterSpec {
 fn spec_behind() -> ClusterSpec {
     ClusterSpec {
         seed: 712,
+        wal_rotation_bytes: Some(WAL_ROTATION),
         ..ClusterSpec::default()
     }
 }
@@ -77,9 +79,14 @@ fn spec_behind() -> ClusterSpec {
 fn spec_cut() -> ClusterSpec {
     ClusterSpec {
         seed: 713,
+        wal_rotation_bytes: Some(WAL_ROTATION),
         ..ClusterSpec::default()
     }
 }
+
+/// WAL segment rotation of the bootstrap clusters: retention deletes whole segments only,
+/// and with the 250 MB default a test-sized log would never trim (12-16).
+const WAL_ROTATION: u64 = 2 * 1024;
 
 /// The node that is stopped, emptied or left behind, and brought back.
 const LATE: u64 = 3;

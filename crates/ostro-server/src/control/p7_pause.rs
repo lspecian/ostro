@@ -73,7 +73,7 @@ pub(crate) async fn pause_run(
     }
     .validate()?;
     let run = parse_run_id(cp, &run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     if rec.status.is_terminal() {
         return Err(ApiError::run_terminal(&run_id, status(rec.status)));
@@ -119,7 +119,7 @@ pub(crate) async fn resume_run(
     run_id: String,
 ) -> Result<RunPauseState, ApiError> {
     let run = parse_run_id(cp, &run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let rec = read_record(handle, run).await?;
     if rec.status.is_terminal() {
         return Err(ApiError::run_terminal(&run_id, status(rec.status)));
@@ -146,6 +146,7 @@ pub(crate) async fn retry_alias(
     let Ok(handle) = cp.partition(run.partition()) else {
         return Ok(None);
     };
+    let handle = &handle;
     let Ok(rec) = read_record(handle, run).await else {
         return Ok(None);
     };

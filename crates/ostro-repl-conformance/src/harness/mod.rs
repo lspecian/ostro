@@ -30,6 +30,9 @@ pub struct ClusterSpec {
     pub objstore: bool,
     /// Seed of the fault layer and workloads.
     pub seed: u64,
+    /// Rotate every node's WAL segments at this size (`None` = the 250 MB default), so
+    /// retention can trim a small test log (bootstrap scenarios).
+    pub wal_rotation_bytes: Option<u64>,
 }
 
 impl Default for ClusterSpec {
@@ -41,6 +44,7 @@ impl Default for ClusterSpec {
             partitions: 4,
             objstore: false,
             seed: 0,
+            wal_rotation_bytes: None,
         }
     }
 }

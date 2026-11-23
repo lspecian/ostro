@@ -165,7 +165,7 @@ struct Source {
 async fn load_source(ctx: &P11Ctx, run_id: &str) -> Result<Source, ApiError> {
     let cp = &ctx.cc.partitions;
     let run = parse_run_id(cp, run_id)?;
-    let handle = cp.partition(run.partition())?;
+    let handle = &cp.partition(run.partition())?;
     let reader = handle.reader();
     let rec = tokio::task::spawn_blocking(move || query::run_record(&reader, &run))
         .await
@@ -471,7 +471,7 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
         Some(d) => partition_for_key(&workflow, d.as_bytes(), count_p),
         None => partition_for_new_run(&uuid, count_p),
     };
-    let handle = cp.partition(p)?;
+    let handle = &cp.partition(p)?;
     let existing = match &dedupe {
         Some(d) => existing_run(handle, &workflow, d).await?,
         None => None,
@@ -527,7 +527,7 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
     }
 
     // 6. The StartRun, fitted into the envelope.
-    let src_handle = cp.partition(src.run.partition())?;
+    let src_handle = &cp.partition(src.run.partition())?;
     let mut rows = source_rows(src_handle, src.run, cut).await?;
     let run_started = rows.remove(0);
     let src_run = src.run;
