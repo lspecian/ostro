@@ -27,7 +27,7 @@
 //! |-------|--------|
 //! | `Drop(p)` | with probability `p` (seeded `StdRng`), the RPC fails at once with `UNAVAILABLE` "dropped by fault layer" |
 //! | `Delay(ms)` | the request is held `ms` before it is forwarded |
-//! | `Blackhole` | the request is accepted and never answered (the client deadline fires) |
+//! | `Blackhole` | the request is accepted and never answered (the client deadline fires); a response that becomes ready while a blackhole (or cut) rule matches is lost too, so a call in flight when the rule was added never delivers |
 //! | `Cut` | for `RpcKind::Any`: new connections are refused (`ConnectionRefused`) and every live pipe of the link fails with `ConnectionReset` (streams reset); for a specific kind: those RPCs fail with `UNAVAILABLE` "connection reset" |
 //!
 //! Rules are per directed link `(from, to)` (either side may be "any node", used by
@@ -243,6 +243,30 @@ impl FaultLayer {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .any(|r| r.on_link(from, to) && r.kind == RpcKind::Any && r.fault == Fault::Cut)
+    }
+
+    /// Whether a response to a request of `kind` on `from -> to` that is ready now is lost:
+    /// the matching rule (if any) is a `Blackhole` (`Some(None)`, never delivered) or a `Cut`
+    /// (`Some(Some(reason))`). A link that went dark while a call was in flight (a parked
+    /// long-poll `Fetch`, for instance) loses its answer like a real dead link would, instead
+    /// of delivering data the leader appended after the fault was installed. Never draws from
+    /// the RNG.
+    pub fn response_lost(&self, from: u64, to: u64, kind: RpcKind) -> Option<Option<String>> {
+        let rule = self
+            .rules
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .rev()
+            .find(|r| r.on_link(from, to) && r.kind.matches(kind))
+            .copied();
+        match rule.map(|r| r.fault) {
+            Some(Fault::Blackhole) => Some(None),
+            Some(Fault::Cut) => Some(Some(format!(
+                "connection reset by fault layer (link {from}->{to} cut)"
+            ))),
+            _ => None,
+        }
     }
 
     /// Decide one request of `kind` on `from -> to` (draws from the seeded RNG for `Drop`).
@@ -733,6 +757,7 @@ impl tower::Service<http::Request<Body>> for FaultProxy {
         let kind = RpcKind::from_path(req.uri().path());
         let action = self.faults.decide(self.from, self.to, kind);
         let mut inner = self.inner.clone();
+        let (faults, from, to) = (Arc::clone(&self.faults), self.from, self.to);
         Box::pin(async move {
             use tower::ServiceExt as _;
             match action {
@@ -746,7 +771,11 @@ impl tower::Service<http::Request<Body>> for FaultProxy {
                 Err(e) => return Ok(unavailable(format!("fault proxy: {e}"))),
             };
             match tower::Service::call(svc, req).await {
-                Ok(resp) => Ok(resp),
+                Ok(resp) => match faults.response_lost(from, to, kind) {
+                    None => Ok(resp),
+                    Some(None) => std::future::pending().await,
+                    Some(Some(msg)) => Ok(unavailable(msg)),
+                },
                 Err(e) => Ok(unavailable(format!("fault proxy forward: {e}"))),
             }
         })

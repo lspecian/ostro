@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt as _;
 use ostro_cluster::transport::{ClusterIncoming, ClusterTransport, PeerNode};
 use ostro_proto::cluster::v1 as cpb;
 use ostro_proto::cluster::v1::meta_peer_client::MetaPeerClient;
@@ -263,6 +264,54 @@ async fn blackhole_times_out_at_the_client_deadline() {
         assert!(t.elapsed() >= Duration::from_millis(300));
         net.faults().clear_link(1, 2);
         check(&ch).await.expect("cleared");
+    })
+    .await;
+}
+
+/// 12-16 (`two_quick_leader_changes_truncate`): a call already in flight when its link is
+/// blackholed never delivers its answer (a parked long-poll `Fetch` used to hand the
+/// follower data the leader appended after the hold was installed). The answer here becomes
+/// ready only when the client finishes its `Raft` stream, after the rule was added.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blackhole_swallows_the_answer_of_a_call_in_flight() {
+    guarded(async {
+        let (net, ch) = net(7);
+        check(&ch).await.expect("connected");
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
+        let batches = futures_util::stream::once(async {
+            cpb::RaftBatch {
+                from: 1,
+                messages: vec![vec![1]],
+            }
+        })
+        .chain(futures_util::stream::once(async move {
+            let _ = gate.await;
+            cpb::RaftBatch {
+                from: 1,
+                messages: vec![vec![2]],
+            }
+        }));
+        let call = tokio::spawn({
+            let ch = ch.clone();
+            async move {
+                MetaPeerClient::new(ch)
+                    .raft(req(batches, Duration::from_secs(2)))
+                    .await
+                    .map(|_| ())
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await; // clock-exempt: test pacing
+        net.faults().set(1, 2, RpcKind::Raft, Fault::Blackhole);
+        release.send(()).expect("stream still open");
+        let r = call.await.expect("join");
+        let e = r.expect_err("the answer of a call in flight is lost once the link is blackholed");
+        // The client deadline fired (tonic reports it as Cancelled "Timeout expired").
+        assert!(
+            matches!(e.code(), Code::Cancelled | Code::DeadlineExceeded),
+            "{e:?}"
+        );
+        net.faults().clear_link(1, 2);
+        raft(&ch).await.expect("cleared");
     })
     .await;
 }
