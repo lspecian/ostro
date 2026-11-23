@@ -577,7 +577,7 @@ Recent decisions affecting current work:
 - [FOLLOW-UP] Phase 10: `ostro dev` prints ~1600 INFO log lines on stdout before the ready line (10-17); move logs to stderr (server change; the ready line stays on stdout).
 - [FOLLOW-UP] Phase 10: move the wasm32 guard into `ostro_sdk::export!` (10-17: the Rust template carries `#[cfg(target_arch = "wasm32")]` so host `cargo test` links).
 - [FOLLOW-UP] Phase 10 API docs: OpenAPI `RunStatusDto::Scheduled` says "Waiting for its start delay" but suspended runs are also `scheduled` (10-14); the bulk `retry` action description "Retry (resume) failed runs." (10-18). Both in the frozen OpenAPI snapshot; fix with a snapshot update by the API owner.
-- [FOLLOW-UP] Phase 10: musl binary 56.2 MB vs the 60 MB NFR-2.1 gate (+33.5 MB since Phase 4); take a cargo-bloat breakdown before the next large addition (10-19). **Update (followups1, 2026-11-23): now 59.09 MB (0.9 MB headroom); breakdown + reduction options in docs/binary-size.md; apply option 1/2 before the next code addition.**
+- [FOLLOW-UP] Phase 10: musl binary 56.2 MB vs the 60 MB NFR-2.1 gate (+33.5 MB since Phase 4); take a cargo-bloat breakdown before the next large addition (10-19). **Update (followups1, 2026-11-23): now 59.09 MB (0.9 MB headroom); breakdown + reduction options in docs/binary-size.md; apply option 1/2 before the next code addition.** **Update (size1, 2026-11-23): option 1 applied (opt-level "s" on cold crates): 56.02 MB, 3.98 MB headroom.**
 - [FOLLOW-UP] Phase 10: `build_polyglot::ts_offline_after_warm` failed once on a cold `target/ostro-toolchains-test` (npmrc write ENOENT while `ts_template_builds` installed concurrently; 10-20 gate, green on rerun). ci-fix6 (5067bf7, per-call temp names in write_atomic) may cover it; re-check on a fresh cache.
 
 ### Blockers/Concerns
@@ -642,6 +642,7 @@ Open:
   - Candidate for 10-10/10-13 (open user item, not implemented by the gate): macOS `ostro dev --ephemeral` misses the 1 s budget because macOS has no tmpfs; coordinator suggestion = an in-memory / fsync-free ephemeral mode.
   - eph-fix (2026-11-23): `--ephemeral` uses /dev/shm only when it exists, is writable and has >= 512 MiB free (statvfs), else the OS temp dir; one log line says which. Fixes the 10-19 ENOSPC in default 64 MB Docker shm; `--shm-size` is now optional. See phases/10-developer-cli-test-kits/eph-fix-SUMMARY.md.
   - followups1 (2026-11-23): node logs go to stderr (stdout = ready line + machine output only); `ostro_sdk::export!` is a no-op off wasm32 (template guard removed); OpenAPI scheduled/bulk-retry wording; docs/binary-size.md (musl 59.09 MB). See phases/10-developer-cli-test-kits/followups1-SUMMARY.md.
+  - size1 (2026-11-23): release opt-level "s" for cold crates (ostro-api/cli/client/ui/build, clap, utoipa, kube): musl 59.09 -> 56.02 MB (3.98 MB headroom); startup unchanged. See phases/10-developer-cli-test-kits/size1-SUMMARY.md.
 
 Resolved in Phase 1:
 - ~~Do componentize-py/js reseed randomness after pre-init?~~ **Resolved** (S2, 01-05): no. Host-driven reseed works in all three languages; SDKs must reseed/patch from ctx. See docs/spikes/S2-guest-toolchains.md#determinism-probes
