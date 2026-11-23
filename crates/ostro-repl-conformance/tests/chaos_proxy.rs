@@ -181,9 +181,12 @@ async fn an_upstream_rst_reaches_the_client_as_a_reset_and_a_fin_as_a_fin() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_upstream_resets_the_client() {
     // What a kill -9'd node's port looks like: nothing listens, the connect is refused.
-    let l = TcpListener::bind(LOCAL).await.expect("bind");
-    let dead = l.local_addr().expect("addr");
-    drop(l);
+    // The port stays bound (no `listen`) for the whole test: a bind-then-drop port can be
+    // handed to a listener of a concurrently running test, whose clean close then reached
+    // the client as `Ok(())` (seen on linux-aarch64-musl CI).
+    let dead_sock = tokio::net::TcpSocket::new_v4().expect("socket");
+    dead_sock.bind(LOCAL).expect("bind");
+    let dead = dead_sock.local_addr().expect("addr");
     let p = proxy_to(dead).await;
     let mut s = TcpStream::connect(p.addr(1, 2)).await.expect("connect");
     let _ = s.write_all(b"z").await;
@@ -191,6 +194,7 @@ async fn a_dead_upstream_resets_the_client() {
         read_end(&mut s, Duration::from_secs(10)).await,
         Err(ErrorKind::ConnectionReset)
     );
+    drop(dead_sock);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
