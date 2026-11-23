@@ -7,7 +7,8 @@
 //! and with it (must fail). The names are fixed here (12-02) and never renamed.
 
 /// The leader takes its ISR from the assignment's `replicas` instead of the
-/// published ISR. Placed by 12-04 in `replica/isr.rs`.
+/// published ISR. Placed by 12-04 in `replica/isr.rs`; 12-16 extends it to
+/// ostro-cluster `isr_publisher.rs` (the re-add-after-a-new-fetch gate is skipped).
 pub const ISR_FROM_ASSIGNMENT: &str = "repl::mutant::isr_from_assignment";
 
 /// The HW follows the leader's own LEO, ignoring followers. Placed by 12-04 in

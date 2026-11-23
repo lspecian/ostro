@@ -317,7 +317,12 @@ impl IsrPublisher {
             now,
             self.cfg.lag_max_ms(),
         )?;
+        // The re-add gate is part of the in-sync decision, so the `isr_from_assignment`
+        // mutant (membership from the assignment alone) bypasses it too (12-16: with the
+        // gate honoured, a never-fetching replica stayed out after its first shrink and the
+        // conformance scenario caught the mutant only when the first expansion raced the HW).
         if let isr::PendingChange::Add(r) = change
+            && !crate::fetch::mutant(ostro_log::mutants::ISR_FROM_ASSIGNMENT)
             && let Some(&at) = self.removed_at.get(&r)
         {
             if view.tracker.last_fetch_ms(r).is_none_or(|f| f <= at) {
