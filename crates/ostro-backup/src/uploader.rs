@@ -54,7 +54,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use ostro_blob::BlobStore;
-use ostro_log::ReplicatedLog as _;
+use ostro_log::{RawBatch, ReplicatedLog as _};
 use ostro_meta::MetaView;
 use ostro_objstore::{Conditional, ObjectStore};
 use ostro_partition::{Clock, Node};
@@ -64,6 +64,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::chunk::{self, ChunkError, MAX_CHUNK_BYTES};
+use crate::cluster::{self, Head, HeadPut, HeadSnapshot, Takeover, TakeoverOutcome};
 use crate::config::BackupConfig;
 use crate::fence::{self, FenceError, Ident, Immutable, put_immutable};
 use crate::manifest::{self, Manifest, ManifestError, PartitionCut};
@@ -225,12 +226,12 @@ pub struct RoundReport {
 
 /// A remote snapshot object.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SnapRef {
-    offset: u64,
-    key: String,
-    sha: [u8; 32],
+pub(crate) struct SnapRef {
+    pub(crate) offset: u64,
+    pub(crate) key: String,
+    pub(crate) sha: [u8; 32],
     /// Known for snapshots uploaded by this session (or referenced with verify == offset).
-    state_hash: Option<[u8; 32]>,
+    pub(crate) state_hash: Option<[u8; 32]>,
 }
 
 /// One chunk of the in-memory chain index.
@@ -255,6 +256,11 @@ struct PartState {
     referenced: Option<u64>,
     /// Entry of the last durable manifest.
     last_entry: Option<PartitionCut>,
+    /// Cluster mode: the epoch this state was reconciled for (`None` = reconcile before the
+    /// next upload, 12-15).
+    led_epoch: Option<u32>,
+    /// Cluster mode: etag of `p/<pppp>/head` as last read or written (`None` = absent).
+    head_etag: Option<String>,
 }
 
 /// Gen manifest references, for retention.
@@ -299,6 +305,9 @@ pub struct Uploader {
     /// Upload from a node opened in Inspect mode (offline backup, 08-18): the closed
     /// readiness barriers do not stop the round.
     inspect: bool,
+    /// Cluster mode: partitions fenced by a higher-epoch head, with the epoch they were
+    /// fenced at (kept across sessions; cleared by a takeover at a higher epoch).
+    part_fenced: Mutex<BTreeMap<u16, u32>>,
     /// Phase 12 cluster mode (12-02 contract, consumed by 12-15); `None` = Phase 8
     /// behaviour.
     cluster: Option<UploaderClusterDeps>,
@@ -410,6 +419,7 @@ impl Uploader {
             fenced: AtomicBool::new(false),
             hook: Mutex::new(None),
             inspect: false,
+            part_fenced: Mutex::new(BTreeMap::new()),
             cluster: None,
         }
     }
@@ -446,6 +456,17 @@ impl Uploader {
     /// Whether a precondition failure stopped this uploader.
     pub fn is_fenced(&self) -> bool {
         self.fenced.load(Ordering::Acquire)
+    }
+
+    /// Cluster mode: the epoch at which partition `p` was fenced by a higher-epoch head
+    /// (`None` = not fenced). Uploads of `p` resume only when this node leads it at a higher
+    /// epoch.
+    pub fn partition_fenced(&self, p: PartitionId) -> Option<u32> {
+        self.part_fenced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&p.0)
+            .copied()
     }
 
     /// Test hook (B3 test): after the cut is read, the round sends a resume sender on `tx`
@@ -532,21 +553,30 @@ impl Uploader {
     async fn round_inner(&self, store: &Arc<dyn ObjectStore>) -> Result<RoundReport, UploadError> {
         let mut report = RoundReport::default();
         let count = self.partitions();
-        // Leader services only: every started partition's barrier must be open.
-        let mut any = false;
-        for p in 0..count {
-            let pid = PartitionId(p);
-            if self.node.handle(pid).is_some() {
-                any = true;
-                if !self.inspect && !self.node.barrier(pid).is_some_and(|b| b.is_open()) {
-                    report.barrier_closed = true;
-                    return Ok(report);
+        let cl = self.cluster_round(count);
+        if let Some(cl) = &cl {
+            // Cluster mode (12-15): only led partitions upload, each once its barrier is open.
+            if cl.led.is_empty() {
+                report.barrier_closed = true;
+                return Ok(report);
+            }
+        } else {
+            // Leader services only: every started partition's barrier must be open.
+            let mut any = false;
+            for p in 0..count {
+                let pid = PartitionId(p);
+                if self.node.handle(pid).is_some() {
+                    any = true;
+                    if !self.inspect && !self.node.barrier(pid).is_some_and(|b| b.is_open()) {
+                        report.barrier_closed = true;
+                        return Ok(report);
+                    }
                 }
             }
-        }
-        if !any {
-            report.barrier_closed = true;
-            return Ok(report);
+            if !any {
+                report.barrier_closed = true;
+                return Ok(report);
+            }
         }
 
         let mut guard = self.session.lock().await;
@@ -556,6 +586,15 @@ impl Uploader {
         let Some(sess) = guard.as_mut() else {
             return Err(UploadError::Io("no session".into()));
         };
+        if let Some(cl) = &cl {
+            // A partition no longer led (or led at another epoch) is reconciled again before
+            // its next upload.
+            for (p, part) in sess.parts.iter_mut().enumerate() {
+                if cl.led.get(&(p as u16)) != part.led_epoch.as_ref() {
+                    part.led_epoch = None;
+                }
+            }
+        }
 
         // 1. Applied pairs first, then the cut (W2).
         let pairs: Vec<Option<(Offset, [u8; 32])>> = (0..count)
@@ -572,10 +611,15 @@ impl Uploader {
         report.blobs = self.upload_blobs(sess).await?;
 
         // 6. Meta snapshot, captured after the cut; its PUT overlaps the partition uploads.
-        let meta_snap = self.meta.as_ref().and_then(|view| {
-            let (index, bytes) = view.read(|s| (view.applied(), ostro_meta::encode_snapshot(s)));
-            (sess.meta_index != Some(index)).then_some((index, bytes))
-        });
+        let meta_snap = self
+            .meta
+            .as_ref()
+            .filter(|_| cl.as_ref().is_none_or(|c| c.single))
+            .and_then(|view| {
+                let (index, bytes) =
+                    view.read(|s| (view.applied(), ostro_meta::encode_snapshot(s)));
+                (sess.meta_index != Some(index)).then_some((index, bytes))
+            });
         let meta_put = {
             let store = Arc::clone(&sess.store);
             async move {
@@ -596,6 +640,12 @@ impl Uploader {
             node: Arc::clone(&self.node),
             store: Arc::clone(&sess.store),
             max_chunk_bytes: self.cfg.max_chunk_bytes,
+            above_hw: mutant_upload_above_hw(),
+            cluster: cl.as_ref().map(|c| ClusterPartCtx {
+                led: c.led.clone(),
+                node_id: self.cfg.node_id,
+                members: c.members,
+            }),
         };
         let parts = std::mem::take(&mut sess.parts);
         let (parts_res, meta_res) = tokio::join!(
@@ -627,6 +677,43 @@ impl Uploader {
             changed = true;
         }
 
+        // Cluster mode (12-15): per-partition heads first (fenced by epoch), then either the
+        // single-member manifest below or, with several members, floors + retention here.
+        let mut excluded: BTreeSet<u16> = BTreeSet::new();
+        let mut cluster_plan: Option<Option<RetentionPlan>> = None;
+        if let Some(cl) = &cl {
+            let mut plan = if self.cfg.retention
+                && (!cl.single || !incomplete)
+                && (sess.retention_due || snapshot_changed || outcomes.iter().any(|o| o.reconciled))
+            {
+                Some(self.plan_retention(sess))
+            } else {
+                None
+            };
+            excluded = self
+                .cluster_heads(sess, cl, &outcomes, plan.as_mut())
+                .await?;
+            if !cl.single {
+                if self.cfg.publish_floor {
+                    for (p, part) in sess.parts.iter().enumerate() {
+                        let p16 = p as u16;
+                        if cl.led.contains_key(&p16) && !excluded.contains(&p16) && part.has_chain {
+                            raise_floor(&self.node, p16, part_floor(part));
+                        }
+                    }
+                }
+                if let Some(plan) = plan {
+                    report.deleted = self.apply_retention(sess, plan).await;
+                    sess.retention_due = false;
+                }
+                report.upload = started.elapsed();
+                metrics::histogram!(METRIC_UPLOAD_SECONDS).record(report.upload.as_secs_f64());
+                self.publish_metrics(sess, &pairs);
+                return Ok(report);
+            }
+            cluster_plan = Some(plan);
+        }
+
         if incomplete {
             report.upload = started.elapsed();
             return Ok(report);
@@ -638,17 +725,23 @@ impl Uploader {
         }
 
         // Retention plan (applied only after the manifest is durable).
-        let plan = if self.cfg.retention && (sess.retention_due || snapshot_changed) {
-            Some(self.plan_retention(sess))
-        } else {
-            None
+        let plan = match cluster_plan {
+            Some(plan) => plan,
+            None if self.cfg.retention && (sess.retention_due || snapshot_changed) => {
+                Some(self.plan_retention(sess))
+            }
+            None => None,
         };
 
         // 7. Entries.
         let mut cut_entries = Vec::with_capacity(count as usize);
         for p in 0..count {
             let part = &sess.parts[p as usize];
-            if self.node.handle(PartitionId(p)).is_none()
+            let not_ours = cl
+                .as_ref()
+                .is_some_and(|c| !c.led.contains_key(&p) || excluded.contains(&p));
+            if not_ours
+                || self.node.handle(PartitionId(p)).is_none()
                 || part.uploaded_end > cut.get(p as usize).map_or(0, |o| o.0)
             {
                 if let Some(e) = &part.last_entry {
@@ -734,6 +827,13 @@ impl Uploader {
         };
         let etag = match put {
             Conditional::Ok(o) => o.e_tag,
+            Conditional::PreconditionFailed if cl.is_some() => {
+                // Cluster mode: the heads fence writers per partition; a manifest written by an
+                // earlier single member is re-read by the next session (D-P12-3).
+                return Err(UploadError::Io(
+                    "manifest/current changed under us; re-reading it".into(),
+                ));
+            }
             Conditional::PreconditionFailed => {
                 return Err(UploadError::Fenced(
                     "manifest/current changed under us (precondition failed)".into(),
@@ -774,16 +874,7 @@ impl Uploader {
         if self.cfg.publish_floor {
             for e in &m.cut {
                 let floor = e.snapshot_offset.unwrap_or(e.chain_start).min(e.cut_offset);
-                if let Some(fh) = self.node.floor_handles(PartitionId(e.p)) {
-                    fh.upload.send_if_modified(|v| {
-                        if v.is_none_or(|c| c.0 < floor) {
-                            *v = Some(Offset(floor));
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                }
+                raise_floor(&self.node, e.p, floor);
             }
         }
 
@@ -804,6 +895,158 @@ impl Uploader {
         );
         report.manifest = Some(m);
         Ok(report)
+    }
+
+    /// Cluster mode (12-15): what this round may upload. A partition is uploaded only if
+    /// this node leads it (`PartitionRoles::led()`), it runs here with an open barrier, and it
+    /// is not fenced at that epoch or a later one.
+    fn cluster_round(&self, count: u16) -> Option<ClusterRound> {
+        let c = self.cluster.as_ref()?;
+        let members = (*c.members.borrow()).max(1) as u64;
+        let fenced = self
+            .part_fenced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let led_now = c.roles.led().borrow().clone();
+        let mut led = BTreeMap::new();
+        for (pid, e) in led_now.iter() {
+            if pid.0 >= count || self.node.handle(*pid).is_none() {
+                continue;
+            }
+            if !self.inspect && !self.node.barrier(*pid).is_some_and(|b| b.is_open()) {
+                continue;
+            }
+            if fenced.get(&pid.0).is_some_and(|f| e.0 <= *f) {
+                continue;
+            }
+            led.insert(pid.0, e.0);
+        }
+        Some(ClusterRound {
+            led,
+            single: members <= 1,
+            members,
+        })
+    }
+
+    fn fence_partition(&self, part: &mut PartState, p: u16, epoch: u32, head_epoch: u32) {
+        self.part_fenced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(p, epoch);
+        metrics::gauge!(cluster::METRIC_UPLOAD_FENCED, "partition" => p.to_string()).set(1.0);
+        warn!(
+            partition = p,
+            epoch, head_epoch, "bottomless uploads of the partition fenced by a newer leader"
+        );
+        *part = PartState {
+            snaps: std::mem::take(&mut part.snaps),
+            last_entry: part.last_entry.take(),
+            ..PartState::default()
+        };
+    }
+
+    fn unfence_partition(&self, p: u16) {
+        let was = self
+            .part_fenced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&p);
+        if was.is_some() {
+            metrics::gauge!(cluster::METRIC_UPLOAD_FENCED, "partition" => p.to_string()).set(0.0);
+        }
+    }
+
+    /// Cluster mode: move each changed led partition's head (`If-Match`), after its chunks
+    /// are durable. Returns the partitions whose state must not reach a manifest, floor or
+    /// retention this round (not uploaded, skipped, fenced, or the head moved under us). The
+    /// retention plan is restricted to the others.
+    async fn cluster_heads(
+        &self,
+        sess: &mut Session,
+        cl: &ClusterRound,
+        outcomes: &[PartOutcome],
+        plan: Option<&mut RetentionPlan>,
+    ) -> Result<BTreeSet<u16>, UploadError> {
+        let mut excluded = BTreeSet::new();
+        let by_p: BTreeMap<u16, &PartOutcome> = outcomes.iter().map(|o| (o.p, o)).collect();
+        for (&p, &e) in &cl.led {
+            let Some(part) = sess.parts.get_mut(p as usize) else {
+                excluded.insert(p);
+                continue;
+            };
+            let Some(o) = by_p.get(&p) else {
+                excluded.insert(p);
+                continue;
+            };
+            if let Some(head_epoch) = o.fenced {
+                self.fence_partition(part, p, e, head_epoch);
+                excluded.insert(p);
+                continue;
+            }
+            if o.reconciled {
+                self.unfence_partition(p);
+            }
+            if o.skipped.is_some() || !part.has_chain || part.led_epoch != Some(e) {
+                excluded.insert(p);
+                continue;
+            }
+            let cs = plan
+                .as_ref()
+                .and_then(|pl| pl.chain_start.get(&p).copied())
+                .unwrap_or(part.chain_start);
+            if !o.changed && cs == part.chain_start {
+                continue;
+            }
+            let has_head = part.uploaded_end > cs;
+            let head = Head {
+                epoch: e,
+                last_chunk_key: if has_head {
+                    part.last_key.clone()
+                } else {
+                    None
+                },
+                last_chunk_sha256: if has_head { part.last_sha } else { None },
+                chain_start: cs,
+                end: part.uploaded_end,
+                snapshot: part
+                    .referenced
+                    .and_then(|o| part.snaps.get(&o))
+                    .map(|s| HeadSnapshot {
+                        key: s.key.clone(),
+                        offset: s.offset,
+                        sha256: s.sha,
+                        state_hash: s.state_hash,
+                    }),
+                node_id: self.cfg.node_id,
+                members: cl.members,
+            };
+            match cluster::put_head(&sess.store, p, &head, part.head_etag.as_deref()).await? {
+                HeadPut::Written(etag) => {
+                    part.head_etag = etag;
+                    part.chain_start = cs;
+                }
+                HeadPut::Conflict(cur) => {
+                    excluded.insert(p);
+                    match cur {
+                        Some((h, _)) if h.epoch > e => self.fence_partition(part, p, e, h.epoch),
+                        _ => {
+                            // Another write of an equal or older epoch landed: reconcile
+                            // before the next upload of the partition.
+                            debug!(partition = p, "head moved under us; reconciling next round");
+                            part.led_epoch = None;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(pl) = plan {
+            let keep = |p: &u16| cl.led.contains_key(p) && !excluded.contains(p);
+            pl.chain_start.retain(|p, _| keep(p));
+            pl.keep_chunks.retain(|p, _| keep(p));
+            pl.delete_snaps.retain(|(p, ..)| keep(p));
+        }
+        Ok(excluded)
     }
 
     fn publish_metrics(&self, sess: &Session, pairs: &[Option<(Offset, [u8; 32])>]) {
@@ -1241,6 +1484,12 @@ impl Uploader {
 /// What one partition's upload did (steps 3-5).
 #[derive(Debug, Default)]
 struct PartOutcome {
+    /// The partition.
+    p: u16,
+    /// Cluster mode: a head with this (higher) epoch fenced the partition.
+    fenced: Option<u32>,
+    /// Cluster mode: the takeover reconcile ran this round.
+    reconciled: bool,
     snapshots: usize,
     chunks: usize,
     chunk_bytes: u64,
@@ -1256,6 +1505,113 @@ struct PartCtx {
     node: Arc<Node>,
     store: Arc<dyn ObjectStore>,
     max_chunk_bytes: usize,
+    /// Mutant `repl::mutant::upload_above_hw`: read up to the durable log end, not HW.
+    above_hw: bool,
+    /// Cluster mode (12-15).
+    cluster: Option<ClusterPartCtx>,
+}
+
+/// Cluster mode, per round (12-15).
+#[derive(Clone, Debug)]
+struct ClusterRound {
+    /// Led partitions this round may upload, with their leader epochs.
+    led: BTreeMap<u16, u32>,
+    /// Exactly one cluster member: `manifest/current` is written too (D-P12-3).
+    single: bool,
+    /// Member count.
+    members: u64,
+}
+
+/// What a partition task needs in cluster mode.
+#[derive(Clone, Debug)]
+struct ClusterPartCtx {
+    led: BTreeMap<u16, u32>,
+    node_id: u64,
+    members: u64,
+}
+
+/// Whether the mutant `repl::mutant::upload_above_hw` is on (D-P12-19): the uploader then
+/// reads up to the durable log end instead of the HW.
+#[cfg(feature = "failpoints")]
+fn mutant_upload_above_hw() -> bool {
+    fail::eval(ostro_log::mutants::UPLOAD_ABOVE_HW, |_| ()).is_some()
+}
+
+/// Whether the mutant `repl::mutant::upload_above_hw` is on: never without `failpoints`.
+#[cfg(not(feature = "failpoints"))]
+fn mutant_upload_above_hw() -> bool {
+    false
+}
+
+/// Raise partition `p`'s upload floor to `floor` (never lowers it).
+fn raise_floor(node: &Node, p: u16, floor: u64) {
+    if let Some(fh) = node.floor_handles(PartitionId(p)) {
+        fh.upload.send_if_modified(|v| {
+            if v.is_none_or(|c| c.0 < floor) {
+                *v = Some(Offset(floor));
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+/// The upload floor a durable chain state allows: the referenced snapshot (or the chain
+/// start), capped at the uploaded end.
+fn part_floor(part: &PartState) -> u64 {
+    part.referenced
+        .unwrap_or(part.chain_start)
+        .min(part.uploaded_end)
+}
+
+/// Adopt a takeover's reconciled remote state for a partition led at `epoch`.
+fn apply_reconciled(part: &mut PartState, r: cluster::Reconciled, epoch: u32) {
+    let mut snaps = std::mem::take(&mut part.snaps);
+    let last_entry = part.last_entry.take();
+    let Some(h) = r.head else {
+        // Nothing remote: the Phase 8 chain start rule starts the chain.
+        *part = PartState {
+            snaps,
+            last_entry,
+            led_epoch: Some(epoch),
+            head_etag: r.etag,
+            ..PartState::default()
+        };
+        return;
+    };
+    if let Some(s) = &h.snapshot {
+        let e = snaps.entry(s.offset).or_insert(SnapRef {
+            offset: s.offset,
+            key: s.key.clone(),
+            sha: s.sha256,
+            state_hash: None,
+        });
+        if e.state_hash.is_none() {
+            e.state_hash = s.state_hash;
+        }
+    }
+    let uploaded_end = r.chain.last().map_or(h.chain_start, |l| l.end);
+    *part = PartState {
+        has_chain: true,
+        chain_start: h.chain_start,
+        uploaded_end,
+        last_key: h.last_chunk_key.clone(),
+        last_sha: h.last_chunk_sha256,
+        chain: r
+            .chain
+            .iter()
+            .map(|l| ChunkMeta {
+                key: l.key.clone(),
+                end: l.end,
+            })
+            .collect(),
+        snaps,
+        referenced: h.snapshot.as_ref().map(|s| s.offset),
+        last_entry,
+        led_epoch: Some(epoch),
+        head_etag: r.etag,
+    };
 }
 
 /// Steps 3-5 for every started partition, at most `concurrency` at a time, each against
@@ -1273,17 +1629,32 @@ async fn upload_partitions(
     let mut set = tokio::task::JoinSet::new();
     for (p, part) in parts.into_iter().enumerate() {
         let pid = PartitionId(p as u16);
-        if ctx.node.handle(pid).is_none() {
+        let Some(h) = ctx.node.handle(pid) else {
             slots.push(Some(part));
             continue;
-        }
+        };
+        // Cluster mode: only the partition's current leader uploads it (12-15).
+        let epoch = match &ctx.cluster {
+            Some(c) => match c.led.get(&pid.0) {
+                Some(e) => Some(*e),
+                None => {
+                    slots.push(Some(part));
+                    continue;
+                }
+            },
+            None => None,
+        };
         slots.push(None);
-        let cut_p = cut.get(p).map_or(0, |o| o.0);
+        let mut cut_p = cut.get(p).map_or(0, |o| o.0);
+        if ctx.above_hw {
+            cut_p = cut_p.max(h.log().durable_end().0);
+        }
+        drop(h);
         let (ctx, sem) = (ctx.clone(), Arc::clone(&sem));
         set.spawn(async move {
             let _permit = sem.acquire_owned().await;
             let mut part = part;
-            let r = ctx.upload_partition(pid, &mut part, cut_p).await;
+            let r = ctx.upload_partition(pid, &mut part, cut_p, epoch).await;
             (p, part, r)
         });
     }
@@ -1309,12 +1680,23 @@ impl PartCtx {
         pid: PartitionId,
         part: &mut PartState,
         cut_p: u64,
+        epoch: Option<u32>,
     ) -> Result<PartOutcome, UploadError> {
-        let mut out = PartOutcome::default();
         let p = pid.0;
+        let mut out = PartOutcome {
+            p,
+            ..PartOutcome::default()
+        };
         let Some(h) = self.node.handle(pid) else {
             return Ok(out);
         };
+        // Cluster mode: a newly led (p, e) reconciles the remote chain first (12-15).
+        if let (Some(e), Some(cc)) = (epoch, &self.cluster)
+            && part.led_epoch != Some(e)
+            && !self.takeover(pid, part, e, cc, &mut out).await?
+        {
+            return Ok(out);
+        }
         let log_start = h.log().log_start().0;
 
         // 5a. Upload every new local snapshot now (held back from the manifest below).
@@ -1367,6 +1749,8 @@ impl PartCtx {
                         referenced: Some(o),
                         snaps: std::mem::take(&mut part.snaps),
                         last_entry: part.last_entry.take(),
+                        led_epoch: part.led_epoch,
+                        head_etag: part.head_etag.take(),
                         ..PartState::default()
                     };
                     out.changed = true;
@@ -1377,6 +1761,8 @@ impl PartCtx {
                         has_chain: true,
                         snaps: std::mem::take(&mut part.snaps),
                         last_entry: part.last_entry.take(),
+                        led_epoch: part.led_epoch,
+                        head_etag: part.head_etag.take(),
                         ..PartState::default()
                     };
                     out.changed = true;
@@ -1426,12 +1812,109 @@ impl PartCtx {
 
     // ------------------------------------------------------------------ snapshots
 
+    /// Cluster mode: reconcile the remote chain of a newly led `(p, e)`. `Ok(true)` =
+    /// continue uploading; `Ok(false)` = not this round (`out` says why).
+    async fn takeover(
+        &self,
+        pid: PartitionId,
+        part: &mut PartState,
+        epoch: u32,
+        cc: &ClusterPartCtx,
+        out: &mut PartOutcome,
+    ) -> Result<bool, UploadError> {
+        let Some(h) = self.node.handle(pid) else {
+            return Ok(false);
+        };
+        let snapshots = self.node.local_snapshots(pid).await;
+        let r = cluster::reconcile_on_takeover(Takeover {
+            store: &self.store,
+            partition: pid.0,
+            epoch,
+            node_id: cc.node_id,
+            members: cc.members,
+            log: h.log().as_ref(),
+            snapshots: &snapshots,
+            stop_before_head: false,
+        })
+        .await?;
+        match r {
+            TakeoverOutcome::Ready(r) => {
+                apply_reconciled(part, *r, epoch);
+                out.reconciled = true;
+                Ok(true)
+            }
+            TakeoverOutcome::Fenced { head_epoch } => {
+                out.fenced = Some(head_epoch);
+                Ok(false)
+            }
+            TakeoverOutcome::NoSnapshot {
+                log_start,
+                tail_end,
+            } => {
+                warn!(
+                    partition = pid.0,
+                    log_start,
+                    tail_end,
+                    "takeover: remote chain ends below log_start and no snapshot to re-chain from; requesting one"
+                );
+                metrics::counter!(METRIC_FAILURES, "kind" => "no_snapshot").increment(1);
+                out.skipped = Some(pid.0);
+                let node = Arc::clone(&self.node);
+                tokio::spawn(async move {
+                    if let Err(e) = node.snapshot_now(pid).await {
+                        debug!(partition = pid.0, error = %e, "requested snapshot failed");
+                    }
+                });
+                Ok(false)
+            }
+            TakeoverOutcome::Interrupted => {
+                out.skipped = Some(pid.0);
+                Ok(false)
+            }
+        }
+    }
+
     /// Upload one local snapshot. `Ok(None)` if it is not a usable snapshot file.
     async fn upload_snapshot(
         &self,
         p: u16,
         path: &std::path::Path,
     ) -> Result<Option<(SnapRef, u64)>, UploadError> {
+        upload_snapshot_file(&self.store, p, path).await
+    }
+
+    /// Batches from `from`: HW-capped, or up to the durable end under the mutant.
+    async fn read_batches(
+        &self,
+        pid: PartitionId,
+        from: u64,
+    ) -> Result<Vec<RawBatch>, UploadError> {
+        if self.above_hw {
+            let h = self
+                .node
+                .handle(pid)
+                .ok_or_else(|| UploadError::Log(format!("partition {} is not running", pid.0)))?;
+            return h
+                .log()
+                .read_replica(Offset(from), self.max_chunk_bytes)
+                .await
+                .map_err(|e| UploadError::Log(e.to_string()));
+        }
+        self.node
+            .read_envelopes(pid, Offset(from), self.max_chunk_bytes)
+            .await
+            .map_err(|e| UploadError::Log(e.to_string()))
+    }
+}
+
+/// Upload one local snapshot file to `p/<pppp>/snap/` (verified first). `Ok(None)` if it is not
+/// a usable snapshot file.
+pub(crate) async fn upload_snapshot_file(
+    store: &Arc<dyn ObjectStore>,
+    p: u16,
+    path: &std::path::Path,
+) -> Result<Option<(SnapRef, u64)>, UploadError> {
+    {
         let bytes = tokio::fs::read(path)
             .await
             .map_err(|e| UploadError::Io(format!("{}: {e}", path.display())))?;
@@ -1453,7 +1936,7 @@ impl PartCtx {
         let sha: [u8; 32] = Sha256::digest(&bytes).into();
         let key = snap_key(p, info.applied_offset, &sha);
         let len = bytes.len() as u64;
-        put_immutable(&self.store, &key, bytes, sha).await?;
+        put_immutable(store, &key, bytes, sha).await?;
         Ok(Some((
             SnapRef {
                 offset: info.applied_offset,
@@ -1464,7 +1947,9 @@ impl PartCtx {
             len,
         )))
     }
+}
 
+impl PartCtx {
     // ------------------------------------------------------------------ chunks
 
     async fn upload_chunks(
@@ -1475,11 +1960,7 @@ impl PartCtx {
     ) -> Result<(usize, u64), UploadError> {
         let (mut n, mut total) = (0usize, 0u64);
         while part.uploaded_end < cut_p {
-            let batches = self
-                .node
-                .read_envelopes(pid, Offset(part.uploaded_end), self.max_chunk_bytes)
-                .await
-                .map_err(|e| UploadError::Log(e.to_string()))?;
+            let batches = self.read_batches(pid, part.uploaded_end).await?;
             let before = part.uploaded_end;
             'batches: for b in batches {
                 // Envelopes below the cut, grouped into chunks of at most max_chunk_bytes.

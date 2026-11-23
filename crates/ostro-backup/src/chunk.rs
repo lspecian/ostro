@@ -449,6 +449,43 @@ pub async fn walk_back(
     Ok(out)
 }
 
+/// `[base, end)` of one stored envelope.
+pub fn envelope_span(env: &[u8]) -> Result<(u64, u64), ChunkError> {
+    let h = envelope::peek_header(env).map_err(|e| ChunkError::Envelope {
+        index: 0,
+        reason: e.to_string(),
+    })?;
+    Ok((h.base.0, h.base.0 + u64::from(h.cmd_count)))
+}
+
+/// Phase 12 takeover repair (12-15): re-cut `chunk` to its longest envelope prefix ending at
+/// or below `valid_end`, keeping its partition, epoch and `prev_chunk_sha256` (so it links
+/// where the original did). `Ok(None)` when not even the first envelope fits. The result has
+/// a smaller `end`, so its key differs from the original's.
+pub fn recut_prefix(
+    chunk: &Chunk,
+    valid_end: u64,
+) -> Result<Option<(ChunkHeader, Vec<u8>)>, ChunkError> {
+    let mut keep: Vec<&[u8]> = Vec::new();
+    for env in &chunk.envelopes {
+        let (_, end) = envelope_span(env)?;
+        if end > valid_end {
+            break;
+        }
+        keep.push(env);
+    }
+    if keep.is_empty() {
+        return Ok(None);
+    }
+    encode(
+        chunk.header.partition,
+        chunk.header.epoch,
+        chunk.header.prev_chunk_sha256,
+        &keep,
+    )
+    .map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +522,22 @@ mod tests {
         assert_eq!(parse_chunk_key(&k), Some((3, 7, 10, 15)));
         assert_eq!(parse_chunk_key("p/0003/snap/x.osnap"), None);
         assert_eq!(parse_chunk_key("p/0003/seg/7-10-15.oseg"), None);
+    }
+
+    #[test]
+    fn recut_keeps_the_prefix_and_the_link() {
+        let prev = [9; 32];
+        let (_, c) = mk(0, 2, 10, prev);
+        assert_eq!((c.header.base, c.header.end), (10, 15));
+        assert!(recut_prefix(&c, 11).expect("recut").is_none());
+        let (h, bytes) = recut_prefix(&c, 14).expect("recut").expect("prefix");
+        assert_eq!((h.base, h.end, h.epoch, h.count), (10, 12, 2, 1));
+        assert_eq!(h.prev_chunk_sha256, prev);
+        let d = decode(&bytes).expect("decode");
+        assert_eq!(d.envelopes[0], c.envelopes[0]);
+        assert_ne!(chunk_key(0, 2, h.base, h.end), chunk_key(0, 2, 10, 15));
+        let (h, _) = recut_prefix(&c, 15).expect("recut").expect("whole");
+        assert_eq!(h.end, 15);
     }
 
     #[test]

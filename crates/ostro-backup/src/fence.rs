@@ -10,6 +10,7 @@
 //! - [`check_before_manifest`] is a no-op on stores with conditional PUT. Without it (the
 //!   documented, weaker fallback) it re-reads LOCK and compares the identity before every
 //!   manifest PUT.
+//! - [`acquire_if_single_member`] (Phase 12): LOCK only while the cluster has one member.
 //! - [`put_immutable`] writes `seg/`, `snap/`, `meta/`, `blobs/` and `manifest/gen/` objects
 //!   with `put_if_absent`: an existing object with the same sha256 is success (an idempotent
 //!   retry after a crash); different bytes under our key mean another writer, so
@@ -154,6 +155,27 @@ async fn check_lock(store: &Arc<dyn ObjectStore>, ident: &Ident) -> Result<(), F
         ))),
         None => Err(FenceError::Fenced("LOCK disappeared".into())),
     }
+}
+
+/// Phase 12 (D-P12-3, 12-15): [`acquire`] only while the cluster has exactly one member.
+/// With several members the prefix has no single owner: writers are fenced per partition by
+/// the epoch in `p/<pppp>/head` ([`crate::cluster`]), and neither `LOCK` nor
+/// `manifest/current` is written. Returns whether the LOCK is held. `members` 0 (unknown)
+/// counts as one, like a node without a cluster.
+pub async fn acquire_if_single_member(
+    store: &Arc<dyn ObjectStore>,
+    ident: &Ident,
+    takeover: bool,
+    members: usize,
+) -> Result<bool, FenceError> {
+    if members > 1 {
+        tracing::info!(
+            members,
+            "bottomless LOCK skipped: multi-member cluster (per-partition head fencing)"
+        );
+        return Ok(false);
+    }
+    acquire(store, ident, takeover).await.map(|()| true)
 }
 
 /// Before a manifest PUT: nothing with conditional PUT (the `If-Match` on the manifest
