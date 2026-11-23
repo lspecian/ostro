@@ -95,6 +95,20 @@ fn tracker_caught_up_compares_with_previous_response_end_not_leo() {
     assert_eq!(t.lag_ms(2, 3_000), Some(1_000));
 }
 
+/// 12-16: a replica that never fetched is reported out of sync, even inside its join grace.
+#[test]
+fn tracker_status_never_fetched_is_not_in_sync() {
+    let mut t = ReplicaTracker::new(1, &[1, 2, 3], o(0), 1_000);
+    t.on_local_durable(o(5));
+    t.on_fetch(2, o(5), o(5), o(5), 1_100);
+    let rows = t.status(1_200, LAG);
+    let r2 = rows.iter().find(|r| r.replica == 2).unwrap();
+    let r3 = rows.iter().find(|r| r.replica == 3).unwrap();
+    assert!(r2.in_sync);
+    assert!(!r3.in_sync, "never fetched: {r3:?}");
+    assert_eq!(r3.durable_leo, o(0));
+}
+
 #[test]
 fn tracker_continuous_appends_keep_a_keeping_up_follower_in_sync() {
     let mut t = ReplicaTracker::new(1, &[1, 2, 3], o(0), 0);

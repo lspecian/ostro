@@ -186,8 +186,10 @@ impl ReplicaTracker {
             .map(|e| now_ms.saturating_sub(e.last_caught_up_ms))
     }
 
-    /// Follower rows (leader excluded), `in_sync = lag <= lag_max_ms` (measured, not the
-    /// published ISR).
+    /// Follower rows (leader excluded), `in_sync = fetched && lag <= lag_max_ms` (measured,
+    /// not the published ISR). A replica that never fetched is not in sync: its join grace
+    /// only delays a shrink, it is not progress (12-16; the status row used to say
+    /// `in_sync: true` for a node that never ran).
     pub fn status(&self, now_ms: u64, lag_max_ms: u64) -> Vec<FollowerStatusRow> {
         self.entries
             .iter()
@@ -197,7 +199,8 @@ impl ReplicaTracker {
                 durable_leo: e.durable_leo,
                 fetch_offset: e.fetch_offset,
                 last_caught_up_ms: e.last_caught_up_ms,
-                in_sync: now_ms.saturating_sub(e.last_caught_up_ms) <= lag_max_ms,
+                in_sync: e.last_fetch_ms.is_some()
+                    && now_ms.saturating_sub(e.last_caught_up_ms) <= lag_max_ms,
             })
             .collect()
     }
