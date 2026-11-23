@@ -148,18 +148,18 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **SDK-03**: TypeScript SDK: `workflow()`, `step()`, ctx, effects, SDK-owned job loop with Promise.all/race; built with pinned jco (no WASI imports)
 - [ ] **SDK-04**: SDKs reseed randomness after pre-init: two runs get different `ctx.random`, a replay reproduces the same values; builds are reproducible (same source → same sha)
 - [x] **SDK-05**: Language-neutral conformance suite (steps, retries, timers, signals, concurrency/race, cancellation, children, continue-as-new, await tokens, patching, non-determinism detection) passes for Rust, Python and TS
-- [ ] **SDK-06**: Per-language test harness with time-skipping against `ostro dev --ephemeral` [FR-1.10]
-- [ ] **SDK-07**: Thin client libraries (TS, Python, Go, Rust) for the control-plane API
+- [x] **SDK-06**: Per-language test harness with time-skipping against `ostro dev --ephemeral` [FR-1.10]
+- [x] **SDK-07**: Thin client libraries (TS, Python, Go, Rust) for the control-plane API
 
 ### CLI
 
 - [x] **CLI-01**: `ostro dev` starts server + executor + UI with zero config in < 1 s; `--ephemeral` keeps state in memory [FR-0]
 - [x] **CLI-02**: `ostro server` runs a single node with zero-config defaults; TOML + env overrides [FR-0.2]
-- [ ] **CLI-03**: `ostro init --lang {rust,python,ts}` scaffolds a project with pinned toolchains [FR-2.1]
+- [x] **CLI-03**: `ostro init --lang {rust,python,ts}` scaffolds a project with pinned toolchains [FR-2.1]
 - [x] **CLI-04**: `ostro build` produces a validated component + manifest for Rust, Python and TS with hermetic toolchains (cached downloads or `--docker`) [FR-2.2/2.3]
 - [x] **CLI-05**: `ostro deploy [--activate]` builds if needed and uploads idempotently [FR-2.4]
 - [x] **CLI-06**: `ostro run/ls/inspect/history/signal/cancel/retry` with `--json` and `--dry-run` where applicable [FR-2.5]
-- [ ] **CLI-07**: `ostro replay <run|--sample N> --module new.wasm` detects non-determinism before deploy (CI gate) [FR-2.6]
+- [x] **CLI-07**: `ostro replay <run|--sample N> --module new.wasm` detects non-determinism before deploy (CI gate) [FR-2.6]
 - [x] **CLI-08**: `ostro dev --watch` rebuilds and redeploys on save [FR-2.7]
 
 ### UI
@@ -343,16 +343,16 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | SDK-03 | Phase 9 | Complete (npm publishing human_needed, D-P9-19) |
 | SDK-04 | Phase 9 | Partial (reseeding verified: C-RAND-01/02, C-VAL-01; Rust builds bit-reproducible; Python/TS build residual accepted per D-P9-3, human_needed until upstream fixes) |
 | SDK-05 | Phase 9 | Complete (09-20 gate: 135/135 scenario x language cells) |
-| SDK-06 | Phase 10 | Pending |
-| SDK-07 | Phase 10 | Pending |
+| SDK-06 | Phase 10 | Complete (10-10 time_skipping, 10-13 time_skipping_auto + race_gate_1000 (1000 iterations x2, zero leases after every skip), 10-17 kits: Rust kit 3-day sleep_for in 59 ms, pytest/node/go kits, template_tests rust/python/ts; strict CLOCK_GATE 0 hits at 10-20) |
+| SDK-07 | Phase 10 | Complete (10-09 ostro-client + contract/typed, 10-14 Python/TS/Go clients + e2e; 10-20: OSTRO_REQUIRE_ALL_CLIENTS=1 contract green, 4 clients, 0 missing routes, publishing human_needed) |
 | CLI-01 | Phase 4 | Complete |
 | CLI-02 | Phase 4 | Complete |
-| CLI-03 | Phase 10 | Pending |
-| CLI-04 | Phase 10 | Complete |
-| CLI-05 | Phase 10 | Complete |
+| CLI-03 | Phase 10 | Complete (10-08 init snapshots (cargo test -p ostro-cli --test init) + 10-15 templates_build + 10-17 template_tests; local no-toolchain run passed (10-19 clean_machine local_all, re-run at 10-20); container + macOS runs human_needed) |
+| CLI-04 | Phase 10 | Complete (10-07 toolchain_cache, 10-12 build_rust + build_rust_hermetic (--no-cc, zig), 10-15 build_polyglot + parity + OSTRO_POLYGLOT_BUILDER=ostro conformance; local no-toolchain run passed (10-19 clean_machine local_all, re-run at 10-20); container + macOS runs human_needed) |
+| CLI-05 | Phase 10 | Complete (10-16 deploy_build: build if stale, idempotent upload/activation, .wasm form unchanged; local no-toolchain run passed (10-19 clean_machine local_all, re-run at 10-20); container + macOS runs human_needed) |
 | CLI-06 | Phase 5 | Complete (spawned-binary cli_verbs suite + --json snapshots: 05-14; order-saga happy/compensated/cancelled/kill -9 driven only by the CLI: 05-17 order_saga) |
-| CLI-07 | Phase 10 | Pending |
-| CLI-08 | Phase 10 | Complete |
+| CLI-07 | Phase 10 | Complete (10-11 replay_cli: rust/python/ts replay gates exit 4 on v2 and 0 on v3, corpus_offline; replay_corpus + replay_check) |
+| CLI-08 | Phase 10 | Complete (10-16 dev_watch: edit -> new version, broken edit keeps the old one, ignore list; 10-13 watch + time skipping) |
 | UI-01 | Phase 11 | Complete (11-18 ui_e2e: run list/filter, run detail, timeline/logs/status fragments, DLQ, published-status pages over HTTP on real runs with the D-P11-15 headers; ostro-ui pages/hardening/security; real-browser checks human_needed, 11-VALIDATION Manual-Only) |
 | UI-02 | Phase 11 | Complete (11-18 ui_e2e: terminate, cancel, retry, pause/resume run + queue, rerun preview + submit, DLQ requeue, bulk create + cancel change real state via same-origin CSRF requests; cross-site / foreign Host 403; ostro-ui actions; browser checks human_needed) |
 | UI-03 | Phase 11 | Complete (11-18 ui_e2e: modules, workflows, queues, schedules, workers and partition health with live data on a TLS ostro server with a real worker and a schedule; ostro-ui inventory; browser checks human_needed) |
