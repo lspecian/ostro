@@ -94,12 +94,24 @@ pub fn __dispatch(name: &str, table: &[Entry], input: Payload) -> Result<RunResu
 /// ```ignore
 /// ostro_sdk::export!(Greeter, Billing);
 /// ```
+///
+/// The WIT exports exist only when compiling for `wasm32`. On any other target (a host
+/// `cargo test` / `cargo check` of the workflow crate) the macro only type-checks that
+/// every listed type implements [`Workflow`](crate::registry::Workflow) and exports nothing, so the crate links
+/// for the host without a `#[cfg(target_arch = "wasm32")]` guard at the call site.
 #[macro_export]
 macro_rules! export {
     ($($wf:ty),+ $(,)?) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        const _: () = {
+            $(let _ = <$wf as $crate::registry::Workflow>::NAME;)+
+        };
+
+        #[cfg(target_arch = "wasm32")]
         #[doc(hidden)]
         struct __OstroComponent;
 
+        #[cfg(target_arch = "wasm32")]
         impl $crate::bindings::exports::ostro::runtime::workflows::Guest for __OstroComponent {
             fn describe() -> ::std::vec::Vec<
                 $crate::bindings::exports::ostro::runtime::workflows::WorkflowMeta,
@@ -124,6 +136,7 @@ macro_rules! export {
             }
         }
 
+        #[cfg(target_arch = "wasm32")]
         $crate::bindings::__export_world!(__OstroComponent with_types_in $crate::bindings);
     };
 }
