@@ -366,6 +366,31 @@ impl Group {
         self.records.lock().unwrap().clone()
     }
 
+    /// Wait until `f` holds on the recorded controller events. They reach `records`
+    /// through each controller's event channel and a forwarding task, i.e. after the meta
+    /// state already shows the command applied: a test that saw an assignment change must
+    /// wait here before counting records (ci-fix6: macOS counted 0 ElectLeader records
+    /// right after the failover was visible).
+    pub async fn wait_records(
+        &self,
+        what: &str,
+        within: Duration,
+        f: impl Fn(&[ProposalRecord]) -> bool,
+    ) -> Vec<ProposalRecord> {
+        let deadline = Instant::now() + within;
+        loop {
+            let r = self.records();
+            if f(&r) {
+                return r;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}: {r:#?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     /// Applied (`Ok`) controller records for partition `p`.
     pub fn applied_for(&self, p: u16) -> Vec<ProposalRecord> {
         self.records()

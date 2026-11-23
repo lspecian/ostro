@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ostro_cluster::bootstrap::placement;
+use ostro_cluster::controller::ProposalRecord;
 use ostro_cluster::controller::{self, ControllerConfig, FreshTerm};
 use ostro_cluster::liveness::{Liveness, LivenessConfig, LivenessHandle};
 use ostro_cluster::members;
@@ -17,9 +18,16 @@ use ostro_meta::ext::{
 };
 use ostro_meta::{MetaCommand, MetaResult};
 use ostro_partition::SystemClock;
-use support_controller::{FakeLiveness, Group, audit};
+use support_controller::{FakeLiveness, Group, audit, partition_of};
 
 const LONG: Duration = Duration::from_secs(20);
+
+/// An applied `ElectLeader` record for partition `p`.
+fn is_applied_elect(r: &ProposalRecord, p: u16) -> bool {
+    matches!(r.cmd, MetaCommand::ElectLeader { .. })
+        && matches!(r.result, Ok(MetaResult::Ok { .. }))
+        && partition_of(&r.cmd) == p
+}
 
 fn cfg(rf: usize, min_insync: u8) -> ControllerConfig {
     ControllerConfig::new(rf, min_insync)
@@ -360,7 +368,19 @@ async fn dead_leader_fails_over_to_the_first_live_isr_member_only() {
     // Partition 0: replicas[1] is live and preferred but outside the ISR: never chosen.
     assert_eq!(after[0].leader, before[0].replicas[2]);
     assert_ne!(after[0].leader, before[0].replicas[1]);
-    let recs = g.records();
+    // The records trail the meta state the wait above observed.
+    let failed_over: Vec<u16> = before
+        .iter()
+        .filter(|b| b.leader == victim)
+        .map(|b| b.partition)
+        .collect();
+    let recs = g
+        .wait_records("the failover ElectLeader records", LONG, |r| {
+            failed_over
+                .iter()
+                .all(|&p| r.iter().any(|x| is_applied_elect(x, p)))
+        })
+        .await;
     audit(&recs);
     // Exactly one applied ElectLeader per failed-over partition (one controller acts).
     for b in &before {
@@ -523,7 +543,13 @@ async fn a_new_controller_seeds_suspicion_and_does_not_elect_on_its_first_sample
         elected - took_over,
         lcfg.seed_window
     );
-    let recs = g.records();
+    // The records trail the meta state the wait above observed.
+    let recs = g
+        .wait_records("the takeover ElectLeader records", LONG, |r| {
+            led.iter()
+                .all(|&p| r.iter().any(|x| is_applied_elect(x, p)))
+        })
+        .await;
     audit(&recs);
     for p in led {
         let elects: Vec<_> = g
