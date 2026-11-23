@@ -381,7 +381,7 @@ Plans:
 - [x] 10-17-PLAN.md — Test kits: Rust (ostro-client testing), Python pytest plugin, TS ostro-client/testing, Go ostrotest; frozen ready line; template tests pass; docs/testing.md (SDK-06, SDK-07) (W6)
 - [x] 10-18-PLAN.md — ostro completions (presence checks) + local-verb JSON envelope snapshots + docs/cli-json.md exit-code table (CLI-03..08) (W6)
 - [x] 10-19-PLAN.md — SC1 clean-machine e2e (container + local no-toolchain modes), ci.yml clean-machine job, musl < 60 MB gate, docs/getting-started.md (CLI-03/04/05) (W7)
-- [ ] 10-20-PLAN.md — PHASE-10 GATE: full gate + gate-only suites, CLOCK_GATE, SC evidence, RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION, DECISIONS fold-in, STATE + human_needed list (all) (W8)
+- [x] 10-20-PLAN.md — PHASE-10 GATE: full gate + gate-only suites, CLOCK_GATE, SC evidence, RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION, DECISIONS fold-in, STATE + human_needed list (all) (W8)
 
 ### Phase 11: Run Operations & Embedded UI
 **Goal**: Operators triage and repair runs from the CLI/API or from an embedded UI that has real actions, within documented and enforced limits.
