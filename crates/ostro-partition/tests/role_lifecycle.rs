@@ -460,7 +460,7 @@ mod failpoints {
         sleep(Duration::from_millis(200)).await;
         assert!(!pending.is_finished(), "the submit waits for the HW");
 
-        fail::cfg("roles::before_services_stop", "return(2000)").expect("cfg");
+        fail::cfg("repl::before_services_stop", "return(2000)").expect("cfg");
         // Self-demotion: meta's view masked as leaderless.
         asg.set(view(0, 0, 1, &[1, 2], &[1, 2], 2, 1));
         let r = timeout(Duration::from_millis(800), pending)
@@ -476,7 +476,7 @@ mod failpoints {
         .expect("a new submit is refused at once");
         assert!(r.is_err(), "{r:?}");
         assert!(node.roles().led().borrow().is_empty());
-        fail::remove("roles::before_services_stop");
+        fail::remove("repl::before_services_stop");
         wait_role(&node, 0, "Offline", |r| *r == PartitionRole::Offline).await;
         node.shutdown().await.expect("shutdown");
     }

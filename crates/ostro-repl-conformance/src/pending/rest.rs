@@ -5,14 +5,12 @@
 //! `GET /v1/admin/replication`, 12-14).
 
 /// Scenario names not yet integrated (removed as their behaviour lands). 12-14 removed every
-/// entry its first integrated red run saw pass; the rest is 12-16's work list.
+/// entry its first integrated red run saw pass; 12-16 the rest except bootstrap.
 pub const PENDING: &[&str] = &[
-    // bootstrap
+    // bootstrap (12-16: installs now succeed, but the disk oracle requires every acked run's
+    // StartRun in >= min_insync WALs, which a trimmed log no longer holds; awaiting a
+    // decision on how acked runs below a trimmed log start are evidenced)
     "empty_node_bootstraps_from_snapshot",
     "node_behind_log_start_reinstalls",
     "install_stream_cut_resumes",
-    // fetch_path
-    "batching_on_user_partitions",
-    // zombie
-    "isolated_leader_cannot_commit",
 ];

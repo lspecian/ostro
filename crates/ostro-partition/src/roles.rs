@@ -1251,12 +1251,12 @@ impl RoleDriver {
     }
 }
 
-/// Test hook: `roles::before_services_stop` = `return(<ms>)` holds a step-down for that long
+/// Test hook: `repl::before_services_stop` = `return(<ms>)` holds a step-down for that long
 /// before the leader services stop (a slow services shutdown, as an executor job in the
 /// dispatcher's grace period makes it).
 #[cfg(feature = "failpoints")]
 fn services_stop_delay() -> Option<u64> {
-    fail::fail_point!("roles::before_services_stop", |a| a
+    fail::fail_point!("repl::before_services_stop", |a| a
         .and_then(|s| s.parse().ok()));
     None
 }

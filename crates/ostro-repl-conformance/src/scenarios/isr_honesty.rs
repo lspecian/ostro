@@ -52,27 +52,30 @@ fn rf3() -> ClusterSpec {
 /// The lagging node of these scenarios.
 const LAGGER: u64 = 3;
 
-/// One measured honesty sample of partition `p`: published ISR and every node's durable
-/// end are read before and after the leader's status; only a sample where both agree is
-/// checked (`Ok(false)` otherwise). The HW checked is the one the status itself reports.
+/// One measured honesty sample of partition `p`: the published ISR is read before and after
+/// the leader's status, and only a sample where both agree is checked (`Ok(false)`
+/// otherwise). Every node's durable end is measured **after** the status: durable ends only
+/// grow, so a member whose end measured afterwards is still below the HW the status reported
+/// was below it when the status was taken (a sound violation, whatever moved meanwhile). The
+/// HW checked is the one the status itself reports.
+///
+/// 12-16: the sample used to be discarded whenever any node's durable end moved while it was
+/// taken, which on a partition with runs still executing left no checkable sample at all
+/// (the `isr_from_assignment` mutant then failed on "no stable status sample" instead of on
+/// the never-fetching follower listed in the ISR).
 async fn honest_sample(c: &InProcCluster, p: u16) -> Result<bool, ScenarioFailure> {
     let before = published(c, p);
     if before.leader == 0 {
         return Ok(false);
     }
+    let admin = c.admin_status(before.leader).await;
+    let after = published(c, p);
+    if before != after {
+        return Ok(false);
+    }
     let mut leos = BTreeMap::new();
     for n in c.node_ids() {
         leos.insert(n, durable_end(c, n, p)?);
-    }
-    let admin = c.admin_status(before.leader).await;
-    let after = published(c, p);
-    for (n, leo) in &leos {
-        if durable_end(c, *n, p)? != *leo {
-            return Ok(false);
-        }
-    }
-    if before != after {
-        return Ok(false);
     }
     let hw = admin["partitions"]
         .as_array()

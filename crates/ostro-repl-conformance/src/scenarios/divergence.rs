@@ -16,14 +16,15 @@ use ostro_meta::PartitionAssignment;
 
 use super::placement::support::{
     ACK_T, CHANGE_T, LAG_MAX, SESSION, Start, append_acked, blackhole, deploy, fail,
-    final_checks_with, join_starts, none_committed, pick, settle, spawn_starts, wait_assignment,
-    wait_keys_on_disk, wait_meta_leader,
+    final_checks_with, join_starts, none_committed, pick, published, reported_hw, settle,
+    spawn_starts, wait_assignment, wait_keys_on_disk, wait_meta_leader,
 };
 use super::placement::{LONG_DEADLINE, Run};
 use super::{Scenario, ScenarioFailure, ScenarioResult, Tier};
 use crate::harness::fault::RpcKind;
 use crate::harness::inproc::{Ack, InProcCluster};
 use crate::harness::{ClusterHarness, ClusterSpec};
+use crate::oracle::disk::acked_on_disk;
 
 /// The `divergence` scenarios.
 pub fn scenarios() -> Vec<Scenario> {
@@ -111,20 +112,38 @@ fn split(keys: Vec<String>, results: Vec<Start>, acks: &mut Vec<Ack>) -> Vec<Str
 
 /// Wait for `p` to settle with every node of `members` in its ISR, then check no divergent
 /// key is below the HW anywhere.
+///
+/// When the old leader(s) never rejoin, the divergence and durability oracles run on the
+/// cluster as it stands before the timeout is reported (12-16): a leader that kept its
+/// divergent tail (no truncation) or acknowledged writes no follower holds (HW over its own
+/// LEO) is named by the oracle that defines the bug, not only by the rejoin timeout it
+/// causes.
 async fn truncated(
     c: &InProcCluster,
     p: u16,
     members: &[u64],
     divergent: &[String],
+    acks: &[Ack],
 ) -> Result<(), ScenarioFailure> {
-    wait_assignment(
+    if let Err(timeout) = wait_assignment(
         c,
         p,
         "rejoined by the old leader(s)",
         LAG_MAX + CHANGE_T,
         |x| members.iter().all(|m| x.isr.contains(m)),
     )
-    .await?;
+    .await
+    {
+        let leader = published(c, p).leader;
+        if leader != 0
+            && let Some(hw) = reported_hw(c, leader, p).await
+        {
+            none_committed(c, p, hw, divergent)?;
+        }
+        let views: Vec<_> = c.node_ids().iter().map(|n| c.node_disk(*n)).collect();
+        acked_on_disk(&views, acks, c.spec().min_insync).into_result()?;
+        return Err(timeout);
+    }
     match settle(c, p).await? {
         Some((_, hw, _)) => none_committed(c, p, hw, divergent),
         None => Err(fail("availability", format!("partition {p} is offline"))),
@@ -153,7 +172,7 @@ fn leader_dies_with_unreplicated_writes(c: &mut InProcCluster) -> BoxFuture<'_, 
         let divergent = split(keys, join_starts(tasks).await, &mut acks);
         acks.extend(append_acked(c, p, 3, ACK_T).await?);
         restart_or_panic(c.restart(leader).await, leader);
-        truncated(c, p, &[leader], &divergent).await?;
+        truncated(c, p, &[leader], &divergent, &acks).await?;
         final_checks_with(c, false, &acks).await
     })
 }
@@ -178,7 +197,7 @@ fn isolated_leader_rejoin_truncates(c: &mut InProcCluster) -> BoxFuture<'_, Scen
         let divergent = split(keys, join_starts(tasks).await, &mut acks);
         acks.extend(append_acked(c, p, 3, ACK_T).await?);
         c.heal(leader);
-        truncated(c, p, &[leader], &divergent).await?;
+        truncated(c, p, &[leader], &divergent, &acks).await?;
         final_checks_with(c, false, &acks).await
     })
 }
@@ -230,7 +249,7 @@ fn two_quick_leader_changes_truncate(c: &mut InProcCluster) -> BoxFuture<'_, Sce
             ));
         }
         acks.extend(append_acked(c, p, 3, CHANGE_T + ACK_T).await?);
-        truncated(c, p, &[first, second], &divergent).await?;
+        truncated(c, p, &[first, second], &divergent, &acks).await?;
         final_checks_with(c, false, &acks).await
     })
 }
