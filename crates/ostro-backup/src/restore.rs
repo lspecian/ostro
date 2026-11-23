@@ -148,6 +148,10 @@ pub enum RestoreError {
     /// No manifest matches.
     #[error("no restore point: {0}")]
     NoManifest(String),
+    /// The bucket belongs to a multi-member cluster: per-partition heads, no manifest
+    /// (D-P12-3).
+    #[error("cluster-wide restore is deferred (Phase 13/14); see docs/replication.md ({0})")]
+    ClusterBucketUnsupported(String),
     /// The manifest is malformed or violates the ordering rules.
     #[error("bad manifest: {0}")]
     BadManifest(String),
@@ -346,6 +350,9 @@ async fn load_manifest(
         Some((b, _)) => Some(decode(manifest::CURRENT_KEY, &b)?),
         None => None,
     };
+    if current.is_none() {
+        refuse_cluster_bucket(store).await?;
+    }
     let Some(at) = at else {
         return current.ok_or_else(|| {
             RestoreError::NoManifest(format!("{} is missing", manifest::CURRENT_KEY))
@@ -390,6 +397,33 @@ async fn load_manifest(
     }
     Err(RestoreError::NoManifest(format!(
         "no manifest was cut at or before {t} ms"
+    )))
+}
+
+/// A bucket without `manifest/current` but with `p/<pppp>/head` objects was written by a
+/// multi-member cluster (12-15): no single manifest names a consistent cut, so restore refuses
+/// it (D-P12-3).
+async fn refuse_cluster_bucket(store: &Arc<dyn ObjectStore>) -> Result<(), RestoreError> {
+    let heads: Vec<String> = store
+        .list("p/", None)
+        .await
+        .map_err(|e| RestoreError::Source(e.to_string()))?
+        .into_iter()
+        .map(|m| m.key)
+        .filter(|k| {
+            k.strip_prefix("p/")
+                .and_then(|r| r.split_once('/'))
+                .is_some_and(|(p, rest)| p.len() == 4 && rest == "head")
+        })
+        .collect();
+    if heads.is_empty() {
+        return Ok(());
+    }
+    Err(RestoreError::ClusterBucketUnsupported(format!(
+        "the bucket has no {} but {} per-partition head object(s), e.g. {}",
+        manifest::CURRENT_KEY,
+        heads.len(),
+        heads[0]
     )))
 }
 

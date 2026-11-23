@@ -7,8 +7,11 @@
 //!
 //! The head is `p/<pppp>/head` (cluster mode, 12-15) when present, else the Phase 8
 //! manifest (`manifest/current`, single-member mode). The cluster head's encoding is owned
-//! by 12-15; [`decode_head`] accepts JSON `{"epoch", "last_chunk_key", "last_chunk_sha256"}`
-//! (sha as a hex string or a byte array) and 12-15 adjusts it if the head lands differently.
+//! by 12-15 (`ostro_backup::cluster::encode_head`): JSON `{"epoch", "last_chunk_key",
+//! "last_chunk_sha256", "chain_start", ...}`. [`decode_head`] reads the chain pointer (sha as a
+//! hex string or a byte array; `chain_start` absent = 0). A head with `last_chunk_key: null`
+//! is an empty chain at its `chain_start` (a takeover re-chained from a snapshot, which is the
+//! chain base): nothing to compare.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,8 +33,7 @@ pub struct ChainHead {
     pub last_chunk_key: String,
     /// Its identity.
     pub last_chunk_sha256: [u8; 32],
-    /// Stop walking at the first chunk with `base <= stop` (manifest `chain_start`; 0 for a
-    /// cluster head).
+    /// Stop walking at the first chunk with `base <= stop` (manifest or head `chain_start`).
     pub stop: u64,
 }
 
@@ -60,14 +62,22 @@ fn sha_from(v: &Value) -> Option<[u8; 32]> {
     }
 }
 
-/// Decode a cluster head object (see the module docs).
-pub fn decode_head(bytes: &[u8]) -> Option<ChainHead> {
+/// Decode a cluster head object (see the module docs): `None` = unrecognised, `Some(None)` =
+/// an empty chain.
+pub fn decode_head(bytes: &[u8]) -> Option<Option<ChainHead>> {
     let v: Value = serde_json::from_slice(bytes).ok()?;
-    Some(ChainHead {
+    let stop = match &v["chain_start"] {
+        Value::Null => 0,
+        c => c.as_u64()?,
+    };
+    if v["last_chunk_key"].is_null() && v.get("epoch").is_some() {
+        return Some(None);
+    }
+    Some(Some(ChainHead {
         last_chunk_key: v["last_chunk_key"].as_str()?.to_owned(),
         last_chunk_sha256: sha_from(&v["last_chunk_sha256"])?,
-        stop: 0,
-    })
+        stop,
+    }))
 }
 
 fn open(bucket: &Path) -> Result<Arc<dyn ObjectStore>, String> {
@@ -79,9 +89,7 @@ fn open(bucket: &Path) -> Result<Arc<dyn ObjectStore>, String> {
 /// The head of partition `p`'s chain (`None` = nothing uploaded for it).
 pub async fn find_head(store: &Arc<dyn ObjectStore>, p: u16) -> Result<Option<ChainHead>, String> {
     if let Some((b, _)) = store.get(&head_key(p)).await.map_err(|e| e.to_string())? {
-        return decode_head(&b)
-            .map(Some)
-            .ok_or_else(|| format!("{}: unrecognised head object", head_key(p)));
+        return decode_head(&b).ok_or_else(|| format!("{}: unrecognised head object", head_key(p)));
     }
     let Some((b, _)) = store
         .get(manifest::CURRENT_KEY)
