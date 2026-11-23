@@ -5,7 +5,7 @@
 #
 # Usage: bash scripts/clean-machine.sh <rust|python|ts|all> (--image IMG | --local)
 #                                      [--docker] [--no-cc] [--ostro PATH]
-#                                      [--timeout SECS] [--print-plan]
+#                                      [--timeout SECS] [--cache DIR] [--print-plan]
 #
 # Modes:
 #   --image IMG   a fresh `docker run --rm` container of IMG (ubuntu:24.04, debian:12) with
@@ -25,6 +25,8 @@
 #   --no-cc       mask cc/gcc/clang with failing stubs (a PATH shim dir) and set
 #                 OSTRO_NO_CC=1, so the Rust build takes the zig cc fallback even when the
 #                 host has a C compiler.
+#   --cache DIR   (--local) use DIR as OSTRO_TOOLCHAIN_DIR and keep it: a second run with
+#                 the same DIR measures the warm path (toolchains already downloaded).
 #   --print-plan  print the commands of each language run without running anything.
 #
 # Per language, inside the environment:
@@ -147,7 +149,7 @@ fi
 # --------------------------------------------------------------------------------------
 # Outer mode: argument parsing and environment setup.
 # --------------------------------------------------------------------------------------
-LANGS_ARG="" IMAGE="" LOCAL=0 DOCKER_BUILD=0 NO_CC=0 OSTRO_BIN="" TIMEOUT=600 PRINT_PLAN=0
+LANGS_ARG="" IMAGE="" LOCAL=0 DOCKER_BUILD=0 NO_CC=0 OSTRO_BIN="" TIMEOUT=600 PRINT_PLAN=0 CACHE_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     rust|python|ts|all) LANGS_ARG="$1" ;;
@@ -160,6 +162,8 @@ while [[ $# -gt 0 ]]; do
     --ostro=*) OSTRO_BIN="${1#--ostro=}" ;;
     --timeout) TIMEOUT="${2:?--timeout needs a value}"; shift ;;
     --timeout=*) TIMEOUT="${1#--timeout=}" ;;
+    --cache) CACHE_DIR="${2:?--cache needs a value}"; shift ;;
+    --cache=*) CACHE_DIR="${1#--cache=}" ;;
     --print-plan) PRINT_PLAN=1 ;;
     -h|--help) sed -n '2,40p' "$SELF"; exit 0 ;;
     *) die "unknown argument: $1" ;;
@@ -171,6 +175,11 @@ if [[ -n "$IMAGE" && "$LOCAL" == 1 ]] || [[ -z "$IMAGE" && "$LOCAL" == 0 ]]; the
   die "exactly one of --image IMG or --local is required"
 fi
 [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die "--timeout must be a number of seconds"
+if [[ -n "$CACHE_DIR" ]]; then
+  [[ "$LOCAL" == 1 ]] || die "--cache is only supported with --local"
+  mkdir -p "$CACHE_DIR"
+  CACHE_DIR="$(cd "$CACHE_DIR" && pwd)"
+fi
 if [[ "$LANGS_ARG" == all ]]; then LANGS=(rust python ts); else LANGS=("$LANGS_ARG"); fi
 
 if [[ -z "$OSTRO_BIN" ]]; then
@@ -199,7 +208,9 @@ APT='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq
 
 container_cmd() { # <lang> <workdir-on-host-or-empty>
   local lang="$1" hostwork="$2" docker_bin
-  CMD=(docker run --rm --network host
+  # --shm-size: `ostro dev --ephemeral` keeps its data under /dev/shm, and Docker's default
+  # 64 MB is too small for a Python module (~19 MB, stored more than once): ENOSPC (10-19).
+  CMD=(docker run --rm --network host --shm-size 1g
     -v "$OSTRO_BIN:/usr/local/bin/ostro:ro"
     -v "$SELF:/clean-machine.sh:ro"
     -e CM_LANG="$lang" -e CM_LABEL="$IMAGE" -e CM_TIMEOUT="$TIMEOUT")
@@ -213,13 +224,14 @@ container_cmd() { # <lang> <workdir-on-host-or-empty>
       -v "$OSTRO_BIN:$OSTRO_BIN:ro"
       -v "$hostwork:$hostwork"
       -e CM_WORK="$hostwork/w" -e CM_DOCKER=1 -e OSTRO_LINUX_BIN="$OSTRO_BIN"
-      -e OSTRO_TOOLCHAIN_DIR="$hostwork/toolchains" -e HOME="$hostwork/home")
+      -e OSTRO_TOOLCHAIN_DIR="$hostwork/toolchains" -e HOME="$hostwork/home"
+      -e CM_CHOWN="$(id -u):$(id -g)" -e CM_HOSTWORK="$hostwork")
   else
     CMD+=(-e CM_WORK=/work -e HOME=/root -e OSTRO_TOOLCHAIN_DIR=/root/.ostro-toolchains)
   fi
   [[ "$NO_CC" == 1 ]] && CMD+=(-e OSTRO_NO_CC=1)
   CMD+=(-e OSTRO_ZIG_SHIM_LOG=/tmp/zig-shim.log)
-  CMD+=("$IMAGE" bash -c "set -e; $APT; for t in cc gcc clang cargo rustup node npm uv go; do if command -v \$t >/dev/null; then echo \"clean-machine: \$t present in the image\"; fi; done; exec bash /clean-machine.sh --inner")
+  CMD+=("$IMAGE" bash -c "set -e; $APT; for t in cc gcc clang cargo rustup node npm uv go; do if command -v \$t >/dev/null; then echo \"clean-machine: \$t present in the image\"; fi; done; rc=0; bash /clean-machine.sh --inner || rc=\$?; if [ -n \"\${CM_CHOWN:-}\" ]; then chown -R \"\$CM_CHOWN\" \"\$CM_HOSTWORK\"; fi; exit \$rc")
 }
 
 # ---- local mode ----
@@ -227,6 +239,8 @@ FORBIDDEN=(cargo rustup node npm uv go python3.12)
 
 local_env() { # <lang> <scratch>: fills CMD with the env -i invocation
   local lang="$1" scratch="$2" path="/usr/bin:/bin" t found=()
+  # fs <cmd...>: filesystem setup, skipped by --print-plan (which only prints).
+  fs() { if [[ "$PRINT_PLAN" == 0 ]]; then "$@"; fi; }
   for t in "${FORBIDDEN[@]}"; do
     if PATH="$path" command -v "$t" >/dev/null 2>&1; then found+=("$t=$(PATH="$path" command -v "$t")"); fi
   done
@@ -234,23 +248,26 @@ local_env() { # <lang> <scratch>: fills CMD with the env -i invocation
     die "--local needs a PATH without language toolchains, but /usr/bin:/bin has: ${found[*]}"
   fi
   if [[ "$NO_CC" == 1 ]]; then
-    mkdir -p "$scratch/nocc"
+    fs mkdir -p "$scratch/nocc"
     for t in cc gcc clang c++ g++ clang++; do
-      printf '#!/bin/sh\necho "clean-machine --no-cc: %s is masked" >&2\nexit 127\n' "$t" >"$scratch/nocc/$t"
-      chmod +x "$scratch/nocc/$t"
+      if [[ "$PRINT_PLAN" == 0 ]]; then
+        printf '#!/bin/sh\necho "clean-machine --no-cc: %s is masked" >&2\nexit 127\n' "$t" >"$scratch/nocc/$t"
+        chmod +x "$scratch/nocc/$t"
+      fi
     done
     path="$scratch/nocc:$path"
   fi
   if [[ "$DOCKER_BUILD" == 1 ]]; then
-    local d; d="$(command -v "${OSTRO_DOCKER:-docker}" 2>/dev/null)" || die "--docker: docker not on PATH"
-    mkdir -p "$scratch/dockerbin"
-    ln -sf "$d" "$scratch/dockerbin/docker"
+    local d; d="$(command -v "${OSTRO_DOCKER:-docker}" 2>/dev/null)" || d=docker
+    [[ "$PRINT_PLAN" == 1 || "$d" == /* ]] || die "--docker: docker not on PATH"
+    fs mkdir -p "$scratch/dockerbin"
+    fs ln -sf "$d" "$scratch/dockerbin/docker"
     path="$path:$scratch/dockerbin"
   fi
-  mkdir -p "$scratch/bin" "$scratch/home" "$scratch/toolchains" "$scratch/tmp"
-  ln -sf "$OSTRO_BIN" "$scratch/bin/ostro"
+  fs mkdir -p "$scratch/bin" "$scratch/home" "$scratch/toolchains" "$scratch/tmp"
+  fs ln -sf "$OSTRO_BIN" "$scratch/bin/ostro"
   CMD=(env -i "HOME=$scratch/home" "PATH=$scratch/bin:$path" "TMPDIR=$scratch/tmp"
-    "OSTRO_TOOLCHAIN_DIR=$scratch/toolchains" "TERM=dumb" "LANG=C.UTF-8"
+    "OSTRO_TOOLCHAIN_DIR=${CACHE_DIR:-$scratch/toolchains}" "TERM=dumb" "LANG=C.UTF-8"
     "CM_LANG=$lang" "CM_WORK=$scratch/w" "CM_LABEL=local" "CM_TIMEOUT=$TIMEOUT"
     "CM_DOCKER=$DOCKER_BUILD" "OSTRO_ZIG_SHIM_LOG=$scratch/zig-shim.log")
   [[ "$NO_CC" == 1 ]] && CMD+=("OSTRO_NO_CC=1")
