@@ -578,12 +578,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BuildError> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp = path.with_file_name(format!(".{file}.tmp-{}", tmp_suffix()));
-    std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            BuildError::io(format!("writing {}", path.display()), e)
-        })
+    // The two steps are reported apart: a rename ENOENT (the temp vanished) used to read
+    // as "writing <path>: No such file or directory", i.e. like a missing parent dir.
+    let fail = |what: String, e| {
+        let _ = std::fs::remove_file(&tmp);
+        BuildError::io(what, e)
+    };
+    std::fs::write(&tmp, bytes).map_err(|e| fail(format!("writing {}", tmp.display()), e))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        fail(
+            format!("renaming {} to {}", tmp.display(), path.display()),
+            e,
+        )
+    })
 }
 
 /// Lines of step output kept for [`BuildError::Step`].
