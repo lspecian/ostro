@@ -162,7 +162,13 @@ async fn cut_fails_fast_and_heal_restores() {
             .await
             .expect("a cut link fails fast, it does not hang")
             .expect_err("cut");
-        assert_eq!(e.code(), Code::Unavailable, "{e:?}");
+        // A call already dispatched on the old connection when the reset lands comes back
+        // Cancelled (hyper `Canceled: connection closed`); later ones see Unavailable.
+        // Which one the first call gets is a race (seen on linux-aarch64-musl CI).
+        assert!(
+            matches!(e.code(), Code::Unavailable | Code::Cancelled),
+            "{e:?}"
+        );
         assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     }
     // A fresh channel: connect refused.
