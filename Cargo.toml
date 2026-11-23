@@ -176,6 +176,53 @@ codegen-units = 1
 strip = "debuginfo"
 # panic strategy: leave default (unwind) until Phase 3 decides (catch_unwind around guest calls)
 
+# Size-optimise cold code in the release binary (docs/binary-size.md, option 1). These crates
+# are the CLI, the REST/OpenAPI admin surface, the UI and the Kubernetes secrets client: none
+# is on the invocation/apply hot path (wasmtime/cranelift, ostro-engine, ostro-partition,
+# ostro-log, ostro-wal, fjall, tokio, hyper/h2, prost and rustls keep opt-level 3).
+# Fat LTO keeps the per-function optsize attribute, so the saving survives the merge.
+[profile.release.package.ostro-api]
+opt-level = "s"
+
+[profile.release.package.ostro-cli]
+opt-level = "s"
+
+[profile.release.package.ostro-client]
+opt-level = "s"
+
+[profile.release.package.ostro-ui]
+opt-level = "s"
+
+[profile.release.package.ostro-build]
+opt-level = "s"
+
+[profile.release.package.clap]
+opt-level = "s"
+
+[profile.release.package.clap_builder]
+opt-level = "s"
+
+[profile.release.package.utoipa]
+opt-level = "s"
+
+[profile.release.package.utoipa-axum]
+opt-level = "s"
+
+[profile.release.package.kube]
+opt-level = "s"
+
+[profile.release.package.kube-client]
+opt-level = "s"
+
+[profile.release.package.kube-core]
+opt-level = "s"
+
+[profile.release.package.k8s-openapi]
+opt-level = "s"
+
+[profile.release.package.serde-saphyr]
+opt-level = "s"
+
 # Debug info trimmed to keep target dirs small (they filled the disk, 2026-11-22).
 # Backtraces still have file:line. To debug with variables in gdb/lldb, set
 # debug = true here and delete the [profile.dev.package."*"] block below

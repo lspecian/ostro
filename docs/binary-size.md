@@ -3,7 +3,8 @@
 NFR-2.1 caps the static `x86_64-unknown-linux-musl` release binary at **60 MB**
 (60,000,000 bytes, `scripts/ci-local.sh` step "musl binary size < 60 MB"). This page records
 where the bytes go and what could be cut. It was measured on 2026-11-23 at `3b5b785` (after
-Phase 10, Phase 11 and most of Phase 12).
+Phase 10, Phase 11 and most of Phase 12). Option 1 below was applied by size1 the same day;
+see "Applied: option 1" for the result. The breakdown tables are from before that change.
 
 ## Measurement
 
@@ -11,7 +12,9 @@ Phase 10, Phase 11 and most of Phase 12).
 |---|---|
 | Phase 4 baseline (04-20) | 22.7 MB |
 | Phase 10 gate (10-19 / 10-20) | 56.2 MB |
-| **2026-11-23, `3b5b785`** | **59.09 MB (59,092,784 bytes): 0.9 MB of headroom** |
+| 2026-11-23, `3b5b785` | 59.09 MB (59,092,784 bytes): 0.9 MB of headroom |
+| 2026-11-23, `73e53a7` (size1 baseline) | 59.09 MB (59,093,232 bytes) |
+| **2026-11-23, size1 (option 1 applied)** | **56.02 MB (56,023,344 bytes): 3.98 MB of headroom** |
 
 The binary grew by 2.9 MB since the Phase 10 gate. The new code since then is Phase 11 and
 Phase 12 (bulk/DLQ/UI routes, replication); no per-commit bisection was done. **The next feature of a few hundred kB may trip the gate.**
@@ -71,9 +74,43 @@ each, `ostro_api::phase11::api_routes` 280 kB, `ostro_api::phase8::api_routes` 2
 `utoipa-axum` route builders (`*_routes`) total **1.25 MB**. Each one is a single function into
 which every handler's `Handler` impl and schema registration is inlined.
 
-## Reduction options (none applied)
+## Applied: option 1 (size1, 2026-11-23)
 
-1. **Size-optimise the cold crates (low risk, measure first).** Add
+The root `Cargo.toml` sets `[profile.release.package.<crate>] opt-level = "s"` for these
+cold crates: `ostro-api`, `ostro-cli`, `ostro-client` (the CLI's REST client), `ostro-ui`,
+`ostro-build`, `clap`, `clap_builder`, `utoipa`, `utoipa-axum`, `kube`, `kube-client`,
+`kube-core`, `k8s-openapi` and `serde-saphyr` (kube's YAML). The proc-macro crates
+(`clap_derive`, `utoipa-gen`) are not in the binary and are left alone. The hot path keeps
+opt-level 3: wasmtime/cranelift, `ostro-engine`, `ostro-partition`, `ostro-log`, `ostro-wal`,
+`ostro-server`, fjall/lsm-tree, tokio, hyper/h2, tonic, prost, rustls/aws-lc.
+
+| Section | before (bytes) | after (bytes) | delta |
+|---|---:|---:|---:|
+| `.text` | 48,225,798 | 45,194,118 | -3.03 MB |
+| `.gcc_except_table` | 2,029,396 | 1,953,188 | -0.08 MB |
+| `.rodata` | 3,968,880 | 3,960,688 | -0.01 MB |
+| `.eh_frame` | 3,360,408 | 3,396,448 | +0.04 MB |
+| **file** | **59,093,232** | **56,023,344** | **-3.07 MB** |
+
+Generic code from these crates that is instantiated in another crate (for example serde or
+clap derive output expanded inside `ostro-server`) is compiled with that crate's opt-level, so
+some cold bytes remain at opt-level 3.
+
+Checks with the musl release binary (`OSTRO_BIN`):
+
+- `dev_startup` including the ignored `cold_first_run_measurement`: cold first run had the
+  same best time before and after, measured back to back under the same machine load (1559 ms
+  vs 1554 ms; median 1583 vs 1585 ms). `--ephemeral` took 91 ms before and 94 ms after
+  (budget 1 s).
+- `e2e_dev`: 3/3 passed.
+- `cargo test --release -p ostro-api -p ostro-cli -p ostro-ui`: all passed. This includes the
+  OpenAPI snapshot, so every route is still registered.
+
+Option 2 was not needed for the 3 MB headroom target and is still open.
+
+## Reduction options
+
+1. **(Applied, see above.) Size-optimise the cold crates (low risk, measure first).** Add
    `[profile.release.package.<crate>] opt-level = "s"` for code that is not on the hot path:
    `ostro-api` (route builders, OpenAPI), `ostro-cli`, `clap_builder`, `utoipa`, `kube-client`,
    `k8s-openapi`, `serde_saphyr`, `ostro-ui`, `ostro-build`. Fat LTO merges modules, but LLVM
