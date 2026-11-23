@@ -79,12 +79,32 @@ impl Net {
     }
 }
 
-struct LocalForwarder(Net);
+/// Nodes cut off from every other node (Raft messages and forwarded proposals dropped).
+type Cut = Arc<Mutex<BTreeSet<u64>>>;
+
+/// Commands forwarded to the leader, by sending node.
+type Forwarded = Arc<Mutex<Vec<(u64, MetaCommand)>>>;
+
+struct LocalForwarder {
+    net: Net,
+    from: u64,
+    cut: Cut,
+    forwarded: Forwarded,
+}
 
 impl ProposeForwarder for LocalForwarder {
     fn forward(&self, leader: u64, cmd: Vec<u8>) -> ForwardFuture<'_> {
         Box::pin(async move {
-            match self.0.get(leader) {
+            {
+                let cut = self.cut.lock().unwrap();
+                if cut.contains(&self.from) || cut.contains(&leader) {
+                    return Err(ProposeError::NotLeader { leader: None });
+                }
+            }
+            if let Ok(c) = ostro_meta::decode_command(&cmd) {
+                self.forwarded.lock().unwrap().push((self.from, c));
+            }
+            match self.net.get(leader) {
                 Some(h) => h.propose(cmd).await,
                 None => Err(ProposeError::NotLeader { leader: None }),
             }
@@ -104,6 +124,8 @@ pub struct Group {
     dirs: HashMap<u64, TempDir>,
     nodes: HashMap<u64, Running>,
     pub records: Arc<Mutex<Vec<ProposalRecord>>>,
+    cut: Cut,
+    pub forwarded: Forwarded,
 }
 
 impl Group {
@@ -118,6 +140,8 @@ impl Group {
                 .collect(),
             nodes: HashMap::new(),
             records: Arc::new(Mutex::new(Vec::new())),
+            cut: Cut::default(),
+            forwarded: Forwarded::default(),
             voters,
         };
         for id in g.voters.clone() {
@@ -140,7 +164,12 @@ impl Group {
                 node_id: id,
                 voters: self.voters.clone(),
                 outbox: Box::new(ChannelOutbox(tx)),
-                forwarder: Some(Arc::new(LocalForwarder(self.net.clone()))),
+                forwarder: Some(Arc::new(LocalForwarder {
+                    net: self.net.clone(),
+                    from: id,
+                    cut: Arc::clone(&self.cut),
+                    forwarded: Arc::clone(&self.forwarded),
+                })),
                 tick: ticks(),
             },
         )
@@ -148,9 +177,17 @@ impl Group {
         .expect("start_with");
         self.net.0.lock().unwrap().insert(id, h.raft().clone());
         let net = self.net.clone();
+        let cut = Arc::clone(&self.cut);
         tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
                 for m in batch {
+                    let dropped = {
+                        let cut = cut.lock().unwrap();
+                        cut.contains(&m.from) || cut.contains(&m.to)
+                    };
+                    if dropped {
+                        continue;
+                    }
                     if let Some(to) = net.get(m.to) {
                         to.step(m);
                     }
@@ -213,6 +250,21 @@ impl Group {
 
     pub fn meta(&self, id: u64) -> &MetaHandle {
         &self.nodes[&id].meta
+    }
+
+    /// A shared handle to node `id`'s meta (drop it before [`Group::stop`]).
+    pub fn meta_arc(&self, id: u64) -> Arc<MetaHandle> {
+        Arc::clone(&self.nodes[&id].meta)
+    }
+
+    /// Cut node `id` off from every other node.
+    pub fn cut(&self, id: u64) {
+        self.cut.lock().unwrap().insert(id);
+    }
+
+    /// Restore node `id`'s links.
+    pub fn heal(&self, id: u64) {
+        self.cut.lock().unwrap().remove(&id);
     }
 
     pub fn running(&self) -> Vec<u64> {

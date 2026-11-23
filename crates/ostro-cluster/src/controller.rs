@@ -30,7 +30,9 @@ use ostro_meta::ext::{
     ELECTION_REASON_FAILOVER, ELECTION_REASON_OFFLINE, ELECTION_REASON_RESIGN,
     ELECTION_REASON_STARTUP, ElectionInfo, get_election_info,
 };
-use ostro_meta::{MetaCommand, MetaError, MetaHandle, MetaRecord, MetaResult, PartitionAssignment};
+use ostro_meta::{
+    MetaCommand, MetaError, MetaHandle, MetaKey, MetaRecord, MetaResult, PartitionAssignment,
+};
 use ostro_partition::Clock;
 use tokio::sync::{Semaphore, broadcast};
 use tokio::task::JoinSet;
@@ -114,6 +116,9 @@ struct LoopState {
     /// Partitions already logged as "not re-placed".
     warned_rf: HashSet<u16>,
 }
+
+/// Bound on the read barrier a new meta leader takes before planning.
+const BARRIER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What a finished proposal task hands back.
 type Done = (u16, String, ProposalRecord);
@@ -213,6 +218,23 @@ impl Controller {
                 continue;
             }
             if !leading {
+                // A fresh meta leader may not have applied the previous term's committed
+                // tail yet: plan only from a view that includes it.
+                let barrier = tokio::time::timeout(BARRIER_TIMEOUT, read_barrier(&self.meta));
+                let ok = tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    r = barrier => matches!(r, Ok(Ok(()))),
+                };
+                if !ok {
+                    tracing::debug!(
+                        node = self.meta.node_id(),
+                        "controller read barrier did not complete; retrying next tick"
+                    );
+                    continue;
+                }
+                if !self.meta.is_leader() {
+                    continue;
+                }
                 leading = true;
                 st.offline.clear();
                 st.warned_rf.clear();
@@ -428,6 +450,26 @@ impl Controller {
     }
 }
 
+/// A linearizable read point for the local metadata view: once this returns `Ok`, the view
+/// holds every entry the metadata group committed before the call.
+///
+/// It proposes a command that can never change state (`Delete` of `Member(0)` at version
+/// 0: node ids start at 1 and record versions at 1, so the CAS never matches and apply
+/// answers `NotFound`/`StaleVersion`). `MetaHandle::propose` returns only once this node
+/// applied the entry's index (forwarded proposals wait for it), and Raft commits the entry
+/// after everything committed earlier. A node that just regained meta contact (or a meta
+/// leader that was just elected and has not applied the previous term's tail yet) can read
+/// a view that is many entries behind; deciding an `ElectLeader` from that view proposes
+/// from an ISR that is no longer published (12-16, `isolated_leader_rejoin_truncates`).
+pub async fn read_barrier(meta: &MetaHandle) -> Result<(), MetaError> {
+    meta.propose(MetaCommand::Delete {
+        key: MetaKey::Member(0),
+        expected_version: 0,
+    })
+    .await
+    .map(|_| ())
+}
+
 /// The outcome of [`request_fresh_term`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FreshTerm {
@@ -461,6 +503,9 @@ const FRESH_TERM_ATTEMPTS: usize = 10;
 /// called by the role lifecycle when meta names this node leader at an epoch ≤ the local
 /// log's latest, with `min_epoch = latest + 1`).
 ///
+/// A proposal is decided from a view at least as new as the call ([`read_barrier`] before
+/// the first one): a node that was cut off decides from the current ISR, never from the one
+/// it last saw. The no-op answers may come from the local view as it is.
 /// No-op at epoch 0, when another node leads, when this node is not in the ISR, or when the
 /// current epoch already reaches `min_epoch`. Otherwise proposes (forwarded if needed)
 /// `ElectLeader{max(epoch + 1, min_epoch), leader = self, isr = current, expected
@@ -472,6 +517,7 @@ pub async fn request_fresh_term(
     min_epoch: u32,
     clock: &dyn Clock,
 ) -> Result<FreshTerm, MetaError> {
+    let mut fresh = false;
     for _ in 0..FRESH_TERM_ATTEMPTS {
         let Some(cur) = meta
             .view()
@@ -490,6 +536,12 @@ pub async fn request_fresh_term(
         }
         if cur.epoch >= min_epoch {
             return Ok(FreshTerm::AlreadyFresh { epoch: cur.epoch });
+        }
+        if !fresh {
+            // About to propose: decide again from a view at least as new as this call.
+            read_barrier(meta).await?;
+            fresh = true;
+            continue;
         }
         let epoch = cur
             .epoch

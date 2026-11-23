@@ -340,12 +340,11 @@ impl IsrPublisher {
             expected_isr_version: expected_version,
             isr: proposed,
         };
-        let outcome = match tokio::time::timeout(self.cfg.propose_timeout, self.meta.alter_isr(cmd))
-            .await
-        {
-            Ok(r) => r,
-            Err(_) => Err(MetaError::Timeout),
-        };
+        let outcome =
+            match tokio::time::timeout(self.cfg.propose_timeout, self.meta.alter_isr(cmd)).await {
+                Ok(r) => r,
+                Err(_) => Err(MetaError::Timeout),
+            };
         match outcome {
             Ok(MetaResult::Ok { .. }) => {
                 // Applied: the assignment watch delivers the new ISR; it stays pending (and

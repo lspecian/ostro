@@ -12,7 +12,8 @@ use ostro_cluster::controller::{self, ControllerConfig, FreshTerm};
 use ostro_cluster::liveness::{Liveness, LivenessConfig, LivenessHandle};
 use ostro_cluster::members;
 use ostro_meta::ext::{
-    ELECTION_REASON_FAILOVER, ELECTION_REASON_OFFLINE, ELECTION_REASON_RESIGN, get_election_info,
+    ELECTION_REASON_FAILOVER, ELECTION_REASON_OFFLINE, ELECTION_REASON_RESIGN, ElectionInfo,
+    get_election_info,
 };
 use ostro_meta::{MetaCommand, MetaResult};
 use ostro_partition::SystemClock;
@@ -564,6 +565,80 @@ async fn elect_before_propose_failpoint_blocks_proposals_until_removed() {
         a.iter().all(|a| a.epoch == 1)
     })
     .await;
+    audit(&g.records());
+    g.stop_all().await;
+}
+
+/// 12-16 `isolated_leader_rejoin_truncates`: a partition leader cut off from the metadata
+/// group still sees itself leading at the old epoch with the old ISR. When it asks for a
+/// fresh term on rejoining, the decision must come from the current view (another node was
+/// elected meanwhile and the ISR shrank without it): no `ElectLeader` planned from the stale
+/// ISR is ever proposed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fresh_term_after_a_cut_decides_from_the_current_view() {
+    let mut g = Group::new(3).await;
+    let _live = placed(&mut g, 3, 3).await;
+    for a in g.assignments().await {
+        g.expand_isr(a.partition, a.replicas.clone()).await;
+    }
+    let ml = g.leader().await;
+    let a = g
+        .assignments()
+        .await
+        .into_iter()
+        .find(|a| a.leader != ml)
+        .expect("a partition led by a node other than the meta leader");
+    let (p, x) = (a.partition, a.leader);
+    g.cut(x);
+    let y = *a.replicas.iter().find(|r| **r != x).unwrap();
+    let isr: Vec<u64> = a.isr.iter().copied().filter(|r| *r != x).collect();
+    let r = g
+        .meta(ml)
+        .propose(MetaCommand::ElectLeader {
+            partition: p,
+            epoch: a.epoch + 1,
+            leader: y,
+            isr: isr.clone(),
+            expected_isr_version: a.isr_version,
+            info: ElectionInfo {
+                reason: ELECTION_REASON_FAILOVER,
+                elected_at_ms: 1,
+                prev_leader: x,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(r, MetaResult::Ok { .. }), "{r:?}");
+    // The cut node's view is stale: it still leads at the old epoch.
+    let seen = g
+        .meta(x)
+        .view()
+        .read(|s| s.partition(p).map(|v| v.value.clone()));
+    assert_eq!(seen.map(|v| (v.leader, v.epoch)), Some((x, a.epoch)));
+
+    let mx = g.meta_arc(x);
+    let req = tokio::spawn(async move {
+        controller::request_fresh_term(&mx, x, p, a.epoch + 1, &SystemClock).await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    g.heal(x);
+    let r = tokio::time::timeout(LONG, req)
+        .await
+        .expect("fresh term request finishes after the heal")
+        .unwrap()
+        .unwrap();
+    assert_eq!(r, FreshTerm::NotLeader { leader: y });
+    let stale: Vec<_> = g
+        .forwarded
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(from, c)| *from == x && matches!(c, MetaCommand::ElectLeader { .. }))
+        .cloned()
+        .collect();
+    assert!(stale.is_empty(), "stale ElectLeader proposed: {stale:?}");
+    let now = g.assignment(p).await;
+    assert_eq!((now.leader, now.epoch, now.isr), (y, a.epoch + 1, isr));
     audit(&g.records());
     g.stop_all().await;
 }
