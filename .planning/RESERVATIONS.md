@@ -402,9 +402,10 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | REST path | `GET /v1/admin/replication` (server-local route) | planned P12 |
 | Failpoints | `repl::mutant::{isr_from_assignment, hw_leader_leo, count_nondurable_leo, skip_epoch_check, no_truncate, unclean_election, ignore_min_insync, shrink_before_commit, upload_above_hw, rf1_bypass}` | names exist (P12, 12-02 `ostro_log::mutants`); sites planned P12 |
 | Failpoints | `install::{after_log_reset, before_rename, after_rename}`, `fetch::{before_append, before_durable}`, `isr::before_alter`, `elect::before_propose` | planned P12 |
+| Failpoint | `repl::before_services_stop` (ostro-partition roles step-down test hook, `return(<ms>)`) | exists (P12, 12-16) |
 | Object key (bottomless layout) | `p/<pppp>/head` | planned P12 |
 | Metrics | `ostro_repl_*`, incl. `ostro_repl_upload_fenced{partition}` and `ostro_repl_self_demotions_total` | planned P12 |
-| Env vars | `OSTRO_REPL_RED_RUN`, `OSTRO_REPL_REQUIRE_ALL`, `OSTRO_FAILOVER_ITERS`, `OSTRO_FAILOVER_ASSERT`, `OSTRO_FAILOVER_SWEEP`, `OSTRO_CAMPAIGN_FAULTS` (shared with the P5 campaign knob), `OSTRO_REPL_BENCH_SECS`, `OSTRO_PROC_ITERS`, `OSTRO_FAILPOINT_BIN`, `OSTRO_PROC_BUILD` | planned P12 |
+| Env vars | `OSTRO_REPL_RED_RUN`, `OSTRO_REPL_REQUIRE_ALL`, `OSTRO_FAILOVER_ITERS`, `OSTRO_FAILOVER_ASSERT`, `OSTRO_FAILOVER_SWEEP`, `OSTRO_CAMPAIGN_FAULTS` (shared with the P5 campaign knob), `OSTRO_REPL_BENCH_SECS`, `OSTRO_PROC_ITERS`, `OSTRO_FAILPOINT_BIN`, `OSTRO_PROC_BUILD`, `OSTRO_REPL_SCENARIO` / `OSTRO_REPL_REPEAT` (12-16 `tests/scenario.rs`) | planned P12 |
 | Crate / dirs | `ostro-ui` (`crates/ostro-ui/{templates,assets}`), `<data>/bulk/` | exists (P11, 11-03 crate; 11-13 `<data>/bulk/`) |
 | REST | `/ui/*`, `GET /v1/dlq`, `POST /v1/dlq/{run}/requeue\|dismiss`, `POST /v1/runs/{id}/rerun`, `GET\|POST /v1/bulk`, `GET /v1/bulk/{id}`, `POST /v1/bulk/{id}/cancel`, list endpoints `GET /v1/modules`, `GET /v1/queues`, `GET /v1/partitions`, `GET /v1/limits` | exists (P11, 11-09 routes; 11-10..11-17) |
 | gRPC services | `ostro.api.v1.RunOps`, `ostro.api.v1.Inventory` | exists (P11, 11-09) |
