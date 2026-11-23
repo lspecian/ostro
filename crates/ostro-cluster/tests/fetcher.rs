@@ -123,13 +123,18 @@ impl Pair {
 }
 
 /// Samples HW bounds until stopped: follower HW <= leader HW and <= follower durable end.
+/// Takes at least [`MIN_HW_SAMPLES`] samples even when stopped earlier: on the
+/// current-thread test runtime the watcher only runs when the test task yields, and a fast
+/// runner can converge in fewer polls than that (CI linux-x86_64-musl saw <= 10).
+const MIN_HW_SAMPLES: usize = 11;
+
 fn hw_watcher(p: &Pair) -> (Arc<AtomicBool>, tokio::task::JoinHandle<usize>) {
     let stop = Arc::new(AtomicBool::new(false));
     let (l, f) = (Arc::clone(&p.leader.log), Arc::clone(&p.follower.log));
     let s = Arc::clone(&stop);
     let h = tokio::spawn(async move {
         let mut samples = 0;
-        while !s.load(Ordering::SeqCst) {
+        while !s.load(Ordering::SeqCst) || samples < MIN_HW_SAMPLES {
             let fhw = *f.high_watermark().borrow();
             let fd = f.durable_end();
             let lhw = *l.high_watermark().borrow();
