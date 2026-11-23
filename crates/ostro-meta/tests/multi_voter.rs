@@ -141,10 +141,21 @@ impl Group {
             {
                 return l;
             }
-            assert!(
-                Instant::now() < deadline,
-                "no agreed leader within {within:?}"
-            );
+            if Instant::now() >= deadline {
+                // the raft view of every running node, for a failure on a slow runner
+                let status: Vec<String> = self
+                    .nodes
+                    .iter()
+                    .map(|(i, h)| {
+                        let s = h.raft().status();
+                        format!(
+                            "node {i}: term {} leader {:?} is_leader {} commit {} applied {} failed {:?}",
+                            s.term, s.leader_id, s.is_leader, s.commit, s.applied, s.failed
+                        )
+                    })
+                    .collect();
+                panic!("no agreed leader within {within:?}: {status:#?}");
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
