@@ -433,7 +433,7 @@ Plans:
 - [x] 12-04-PLAN.md — Pure algorithms (TDD): tracker (caught-up vs previous durable end), KIP-497 maximal ISR + min_insync freeze, KIP-595 divergence, ISR-only planner (isr ∩ live), model, six mutants (CLUS-02, CLUS-03) (W3)
 - [x] 12-05-PLAN.md — ElectLeader (ISR ⊆ published)/AlterIsr/ResignLeader validated at meta apply + command golden, multi-voter MetaHandle with forwarding, MetaPeer over mTLS with node-identity authz (CLUS-03) (W3)
 - [x] 12-06-PLAN.md — Conformance suite FIRST, core groups: placement, ISR honesty, HW, stale epoch, divergence, failover/offline, min_insync + red run (CLUS-01) (W4)
-- [ ] 12-07-PLAN.md — Conformance suite FIRST, remaining groups (standby, bootstrap, fetch path, blobs, one path, zombie, object storage) + permanent mutant matrix + red run (CLUS-01) (W4)
+- [x] 12-07-PLAN.md — Conformance suite FIRST, remaining groups (standby, bootstrap, fetch path, blobs, one path, zombie, object storage) + permanent mutant matrix + red run (CLUS-01) (W4)
 - [x] 12-08-PLAN.md — One log implementation: Rf1Log -> PartitionLog, tracker-driven HW via publish_hw (RF=1 included), follower/install primitives, become_leader only above the log's epoch, parsed-base torn rule, grep gate (CLUS-02, CLUS-04) (W4)
 - [x] 12-09-PLAN.md — Tier-C harness: Rust TCP chaos proxy (RST passthrough) + multi-process loopback cluster with real kill -9 (CLUS-04) (W4)
 - [x] 12-10-PLAN.md — Controller: learner-aware sample_live, Ostro wiped-voter remedy text, suspect-confirmed liveness, placement for any voter count, fresh terms, ISR-only failover, resign, Member self-upsert (CLUS-03, CLUS-04) (W4)
