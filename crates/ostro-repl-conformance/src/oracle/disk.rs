@@ -67,6 +67,17 @@ impl LogScan {
         })
     }
 
+    /// Base offset of the first verified record (`None` when empty). A value above 0 means
+    /// retention has trimmed this copy below that offset.
+    pub fn log_start(&self) -> Option<Offset> {
+        self.records.first().map(|r| r.base)
+    }
+
+    /// Whether retention has trimmed this copy (its first verified record starts above 0).
+    pub fn is_trimmed(&self) -> bool {
+        self.log_start().is_some_and(|o| o.0 > 0)
+    }
+
     /// Whether the log holds a `StartRun` for `run`.
     pub fn has_start_run(&self, run: &RunId) -> bool {
         self.commands().any(|(_, c)| {
@@ -164,19 +175,57 @@ pub fn scan_wal_dir(node: u64, wal_dir: &Path, p: PartitionId) -> Result<LogScan
 /// holds its `StartRun` command (below that node's measured durable end, by construction of
 /// the scan). Violations name the run id, partition and the nodes that have it.
 pub fn acked_on_disk(views: &[DataDirView], acks: &[Ack], min_insync: usize) -> Report {
-    let mut report = Report::new("disk");
+    acked_on_disk_with(views, acks, min_insync, |_, _, _| false)
+}
+
+/// [`acked_on_disk`] with the trimmed-log rule (user-approved 2026-11-23, recorded in
+/// 12-DECISIONS): a node counts as holding an acknowledged run if its verified WAL holds the
+/// run's `StartRun` (exactly as in [`acked_on_disk`]), or — only when that node's WAL has
+/// been trimmed by retention ([`LogScan::is_trimmed`]) — if `in_state(node, partition, run)`
+/// finds the run's record in that node's checkpointed state store.
+///
+/// Soundness: a state store only holds what was applied from the log, so a run present in
+/// state but absent from a contiguous trimmed WAL was applied below the WAL's start, and
+/// retention only deletes segments covered by a durable checkpoint and the oldest snapshot.
+/// An untrimmed copy never consults `in_state`.
+pub fn acked_on_disk_with(
+    views: &[DataDirView],
+    acks: &[Ack],
+    min_insync: usize,
+    in_state: impl Fn(u64, PartitionId, &RunId) -> bool,
+) -> Report {
     let partitions: BTreeSet<u16> = acks.iter().map(|a| a.partition).collect();
     let mut scans = Vec::new();
+    let mut scan_errors = Vec::new();
     for v in views {
         for p in &partitions {
             match scan_partition(v, PartitionId(*p)) {
                 Ok(s) => scans.push(s),
                 Err(e) => {
-                    report.violation(format!("node {} partition {p}: scan failed: {e}", v.node))
+                    scan_errors.push(format!("node {} partition {p}: scan failed: {e}", v.node))
                 }
             }
         }
     }
+    let mut report = Report::new("disk");
+    for e in scan_errors {
+        report.violation(e);
+    }
+    report
+        .violations
+        .extend(acked_on_scans(&scans, acks, min_insync, in_state).violations);
+    report
+}
+
+/// The core of [`acked_on_disk_with`] over already-scanned logs (pure; used by the oracle
+/// self-tests to model trimmed copies exactly).
+pub fn acked_on_scans(
+    scans: &[LogScan],
+    acks: &[Ack],
+    min_insync: usize,
+    in_state: impl Fn(u64, PartitionId, &RunId) -> bool,
+) -> Report {
+    let mut report = Report::new("disk");
     for a in acks {
         let run: RunId = match a.run_id.parse() {
             Ok(r) => r,
@@ -187,7 +236,10 @@ pub fn acked_on_disk(views: &[DataDirView], acks: &[Ack], min_insync: usize) -> 
         };
         let holders: Vec<u64> = scans
             .iter()
-            .filter(|s| s.partition.0 == a.partition && s.has_start_run(&run))
+            .filter(|s| s.partition.0 == a.partition)
+            .filter(|s| {
+                s.has_start_run(&run) || (s.is_trimmed() && in_state(s.node, s.partition, &run))
+            })
             .map(|s| s.node)
             .collect();
         if holders.len() < min_insync {

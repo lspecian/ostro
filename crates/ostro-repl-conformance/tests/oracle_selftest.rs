@@ -576,3 +576,79 @@ async fn cluster_formed_passes_formed_clusters_and_names_mismatches() {
     );
     c.stop().await;
 }
+
+// ---------------------------------------------------------------------------------------
+// disk: trimmed-log rule (user-approved 2026-11-23)
+// ---------------------------------------------------------------------------------------
+
+/// A verified scan of `node` holding exactly the given `(base, commands)` records.
+fn scan_of(node: u64, p: PartitionId, records: Vec<(u64, Vec<Bytes>)>) -> disk::LogScan {
+    disk::LogScan {
+        node,
+        partition: p,
+        records: records
+            .into_iter()
+            .map(|(base, commands)| disk::ScannedRecord {
+                base: Offset(base),
+                end: Offset(base + commands.len() as u64),
+                epoch: Epoch(1),
+                envelope: Bytes::new(),
+                commands,
+            })
+            .collect(),
+        stopped: None,
+    }
+}
+
+#[test]
+fn disk_trimmed_copy_may_evidence_a_run_by_its_state_store() {
+    let p = PartitionId(1);
+    let (r1, r2) = (RunId::new_v7(p), RunId::new_v7(p));
+    let acks = [ack(&r1), ack(&r2)];
+    // Node 1: untrimmed, holds both. Node 2: trimmed at offset 2 (r1 lived below it).
+    let n1 = scan_of(
+        1,
+        p,
+        vec![
+            (0, vec![la(1, 1), start_run(&r1)]),
+            (2, vec![start_run(&r2)]),
+        ],
+    );
+    let n2 = scan_of(2, p, vec![(2, vec![start_run(&r2)])]);
+    assert!(n2.is_trimmed() && !n1.is_trimmed());
+
+    // r1 in node 2's state store: both runs on 2 nodes -> pass.
+    let ok = disk::acked_on_scans(&[n1.clone(), n2.clone()], &acks, 2, |n, _, r| {
+        n == 2 && *r == r1
+    });
+    assert!(ok.is_ok(), "{ok}");
+
+    // r1 missing from node 2's state store too -> FAIL naming r1 only.
+    let bad = disk::acked_on_scans(&[n1.clone(), n2.clone()], &acks, 2, |_, _, _| false);
+    assert_eq!(bad.violations.len(), 1, "{bad}");
+    assert!(
+        bad.mentions(&r1.to_string()) && !bad.mentions(&r2.to_string()),
+        "{bad}"
+    );
+    assert_eq!(bad.into_result().expect_err("failure").oracle, "disk");
+}
+
+#[test]
+fn disk_untrimmed_copy_never_consults_the_state_store() {
+    let p = PartitionId(1);
+    let (r1, r2) = (RunId::new_v7(p), RunId::new_v7(p));
+    let acks = [ack(&r1), ack(&r2)];
+    // Node 2 is untrimmed (starts at 0) but is missing r2: a state-store hit must not count.
+    let n1 = scan_of(
+        1,
+        p,
+        vec![(0, vec![la(1, 1), start_run(&r1), start_run(&r2)])],
+    );
+    let n2 = scan_of(2, p, vec![(0, vec![la(1, 1), start_run(&r1)])]);
+    let bad = disk::acked_on_scans(&[n1, n2], &acks, 2, |_, _, _| true);
+    assert_eq!(bad.violations.len(), 1, "{bad}");
+    assert!(
+        bad.mentions(&r2.to_string()) && bad.mentions("[1]"),
+        "{bad}"
+    );
+}

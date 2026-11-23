@@ -10,6 +10,7 @@
 //! | oracle | inputs | checks |
 //! |--------|--------|--------|
 //! | [`disk::acked_on_disk`] | data dirs, acks, `min_insync` | every acked run's command is in >= `min_insync` nodes' verified WAL |
+//! | [`disk::acked_on_disk_with`] | as above + a state-store probe | same, except a copy whose WAL retention trimmed may evidence a run by its checkpointed state store (user-approved 2026-11-23) |
 //! | [`replica::identical_below_hw`] | data dirs, partition, HW | envelopes below HW byte-identical on every node (F1) |
 //! | [`standby::equal_state`] | data dirs, partition | equal `applied_offset` ⇒ equal `state_hash` and per-table digests |
 //! | [`la_rule::check`] | data dir, partition, meta log | each epoch starts with `LeaderAnnounced{e}` of meta's leader for e |

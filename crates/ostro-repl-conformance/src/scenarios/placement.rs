@@ -148,7 +148,7 @@ pub(crate) mod support {
     use std::time::Duration;
 
     use ostro_meta::{MetaCommand, PartitionAssignment};
-    use ostro_types::{Offset, PartitionCount, PartitionId};
+    use ostro_types::{Offset, PartitionCount, PartitionId, RunId};
     use serde_json::{Value, json};
     use tokio::task::JoinHandle;
     use tokio::time::Instant;
@@ -156,7 +156,7 @@ pub(crate) mod support {
     use crate::harness::fault::{Fault, RpcKind};
     use crate::harness::inproc::{Ack, InProcCluster, MetaLogDump, TEST_WORKFLOW, read_meta_log};
     use crate::harness::{ApiClient, ClusterHarness, DataDirView};
-    use crate::oracle::disk::{LogScan, acked_on_disk, scan_partition};
+    use crate::oracle::disk::{LogScan, acked_on_disk_with, scan_partition};
     use crate::oracle::{election, la_rule, replica};
     use crate::scenarios::{ScenarioFailure, ScenarioResult};
 
@@ -760,7 +760,14 @@ pub(crate) mod support {
             }
         }
         let views: Vec<DataDirView> = c.node_ids().iter().map(|n| c.node_disk(*n)).collect();
-        acked_on_disk(&views, &acks, c.spec().min_insync).into_result()?;
+        // Trimmed copies may evidence a run by their checkpointed state store (disk oracle
+        // trimmed-log rule, user-approved 2026-11-23); untrimmed copies need the WAL record.
+        let in_state = |n: u64, p: PartitionId, run: &RunId| {
+            c.handle(n)
+                .and_then(|h| h.node().handle(p))
+                .is_some_and(|ph| matches!(ph.read_run(run), Ok(Some(_))))
+        };
+        acked_on_disk_with(&views, &acks, c.spec().min_insync, in_state).into_result()?;
         let dump = meta_dump(c);
         for v in &views {
             for p in 0..c.spec().partitions {
