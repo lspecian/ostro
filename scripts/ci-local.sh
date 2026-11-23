@@ -354,6 +354,25 @@ check_musl_release() {
   grep -q "target=${MUSL_TARGET}" <<<"$info" || { echo "unexpected target"; return 1; }
 }
 
+# NFR-2.1 (plan 10-19): the static musl binary stays under 60 MB. Prints the size and the
+# delta against the Phase 4 baseline (22.7 MB, 04-20). Gate-only commands (not run here):
+#   cargo test -p ostro --test clean_machine -- --ignored --test-threads=1 local_all
+#     (SC1: scripts/clean-machine.sh all --local --no-cc; network, ~1 GB per language)
+#   bash scripts/clean-machine.sh all --image ubuntu:24.04 --ostro <musl ostro>   (Docker)
+#   cargo test -p ostro-server --locked --test time_skipping_auto -- --ignored race_gate_1000
+#   (the 1000-iteration time-skipping race gate, 10-13) and the hermetic Rust build
+#   (cargo test -p ostro-build --test build_rust_hermetic -- --ignored)
+check_musl_size() {
+  local bin="${CARGO_TARGET_DIR:-target}/${MUSL_TARGET}/release/ostro" bytes
+  [[ -f "$bin" ]] || { echo "musl binary missing: $bin"; return 1; }
+  bytes=$(stat -c %s "$bin")
+  awk -v b="$bytes" 'BEGIN {
+    mb = b / 1000000; d = mb - 22.7
+    printf "size=%.1f MB (%d bytes) delta_vs_P4=%+.1f MB (baseline 22.7 MB)\n", mb, b, d
+    exit (b >= 60000000) ? 1 : 0
+  }' || { echo "musl binary is 60 MB or more (NFR-2.1)"; return 1; }
+}
+
 check_musl_test() {
   # `cargo zigbuild test` is not a subcommand; the test runner is `cargo-zigbuild test`.
   cargo-zigbuild test --workspace --locked --target "$MUSL_TARGET"
@@ -576,6 +595,7 @@ fi
 if [[ "$RUN_MUSL" -eq 1 ]]; then
   step "zig + cargo-zigbuild present" check_zig
   step "musl release (static, mimalloc)" check_musl_release
+  step "musl binary size < 60 MB" check_musl_size
   if [[ "$RUN_MUSL_TEST" -eq 1 ]]; then
     step "musl zigbuild test" check_musl_test
   else
@@ -584,6 +604,7 @@ if [[ "$RUN_MUSL" -eq 1 ]]; then
 else
   skip "zig + cargo-zigbuild present" "--no-musl"
   skip "musl release (static, mimalloc)" "--no-musl"
+  skip "musl binary size < 60 MB" "--no-musl"
   skip "musl zigbuild test" "--no-musl"
 fi
 

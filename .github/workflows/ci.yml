@@ -644,3 +644,57 @@ jobs:
           if [ "${#targets[@]}" -gt 0 ]; then
             cargo test -p ostro --features polyglot "${targets[@]}" --locked -- --test-threads=1
           fi
+
+  clean-machine:
+    # SC1 (plan 10-19): `ostro init -> ostro dev -> ostro deploy -> ostro run` in fresh
+    # ubuntu:24.04 and debian:12 containers with only ca-certificates installed (no cc, no
+    # node, no cargo, no uv): the static musl ostro is mounted read-only and downloads
+    # every toolchain hermetically. scripts/clean-machine.sh fails any language above
+    # 600 s. The local approximation is `clean_machine local_all` (ci-local gate-only list).
+    name: clean machine (SC1)
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      T: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml) + target
+        run: |
+          rustup toolchain install
+          rustup target add "$T"
+          rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: clean-machine
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+      - name: cargo zigbuild --release (ostro, static musl)
+        run: |
+          cargo zigbuild --release --locked -p ostro --target "$T"
+          bin="target/$T/release/ostro"
+          file "$bin"
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          ls -l "$bin"
+          docker version
+      - name: clean machine (ubuntu:24.04)
+        run: |
+          set -o pipefail
+          bash scripts/clean-machine.sh all --image ubuntu:24.04 --ostro "target/$T/release/ostro" 2>&1 | tee clean-ubuntu.txt
+      - name: clean machine (debian:12)
+        run: |
+          set -o pipefail
+          bash scripts/clean-machine.sh all --image debian:12 --ostro "target/$T/release/ostro" 2>&1 | tee clean-debian.txt
+      - name: CLEAN lines to the step summary
+        if: always()
+        run: |
+          {
+            echo '### Clean machine (SC1)'
+            echo '```'
+            cat clean-ubuntu.txt clean-debian.txt 2>/dev/null | grep -E '^CLEAN ' || echo 'no CLEAN lines'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
