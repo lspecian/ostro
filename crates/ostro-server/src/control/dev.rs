@@ -9,7 +9,7 @@
 //! idle snapshot. A manual skip (either mode) is lease-safe (D-W26): it first waits up to
 //! [`SKIP_BUSY_WAIT`] for zero activations (leases or grants) and zero mutating API
 //! requests, else answers 503 `busy: N activations in flight; retry`; then it skips through
-//! [`DevClock::skip_guarded`](crate::devclock::DevClock::skip_guarded) and re-checks the
+//! [`DevClock::skip_guarded_with`](crate::devclock::DevClock::skip_guarded_with) and re-checks the
 //! activations under the barrier's write guard (atomic loads only). A re-check that finds
 //! work goes back to waiting within the same deadline.
 
@@ -19,6 +19,7 @@ use ostro_api::ApiError;
 use ostro_api::domain::{DevSkip, DevSkipResult, DevTimeInfo, time_skipping_disabled};
 
 use super::ServerControlPlane;
+use crate::devclock::GuardedSkip;
 
 /// How long a manual skip waits for in-flight activations to finish.
 pub const SKIP_BUSY_WAIT: Duration = Duration::from_secs(5);
@@ -71,7 +72,7 @@ pub(super) async fn dev_skip(
         }
         let mut refused = false;
         let skipped = dev
-            .skip_guarded(|now| {
+            .skip_guarded_with(|_now| {
                 if time
                     .as_ref()
                     .is_some_and(|t| t.counters().busy_activations != 0)
@@ -80,8 +81,8 @@ pub(super) async fn dev_skip(
                     return None;
                 }
                 Some(match s {
-                    DevSkip::By { ms } => now.saturating_add(ms),
-                    DevSkip::To { ms } => ms,
+                    DevSkip::By { ms } => GuardedSkip::By(ms),
+                    DevSkip::To { ms } => GuardedSkip::To(ms),
                 })
             })
             .await;

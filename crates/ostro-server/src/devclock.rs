@@ -52,6 +52,15 @@ pub struct DevClock {
 /// See [`DevClock::set_skip_hook`].
 pub type SkipHook = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
+/// A guarded skip's target (see [`DevClock::skip_guarded_with`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedSkip {
+    /// Advance by exactly this many ms.
+    By(u64),
+    /// Advance to this absolute time (ms since the epoch); a past target skips 0 ms.
+    To(u64),
+}
+
 impl std::fmt::Debug for DevClock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DevClock")
@@ -134,23 +143,37 @@ impl DevClock {
     /// skip to its target, if any. Returns the ms skipped (0 when `check` returns `None` or
     /// a target that is not in the future).
     pub async fn skip_guarded<F: FnOnce(u64) -> Option<u64>>(&self, check: F) -> u64 {
+        self.skip_guarded_with(|now| check(now).map(GuardedSkip::To))
+            .await
+    }
+
+    /// [`skip_guarded`](Self::skip_guarded) with a relative or absolute target.
+    /// [`GuardedSkip::By`] advances the offset by exactly that many ms: it never re-reads
+    /// the base clock, so a wall-clock tick between the read handed to `check` and the
+    /// offset update cannot shave a millisecond off the skip.
+    pub async fn skip_guarded_with<F: FnOnce(u64) -> Option<GuardedSkip>>(&self, check: F) -> u64 {
         let _w = self.barrier.write().await;
         let now = ostro_partition::clock::Clock::now_ms(self);
-        match check(now) {
-            Some(target) => {
-                if target > now {
-                    let hook = self
-                        .skip_hook
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
-                    if let Some(h) = hook {
-                        h(now, target);
-                    }
-                }
-                self.skip_to(target)
+        let Some(skip) = check(now) else {
+            return 0;
+        };
+        let target = match skip {
+            GuardedSkip::By(ms) => now.saturating_add(ms),
+            GuardedSkip::To(ms) => ms,
+        };
+        if target > now {
+            let hook = self
+                .skip_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(h) = hook {
+                h(now, target);
             }
-            None => 0,
+        }
+        match skip {
+            GuardedSkip::By(ms) => self.skip_by(ms),
+            GuardedSkip::To(ms) => self.skip_to(ms),
         }
     }
 
@@ -290,6 +313,34 @@ mod tests {
         // A check that finds work: no skip.
         assert_eq!(c.skip_guarded(|_| None).await, 0);
         assert_eq!(c.now_ms(), 1_100);
+    }
+
+    #[tokio::test]
+    async fn devclock_guarded_skip_by_is_exact_across_a_base_tick() {
+        // CI saw `skipped_ms: 3599999` for a 1 h skip: the base clock ticked between the
+        // read handed to `check` and the offset update. `By` must not re-read the base.
+        let base = ManualClock::new(1_000);
+        let c = DevClock::new(Arc::new(base.clone()), DevTimeMode::Manual);
+        let b = base.clone();
+        let skipped = c
+            .skip_guarded_with(|_| {
+                b.advance(1);
+                Some(GuardedSkip::By(3_600_000))
+            })
+            .await;
+        assert_eq!(skipped, 3_600_000);
+        assert_eq!(c.offset_ms(), 3_600_000);
+        // `To` stays absolute: it lands on the target whatever the base did.
+        let b = base.clone();
+        let target = c.now_ms() + 500;
+        let skipped = c
+            .skip_guarded_with(|_| {
+                b.advance(1);
+                Some(GuardedSkip::To(target))
+            })
+            .await;
+        assert_eq!(skipped, 499);
+        assert_eq!(c.now_ms(), target);
     }
 
     #[tokio::test]

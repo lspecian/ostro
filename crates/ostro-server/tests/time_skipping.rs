@@ -315,10 +315,11 @@ async fn skip_api_never_moves_back_and_accumulates() {
     assert_eq!(u(&v, "offset_ms"), 0, "{v}");
     let v1 = post_skip(&s, json!({"by": "1h"})).await;
     let s1 = u(&v1, "skipped_ms");
-    assert!((HOUR_MS - 50..=HOUR_MS).contains(&s1), "{v1}");
+    // `by` is exact (ci-fix6: it used to lose the ms the wall clock ticked mid-skip).
+    assert_eq!(s1, HOUR_MS, "{v1}");
     let v2 = post_skip(&s, json!({"by": "2h"})).await;
     let off = u(&v2, "offset_ms");
-    assert!((3 * HOUR_MS - 100..=3 * HOUR_MS).contains(&off), "{v2}");
+    assert_eq!(off, 3 * HOUR_MS, "{v2}");
     assert!(
         u(&v2, "now_ms") >= u(&v1, "now_ms") + 2 * HOUR_MS - 50,
         "{v1} {v2}"
