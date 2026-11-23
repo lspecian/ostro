@@ -20,21 +20,58 @@
 //!
 //! Inspect mode stops after step 4: no append, the barrier stays closed, no services.
 //! A failure in any step marks only that partition `Failed` (`PartitionFailed`).
+//!
+//! Phase 12 (12-13), with an [`AssignmentSource`](crate::roles::AssignmentSource): steps 1-4
+//! are unchanged except that no term is picked (the log opens unassigned, HW = applied), then
+//! each partition's role driver opens the barrier, starts the replica services and follows
+//! meta: `RoleChanged` records every role change; a takeover logs `TermStarted` (its
+//! `LeaderAnnounced` at the meta-assigned epoch, appended and applied) before
+//! `LeaderServicesStarted`.
 
 use std::sync::Mutex;
+
+use crate::roles::PartitionRole;
 
 /// One startup step, recorded in order of occurrence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartupEvent {
     NodeFileChecked,
-    StateOpened { p: u16, applied: u64 },
-    LogRecovered { p: u16, leo: u64, torn: bool },
-    Validated { p: u16 },
-    CaughtUp { p: u16, applied: u64 },
-    TermStarted { p: u16, epoch: u32, offset: u64 },
-    BarrierOpened { p: u16 },
-    LeaderServicesStarted { p: u16 },
-    PartitionFailed { p: u16, reason: String },
+    StateOpened {
+        p: u16,
+        applied: u64,
+    },
+    LogRecovered {
+        p: u16,
+        leo: u64,
+        torn: bool,
+    },
+    Validated {
+        p: u16,
+    },
+    CaughtUp {
+        p: u16,
+        applied: u64,
+    },
+    TermStarted {
+        p: u16,
+        epoch: u32,
+        offset: u64,
+    },
+    BarrierOpened {
+        p: u16,
+    },
+    LeaderServicesStarted {
+        p: u16,
+    },
+    PartitionFailed {
+        p: u16,
+        reason: String,
+    },
+    /// Phase 12 (12-13): the role driver moved the partition to `role`.
+    RoleChanged {
+        p: u16,
+        role: PartitionRole,
+    },
 }
 
 impl StartupEvent {
@@ -49,7 +86,8 @@ impl StartupEvent {
             | StartupEvent::TermStarted { p, .. }
             | StartupEvent::BarrierOpened { p }
             | StartupEvent::LeaderServicesStarted { p }
-            | StartupEvent::PartitionFailed { p, .. } => Some(*p),
+            | StartupEvent::PartitionFailed { p, .. }
+            | StartupEvent::RoleChanged { p, .. } => Some(*p),
         }
     }
 }

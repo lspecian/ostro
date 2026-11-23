@@ -91,7 +91,7 @@ async fn zero_event_rearm_is_accepted_idempotent_and_cas_checked() {
     let run = run_on(0);
     assert_eq!(
         submit(
-            h,
+            &h,
             Command::start_run(StartRun {
                 requested_at_ms: FAR_MS,
                 ready_at_ms: FAR_MS,
@@ -129,7 +129,7 @@ async fn zero_event_rearm_is_accepted_idempotent_and_cas_checked() {
         ),
     ];
     assert_eq!(
-        submit(h, appended(&run, t, 0, events, vec![])).await,
+        submit(&h, appended(&run, t, 0, events, vec![])).await,
         ApplyOutcome::Accepted
     );
     let rec = h.read_run(&run).expect("read").expect("run");
@@ -137,7 +137,7 @@ async fn zero_event_rearm_is_accepted_idempotent_and_cas_checked() {
 
     // The re-arm: zero events, intents only, at the journal end.
     assert_eq!(
-        submit(h, appended(&run, t, 3, vec![], rearm())).await,
+        submit(&h, appended(&run, t, 3, vec![], rearm())).await,
         ApplyOutcome::Accepted
     );
     let rec = h.read_run(&run).expect("read").expect("run");
@@ -147,7 +147,7 @@ async fn zero_event_rearm_is_accepted_idempotent_and_cas_checked() {
 
     // A repeat (restart lost the executor's in-memory marker) changes nothing.
     assert_eq!(
-        submit(h, appended(&run, t, 3, vec![], rearm())).await,
+        submit(&h, appended(&run, t, 3, vec![], rearm())).await,
         ApplyOutcome::Accepted
     );
     let rec = h.read_run(&run).expect("read").expect("run");
@@ -155,7 +155,7 @@ async fn zero_event_rearm_is_accepted_idempotent_and_cas_checked() {
 
     // A stale journal end is a SeqMismatch like any batch (the executor re-activates).
     assert_eq!(
-        submit(h, appended(&run, t, 2, vec![], rearm())).await,
+        submit(&h, appended(&run, t, 2, vec![], rearm())).await,
         ApplyOutcome::Rejected(RejectReason::SeqMismatch { expected: 3 })
     );
     node.shutdown().await.expect("shutdown");

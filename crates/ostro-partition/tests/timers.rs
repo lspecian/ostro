@@ -42,7 +42,7 @@ async fn open(dir: &Path, clock: &ManualClock, timers: TimerConfig) -> Node {
         .expect("node open")
 }
 
-fn h(node: &Node) -> &Handle {
+fn h(node: &Node) -> Handle {
     node.handle(P0).expect("partition ready")
 }
 
@@ -171,21 +171,21 @@ async fn timer_fires_once_and_row_is_removed() {
     let (cfg, stats) = stats_cfg();
     let node = open(tmp.path(), &clock, cfg).await;
     let h = h(&node);
-    let (run, t) = running(h).await;
+    let (run, t) = running(&h).await;
     assert_eq!(
-        submit(h, events(&run, t, 0, vec![sched(1, START + 1_000)])).await,
+        submit(&h, events(&run, t, 0, vec![sched(1, START + 1_000)])).await,
         ApplyOutcome::Accepted
     );
     sleep(Duration::from_millis(200)).await;
-    assert!(journal_fired(h, &run).is_empty(), "fired before due");
+    assert!(journal_fired(&h, &run).is_empty(), "fired before due");
     clock.advance(1_000);
     eventually(Duration::from_secs(2), "timer fired", || {
-        !journal_fired(h, &run).is_empty()
+        !journal_fired(&h, &run).is_empty()
     })
     .await;
     sleep(Duration::from_millis(200)).await;
-    assert_eq!(journal_fired(h, &run), vec![(1, START + 1_000)]);
-    assert_eq!(timer_rows(h), 0);
+    assert_eq!(journal_fired(&h, &run), vec![(1, START + 1_000)]);
+    assert_eq!(timer_rows(&h), 0);
     assert_eq!(stats.fired.load(Ordering::Relaxed), 1);
     node.shutdown().await.expect("shutdown");
 }
@@ -197,20 +197,20 @@ async fn cancelled_timer_never_fires() {
     let (cfg, stats) = stats_cfg();
     let node = open(tmp.path(), &clock, cfg).await;
     let h = h(&node);
-    let (run, t) = running(h).await;
+    let (run, t) = running(&h).await;
     let due = START + 1_000;
     assert_eq!(
-        submit(h, events(&run, t, 0, vec![sched(1, due)])).await,
+        submit(&h, events(&run, t, 0, vec![sched(1, due)])).await,
         ApplyOutcome::Accepted
     );
     assert_eq!(
-        submit(h, events(&run, t, 1, vec![cancel(1, due)])).await,
+        submit(&h, events(&run, t, 1, vec![cancel(1, due)])).await,
         ApplyOutcome::Accepted
     );
     clock.advance(5_000);
     sleep(Duration::from_secs(1)).await;
-    assert!(journal_fired(h, &run).is_empty());
-    assert_eq!(timer_rows(h), 0);
+    assert!(journal_fired(&h, &run).is_empty());
+    assert_eq!(timer_rows(&h), 0);
     assert_eq!(stats.fired.load(Ordering::Relaxed), 0);
     node.shutdown().await.expect("shutdown");
 }
@@ -226,19 +226,19 @@ async fn delayed_start_becomes_ready() {
     s.requested_at_ms = START;
     s.ready_at_ms = START + 5_000;
     assert_eq!(
-        submit(h, Command::start_run(s)).await,
+        submit(&h, Command::start_run(s)).await,
         ApplyOutcome::Accepted
     );
     let status = |h: &Handle| -> RunStatus {
         let rec: RunRecord = h.read_run(&run).expect("read").expect("run");
         rec.status
     };
-    assert_eq!(status(h), RunStatus::Scheduled);
+    assert_eq!(status(&h), RunStatus::Scheduled);
     sleep(Duration::from_millis(200)).await;
-    assert_eq!(status(h), RunStatus::Scheduled);
+    assert_eq!(status(&h), RunStatus::Scheduled);
     clock.advance(5_000);
     eventually(Duration::from_secs(2), "run ready", || {
-        status(h) == RunStatus::Ready
+        status(&h) == RunStatus::Ready
     })
     .await;
     let ready = h
@@ -246,7 +246,7 @@ async fn delayed_start_becomes_ready() {
         .prefix(Table::Ready, &ready_prefix("q"), usize::MAX)
         .expect("ready");
     assert_eq!(ready.len(), 1);
-    assert_eq!(timer_rows(h), 0);
+    assert_eq!(timer_rows(&h), 0);
     node.shutdown().await.expect("shutdown");
 }
 
@@ -255,9 +255,9 @@ async fn overdue_timer_fires_once_after_restart() {
     let tmp = ostro_testkit::fs::tempdir();
     let clock = ManualClock::new(START);
     let node = open(tmp.path(), &clock, TimerConfig::default()).await;
-    let (run, t) = running(h(&node)).await;
+    let (run, t) = running(&h(&node)).await;
     assert_eq!(
-        submit(h(&node), events(&run, t, 0, vec![sched(7, START + 500)])).await,
+        submit(&h(&node), events(&run, t, 0, vec![sched(7, START + 500)])).await,
         ApplyOutcome::Accepted
     );
     node.shutdown().await.expect("shutdown");
@@ -267,13 +267,13 @@ async fn overdue_timer_fires_once_after_restart() {
     let node = open(tmp.path(), &clock, cfg).await;
     let h = h(&node);
     eventually(Duration::from_secs(2), "overdue timer fired", || {
-        !journal_fired(h, &run).is_empty()
+        !journal_fired(&h, &run).is_empty()
     })
     .await;
     sleep(Duration::from_millis(300)).await;
-    assert_eq!(journal_fired(h, &run), vec![(7, START + 10_000)]);
+    assert_eq!(journal_fired(&h, &run), vec![(7, START + 10_000)]);
     assert_eq!(stats.fired.load(Ordering::Relaxed), 1);
-    assert_eq!(timer_rows(h), 0);
+    assert_eq!(timer_rows(&h), 0);
     node.shutdown().await.expect("shutdown");
 }
 
@@ -283,15 +283,15 @@ async fn duplicate_timer_fired_has_no_effect() {
     let clock = ManualClock::new(START);
     let node = open(tmp.path(), &clock, TimerConfig::default()).await;
     let h = h(&node);
-    let (run, t) = running(h).await;
+    let (run, t) = running(&h).await;
     let due = START + 100;
     assert_eq!(
-        submit(h, events(&run, t, 0, vec![sched(3, due)])).await,
+        submit(&h, events(&run, t, 0, vec![sched(3, due)])).await,
         ApplyOutcome::Accepted
     );
     clock.advance(100);
     eventually(Duration::from_secs(2), "timer fired", || {
-        !journal_fired(h, &run).is_empty()
+        !journal_fired(&h, &run).is_empty()
     })
     .await;
     let dup = Command::timer_fired(TimerFired {
@@ -301,10 +301,10 @@ async fn duplicate_timer_fired_has_no_effect() {
         fired_at_ms: START + 999,
     });
     assert!(matches!(
-        submit(h, dup).await,
+        submit(&h, dup).await,
         ApplyOutcome::Duplicate { .. }
     ));
-    assert_eq!(journal_fired(h, &run), vec![(3, START + 100)]);
+    assert_eq!(journal_fired(&h, &run), vec![(3, START + 100)]);
     // Only the rolling hash / applied offset move; the tables are unchanged: event 0 plus the
     // one journaled timer input.
     let rec: RunRecord = h.read_run(&run).expect("read").expect("run");
@@ -327,18 +327,18 @@ async fn timers_sharing_the_cutoff_due_all_fire() {
     };
     let node = open(tmp.path(), &clock, cfg).await;
     let h = h(&node);
-    let (run, t) = running(h).await;
+    let (run, t) = running(&h).await;
     // 5 early timers, then 25 sharing one due: every scan of 10 is cut inside that due.
     let shared = START + 2_000;
     let mut d: Vec<Derived> = (0..5).map(|i| sched(i, START + 1_000 + i)).collect();
     d.extend((100..125).map(|op| sched(op, shared)));
     assert_eq!(
-        submit(h, events(&run, t, 0, d)).await,
+        submit(&h, events(&run, t, 0, d)).await,
         ApplyOutcome::Accepted
     );
     clock.advance(1_000);
     eventually(Duration::from_secs(3), "early timer fired", || {
-        !journal_fired(h, &run).is_empty()
+        !journal_fired(&h, &run).is_empty()
     })
     .await;
     clock.advance(1_000);
@@ -347,14 +347,14 @@ async fn timers_sharing_the_cutoff_due_all_fire() {
     })
     .await;
     sleep(Duration::from_millis(200)).await;
-    let mut ops: Vec<u64> = journal_fired(h, &run)
+    let mut ops: Vec<u64> = journal_fired(&h, &run)
         .into_iter()
         .map(|(op, _)| op)
         .collect();
     ops.sort_unstable();
     let want: Vec<u64> = (0..5).chain(100..125).collect();
     assert_eq!(ops, want);
-    assert_eq!(timer_rows(h), 0);
+    assert_eq!(timer_rows(&h), 0);
     assert!(stats.max_window_len.load(Ordering::Relaxed) <= 10);
     node.shutdown().await.expect("shutdown");
 }
@@ -377,7 +377,7 @@ async fn hundred_thousand_timers_bounded_window_large() {
     };
     let node = open(tmp.path(), &clock, cfg).await;
     let h = h(&node);
-    let (run, t) = running(h).await;
+    let (run, t) = running(&h).await;
     let step = SPREAD_MS / N; // 72 ms
     let due_of = |i: u64| START + 1 + i * step;
     for c in 0..N / PER_CMD {
@@ -385,11 +385,11 @@ async fn hundred_thousand_timers_bounded_window_large() {
             .map(|i| sched(i, due_of(i)))
             .collect();
         assert_eq!(
-            submit(h, events(&run, t, c, d)).await,
+            submit(&h, events(&run, t, c, d)).await,
             ApplyOutcome::Accepted
         );
     }
-    assert_eq!(timer_rows(h), N as usize);
+    assert_eq!(timer_rows(&h), N as usize);
     assert!(stats.max_window_len.load(Ordering::Relaxed) <= 1_000);
 
     let mut now = START;
@@ -410,8 +410,8 @@ async fn hundred_thousand_timers_bounded_window_large() {
     sleep(Duration::from_millis(300)).await;
     assert_eq!(stats.fired.load(Ordering::Relaxed), N);
     assert!(stats.max_window_len.load(Ordering::Relaxed) <= 1_000);
-    assert_eq!(timer_rows(h), 0);
-    let fired = journal_fired(h, &run);
+    assert_eq!(timer_rows(&h), 0);
+    let fired = journal_fired(&h, &run);
     assert_eq!(fired.len() as u64, N);
     let mut ops: Vec<u64> = fired.into_iter().map(|(op, _)| op).collect();
     ops.sort_unstable();

@@ -783,6 +783,7 @@ async fn inspect_mode_never_rebuilds_and_leader_mode_does() {
         let o = h.submit_one(Command::start_run(s)).await.expect("submit");
         assert_eq!(o, ApplyOutcome::Accepted);
     }
+    drop(h); // an owned handle keeps the store open
     node.shutdown().await.expect("shutdown");
     {
         let (s, _) = PartitionStore::open(

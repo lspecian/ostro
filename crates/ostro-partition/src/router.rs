@@ -2,6 +2,10 @@
 //!
 //! Single node: [`InProcessRouter`] submits the `InboundBatch` to the target's local
 //! [`PartitionHandle`]. Phase 13 adds a network-forwarding implementation of the same trait.
+//!
+//! Phase 12 (12-13): a partition is registered only while this node leads it (after its
+//! `LeaderAnnounced` applied) and unregistered on demotion; [`InProcessRouter::leader_hint`]
+//! names the leader meta last published for a partition this node does not lead.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,6 +30,7 @@ pub trait PartitionRouter: Send + Sync + 'static {
 #[derive(Debug)]
 pub struct InProcessRouter {
     slots: RwLock<Vec<Option<PartitionHandle<PartitionLog>>>>,
+    hints: RwLock<Vec<Option<u64>>>,
 }
 
 impl InProcessRouter {
@@ -33,6 +38,31 @@ impl InProcessRouter {
     pub fn new(count: PartitionCount) -> Self {
         Self {
             slots: RwLock::new(vec![None; usize::from(count.get())]),
+            hints: RwLock::new(vec![None; usize::from(count.get())]),
+        }
+    }
+
+    /// Stop routing to `p` (demotion; deliveries answer `NotLeader`).
+    pub fn unregister(&self, p: PartitionId) {
+        let mut s = self.slots.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(slot) = s.get_mut(p.index()) {
+            *slot = None;
+        }
+    }
+
+    /// The leader of `p` as last published by meta, when this node does not lead it
+    /// (`None` = unknown / this node leads / offline). `PartitionError::NotLeader` keeps its
+    /// shape; callers that want to redirect read the hint here.
+    pub fn leader_hint(&self, p: PartitionId) -> Option<u64> {
+        let h = self.hints.read().unwrap_or_else(|p| p.into_inner());
+        h.get(p.index()).copied().flatten()
+    }
+
+    /// Set (or clear) the leader hint of `p`.
+    pub fn set_leader_hint(&self, p: PartitionId, leader: Option<u64>) {
+        let mut h = self.hints.write().unwrap_or_else(|p| p.into_inner());
+        if let Some(slot) = h.get_mut(p.index()) {
+            *slot = leader;
         }
     }
 

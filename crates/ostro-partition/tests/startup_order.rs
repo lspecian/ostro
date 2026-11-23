@@ -26,6 +26,7 @@ fn kind(e: &StartupEvent) -> u8 {
         StartupEvent::BarrierOpened { .. } => 6,
         StartupEvent::LeaderServicesStarted { .. } => 7,
         StartupEvent::PartitionFailed { .. } => 8,
+        StartupEvent::RoleChanged { .. } => 9,
     }
 }
 
@@ -344,6 +345,7 @@ async fn empty_wal_anchors_at_applied_and_rebuild_matches() {
         epoch: 2,
         offset: 2
     }));
+    drop(h); // an owned handle keeps the store open
     node.shutdown().await.expect("shutdown");
     let after = state_of(d.path(), 2, 0);
     assert_eq!(after.0, Offset(n.0 + 2));

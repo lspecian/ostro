@@ -1,8 +1,8 @@
-//! Leader services of one partition: outbox shuffler, timer service, log retention and,
-//! when configured, the dispatcher (plan 04-14). Phase 8 adds the local snapshot service
-//! (`snapshot`, 08-09: spawned when [`LeaderCtx::snapshots`] is set and enabled; its local
-//! floor and the bottomless upload floor reach retention through [`LeaderCtx::floors`]) and
-//! the cron driver (`cron`, 08-14).
+//! Leader services of one partition: outbox shuffler, timer service and, when configured,
+//! the dispatcher (plan 04-14) and the cron driver (`cron`, 08-14). The local snapshot
+//! service (`snapshot`, 08-09) and log retention (`retention`) are **replica services**
+//! since 12-13: [`spawn_replica_services`](crate::replica_services::spawn_replica_services)
+//! runs them in every role; their floors reach retention through [`LeaderCtx::floors`].
 //!
 //! Phase 7 (07-02) adds the dispatcher contracts [`placement`] (`Placement`,
 //! `SemaphorePlacement`) and [`flow`] (`FlowControl`, `NoFlow`, `QueueGauges`), plus the
@@ -64,6 +64,7 @@ impl std::fmt::Debug for LeaderCtx {
 pub struct LeaderConfig {
     pub shuffler: shuffler::ShufflerConfig,
     pub timers: timers::TimerConfig,
+    /// Retention tuning (a replica service since 12-13; kept here for compatibility).
     pub retention: retention::RetentionConfig,
     /// The dispatcher runs only when this is `Some` (Phase 2 suites run without it).
     pub dispatcher: Option<dispatcher::DispatcherConfig>,
@@ -101,18 +102,15 @@ impl LeaderTasks {
     }
 }
 
-/// Spawn shuffler, timers, the snapshot ticker (if enabled), retention and (if configured)
-/// the dispatcher and the cron driver for
-/// `ctx.partition`. They stop when either
-/// `ctx.shutdown` turns true or [`LeaderTasks::shutdown`] is called.
-pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
+/// A copy of `ctx` whose `shutdown` is a fresh per-service-set stop signal, plus the task
+/// forwarding the node-wide shutdown (`ctx.shutdown`) into it.
+pub(crate) fn child_ctx(ctx: LeaderCtx) -> (Arc<watch::Sender<bool>>, LeaderCtx, JoinHandle<()>) {
     let stop = Arc::new(watch::channel(false).0);
     let mut parent = ctx.shutdown.clone();
     let child = LeaderCtx {
         shutdown: stop.subscribe(),
         ..ctx
     };
-    // Forward the node-wide shutdown to this partition's services.
     let fwd = {
         let stop = Arc::clone(&stop);
         let mut mine = stop.subscribe();
@@ -123,6 +121,15 @@ pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
             }
         })
     };
+    (stop, child, fwd)
+}
+
+/// Spawn shuffler, timers and (if configured) the dispatcher and the cron driver for
+/// `ctx.partition`. They stop when either `ctx.shutdown` turns true or
+/// [`LeaderTasks::shutdown`] is called. Snapshots and retention are replica services
+/// (12-13), started separately and kept across role changes.
+pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
+    let (stop, child, fwd) = child_ctx(ctx);
     let mut tasks = vec![
         shuffler::spawn(child.clone(), cfg.shuffler.clone()),
         timers::spawn(child.clone(), cfg.timers.clone()),
@@ -131,14 +138,8 @@ pub fn spawn_all(ctx: LeaderCtx, cfg: &LeaderConfig) -> LeaderTasks {
         tasks.push(dispatcher::spawn(child.clone(), d.clone()));
     }
     if let Some(c) = &cfg.cron {
-        tasks.push(cron::spawn(child.clone(), c.clone()));
+        tasks.push(cron::spawn(child, c.clone()));
     }
-    if let Some(s) = &child.snapshots
-        && s.config().enabled
-    {
-        tasks.push(snapshot::spawn(child.clone(), Arc::clone(s)));
-    }
-    tasks.push(retention::spawn(child, cfg.retention.clone()));
     tasks.push(fwd);
     LeaderTasks { stop, tasks }
 }

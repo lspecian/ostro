@@ -164,7 +164,7 @@ async fn open(dir: &Path, opts: Option<&Opts>) -> Node {
         .expect("node open")
 }
 
-fn h(node: &Node) -> &Handle {
+fn h(node: &Node) -> Handle {
     node.handle(P0).expect("partition ready")
 }
 
@@ -238,7 +238,7 @@ async fn dispatches_by_priority_with_first_token_and_concurrency_key() {
     let (a, b, c) = (run_on(0), run_on(0), run_on(0));
     // One envelope: the three runs arrive in one action batch.
     submit_all(
-        h,
+        &h,
         vec![start(&a, 0, "ck-a"), start(&b, 5, "ck-b"), start(&c, 0, "")],
     )
     .await;
@@ -274,7 +274,7 @@ async fn future_ready_at_is_not_dispatched_early() {
     let now = now_ms();
     let ready_at = now + 400;
     submit_all(
-        h,
+        &h,
         vec![Command::start_run(StartRun {
             requested_at_ms: now,
             ready_at_ms: ready_at,
@@ -304,7 +304,7 @@ async fn executor_requeue_with_future_ready_at_waits_in_the_delay_set() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     let seen = fake.wait_jobs(2, T).await;
     let gap = seen[1].at.duration_since(seen[0].at);
     assert!(
@@ -329,7 +329,7 @@ async fn rebuild_after_restart_regrants_running_under_the_new_epoch_without_poll
         for (i, r) in ready.iter().chain(&running).enumerate() {
             cmds.push(start(r, 0, &format!("ck-{i}")));
         }
-        submit_all(h, cmds).await;
+        submit_all(&h, cmds).await;
         for r in &running {
             h.grant_attempt(*r).await.expect("grant");
         }
@@ -350,7 +350,7 @@ async fn rebuild_after_restart_regrants_running_under_the_new_epoch_without_poll
         let s = by_run.get(r).expect("dispatched after restart");
         assert_eq!(s.token, AttemptToken { epoch, n: 1 }, "run {i}");
         assert_eq!(s.concurrency_key, format!("ck-{i}"), "run {i}");
-        wait_attempt(h, r, (epoch.0, 1)).await;
+        wait_attempt(&h, r, (epoch.0, 1)).await;
     }
 
     // Idle: nothing scans on an interval.
@@ -384,7 +384,7 @@ async fn slots_bound_concurrent_jobs() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let runs: Vec<RunId> = (0..4).map(|_| run_on(0)).collect();
-    submit_all(h, runs.iter().map(|r| start(r, 0, "")).collect()).await;
+    submit_all(&h, runs.iter().map(|r| start(r, 0, "")).collect()).await;
     fake.wait_jobs(4, T).await;
     sleep(Duration::from_millis(100)).await;
     assert_eq!(max.load(Ordering::SeqCst), 1);
@@ -407,7 +407,7 @@ async fn reactivate_reuses_the_token() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     let seen = fake.wait_jobs(2, T).await;
     assert_eq!(seen[0].token, seen[1].token);
     assert_eq!(seen[1].token.n, 1);
@@ -415,7 +415,7 @@ async fn reactivate_reuses_the_token() {
     assert_eq!(fake.seen().len(), 2);
     assert_eq!(o.stats.reactivated.load(Ordering::Relaxed), 1);
     assert_eq!(o.stats.dispatched.load(Ordering::Relaxed), 1);
-    assert_eq!(attempt(h, &run), Some((h.epoch().0, 1)));
+    assert_eq!(attempt(&h, &run), Some((h.epoch().0, 1)));
     node.shutdown().await.expect("shutdown");
 }
 
@@ -434,7 +434,7 @@ async fn retry_grants_a_new_attempt_after_the_delay() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     // F9: the re-grant is logged (and counted) right after the failure, before the delay.
     fake.wait_jobs(1, T).await;
     let deadline = Instant::now() + T;
@@ -455,7 +455,7 @@ async fn retry_grants_a_new_attempt_after_the_delay() {
         let gap = w[1].at.duration_since(w[0].at);
         assert!(gap >= Duration::from_millis(190), "retried after {gap:?}");
     }
-    assert_eq!(attempt(h, &run), Some((h.epoch().0, 3)));
+    assert_eq!(attempt(&h, &run), Some((h.epoch().0, 3)));
     node.shutdown().await.expect("shutdown");
 }
 
@@ -467,7 +467,7 @@ async fn fenced_drops_the_lease() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     fake.wait_jobs(1, T).await;
     sleep(Duration::from_millis(400)).await;
     assert_eq!(fake.seen().len(), 1);
@@ -498,13 +498,13 @@ async fn enqueue_ready_for_a_leased_run_drops_the_lease_and_requeues() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     let seen = fake.wait_jobs(2, T).await;
     assert_eq!(seen[1].token.n, 2);
     sleep(Duration::from_millis(100)).await;
     assert!(first_revoked.load(Ordering::SeqCst));
     assert_eq!(fake.seen().len(), 2);
-    assert_eq!(status(h, &run), RunStatus::Running);
+    assert_eq!(status(&h, &run), RunStatus::Running);
     node.shutdown().await.expect("shutdown");
 }
 
@@ -533,7 +533,7 @@ async fn renewing_executor_keeps_its_lease() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     fake.wait_jobs(1, T).await;
     sleep(Duration::from_millis(1_200)).await;
     assert!(renew_ok.load(Ordering::SeqCst), "lease lost while renewing");
@@ -585,12 +585,12 @@ async fn stalled_executor_is_revoked_regranted_and_its_late_outcome_ignored() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     let seen = fake.wait_jobs(2, T).await;
     assert_eq!(seen[0].token.n, 1);
     assert_eq!(seen[1].token.n, 2);
     // Logged AttemptGranted n = 2.
-    wait_attempt(h, &run, (h.epoch().0, 2)).await;
+    wait_attempt(&h, &run, (h.epoch().0, 2)).await;
     let after = revoked_after_ms.load(Ordering::SeqCst);
     assert!(
         (250..2_000).contains(&after),
@@ -631,7 +631,7 @@ async fn shutdown_revokes_every_lease_and_waits_for_jobs() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let runs: Vec<RunId> = (0..3).map(|_| run_on(0)).collect();
-    submit_all(h, runs.iter().map(|r| start(r, 0, "")).collect()).await;
+    submit_all(&h, runs.iter().map(|r| start(r, 0, "")).collect()).await;
     fake.wait_jobs(3, T).await;
     let t0 = Instant::now();
     timeout(Duration::from_secs(4), node.shutdown())
@@ -687,11 +687,11 @@ async fn terminate_revokes_the_running_jobs_lease() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     fake.wait_jobs(1, T).await;
     let t0 = Instant::now();
     submit_all(
-        h,
+        &h,
         vec![Command::terminate_run(TerminateRun {
             run_id: run.as_bytes().to_vec(),
             reason: "operator".into(),
@@ -701,7 +701,7 @@ async fn terminate_revokes_the_running_jobs_lease() {
     .await;
     let at = wait_revoked(&revoked_at, &run).await;
     assert!(at.duration_since(t0) < Duration::from_secs(1));
-    assert_eq!(status(h, &run), RunStatus::Terminated);
+    assert_eq!(status(&h, &run), RunStatus::Terminated);
     sleep(Duration::from_millis(200)).await;
     assert_eq!(fake.seen().len(), 1, "a terminated run is not re-granted");
     node.shutdown().await.expect("shutdown");
@@ -718,7 +718,7 @@ async fn run_timeout_revokes_the_running_jobs_lease() {
     let run = run_on(0);
     let now = now_ms();
     submit_all(
-        h,
+        &h,
         vec![Command::start_run(StartRun {
             ready_at_ms: now,
             requested_at_ms: now,
@@ -748,11 +748,11 @@ async fn zero_slots_hold_ready_runs_ungranted() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     sleep(Duration::from_millis(300)).await;
     assert!(fake.seen().is_empty(), "no slot: nothing is dispatched");
-    assert_eq!(status(h, &run), RunStatus::Ready);
-    assert_eq!(attempt(h, &run), None, "never granted");
+    assert_eq!(status(&h, &run), RunStatus::Ready);
+    assert_eq!(attempt(&h, &run), None, "never granted");
     // Capacity arrives: the run is dispatched without any other wake-up.
     sem.add_permits(1);
     let seen = fake.wait_jobs(1, T).await;
@@ -889,13 +889,13 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
     let h = h(&node);
     let runs: Vec<RunId> = (0..RUNS).map(|_| run_on(0)).collect();
     for chunk in runs.chunks(100) {
-        submit_all(h, chunk.iter().map(|r| start(r, 0, "")).collect()).await;
+        submit_all(&h, chunk.iter().map(|r| start(r, 0, "")).collect()).await;
     }
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let done = runs
             .iter()
-            .filter(|r| status(h, r) == RunStatus::Completed)
+            .filter(|r| status(&h, r) == RunStatus::Completed)
             .count();
         if done == RUNS {
             break;
@@ -952,7 +952,7 @@ async fn pipelined_grants_never_overlap_and_rejections_are_fenced() {
     let epoch = h.epoch().0;
     let mut grants: GrantLog = BTreeMap::new();
     let mut first_append: BTreeMap<(RunId, (u32, u32)), u64> = BTreeMap::new();
-    for (off, c) in log_commands(h).await {
+    for (off, c) in log_commands(&h).await {
         match c.cmd {
             Some(Cmd::AttemptGranted(g)) => {
                 let r = RunId::from_bytes(&g.run_id).expect("run id");
@@ -1031,9 +1031,9 @@ async fn job_record_carries_the_pipelined_token() {
     let node = open(tmp.path(), Some(&o)).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start(&run, 0, "")]).await;
+    submit_all(&h, vec![start(&run, 0, "")]).await;
     let deadline = Instant::now() + T;
-    while status(h, &run) != RunStatus::Completed {
+    while status(&h, &run) != RunStatus::Completed {
         assert!(Instant::now() < deadline, "run did not complete");
         sleep(Duration::from_millis(10)).await;
     }

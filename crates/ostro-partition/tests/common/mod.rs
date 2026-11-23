@@ -290,7 +290,7 @@ pub fn fast_shuffler(cfg: &mut ostro_partition::NodeConfig) {
     cfg.leader.shuffler.idle_poll = Duration::from_millis(20);
 }
 
-pub fn handle_of(node: &ostro_partition::Node, p: PartitionId) -> &PartitionHandle<PartitionLog> {
+pub fn handle_of(node: &ostro_partition::Node, p: PartitionId) -> PartitionHandle<PartitionLog> {
     node.handle(p).expect("partition ready")
 }
 

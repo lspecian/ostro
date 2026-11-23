@@ -4,6 +4,13 @@
 //! `epoch = max(source floor, latest log epoch + 1)`, so a restart is always a new term
 //! and fences every token granted before it. Phase 4 replaces [`LocalLeadership`] with the
 //! metadata partition map (which supplies a floor from the cluster's view).
+//!
+//! Phase 12 (12-13, F2): the cluster epoch of a term comes **only** from meta (the role
+//! driver leads at the meta-assigned epoch `e > latest log epoch`, otherwise it asks for a
+//! fresh term). [`next_term_epoch`] picks a local epoch only for `StartMode::Inspect`
+//! (offline tooling: it leads with ISR {self} so the HW reaches the durable end and the
+//! catch-up replays the whole tail, but nothing is appended) and for the temporary legacy
+//! self-leader path used when no assignment source is configured (removed by 12-14).
 
 use ostro_types::{Epoch, PartitionId};
 

@@ -407,7 +407,7 @@ async fn open(dir: &Path, o: &Opts) -> Node {
         .expect("node open")
 }
 
-fn h(node: &Node) -> &Handle {
+fn h(node: &Node) -> Handle {
     node.handle(P0).expect("partition ready")
 }
 
@@ -518,7 +518,7 @@ async fn queue_cap_bounds_leases_and_burns_no_attempt() {
     let node = open(tmp.path(), &o).await;
     let h = h(&node);
     let runs: Vec<RunId> = (0..6).map(|_| run_on(0)).collect();
-    submit_all(h, runs.iter().map(|r| start_in(r, "q", 0, "")).collect()).await;
+    submit_all(&h, runs.iter().map(|r| start_in(r, "q", 0, "")).collect()).await;
     let seen = fake.wait_jobs(6, T).await;
     assert!(
         max.load(Ordering::SeqCst) <= 2,
@@ -535,7 +535,7 @@ async fn queue_cap_bounds_leases_and_burns_no_attempt() {
     }
     for r in &runs {
         // A pipelined grant is applied shortly after its job started.
-        wait_until(T, "grant applied", || attempt(h, r) == Some((epoch.0, 1))).await;
+        wait_until(T, "grant applied", || attempt(&h, r) == Some((epoch.0, 1))).await;
     }
     wait_until(T, "permits released", || {
         flow.released.load(Ordering::SeqCst) == 6
@@ -582,7 +582,7 @@ async fn key_cap_with_until_retries_at_until_and_others_proceed() {
             .enumerate()
             .map(|(i, r)| start_in(r, "q", 0, &format!("k{i}"))),
     );
-    submit_all(h, cmds).await;
+    submit_all(&h, cmds).await;
     let seen = fake.wait_jobs(3, T).await;
     assert!(seen.iter().all(|s| s.run != hot), "hot key held back");
     let seen = fake.wait_jobs(4, T).await;
@@ -611,7 +611,7 @@ async fn weights_three_to_one_share() {
     for q in ["a", "b"] {
         for _ in 0..8 {
             let cmds: Vec<Command> = (0..40).map(|_| start_in(&run_on(0), q, 0, "")).collect();
-            submit_all(h, cmds).await;
+            submit_all(&h, cmds).await;
         }
     }
     wait_until(T, "640 ready", || {
@@ -642,7 +642,7 @@ async fn priority_bands_are_served_highest_first() {
     let h = h(&node);
     let (lo, hi, mid) = (run_on(0), run_on(0), run_on(0));
     submit_all(
-        h,
+        &h,
         vec![
             start_in(&lo, "q", 0, "a"),
             start_in(&hi, "q", 9, "b"),
@@ -685,7 +685,7 @@ async fn paused_queue_is_held_and_resumes_on_changed() {
     let free: Vec<RunId> = (0..3).map(|_| run_on(0)).collect();
     let mut cmds: Vec<Command> = held.iter().map(|r| start_in(r, "p", 0, "")).collect();
     cmds.extend(free.iter().map(|r| start_in(r, "q", 0, "")));
-    submit_all(h, cmds).await;
+    submit_all(&h, cmds).await;
     fake.wait_jobs(3, T).await;
     sleep(Duration::from_millis(300)).await;
     assert!(
@@ -693,7 +693,7 @@ async fn paused_queue_is_held_and_resumes_on_changed() {
         "paused queue granted"
     );
     assert!(flow.calls().iter().any(|(_, t)| *t == "paused"));
-    assert_eq!(attempt(h, &held[0]), None, "no attempt while paused");
+    assert_eq!(attempt(&h, &held[0]), None, "no attempt while paused");
     paused.store(false, Ordering::SeqCst);
     flow.bump();
     let seen = fake.wait_jobs(5, T).await;
@@ -738,7 +738,11 @@ async fn paused_workflow_on_shared_queue_does_not_block_others() {
     };
     // Paused workflow first (older ready_at): the head of the unkeyed FIFO and of key "k".
     let held: Vec<(RunId, &str)> = vec![(run_on(0), ""), (run_on(0), ""), (run_on(0), "k")];
-    submit_all(h, held.iter().map(|(r, k)| start(r, "wp", k, 50)).collect()).await;
+    submit_all(
+        &h,
+        held.iter().map(|(r, k)| start(r, "wp", k, 50)).collect(),
+    )
+    .await;
     let free: Vec<(RunId, &str)> = vec![
         (run_on(0), ""),
         (run_on(0), ""),
@@ -746,7 +750,7 @@ async fn paused_workflow_on_shared_queue_does_not_block_others() {
         (run_on(0), "k"),
     ];
     submit_all(
-        h,
+        &h,
         free.iter().map(|(r, k)| start(r, "wf", k, 100)).collect(),
     )
     .await;
@@ -763,7 +767,7 @@ async fn paused_workflow_on_shared_queue_does_not_block_others() {
     want.sort();
     assert_eq!(got, want, "every entry of the other workflow granted");
     for (r, _) in &held {
-        assert_eq!(attempt(h, r), None, "no attempt while paused");
+        assert_eq!(attempt(&h, r), None, "no attempt while paused");
     }
     // No spin: once only held entries are left, nothing probes them until a bump.
     sleep(Duration::from_millis(300)).await;
@@ -823,7 +827,7 @@ async fn blocked_entry_burns_no_attempt_number() {
     let node = open(tmp.path(), &o).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start_in(&run, "q", 0, "")]).await;
+    submit_all(&h, vec![start_in(&run, "q", 0, "")]).await;
     let seen = fake.wait_jobs(1, T).await;
     assert_eq!(seen[0].token.n, 1);
     assert!(flow.calls().iter().filter(|(_, t)| *t == "queue").count() >= 1);
@@ -833,7 +837,7 @@ async fn blocked_entry_burns_no_attempt_number() {
         "placement asked only after admission"
     );
     sleep(Duration::from_millis(100)).await;
-    assert_eq!(attempt(h, &run), Some((h.epoch().0, 1)));
+    assert_eq!(attempt(&h, &run), Some((h.epoch().0, 1)));
     node.shutdown().await.expect("shutdown");
 }
 
@@ -861,7 +865,7 @@ async fn placement_blocked_queue_does_not_starve_embedded_queue() {
             cmds.push(start_in(&ws[i], "w", 0, ""));
         }
     }
-    submit_all(h, cmds).await;
+    submit_all(&h, cmds).await;
     fake.wait_jobs(5, T).await;
     sleep(Duration::from_millis(200)).await;
     let seen = fake.seen();
@@ -929,10 +933,10 @@ async fn reactivations_are_not_throttled() {
     let node = open(tmp.path(), &o).await;
     let h = h(&node);
     let old = run_on(0);
-    submit_all(h, vec![start_in(&old, "q", 0, "old")]).await;
+    submit_all(&h, vec![start_in(&old, "q", 0, "old")]).await;
     fake.wait_jobs(1, T).await;
     let new = run_on(0);
-    submit_all(h, vec![start_in(&new, "q", 0, "new")]).await;
+    submit_all(&h, vec![start_in(&new, "q", 0, "new")]).await;
     let seen = fake.wait_jobs(4, T).await;
     let old_tokens: Vec<u32> = seen
         .iter()
@@ -1019,7 +1023,7 @@ async fn throttled_first_activation_ahead_of_reactivation(key_scoped: bool) {
         })
     };
     let old = run_on(0);
-    submit_all(h, vec![start(&old, "old")]).await;
+    submit_all(&h, vec![start(&old, "old")]).await;
     fake.wait_jobs(1, T).await;
     wait_until(T, "re-activation scheduled", || {
         due_at.lock().expect("lock").is_some()
@@ -1027,7 +1031,7 @@ async fn throttled_first_activation_ahead_of_reactivation(key_scoped: bool) {
     .await;
     // A first activation ahead of the sleeper (ready_at 100 < its timer), same key.
     let new = run_on(0);
-    submit_all(h, vec![start(&new, "new")]).await;
+    submit_all(&h, vec![start(&new, "new")]).await;
     let blocked = if key_scoped { "key" } else { "queue" };
     wait_until(T, "first activation throttled", || {
         flow.calls()
@@ -1071,7 +1075,7 @@ async fn throttled_first_activation_ahead_of_reactivation(key_scoped: bool) {
     assert!(before <= 4, "first activation probed {before} times");
     assert_eq!(fake.seen().len(), 2);
     assert_eq!(
-        attempt(h, &new),
+        attempt(&h, &new),
         None,
         "throttled first activation burned an attempt"
     );
@@ -1138,7 +1142,7 @@ async fn expiry_releases_permit_and_reservation() {
     let node = open(tmp.path(), &o).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start_in(&run, "q", 0, "")]).await;
+    submit_all(&h, vec![start_in(&run, "q", 0, "")]).await;
     let seen = fake.wait_jobs(2, T).await;
     assert_eq!(seen[1].token.n, 2);
     wait_until(T, "second job ran", || {
@@ -1190,7 +1194,7 @@ async fn abandoned_regrants_without_counting_a_failure() {
     let node = open(tmp.path(), &o).await;
     let h = h(&node);
     let run = run_on(0);
-    submit_all(h, vec![start_in(&run, "q", 0, "")]).await;
+    submit_all(&h, vec![start_in(&run, "q", 0, "")]).await;
     let seen = fake.wait_jobs(2, T).await;
     let got: Vec<(u32, u32)> = seen.iter().map(|s| (s.token.n, s.failures)).collect();
     assert_eq!(got, vec![(1, 0), (2, 0)]);
@@ -1245,17 +1249,17 @@ async fn run_paused_revokes_running_and_drops_queued() {
     let node = open(tmp.path(), &o).await;
     let h = h(&node);
     let (a, b) = (run_on(0), run_on(0));
-    submit_all(h, vec![start_in(&a, "q", 5, "")]).await;
+    submit_all(&h, vec![start_in(&a, "q", 5, "")]).await;
     fake.wait_jobs(1, T).await;
-    submit_all(h, vec![start_in(&b, "q", 0, "")]).await;
+    submit_all(&h, vec![start_in(&b, "q", 0, "")]).await;
     sleep(Duration::from_millis(50)).await;
     // a holds the only reservation; b is queued.
-    submit_all(h, vec![pause(&a), pause(&b)]).await;
+    submit_all(&h, vec![pause(&a), pause(&b)]).await;
     wait_until(T, "a revoked", || revoked.load(Ordering::SeqCst) == 1).await;
     sleep(Duration::from_millis(300)).await;
     assert_eq!(fake.seen_runs(), vec![a], "paused b never dispatched");
     assert_eq!(place.live.load(Ordering::SeqCst), 0);
-    submit_all(h, vec![resume(&b)]).await;
+    submit_all(&h, vec![resume(&b)]).await;
     let seen = fake.wait_jobs(2, T).await;
     assert_eq!(seen[1].run, b);
     assert_eq!(seen[1].token.n, 1);
@@ -1287,7 +1291,7 @@ async fn gauges_reflect_ready_and_running_counts() {
     // Higher band: admission sees (and parks) the capped key before placement parks `e`.
     cmds.push(start_in(&run_on(0), "e", 5, "capped"));
     cmds.extend((0..2).map(|_| start_in(&run_on(0), "w1", 0, "")));
-    submit_all(h, cmds).await;
+    submit_all(&h, cmds).await;
     wait_until(T, "ready gauges", || {
         let s = gauges.snapshot();
         s.get("e").is_some_and(|g| g.ready == 4) && s.get("w1").is_some_and(|g| g.ready == 2)

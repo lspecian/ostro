@@ -14,11 +14,20 @@
 //! floor, together with the bottomless upload floor ([`Node::floor_handles`]), bounds WAL
 //! retention, so `log_start` never passes the oldest retained snapshot. A state that is
 //! missing, unreadable or below `log_start` is rebuilt as newest usable snapshot + log tail.
+//! Since 12-13 snapshots and retention are replica services
+//! ([`replica_services`](crate::replica_services)): they run in every role.
+//!
+//! Roles (12-13, research Pattern 5): with [`NodeConfig::assignments`] set, every partition
+//! has a role driven only by meta ([`roles`](crate::roles)): Leader at a meta-assigned epoch,
+//! Follower of a named leader, or Offline. A partition opens unassigned (Offline) and never
+//! picks its own cluster epoch. Without an assignment source the temporary legacy
+//! self-leader path runs (Phase 12: legacy path, removed by 12-14).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use futures_util::future::BoxFuture;
 use ostro_blob::BlobStore;
 use ostro_log::ostro_wal::GroupCommitConfig;
 use ostro_log::{
@@ -26,21 +35,27 @@ use ostro_log::{
     ReplicatedLog,
 };
 use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::acks::PendingAcks;
 use crate::apply::{ApplyOutcome, Cursor};
 use crate::clock::{Clock, SystemClock}; // clock-exempt: default clock import
-use crate::handle::PartitionHandle;
+use crate::handle::{PartitionError, PartitionHandle};
 use crate::leader::cron::{CronConfig, ScheduleSource};
-use crate::leader::retention::FloorWatches;
+use crate::leader::retention::{FloorWatches, RetentionConfig};
 use crate::leader::snapshot::{
     self as snap, LocalSnapshot, SnapshotConfig, SnapshotService, SnapshotShared, SnapshotTaken,
 };
 use crate::leader::{self, LeaderConfig, LeaderCtx, LeaderTasks};
 use crate::leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 use crate::machine::{MachineConfig, MachineHandle, PartitionHealth};
+use crate::replica_services::{ReplicaTasks, spawn_replica_services};
+use crate::roles::{
+    AssignmentSource, DriverCmd, FollowerDriver, InstallGuard, LedSet, NodeTestHooks,
+    PartitionControl, PartitionRole, PartitionRoles, RoleConfig, RoleEnv,
+};
 use crate::router::{InProcessRouter, PartitionRouter};
 use crate::startup::{StartupEvent, StartupLog};
 use crate::store::meta::{K_APPLIED, K_STATE_HASH};
@@ -54,10 +69,13 @@ const NODE_FILE: &str = "node.toml";
 /// What the node does after recovery.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StartMode {
-    /// Full startup: new term, readiness barrier, leader services.
+    /// Full startup: roles from meta (or the legacy self-leader term), readiness barrier,
+    /// services.
     Leader,
     /// Recover and catch up only: no term, no barrier, no leader services, no appends
-    /// (digest comparisons, offline inspection).
+    /// (digest comparisons, offline inspection). The log leads locally at
+    /// [`next_term_epoch`] with ISR {self} so its HW reaches the durable end and the whole
+    /// tail is replayed; nothing is appended and no assignment source is consulted.
     Inspect,
 }
 
@@ -91,11 +109,23 @@ pub struct NodeConfig {
     /// Bottomless backup is on (B4): 08-09 then initialises the upload floor to
     /// `Some(log_start)` in `Node::open` before retention starts.
     pub backup_enabled: bool,
+    /// Meta-published partition assignments (12-13). `Some` = every partition's role is
+    /// driven by meta (RF=1 included: replicas `[self]`). `None` = the temporary legacy
+    /// self-leader path (Phase 12: legacy path, removed by 12-14). Ignored in
+    /// [`StartMode::Inspect`].
+    pub assignments: Option<Arc<dyn AssignmentSource>>,
+    /// Starts the fetcher of a followed partition (12-11 `FetcherDriver`); `None` = a
+    /// follower does not fetch (tests, RF=1).
+    pub follower_driver: Option<Arc<dyn FollowerDriver>>,
+    /// Role driver tuning (12-13).
+    pub roles: RoleConfig,
+    /// Per-node test hooks (12-13: `fail_partition`); inert unless a test calls them.
+    pub test_hooks: NodeTestHooks,
 }
 
 impl NodeConfig {
     /// Defaults: node id 1, default store/machine/WAL/leader configs, [`LocalLeadership`],
-    /// [`SystemClock`], [`StartMode::Leader`]. // clock-exempt: doc ref
+    /// [`SystemClock`], [`StartMode::Leader`], no assignment source. // clock-exempt: doc ref
     pub fn new(data_dir: PathBuf, partitions: PartitionCount) -> Self {
         Self {
             data_dir,
@@ -113,16 +143,20 @@ impl NodeConfig {
             cron: CronConfig::default(),
             schedule_source: None,
             backup_enabled: false,
+            assignments: None,
+            follower_driver: None,
+            roles: RoleConfig::default(),
+            test_hooks: NodeTestHooks::default(),
         }
     }
 }
 
-/// One partition after startup.
-#[derive(Debug)]
+/// One partition's state, as seen through [`Node::slots`].
+#[derive(Clone, Debug)]
 pub enum PartitionSlot {
     Ready(PartitionHandle<PartitionLog>),
-    /// The partition failed to start (corrupt log, state ahead of log, ...). The other
-    /// partitions are unaffected.
+    /// The partition failed to start (corrupt log, state ahead of log, ...), or is quiesced
+    /// for a snapshot install. The other partitions are unaffected.
     Failed {
         partition: PartitionId,
         reason: String,
@@ -149,32 +183,185 @@ pub enum NodeError {
 pub struct FloorHandles {
     /// The upload floor; `None` = unbounded. With `NodeConfig::backup_enabled` it starts at
     /// `Some(log_start)` (set in `Node::open`, before any retention pass: B4), so nothing more
-    /// is trimmed until the uploader publishes a real floor. Only ever raise it.
+    /// is trimmed until the uploader publishes a real floor. Only ever raise it. With roles
+    /// (12-13) retention honours it only while the partition leads.
     pub upload: watch::Sender<Option<Offset>>,
 }
 
-/// Per-partition Phase 8 extras of a started partition.
-struct PartExtras {
-    snapshots: Option<Arc<SnapshotService>>,
-    upload: watch::Sender<Option<Offset>>,
-    floors: FloorWatches,
-    /// Leader mode only: the services' context (forced retention passes).
-    ctx: Option<LeaderCtx>,
+/// A started partition's live parts (replaced by a snapshot install's reopen).
+#[derive(Clone)]
+pub(crate) struct Running {
+    pub(crate) handle: PartitionHandle<PartitionLog>,
+    pub(crate) acks: Arc<PendingAcks>,
+    pub(crate) snapshots: Option<Arc<SnapshotService>>,
+    pub(crate) floors: FloorWatches,
+    /// Leader mode only: the services' context (replica + leader services, forced passes).
+    pub(crate) ctx: Option<LeaderCtx>,
+}
+
+pub(crate) enum CellState {
+    Running(Running),
+    Failed(String),
+    /// Stopped for a snapshot install (store closed) until the guard reopens it.
+    Quiesced,
+}
+
+/// One partition's slot in the node: its current parts plus the stable channels that outlive
+/// a reopen.
+pub(crate) struct PartCell {
+    pub(crate) p: PartitionId,
+    state: Mutex<CellState>,
+    /// The uploader's floor (08-13 writes it through [`FloorHandles`]).
+    pub(crate) upload: watch::Sender<Option<Offset>>,
+    /// The upload floor retention sees (roles: follows `upload` only while leading).
+    pub(crate) effective_upload: watch::Sender<Option<Offset>>,
+    pub(crate) role: watch::Sender<PartitionRole>,
+}
+
+impl PartCell {
+    fn new(p: PartitionId, state: CellState, upload_init: Option<Offset>) -> Self {
+        Self {
+            p,
+            state: Mutex::new(state),
+            upload: watch::channel(upload_init).0,
+            effective_upload: watch::channel(None).0,
+            role: watch::channel(PartitionRole::Offline).0,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CellState> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(crate) fn running(&self) -> Option<Running> {
+        match &*self.lock() {
+            CellState::Running(r) => Some(r.clone()),
+            _ => None,
+        }
+    }
+
+    /// Take the running parts out (the cell becomes `Quiesced`).
+    pub(crate) fn take_running(&self) -> Option<Running> {
+        let mut g = self.lock();
+        match std::mem::replace(&mut *g, CellState::Quiesced) {
+            CellState::Running(r) => Some(r),
+            other => {
+                *g = other;
+                None
+            }
+        }
+    }
+
+    pub(crate) fn set(&self, s: CellState) {
+        *self.lock() = s;
+    }
+
+    fn slot(&self) -> PartitionSlot {
+        match &*self.lock() {
+            CellState::Running(r) => PartitionSlot::Ready(r.handle.clone()),
+            CellState::Failed(reason) => PartitionSlot::Failed {
+                partition: self.p,
+                reason: reason.clone(),
+            },
+            CellState::Quiesced => PartitionSlot::Failed {
+                partition: self.p,
+                reason: "quiesced for a snapshot install".into(),
+            },
+        }
+    }
+
+    fn is_failed(&self) -> bool {
+        matches!(&*self.lock(), CellState::Failed(_))
+    }
+}
+
+/// What a started partition needs to build its [`Running`] parts.
+pub(crate) struct RunningParts<'a> {
+    pub(crate) count: PartitionCount,
+    pub(crate) data_dir: &'a Path,
+    /// `None` = Inspect mode (no snapshot service, no services context).
+    pub(crate) services: Option<ServicesParts<'a>>,
+}
+
+pub(crate) struct ServicesParts<'a> {
+    pub(crate) snapshots: &'a SnapshotConfig,
+    pub(crate) snap_shared: &'a Arc<SnapshotShared>,
+    pub(crate) clock: &'a Arc<dyn Clock>,
+    pub(crate) router: &'a Arc<dyn PartitionRouter>,
+    pub(crate) barrier: &'a ReadyBarrier,
+    pub(crate) shutdown: watch::Receiver<bool>,
+    pub(crate) upload: watch::Receiver<Option<Offset>>,
+}
+
+/// Snapshot service, floors and services context of a started partition.
+pub(crate) fn build_running(
+    parts: RunningParts<'_>,
+    handle: PartitionHandle<PartitionLog>,
+    acks: Arc<PendingAcks>,
+    local: Vec<LocalSnapshot>,
+) -> Running {
+    let p = handle.partition();
+    let Some(sv) = parts.services else {
+        return Running {
+            handle,
+            acks,
+            snapshots: None,
+            floors: FloorWatches::fixed(Offset(0), None),
+            ctx: None,
+        };
+    };
+    let snapshots = SnapshotService::new(
+        p,
+        parts.count,
+        parts.data_dir,
+        Arc::clone(handle.store()),
+        sv.snapshots.clone(),
+        Arc::clone(sv.clock),
+        Arc::clone(sv.snap_shared),
+        local,
+    );
+    let floors = FloorWatches {
+        local: snapshots.local_floor(),
+        upload: sv.upload,
+    };
+    let ctx = LeaderCtx {
+        partition: p,
+        count: parts.count,
+        handle: handle.clone(),
+        router: Arc::clone(sv.router),
+        barrier: sv.barrier.clone(),
+        clock: Arc::clone(sv.clock),
+        shutdown: sv.shutdown,
+        floors: floors.clone(),
+        snapshots: Some(Arc::clone(&snapshots)),
+    };
+    Running {
+        handle,
+        acks,
+        snapshots: Some(snapshots),
+        floors,
+        ctx: Some(ctx),
+    }
 }
 
 /// An open node: P partitions over one shared WAL.
 pub struct Node {
     log: LogNode,
-    slots: Vec<PartitionSlot>,
+    cells: Vec<Arc<PartCell>>,
     barriers: Vec<ReadyBarrier>,
     router: Arc<InProcessRouter>,
     events: Arc<StartupLog>,
+    /// Legacy path: leader and replica services of every partition.
     leaders: Vec<LeaderTasks>,
+    replicas: Vec<ReplicaTasks>,
+    /// Roles path: one role driver per started partition.
+    drivers: Vec<JoinHandle<()>>,
+    control: NodeControl,
+    led: Arc<LedSet>,
     shutdown: watch::Sender<bool>,
     incarnation: [u8; 16],
     data_dir: PathBuf,
-    leader_cfg: LeaderConfig,
-    parts: Vec<Option<PartExtras>>,
+    retention_cfg: RetentionConfig,
     snap_shared: Arc<SnapshotShared>,
     installed: Vec<Option<Offset>>,
 }
@@ -183,7 +370,7 @@ impl std::fmt::Debug for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Node")
             .field("partitions", &self.log.partitions())
-            .field("slots", &self.slots)
+            .field("slots", &self.slots())
             .finish_non_exhaustive()
     }
 }
@@ -203,6 +390,12 @@ impl Node {
         // 0. the fixed partition count (and the node incarnation).
         let incarnation = check_node_file(&cfg.data_dir, count)?;
         events.push(StartupEvent::NodeFileChecked);
+
+        let term = match (cfg.mode, &cfg.assignments) {
+            (StartMode::Inspect, _) => TermMode::Inspect,
+            (StartMode::Leader, None) => TermMode::Legacy,
+            (StartMode::Leader, Some(_)) => TermMode::Roles,
+        };
 
         // 0b. (08-09) finish or roll back an interrupted snapshot install, note which states
         //     are missing, and scan the local snapshots (removing interrupted `.tmp-*` files).
@@ -323,7 +516,7 @@ impl Node {
             }
         }
 
-        // 4./5. catch-up and term start, partitions in parallel.
+        // 4./5. catch-up (and, on the legacy path, the term start), partitions in parallel.
         let mut tasks = Vec::with_capacity(ready.len());
         for (r, p) in ready.into_iter().zip(count.ids()) {
             tasks.push(r.map(|(store, meta, rf1)| {
@@ -334,7 +527,7 @@ impl Node {
                     rf1,
                     blobs: Arc::clone(&blobs),
                     machine: cfg.machine.clone(),
-                    mode: cfg.mode,
+                    term,
                     leadership: Arc::clone(&cfg.leadership),
                     clock: Arc::clone(&cfg.clock),
                     node_id: cfg.node_id,
@@ -343,12 +536,12 @@ impl Node {
                 tokio::spawn(start.run())
             }));
         }
-        let mut slots = Vec::with_capacity(tasks.len());
+        let mut started: Vec<Result<Started, String>> = Vec::with_capacity(tasks.len());
         for (t, p) in tasks.into_iter().zip(count.ids()) {
             let r = match t {
                 None => Err(failed[p.index()].take().unwrap_or_default()),
                 Some(t) => match t.await {
-                    Ok(Ok(h)) => Ok(h),
+                    Ok(Ok(s)) => Ok(s),
                     Ok(Err(reason)) => {
                         error!(partition = p.0, %reason, "partition failed to start");
                         events.push(StartupEvent::PartitionFailed {
@@ -367,130 +560,184 @@ impl Node {
                     }
                 },
             };
-            slots.push(match r {
-                Ok(h) => PartitionSlot::Ready(h),
-                Err(reason) => PartitionSlot::Failed {
-                    partition: p,
-                    reason,
-                },
-            });
+            started.push(r);
         }
 
         let barriers: Vec<ReadyBarrier> = count.ids().map(|_| ReadyBarrier::new()).collect();
         let router = Arc::new(InProcessRouter::new(count));
         let (shutdown, _) = watch::channel(false);
-        let mut leaders = Vec::new();
+        let services_router: Arc<dyn PartitionRouter> = match &cfg.router_wrapper {
+            Some(wrap) => wrap(Arc::clone(&router)),
+            None => Arc::clone(&router) as Arc<dyn PartitionRouter>,
+        };
+        // 08-14: the cron driver runs on every led partition when a schedule source is
+        // configured (it drives only the schedules the partition owns).
+        let mut leader_cfg = cfg.leader.clone();
+        if leader_cfg.cron.is_none()
+            && let Some(source) = &cfg.schedule_source
+        {
+            leader_cfg.cron = Some(leader::cron::CronService {
+                config: cfg.cron.clone(),
+                source: Arc::clone(source),
+            });
+        }
+        let led: Arc<LedSet> = Arc::new(LedSet::default());
 
         // (08-09) floors and snapshot services, before any retention pass can run. The upload
         // floor starts at Some(log_start) with backup on (B4), None (unbounded) otherwise.
         let snap_shared = SnapshotShared::new();
-        let mut parts: Vec<Option<PartExtras>> = Vec::with_capacity(slots.len());
-        for slot in &slots {
-            let PartitionSlot::Ready(h) = slot else {
-                parts.push(None);
-                continue;
+        let mut cells: Vec<Arc<PartCell>> = Vec::with_capacity(started.len());
+        let mut legacy_epochs: Vec<Option<Epoch>> = vec![None; started.len()];
+        for (r, p) in started.into_iter().zip(count.ids()) {
+            let cell = match r {
+                Ok(s) => {
+                    let upload_init = cfg.backup_enabled.then(|| s.handle.log().log_start());
+                    let cell = PartCell::new(p, CellState::Quiesced, upload_init);
+                    legacy_epochs[p.index()] = s.epoch;
+                    let upload = match term {
+                        TermMode::Roles => cell.effective_upload.subscribe(),
+                        TermMode::Legacy | TermMode::Inspect => cell.upload.subscribe(),
+                    };
+                    let services = (term != TermMode::Inspect).then(|| ServicesParts {
+                        snapshots: &cfg.snapshots,
+                        snap_shared: &snap_shared,
+                        clock: &cfg.clock,
+                        router: &services_router,
+                        barrier: &barriers[p.index()],
+                        shutdown: shutdown.subscribe(),
+                        upload,
+                    });
+                    let running = build_running(
+                        RunningParts {
+                            count,
+                            data_dir: &cfg.data_dir,
+                            services,
+                        },
+                        s.handle,
+                        s.acks,
+                        std::mem::take(&mut local[p.index()]),
+                    );
+                    cell.set(CellState::Running(running));
+                    cell
+                }
+                Err(reason) => PartCell::new(p, CellState::Failed(reason), None),
             };
-            let p = h.partition();
-            let upload_init = cfg.backup_enabled.then(|| h.log().log_start());
-            let (upload, upload_rx) = watch::channel(upload_init);
-            let snapshots = (cfg.mode == StartMode::Leader).then(|| {
-                SnapshotService::new(
-                    p,
-                    count,
-                    &cfg.data_dir,
-                    Arc::clone(h.store()),
-                    cfg.snapshots.clone(),
-                    Arc::clone(&cfg.clock),
-                    Arc::clone(&snap_shared),
-                    std::mem::take(&mut local[p.index()]),
-                )
-            });
-            let local_rx = snapshots
-                .as_ref()
-                .map_or_else(|| watch::channel(Offset(0)).1, |s| s.local_floor());
-            parts.push(Some(PartExtras {
-                snapshots,
-                upload,
-                floors: FloorWatches {
-                    local: local_rx,
-                    upload: upload_rx,
-                },
-                ctx: None,
-            }));
+            cells.push(Arc::new(cell));
         }
 
-        if cfg.mode == StartMode::Leader {
-            // 08-14: the cron driver runs on every Leader-mode partition when a schedule
-            // source is configured (it drives only the schedules the partition owns).
-            let mut leader_cfg = cfg.leader.clone();
-            if leader_cfg.cron.is_none()
-                && let Some(source) = &cfg.schedule_source
-            {
-                leader_cfg.cron = Some(leader::cron::CronService {
-                    config: cfg.cron.clone(),
-                    source: Arc::clone(source),
-                });
-            }
-            let services_router: Arc<dyn PartitionRouter> = match &cfg.router_wrapper {
-                Some(wrap) => wrap(Arc::clone(&router)),
-                None => Arc::clone(&router) as Arc<dyn PartitionRouter>,
-            };
-            // 6. barriers + routing, then services once every partition is routable.
-            for slot in &slots {
-                if let PartitionSlot::Ready(h) = slot {
-                    let p = h.partition();
-                    barriers[p.index()].open();
-                    events.push(StartupEvent::BarrierOpened { p: p.0 });
-                    router.register(h.clone());
+        let mut leaders = Vec::new();
+        let mut replicas = Vec::new();
+        let mut drivers = Vec::new();
+        let mut cmds: Vec<Option<mpsc::Sender<DriverCmd>>> = vec![None; cells.len()];
+        match term {
+            TermMode::Inspect => {}
+            TermMode::Legacy => {
+                // Phase 12: legacy path, removed by 12-14 (no assignment source: every
+                // started partition leads at the term `PartitionStart` picked).
+                // 6. barriers + routing, then services once every partition is routable.
+                for cell in &cells {
+                    if let Some(run) = cell.running() {
+                        let p = cell.p;
+                        barriers[p.index()].open();
+                        events.push(StartupEvent::BarrierOpened { p: p.0 });
+                        router.register(run.handle.clone());
+                    }
                 }
-            }
-            for slot in &slots {
-                if let PartitionSlot::Ready(h) = slot {
-                    let p = h.partition();
-                    let Some(extras) = parts[p.index()].as_mut() else {
+                for cell in &cells {
+                    let Some(run) = cell.running() else {
                         continue;
                     };
-                    let ctx = LeaderCtx {
-                        partition: p,
-                        count,
-                        handle: h.clone(),
-                        router: Arc::clone(&services_router),
-                        barrier: barriers[p.index()].clone(),
-                        clock: Arc::clone(&cfg.clock),
-                        shutdown: shutdown.subscribe(),
-                        floors: extras.floors.clone(),
-                        snapshots: extras.snapshots.clone(),
+                    let Some(ctx) = run.ctx.clone() else {
+                        continue;
                     };
-                    extras.ctx = Some(ctx.clone());
+                    let p = cell.p;
+                    replicas.push(spawn_replica_services(ctx.clone(), &cfg.leader.retention));
                     leaders.push(leader::spawn_all(ctx, &leader_cfg));
                     events.push(StartupEvent::LeaderServicesStarted { p: p.0 });
+                    if let Some(e) = legacy_epochs[p.index()] {
+                        cell.role.send_replace(PartitionRole::Leader { epoch: e });
+                        led.insert(p, e);
+                    }
+                }
+            }
+            TermMode::Roles => {
+                let Some(source) = cfg.assignments.clone() else {
+                    unreachable!("TermMode::Roles has an assignment source");
+                };
+                let env = Arc::new(RoleEnv {
+                    node_id: cfg.node_id,
+                    count,
+                    data_dir: cfg.data_dir.clone(),
+                    store_cfg: cfg.store.clone(),
+                    machine_cfg: cfg.machine.clone(),
+                    snapshots_cfg: cfg.snapshots.clone(),
+                    snap_shared: Arc::clone(&snap_shared),
+                    clock: Arc::clone(&cfg.clock),
+                    leadership: Arc::clone(&cfg.leadership),
+                    blobs: Arc::clone(&blobs),
+                    router: Arc::clone(&router),
+                    services_router: Arc::clone(&services_router),
+                    leader_cfg: leader_cfg.clone(),
+                    events: Arc::clone(&events),
+                    shutdown: shutdown.subscribe(),
+                    led: Arc::clone(&led),
+                    source,
+                    follower: cfg.follower_driver.clone(),
+                    hooks: cfg.test_hooks.clone(),
+                    cfg: cfg.roles.clone(),
+                });
+                for cell in &cells {
+                    let Some(run) = cell.running() else {
+                        continue;
+                    };
+                    let p = cell.p;
+                    let (tx, join) = crate::roles::spawn_driver(
+                        Arc::clone(&env),
+                        Arc::clone(cell),
+                        Arc::clone(run.handle.log()),
+                        barriers[p.index()].clone(),
+                    );
+                    cmds[p.index()] = Some(tx);
+                    drivers.push(join);
                 }
             }
         }
 
         Ok(Node {
             log,
-            slots,
+            control: NodeControl {
+                cmds: Arc::new(cmds),
+            },
+            cells,
             barriers,
             router,
             events,
             leaders,
+            replicas,
+            drivers,
+            led,
             shutdown,
             incarnation,
             data_dir: cfg.data_dir.clone(),
-            leader_cfg: cfg.leader.clone(),
-            parts,
+            retention_cfg: cfg.leader.retention.clone(),
             snap_shared,
             installed,
         })
     }
 
+    fn running(&self, p: PartitionId) -> Option<Running> {
+        self.cells.get(p.index())?.running()
+    }
+
     /// Partition `p`'s writable floor slots (the bottomless upload floor, 08-13). `None` for a
     /// partition that did not start.
     pub fn floor_handles(&self, p: PartitionId) -> Option<FloorHandles> {
-        let x = self.parts.get(p.index())?.as_ref()?;
+        let c = self.cells.get(p.index())?;
+        if c.is_failed() {
+            return None;
+        }
         Some(FloorHandles {
-            upload: x.upload.clone(),
+            upload: c.upload.clone(),
         })
     }
 
@@ -505,10 +752,10 @@ impl Node {
     }
 
     /// The local trim floor of `p` (`applied_offset` of its oldest retained snapshot; `0` =
-    /// no trimming). `None` for a partition that did not start.
+    /// no trimming). `None` for a partition that is not running.
     pub fn local_floor(&self, p: PartitionId) -> Option<Offset> {
-        let x = self.parts.get(p.index())?.as_ref()?;
-        Some(*x.floors.local.borrow())
+        let r = self.running(p)?;
+        Some(*r.floors.local.borrow())
     }
 
     /// The snapshot `Node::open` installed for `p` (snapshot + tail rebuild), if any.
@@ -518,35 +765,30 @@ impl Node {
 
     /// Partition `p`'s local snapshots, ascending (Leader mode; empty otherwise).
     pub async fn local_snapshots(&self, p: PartitionId) -> Vec<LocalSnapshot> {
-        match self
-            .parts
-            .get(p.index())
-            .and_then(|x| x.as_ref()?.snapshots.clone())
-        {
+        match self.running(p).and_then(|r| r.snapshots) {
             Some(s) => s.retained().await,
             None => Vec::new(),
         }
     }
 
-    /// Take a snapshot of `p` now (Leader mode), regardless of the cadence. `Ok(None)` when
-    /// nothing was applied since the newest snapshot.
+    /// Take a snapshot of `p` now (Leader mode, any role), regardless of the cadence.
+    /// `Ok(None)` when nothing was applied since the newest snapshot.
     pub async fn snapshot_now(&self, p: PartitionId) -> Result<Option<SnapshotTaken>, String> {
         let s = self
-            .parts
-            .get(p.index())
-            .and_then(|x| x.as_ref()?.snapshots.clone())
+            .running(p)
+            .and_then(|r| r.snapshots)
             .ok_or_else(|| format!("partition {} has no snapshot service", p.0))?;
         s.take().await.map_err(|e| e.to_string())
     }
 
-    /// Run one retention pass of `p` now (Leader mode). Returns the log start after it.
+    /// Run one retention pass of `p` now (Leader mode, any role). Returns the log start
+    /// after it.
     pub async fn retention_pass(&self, p: PartitionId) -> Result<Offset, String> {
         let ctx = self
-            .parts
-            .get(p.index())
-            .and_then(|x| x.as_ref()?.ctx.clone())
-            .ok_or_else(|| format!("partition {} runs no leader services", p.0))?;
-        leader::retention::run_pass(&ctx, &self.leader_cfg.retention)
+            .running(p)
+            .and_then(|r| r.ctx)
+            .ok_or_else(|| format!("partition {} runs no services", p.0))?;
+        leader::retention::run_pass(&ctx, &self.retention_cfg)
             .await
             .map_err(|e| e.to_string())
     }
@@ -567,7 +809,7 @@ impl Node {
 
     /// Partition `p`'s stored OSTR envelopes of whole batches in `[from, HW)`, up to about
     /// `max_bytes` ([`ReplicatedLog::read_envelopes`]). `LogError::Failed` for a partition
-    /// that did not start.
+    /// that is not running.
     pub async fn read_envelopes(
         &self,
         p: PartitionId,
@@ -583,7 +825,7 @@ impl Node {
     /// Partition `p`'s committed `(applied_offset, state_hash)`, read atomically: both meta
     /// rows come from ONE fjall snapshot, and every apply chunk commits them in one batch,
     /// so the pair always belongs to the same chunk (never a mix of two). `None` for a
-    /// partition that did not start or whose meta rows cannot be read (logged).
+    /// partition that is not running or whose meta rows cannot be read (logged).
     pub fn applied_state(&self, p: PartitionId) -> Option<(Offset, [u8; 32])> {
         let h = self.handle(p)?;
         // The meta keyspace holds a handful of fixed rows; one prefix scan = one snapshot.
@@ -617,16 +859,15 @@ impl Node {
         }
     }
 
-    /// Partition `p`'s handle, if it started.
-    pub fn handle(&self, p: PartitionId) -> Option<&PartitionHandle<PartitionLog>> {
-        match self.slots.get(p.index()) {
-            Some(PartitionSlot::Ready(h)) => Some(h),
-            _ => None,
-        }
+    /// Partition `p`'s current handle, if it is running (a snapshot install's reopen
+    /// replaces it: take a fresh one rather than caching it across installs).
+    pub fn handle(&self, p: PartitionId) -> Option<PartitionHandle<PartitionLog>> {
+        self.running(p).map(|r| r.handle)
     }
 
-    pub fn slots(&self) -> &[PartitionSlot] {
-        &self.slots
+    /// Every partition's current slot.
+    pub fn slots(&self) -> Vec<PartitionSlot> {
+        self.cells.iter().map(|c| c.slot()).collect()
     }
 
     pub fn router(&self) -> Arc<InProcessRouter> {
@@ -638,34 +879,62 @@ impl Node {
         self.barriers.get(p.index()).cloned()
     }
 
+    /// Partition `p`'s role (12-13). Legacy path: `Leader` at the picked term; Inspect:
+    /// `Offline`.
+    pub fn role(&self, p: PartitionId) -> Option<watch::Receiver<PartitionRole>> {
+        Some(self.cells.get(p.index())?.role.subscribe())
+    }
+
+    /// The install control of this node's partitions (12-12's `InstallCtx` takes it). It
+    /// does not keep the node alive.
+    pub fn control(&self) -> Arc<dyn PartitionControl> {
+        Arc::new(self.control.clone())
+    }
+
+    /// The partitions this node leads (12-15's uploader takes it).
+    pub fn roles(&self) -> Arc<dyn PartitionRoles> {
+        Arc::new(NodeRoles {
+            led: Arc::clone(&self.led),
+        })
+    }
+
     /// Startup steps in order of occurrence.
     pub fn startup_events(&self) -> Vec<StartupEvent> {
         self.events.snapshot()
     }
 
-    /// Stop leader services, shut every machine down gracefully (final checkpoint), then
-    /// flush and seal the WAL. Per-partition shutdown errors are logged (the WAL holds
-    /// everything acknowledged; the next open replays from the state's `applied_offset`).
+    /// Stop role drivers and services, shut every machine down gracefully (final
+    /// checkpoint), then flush and seal the WAL. Per-partition shutdown errors are logged (the
+    /// WAL holds everything acknowledged; the next open replays from the state's
+    /// `applied_offset`).
     pub async fn shutdown(self) -> Result<(), NodeError> {
         let Node {
             log,
-            slots,
+            cells,
             router,
             leaders,
+            replicas,
+            drivers,
             shutdown,
-            parts,
             ..
         } = self;
         shutdown.send_replace(true);
+        for d in drivers {
+            let _ = d.await;
+        }
         for t in leaders {
             t.shutdown().await;
         }
-        drop(parts);
+        for t in replicas {
+            t.shutdown().await;
+        }
         router.clear();
-        for slot in slots {
-            if let PartitionSlot::Ready(h) = slot {
-                let p = h.partition();
-                if let Err(e) = h.machine().clone().shutdown().await {
+        for cell in cells {
+            if let Some(run) = cell.take_running() {
+                let p = cell.p;
+                let machine = run.handle.machine().clone();
+                drop(run);
+                if let Err(e) = machine.shutdown().await {
                     warn!(partition = p.0, error = %e, "partition shutdown");
                 }
             }
@@ -675,11 +944,61 @@ impl Node {
     }
 }
 
+impl PartitionControl for Node {
+    fn quiesce_for_install(
+        &self,
+        p: PartitionId,
+    ) -> BoxFuture<'_, Result<InstallGuard, PartitionError>> {
+        self.control.quiesce_for_install(p)
+    }
+}
+
+impl PartitionRoles for Node {
+    fn led(&self) -> watch::Receiver<Arc<Vec<(PartitionId, Epoch)>>> {
+        self.led.subscribe()
+    }
+}
+
+/// [`PartitionControl`] over the role drivers (does not own the node).
+#[derive(Clone)]
+pub(crate) struct NodeControl {
+    cmds: Arc<Vec<Option<mpsc::Sender<DriverCmd>>>>,
+}
+
+impl PartitionControl for NodeControl {
+    fn quiesce_for_install(
+        &self,
+        p: PartitionId,
+    ) -> BoxFuture<'_, Result<InstallGuard, PartitionError>> {
+        let tx = self.cmds.get(p.index()).cloned().flatten();
+        Box::pin(async move {
+            let tx = tx.ok_or_else(|| {
+                PartitionError::Failed(format!(
+                    "partition {} has no role driver (not started, Inspect mode or the legacy path)",
+                    p.0
+                ))
+            })?;
+            crate::roles::quiesce_via(tx).await
+        })
+    }
+}
+
+/// [`PartitionRoles`] over the node's led set.
+struct NodeRoles {
+    led: Arc<LedSet>,
+}
+
+impl PartitionRoles for NodeRoles {
+    fn led(&self) -> watch::Receiver<Arc<Vec<(PartitionId, Epoch)>>> {
+        self.led.subscribe()
+    }
+}
+
 /// Step 3: the state must lie inside the log.
 ///
 /// A log with no records was anchored at the floor (`log_start = LEO = applied`, Phase 12
 /// F3), so it always passes; "state ahead of log" is raised only for a non-empty log.
-fn validate(meta: &StoreMeta, log: &PartitionLog) -> Result<(), String> {
+pub(crate) fn validate(meta: &StoreMeta, log: &PartitionLog) -> Result<(), String> {
     let leo = log.log_end();
     if meta.applied > leo {
         return Err(format!(
@@ -808,35 +1127,63 @@ impl LogClock for LogClockAdapter {
     }
 }
 
-/// Steps 4 and 5 of one partition.
-struct PartitionStart {
-    p: PartitionId,
-    store: Arc<PartitionStore>,
-    meta: StoreMeta,
-    rf1: Arc<PartitionLog>,
-    blobs: Arc<BlobStore>,
-    machine: MachineConfig,
-    mode: StartMode,
-    leadership: Arc<dyn LeadershipSource>,
-    clock: Arc<dyn Clock>,
-    node_id: u64,
-    events: Arc<StartupLog>,
+/// How a partition's log gets its role at open.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TermMode {
+    /// Phase 12: legacy path, removed by 12-14. No assignment source: lead at
+    /// [`next_term_epoch`] with ISR {self} and append `LeaderAnnounced` (the Phase 4 term).
+    Legacy,
+    /// Offline tooling: lead locally at [`next_term_epoch`] (HW reaches the durable end, the
+    /// whole tail is replayed), append nothing.
+    Inspect,
+    /// Meta-driven roles (12-13): the log stays unassigned (HW = applied, F4); the role
+    /// driver leads or follows at meta's epoch afterwards.
+    Roles,
+}
+
+/// A partition after steps 4/5.
+pub(crate) struct Started {
+    pub(crate) handle: PartitionHandle<PartitionLog>,
+    pub(crate) acks: Arc<PendingAcks>,
+    /// Legacy path: the epoch of the term started at open.
+    pub(crate) epoch: Option<Epoch>,
+}
+
+/// Steps 4 and 5 of one partition (also the reopen after a snapshot install, `Roles`).
+pub(crate) struct PartitionStart {
+    pub(crate) p: PartitionId,
+    pub(crate) store: Arc<PartitionStore>,
+    pub(crate) meta: StoreMeta,
+    pub(crate) rf1: Arc<PartitionLog>,
+    pub(crate) blobs: Arc<BlobStore>,
+    pub(crate) machine: MachineConfig,
+    pub(crate) term: TermMode,
+    pub(crate) leadership: Arc<dyn LeadershipSource>,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) node_id: u64,
+    pub(crate) events: Arc<StartupLog>,
 }
 
 impl PartitionStart {
-    async fn run(self) -> Result<PartitionHandle<PartitionLog>, String> {
+    pub(crate) async fn run(self) -> Result<Started, String> {
         self.seed_anchored_epochs().await?;
-        // The term's epoch is picked before catch-up (12-08): the log opened with HW =
-        // applied (F4), and leading with ISR {self} is what raises the HW to the durable LEO,
-        // so the replay below covers [applied, LEO) exactly as before. RF=1 bootstrap until
-        // the meta-first role lifecycle (12-13/12-14) assigns the epoch instead.
-        let epoch = next_term_epoch(
-            self.leadership.epoch_floor(self.p),
-            self.rf1.epochs().latest(),
-        );
-        self.rf1
-            .become_leader(epoch, ReplicaSet::solo(self.node_id))
-            .map_err(|e| format!("lead at epoch {}: {e}", epoch.0))?;
+        // Inspect and the legacy path pick a local term before catch-up (12-08): the log
+        // opened with HW = applied (F4), and leading with ISR {self} is what raises the HW to
+        // the durable LEO, so the replay below covers [applied, LEO). With roles the log stays
+        // unassigned: the role driver leads (and waits for applied >= HW) or follows.
+        let epoch = match self.term {
+            TermMode::Roles => None,
+            TermMode::Legacy | TermMode::Inspect => {
+                let epoch = next_term_epoch(
+                    self.leadership.epoch_floor(self.p),
+                    self.rf1.epochs().latest(),
+                );
+                self.rf1
+                    .become_leader(epoch, ReplicaSet::solo(self.node_id))
+                    .map_err(|e| format!("lead at epoch {}: {e}", epoch.0))?;
+                Some(epoch)
+            }
+        };
         let acks = Arc::new(PendingAcks::new());
         let machine = MachineHandle::spawn(
             Arc::clone(&self.store),
@@ -847,19 +1194,24 @@ impl PartitionStart {
             Arc::clone(&acks),
         );
         // Replayed commands' actions were acted upon (or are recomputed) by the leader
-        // services; never re-emit them.
+        // services; never re-emit them. A follower never emits.
         machine.set_emit_actions(false);
         let handle = PartitionHandle::new(
             self.p,
             Arc::clone(&self.rf1),
             Arc::clone(&self.store),
             machine.clone(),
-            acks,
+            Arc::clone(&acks),
             Arc::clone(&self.blobs),
         );
         match self.catch_up_and_announce(&handle, epoch).await {
-            Ok(()) => Ok(handle),
+            Ok(()) => Ok(Started {
+                handle,
+                acks,
+                epoch: epoch.filter(|_| self.term == TermMode::Legacy),
+            }),
             Err(reason) => {
+                drop(handle);
                 let _ = machine.shutdown().await;
                 Err(reason)
             }
@@ -871,6 +1223,7 @@ impl PartitionStart {
     /// state's applied `LeaderAnnounced` history. The next term then picks an epoch above
     /// the cursor's (an unseeded log would pick epoch 1 and its `LeaderAnnounced` would be
     /// rejected as stale), and Phase 12 divergence queries see the history below the start.
+    /// A log `reset_to` by a snapshot install is already seeded (no-op).
     async fn seed_anchored_epochs(&self) -> Result<(), String> {
         let empty = self.rf1.log_end() == self.rf1.log_start() && self.rf1.epochs().0.is_empty();
         if !empty || self.meta.cursor.epoch_history.is_empty() {
@@ -899,7 +1252,7 @@ impl PartitionStart {
     async fn catch_up_and_announce(
         &self,
         handle: &PartitionHandle<PartitionLog>,
-        epoch: Epoch,
+        epoch: Option<Epoch>,
     ) -> Result<(), String> {
         let p = self.p.0;
         let machine = handle.machine();
@@ -925,14 +1278,18 @@ impl PartitionStart {
             p,
             applied: machine.applied().borrow().0,
         });
-        if self.mode == StartMode::Inspect {
+        if self.term == TermMode::Inspect {
             return Ok(());
         }
-        // 11-05: a stale or missing x_run_index rebuilds in the background (never in Inspect).
+        // 11-05: a stale or missing x_run_index rebuilds in the background (never in Inspect;
+        // also after a snapshot install's reopen, 12-12).
         self.store.start_run_index_rebuild();
+        let Some(epoch) = epoch else {
+            return Ok(());
+        };
 
-        // 5. a new term: LeaderAnnounced{epoch} is its first record (the log already leads
-        //    at `epoch`, see `run`).
+        // 5. (legacy path) a new term: LeaderAnnounced{epoch} is its first record (the log
+        //    already leads at `epoch`, see `run`).
         handle.set_epoch(epoch);
         let la = Command::leader_announced(epoch.0, self.node_id, self.clock.now_ms());
         match handle.submit_one(la).await {
@@ -940,22 +1297,25 @@ impl PartitionStart {
             Ok(o) => return Err(format!("LeaderAnnounced{{epoch {}}}: {o:?}", epoch.0)),
             Err(e) => return Err(format!("LeaderAnnounced{{epoch {}}}: {e}", epoch.0)),
         }
-        let offset = self
-            .rf1
-            .epochs()
-            .0
-            .last()
-            .filter(|(e, _)| *e == epoch)
-            .map(|(_, o)| o.0)
+        let offset = term_offset(&self.rf1, epoch)
             .ok_or_else(|| format!("epoch {} missing from the log history", epoch.0))?;
         self.events.push(StartupEvent::TermStarted {
             p,
             epoch: epoch.0,
-            offset,
+            offset: offset.0,
         });
         machine.set_emit_actions(true);
         Ok(())
     }
+}
+
+/// The start offset of `epoch` when it is the log's latest epoch.
+pub(crate) fn term_offset(log: &PartitionLog, epoch: Epoch) -> Option<Offset> {
+    log.epochs()
+        .0
+        .last()
+        .filter(|(e, _)| *e == epoch)
+        .map(|(_, o)| *o)
 }
 
 /// Create `node.toml` or check its partition count against `count`; returns the node

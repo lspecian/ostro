@@ -12,8 +12,9 @@
 //! - [`leader`]: leader services (shuffler, timers, retention, dispatcher) started after
 //!   readiness.
 //! - [`leadership`], [`clock`], [`router`]: term epochs, wall clock, cross-partition delivery.
-//! - [`roles`]: Phase 12 role contracts (assignment source, follower driver, install control).
-//! - [`replica_services`]: Phase 12 role lifecycle (12-13).
+//! - [`roles`]: Phase 12 role contracts (assignment source, follower driver, install control)
+//!   and the per-partition role lifecycle (12-13).
+//! - [`replica_services`]: snapshots + retention in every role (12-13).
 
 pub mod acks;
 pub mod apply;
@@ -51,9 +52,11 @@ pub use leader::placement::{
 pub use leader::{LeaderConfig, LeaderCtx, LeaderTasks};
 pub use leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 pub use node::{Node, NodeConfig, NodeError, PartitionSlot, StartMode};
+pub use replica_services::{ReplicaTasks, spawn_replica_services};
 pub use roles::{
-    AssignmentSource, FollowerDriver, FollowerTask, InstallGuard, PartitionAssignmentView,
-    PartitionControl, PartitionLogHandle, PartitionRoles,
+    AssignmentSource, FollowerDriver, FollowerTask, InstallGuard, NodeTestHooks,
+    PartitionAssignmentView, PartitionControl, PartitionLogHandle, PartitionRole, PartitionRoles,
+    RoleConfig, RoleDecision, decide,
 };
 pub use router::{InProcessRouter, PartitionRouter, RouteFuture};
 pub use startup::StartupEvent;

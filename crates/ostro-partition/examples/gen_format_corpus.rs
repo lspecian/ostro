@@ -137,7 +137,8 @@ pub struct PartFormat {
 
 pub async fn part_format(node: &Node, p: u16) -> Result<PartFormat, String> {
     let commands = log_census(node, p).await?;
-    let h = match &node.slots()[usize::from(p)] {
+    let slots = node.slots();
+    let h = match &slots[usize::from(p)] {
         PartitionSlot::Ready(h) => h,
         PartitionSlot::Failed { reason, .. } => return Err(format!("p{p} failed: {reason}")),
     };
@@ -376,7 +377,7 @@ impl Gen {
     fn h(
         &self,
         p: u16,
-    ) -> Result<&ostro_partition::PartitionHandle<ostro_log::PartitionLog>, String> {
+    ) -> Result<ostro_partition::PartitionHandle<ostro_log::PartitionLog>, String> {
         self.node
             .handle(PartitionId(p))
             .ok_or_else(|| format!("p{p} not ready"))

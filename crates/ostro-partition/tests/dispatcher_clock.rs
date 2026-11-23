@@ -121,7 +121,7 @@ async fn open(
         .expect("node open")
 }
 
-fn h(node: &Node) -> &Handle {
+fn h(node: &Node) -> Handle {
     node.handle(P0).expect("partition ready")
 }
 

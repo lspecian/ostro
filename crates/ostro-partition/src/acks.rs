@@ -31,6 +31,8 @@ struct Inner {
     /// Next offset to apply (everything below was resolved).
     applied: Offset,
     failed: Option<String>,
+    /// Not leading (12-13): registrations answer `NotLeader`.
+    refusing: bool,
 }
 
 /// Two-sided ack rendezvous. The mutex is a `std::sync::Mutex` and is never held across an
@@ -67,6 +69,8 @@ impl PendingAcks {
             let (tx, rx) = oneshot::channel();
             if let Some(reason) = &g.failed {
                 let _ = tx.send(Err(PartitionError::Failed(reason.clone())));
+            } else if g.refusing {
+                let _ = tx.send(Err(PartitionError::NotLeader));
             } else if off < g.applied {
                 let r = match g.ready.remove(&off) {
                     Some(o) => Ok(o),
@@ -111,6 +115,26 @@ impl PendingAcks {
         for (off, tx) in std::mem::replace(&mut g.waiters, still) {
             let _ = tx.send(Err(PartitionError::AckLost(off)));
         }
+    }
+
+    /// Demotion (12-13): fail every current waiter with [`PartitionError::NotLeader`] and
+    /// answer every later registration the same way until [`accept`](Self::accept), without
+    /// failing the partition (the leader hint is
+    /// [`InProcessRouter::leader_hint`](crate::router::InProcessRouter::leader_hint)). A submit
+    /// that appended before the demotion therefore never waits on an offset a new leader may
+    /// fill with another command. Outcomes the apply thread resolves meanwhile are kept in
+    /// `ready` like any unclaimed outcome.
+    pub fn refuse_not_leader(&self) {
+        let mut g = self.lock();
+        g.refusing = true;
+        for (_, tx) in std::mem::take(&mut g.waiters) {
+            let _ = tx.send(Err(PartitionError::NotLeader));
+        }
+    }
+
+    /// Takeover (12-13): registrations wait for their outcomes again.
+    pub fn accept(&self) {
+        self.lock().refusing = false;
     }
 
     /// Fail every current and future waiter (the partition is failed).

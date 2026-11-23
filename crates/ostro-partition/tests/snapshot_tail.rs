@@ -98,7 +98,8 @@ async fn apply(node: &Node, cmds: &[Gen], base: usize, chunk: usize) {
 
 /// `(applied, state_hash, digest)` of a Ready partition.
 fn state(node: &Node) -> (Offset, [u8; 32], [u8; 32]) {
-    let h = match &node.slots()[0] {
+    let slots = node.slots();
+    let h = match &slots[0] {
         PartitionSlot::Ready(h) => h,
         PartitionSlot::Failed { reason, .. } => panic!("partition failed: {reason}"),
     };

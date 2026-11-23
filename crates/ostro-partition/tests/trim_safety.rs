@@ -161,7 +161,8 @@ async fn wait_passes(stats: &RetentionStats, n: u64) {
 
 /// Every offset in `[log_start, HW)` reads back contiguously.
 async fn check_readable(node: &Node) {
-    let log = node.handle(P0).expect("ready").log();
+    let h = node.handle(P0).expect("ready");
+    let log = h.log();
     let start = log.log_start();
     let hw = *log.high_watermark().borrow();
     let got = log.read(start, hw, usize::MAX).await.expect("read");
@@ -259,6 +260,7 @@ async fn floor_is_bounded_by_checkpoint_and_snapshot() {
     check_readable(&node).await;
     let live = h.store().digest().expect("digest");
     let applied = *h.machine().applied().borrow();
+    drop(h); // an owned handle keeps the store open
     node.shutdown().await.expect("shutdown");
 
     // The trimmed log alone cannot rebuild the state, but snapshot + tail can.
@@ -268,6 +270,7 @@ async fn floor_is_bounded_by_checkpoint_and_snapshot() {
     let h = node.handle(P0).expect("rebuilt from snapshot + tail");
     assert_eq!(*h.machine().applied().borrow(), applied);
     assert_eq!(h.store().digest().expect("digest"), live);
+    drop(h);
     node.shutdown().await.expect("shutdown");
 
     // Without the snapshot: "snapshot required".
@@ -361,7 +364,8 @@ fn usable_snapshot_exists(dir: &Path, start: Offset, leo: Offset) -> bool {
 async fn kill_and_reopen(node: Node, dir: &Path, delete_state: bool, step: usize) -> Option<Node> {
     let (applied, digest) = model(&node).await;
     let (start, leo) = {
-        let log = node.handle(P0).expect("ready").log();
+        let h = node.handle(P0).expect("ready");
+        let log = h.log();
         (log.log_start(), log.log_end())
     };
     node.shutdown().await.expect("kill");

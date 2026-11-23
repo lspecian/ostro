@@ -389,7 +389,7 @@ async fn read_run_on(node: &Node, run: RunId) -> Result<Exported, String> {
             rec.status
         ));
     }
-    let journal = journal_io::read_journal(h, &run)
+    let journal = journal_io::read_journal(&h, &run)
         .await
         .map_err(|e| e.to_string())?;
     let (workflow, input) = match journal.first().map(|e| &e.body) {
