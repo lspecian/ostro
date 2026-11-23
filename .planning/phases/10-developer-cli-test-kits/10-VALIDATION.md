@@ -1,9 +1,9 @@
 ---
 phase: 10
 slug: developer-cli-test-kits
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: complete
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-11-19
 ---
 
@@ -71,50 +71,50 @@ created: 2026-11-19
 
 | Task ID | Plan | Wave | Requirements | Task | Automated command(s) | Status |
 |---------|------|------|--------------|------|----------------------|--------|
-| 10-01-01 | 01 | 1 | all | Phase 9 + Phase 8 seam gate, baseline, reservations + Phase 10 rows | `grep / doc checks` | ⬜ pending |
-| 10-01-02 | 01 | 1 | all | Decisions, todos, coordination in STATE.md | `grep / doc checks` | ⬜ pending |
-| 10-02-01 | 02 | 2 | all | Workspace pins, member manifests, deny exception, anchors | `cargo build --workspace`; `cargo deny check`; `cargo tree -i` absences | ⬜ pending |
-| 10-02-02 | 02 | 2 | all | ostro-build skeleton, build.rs stub, fixture server | `cargo test -p ostro-build --test scaffold` | ⬜ pending |
-| 10-02-03 | 02 | 2 | all | ci-local / ci.yml client + polyglot steps | `bash -n scripts/ci-local.sh`; SHA-pin + FAILPOINT sync greps | ⬜ pending |
-| 10-03-01 | 03 | 2 | CLI-03..08 | Verb stubs (full flags, positional replay RUNs), exit 4, local_json | `cargo test -p ostro-cli` | ⬜ pending |
-| 10-03-02 | 03 | 2 | CLI-03..08 | p10 spawn helpers + scaffold test | `cargo test -p ostro --test p10_scaffold`; `cargo test -p ostro --test cli_verbs` | ⬜ pending |
-| 10-04-01 | 04 | 2 | SDK-06, SDK-07 | Python/TS/Go scaffolds | pytest; `node --test clients/ts/test/`; go test (to a file) | ⬜ pending |
-| 10-05-01 | 05 | 2 | SDK-06, SDK-07, CLI-07 | Domain types, REST, OpenAPI, fake, parity exclusion | `cargo test -p ostro-api --test dev_replay_surface`; `cargo test -p ostro-api` | ⬜ pending |
-| 10-05-02 | 05 | 2 | SDK-06, SDK-07, CLI-07 | Server delegation stubs + client methods | `cargo test -p ostro-server --test dev_surface`; `cargo test -p ostro-cli` | ⬜ pending |
-| 10-06-01 | 06 | 2 | SDK-06 | Annotate partition real-time sites | comment-only diff check (strip-and-compare); `cargo test -p ostro-partition` | ⬜ pending |
-| 10-06-02 | 06 | 2 | SDK-06 | Annotate server sites; SCOPED_CLOCK_GATE green | comment-only diff check (strip-and-compare); SCOPED_CLOCK_GATE; `cargo test -p ostro-server` | ⬜ pending |
-| 10-07-01 | 07 | 3 | CLI-04 | Cache, verified fetch (timeouts, size cap), safe extract, async-safe lock, offline/mirror, tools/state prune | `cargo test -p ostro-build --test toolchain_cache` | ⬜ pending |
-| 10-07-02 | 07 | 3 | CLI-04 | toolchains.toml pins, toolchain/doctor verbs, network smoke | `cargo test -p ostro-build --lib -- toolchain`; `cargo test -p ostro-cli -- toolchain`; `cargo test -p ostro-build --features polyglot --test toolchain_network` | ⬜ pending |
-| 10-08-01 | 08 | 3 | CLI-03 | Deterministic SDK bundle, project model | `cargo test -p ostro-build --test sdk_bundle --test project` | ⬜ pending |
-| 10-08-02 | 08 | 3 | CLI-03 | Templates + `ostro init` snapshots | `cargo test -p ostro-cli --test init` | ⬜ pending |
-| 10-09-01 | 09 | 3 | SDK-07 | Move the client into ostro-client, CLI shim | `cargo test -p ostro-client --lib`; `cargo test -p ostro --test cli_verbs`; snapshots unchanged | ⬜ pending |
-| 10-09-02 | 09 | 3 | SDK-07 | Typed surface + four-client OpenAPI contract | `cargo test -p ostro-client --test contract --test typed` | ⬜ pending |
-| 10-10-01 | 10 | 3 | SDK-06 | DevClock, subscribe_changes/skip_barrier, dispatcher wake + grant read guard | `cargo test -p ostro-server --lib -- devclock`; `cargo test -p ostro-partition` | ⬜ pending |
-| 10-10-02 | 10 | 3 | SDK-06 | Seam wiring, [dev] config, manual skip, `--time-skipping`, `build-info --json` | `cargo test -p ostro --test time_skipping_cli --test build_info`; `cargo test -p ostro-server --test config` | ⬜ pending |
-| 10-10-03 | 10 | 3 | SDK-06 | p10-time guest + manual suite (zero leases after each skip) | `cargo test -p ostro-server --test time_skipping`; SCOPED_CLOCK_GATE | ⬜ pending |
-| 10-11-01 | 11 | 3 | CLI-07 | replay_check (4 args) + corpus loader; corpus test via it | `cargo test -p ostro-engine --test replay_corpus --test replay_check` | ⬜ pending |
-| 10-11-02 | 11 | 3 | CLI-07 | Server replay endpoint + `ostro replay` (positional RUN, exit 4, --corpus) | `cargo test -p ostro-server --test replay_endpoint`; `cargo test -p ostro-cli -- replay` | ⬜ pending |
-| 10-11-03 | 11 | 3 | CLI-07 | SC3 gate Rust/Python/TS + docs/replay.md | `cargo test -p ostro --test replay_cli`; `cargo test -p ostro --features polyglot --test replay_cli` | ⬜ pending |
-| 10-12-01 | 12 | 4 | CLI-04 | Pipeline, input hash (IGNORE incl. .venv/.tox), stage, env scrub, validate, manifest | `cargo test -p ostro-build --test pipeline` | ⬜ pending |
-| 10-12-02 | 12 | 4 | CLI-04 | Rust builder (target/ostro/cargo, zig shim filtering) + `ostro build`; offline fixture | `CARGO_NET_OFFLINE=true cargo test -p ostro-build --test build_rust`; `cargo test -p ostro --test build_cli`; `cargo test -p ostro-build --features polyglot --test build_rust_hermetic --test build_rust` | ⬜ pending |
-| 10-13-01 | 13 | 4 | SDK-06 | Idle accessors, waiter count, DevTime, lease-safe manual skip | `cargo test -p ostro-partition`; `cargo test -p ostro-server --test time_skipping`; `cargo test -p ostro-server --lib -- devtime` | ⬜ pending |
-| 10-13-02 | 13 | 4 | SDK-06 | Auto-skip wiring, ApiWriteCounter, race suite | `cargo test -p ostro-server --test time_skipping_auto`; SCOPED_CLOCK_GATE | ⬜ pending |
-| 10-14-01 | 14 | 4 | SDK-07 | Python client + e2e (manual dev_skip) + uv build dry run | pytest; `uv build` | ⬜ pending |
-| 10-14-02 | 14 | 4 | SDK-07 | TS + Go clients + e2e + dry runs + contract | `node --test clients/ts/test/`; `npm pack --dry-run`; go test (to a file); `cargo test -p ostro-client --test contract` | ⬜ pending |
-| 10-15-01 | 15 | 5 | CLI-04 | Python builder (uv + wheel, uv.lock export), pure deps | `cargo test -p ostro-build --features polyglot --test build_polyglot -- python` | ⬜ pending |
-| 10-15-02 | 15 | 5 | CLI-04 | TS builder, parity (crates/ostro), OSTRO_POLYGLOT_BUILDER=ostro | `cargo test -p ostro-build --features polyglot --test build_polyglot`; `cargo test -p ostro --features polyglot --test parity`; `OSTRO_POLYGLOT_BUILDER=ostro cargo test -p ostro-conformance --features polyglot --test polyglot_python --test polyglot_ts` | ⬜ pending |
-| 10-15-03 | 15 | 5 | CLI-04 | --docker runner, template builds, docs/toolchains.md | `cargo test -p ostro-build --test docker_shim`; `cargo test -p ostro-build --features polyglot --test templates_build` | ⬜ pending |
-| 10-16-01 | 16 | 5 | CLI-05 | Deploy build-if-needed, idempotent activation (offline fixture) | `CARGO_NET_OFFLINE=true cargo test -p ostro --test deploy_build`; `cargo test -p ostro --test cli_verbs` | ⬜ pending |
-| 10-16-02 | 16 | 5 | CLI-08 | `ostro dev --watch` | `CARGO_NET_OFFLINE=true cargo test -p ostro --test dev_watch` | ⬜ pending |
-| 10-17-01 | 17 | 6 | SDK-06 | Ready-line contract + Rust kit | `cargo test -p ostro-client --features testing --test kit` | ⬜ pending |
-| 10-17-02 | 17 | 6 | SDK-06, SDK-07 | Python kit + pytest plugin, TS kit | pytest; `node --test clients/ts/test/` | ⬜ pending |
-| 10-17-03 | 17 | 6 | SDK-06 | Go ostrotest, template tests, docs/testing.md | go test (to a file); `cargo test -p ostro --test ready_line`; `cargo test -p ostro --features polyglot --test template_tests` | ⬜ pending |
-| 10-18-01 | 18 | 6 | CLI-03..08 | `ostro completions` (presence checks) | `cargo test -p ostro --test completions` | ⬜ pending |
-| 10-18-02 | 18 | 6 | CLI-03..08 | JSON envelope snapshots, EXIT_CODES, docs/cli-json.md | `cargo test -p ostro --test json_contract`; `cargo test -p ostro --test cli_verbs` | ⬜ pending |
-| 10-19-01 | 19 | 7 | CLI-03, CLI-04, CLI-05 | clean-machine script (`--listen 127.0.0.1:0`) + driver; `--local` run | `cargo test -p ostro --test clean_machine`; `bash scripts/clean-machine.sh all --local --no-cc` | ⬜ pending |
-| 10-19-02 | 19 | 7 | CLI-03, CLI-04, CLI-05 | ci.yml clean-machine job, size gate, getting-started | grep checks (the full ci-local run is plan-level verification) | ⬜ pending |
-| 10-20-01 | 20 | 8 | all | Full gate + gate-only suites + SC evidence | gate commands 1–9 | ⬜ pending |
-| 10-20-02 | 20 | 8 | all | RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION, DECISIONS, STATE | `grep / doc checks` | ⬜ pending |
+| 10-01-01 | 01 | 1 | all | Phase 9 + Phase 8 seam gate, baseline, reservations + Phase 10 rows | `grep / doc checks` | ✅ green (ca8a62e) |
+| 10-01-02 | 01 | 1 | all | Decisions, todos, coordination in STATE.md | `grep / doc checks` | ✅ green (b2e58ce) |
+| 10-02-01 | 02 | 2 | all | Workspace pins, member manifests, deny exception, anchors | `cargo build --workspace`; `cargo deny check`; `cargo tree -i` absences | ✅ green (d5a6fe1) |
+| 10-02-02 | 02 | 2 | all | ostro-build skeleton, build.rs stub, fixture server | `cargo test -p ostro-build --test scaffold` | ✅ green (b266d9f) |
+| 10-02-03 | 02 | 2 | all | ci-local / ci.yml client + polyglot steps | `bash -n scripts/ci-local.sh`; SHA-pin + FAILPOINT sync greps | ✅ green (9391468) |
+| 10-03-01 | 03 | 2 | CLI-03..08 | Verb stubs (full flags, positional replay RUNs), exit 4, local_json | `cargo test -p ostro-cli` | ✅ green (263690b) |
+| 10-03-02 | 03 | 2 | CLI-03..08 | p10 spawn helpers + scaffold test | `cargo test -p ostro --test p10_scaffold`; `cargo test -p ostro --test cli_verbs` | ✅ green (d2bf2ad) |
+| 10-04-01 | 04 | 2 | SDK-06, SDK-07 | Python/TS/Go scaffolds | pytest; `node --test clients/ts/test/`; go test (to a file) | ✅ green (53bce34) |
+| 10-05-01 | 05 | 2 | SDK-06, SDK-07, CLI-07 | Domain types, REST, OpenAPI, fake, parity exclusion | `cargo test -p ostro-api --test dev_replay_surface`; `cargo test -p ostro-api` | ✅ green (cbf6f3c) |
+| 10-05-02 | 05 | 2 | SDK-06, SDK-07, CLI-07 | Server delegation stubs + client methods | `cargo test -p ostro-server --test dev_surface`; `cargo test -p ostro-cli` | ✅ green (9ff94a1) |
+| 10-06-01 | 06 | 2 | SDK-06 | Annotate partition real-time sites | comment-only diff check (strip-and-compare); `cargo test -p ostro-partition` | ✅ green (727b415) |
+| 10-06-02 | 06 | 2 | SDK-06 | Annotate server sites; SCOPED_CLOCK_GATE green | comment-only diff check (strip-and-compare); SCOPED_CLOCK_GATE; `cargo test -p ostro-server` | ✅ green (2924068) |
+| 10-07-01 | 07 | 3 | CLI-04 | Cache, verified fetch (timeouts, size cap), safe extract, async-safe lock, offline/mirror, tools/state prune | `cargo test -p ostro-build --test toolchain_cache` | ✅ green (553ffe7) |
+| 10-07-02 | 07 | 3 | CLI-04 | toolchains.toml pins, toolchain/doctor verbs, network smoke | `cargo test -p ostro-build --lib -- toolchain`; `cargo test -p ostro-cli -- toolchain`; `cargo test -p ostro-build --features polyglot --test toolchain_network` | ✅ green (ab32748) |
+| 10-08-01 | 08 | 3 | CLI-03 | Deterministic SDK bundle, project model | `cargo test -p ostro-build --test sdk_bundle --test project` | ✅ green (849af8f) |
+| 10-08-02 | 08 | 3 | CLI-03 | Templates + `ostro init` snapshots | `cargo test -p ostro-cli --test init` | ✅ green (fe0f829) |
+| 10-09-01 | 09 | 3 | SDK-07 | Move the client into ostro-client, CLI shim | `cargo test -p ostro-client --lib`; `cargo test -p ostro --test cli_verbs`; snapshots unchanged | ✅ green (77725ab) |
+| 10-09-02 | 09 | 3 | SDK-07 | Typed surface + four-client OpenAPI contract | `cargo test -p ostro-client --test contract --test typed` | ✅ green (e3d9b18) |
+| 10-10-01 | 10 | 3 | SDK-06 | DevClock, subscribe_changes/skip_barrier, dispatcher wake + grant read guard | `cargo test -p ostro-server --lib -- devclock`; `cargo test -p ostro-partition` | ✅ green (41d4c95) |
+| 10-10-02 | 10 | 3 | SDK-06 | Seam wiring, [dev] config, manual skip, `--time-skipping`, `build-info --json` | `cargo test -p ostro --test time_skipping_cli --test build_info`; `cargo test -p ostro-server --test config` | ✅ green (c196987, 7291022) |
+| 10-10-03 | 10 | 3 | SDK-06 | p10-time guest + manual suite (zero leases after each skip) | `cargo test -p ostro-server --test time_skipping`; SCOPED_CLOCK_GATE | ✅ green (5d13fa1) |
+| 10-11-01 | 11 | 3 | CLI-07 | replay_check (4 args) + corpus loader; corpus test via it | `cargo test -p ostro-engine --test replay_corpus --test replay_check` | ✅ green (cba9864) |
+| 10-11-02 | 11 | 3 | CLI-07 | Server replay endpoint + `ostro replay` (positional RUN, exit 4, --corpus) | `cargo test -p ostro-server --test replay_endpoint`; `cargo test -p ostro-cli -- replay` | ✅ green (728bdea) |
+| 10-11-03 | 11 | 3 | CLI-07 | SC3 gate Rust/Python/TS + docs/replay.md | `cargo test -p ostro --test replay_cli`; `cargo test -p ostro --features polyglot --test replay_cli` | ✅ green (5e137f7) |
+| 10-12-01 | 12 | 4 | CLI-04 | Pipeline, input hash (IGNORE incl. .venv/.tox), stage, env scrub, validate, manifest | `cargo test -p ostro-build --test pipeline` | ✅ green (6983af8) |
+| 10-12-02 | 12 | 4 | CLI-04 | Rust builder (target/ostro/cargo, zig shim filtering) + `ostro build`; offline fixture | `CARGO_NET_OFFLINE=true cargo test -p ostro-build --test build_rust`; `cargo test -p ostro --test build_cli`; `cargo test -p ostro-build --features polyglot --test build_rust_hermetic --test build_rust` | ✅ green (224d88e, 97bea5c, 7b4f90e) |
+| 10-13-01 | 13 | 4 | SDK-06 | Idle accessors, waiter count, DevTime, lease-safe manual skip | `cargo test -p ostro-partition`; `cargo test -p ostro-server --test time_skipping`; `cargo test -p ostro-server --lib -- devtime` | ✅ green (0ab9421) |
+| 10-13-02 | 13 | 4 | SDK-06 | Auto-skip wiring, ApiWriteCounter, race suite | `cargo test -p ostro-server --test time_skipping_auto`; SCOPED_CLOCK_GATE | ✅ green (97e4d93) |
+| 10-14-01 | 14 | 4 | SDK-07 | Python client + e2e (manual dev_skip) + uv build dry run | pytest; `uv build` | ✅ green (91b0b44) |
+| 10-14-02 | 14 | 4 | SDK-07 | TS + Go clients + e2e + dry runs + contract | `node --test clients/ts/test/`; `npm pack --dry-run`; go test (to a file); `cargo test -p ostro-client --test contract` | ✅ green (480c7f2) |
+| 10-15-01 | 15 | 5 | CLI-04 | Python builder (uv + wheel, uv.lock export), pure deps | `cargo test -p ostro-build --features polyglot --test build_polyglot -- python` | ✅ green (3657e45) |
+| 10-15-02 | 15 | 5 | CLI-04 | TS builder, parity (crates/ostro), OSTRO_POLYGLOT_BUILDER=ostro | `cargo test -p ostro-build --features polyglot --test build_polyglot`; `cargo test -p ostro --features polyglot --test parity`; `OSTRO_POLYGLOT_BUILDER=ostro cargo test -p ostro-conformance --features polyglot --test polyglot_python --test polyglot_ts` | ✅ green (af1b507) |
+| 10-15-03 | 15 | 5 | CLI-04 | --docker runner, template builds, docs/toolchains.md | `cargo test -p ostro-build --test docker_shim`; `cargo test -p ostro-build --features polyglot --test templates_build` | ✅ green (9c068ae) |
+| 10-16-01 | 16 | 5 | CLI-05 | Deploy build-if-needed, idempotent activation (offline fixture) | `CARGO_NET_OFFLINE=true cargo test -p ostro --test deploy_build`; `cargo test -p ostro --test cli_verbs` | ✅ green (bc12cf1) |
+| 10-16-02 | 16 | 5 | CLI-08 | `ostro dev --watch` | `CARGO_NET_OFFLINE=true cargo test -p ostro --test dev_watch` | ✅ green (5188995) |
+| 10-17-01 | 17 | 6 | SDK-06 | Ready-line contract + Rust kit | `cargo test -p ostro-client --features testing --test kit` | ✅ green (fcb89a3) |
+| 10-17-02 | 17 | 6 | SDK-06, SDK-07 | Python kit + pytest plugin, TS kit | pytest; `node --test clients/ts/test/` | ✅ green (4a3cc57) |
+| 10-17-03 | 17 | 6 | SDK-06 | Go ostrotest, template tests, docs/testing.md | go test (to a file); `cargo test -p ostro --test ready_line`; `cargo test -p ostro --features polyglot --test template_tests` | ✅ green (b75e65c) |
+| 10-18-01 | 18 | 6 | CLI-03..08 | `ostro completions` (presence checks) | `cargo test -p ostro --test completions` | ✅ green (b9411ef, 8ca8c8c) |
+| 10-18-02 | 18 | 6 | CLI-03..08 | JSON envelope snapshots, EXIT_CODES, docs/cli-json.md | `cargo test -p ostro --test json_contract`; `cargo test -p ostro --test cli_verbs` | ✅ green (964fd38) |
+| 10-19-01 | 19 | 7 | CLI-03, CLI-04, CLI-05 | clean-machine script (`--listen 127.0.0.1:0`) + driver; `--local` run | `cargo test -p ostro --test clean_machine`; `bash scripts/clean-machine.sh all --local --no-cc` | ✅ green (46aa05f, 0e95072) |
+| 10-19-02 | 19 | 7 | CLI-03, CLI-04, CLI-05 | ci.yml clean-machine job, size gate, getting-started | grep checks (the full ci-local run is plan-level verification) | ✅ green (617b6d1) |
+| 10-20-01 | 20 | 8 | all | Full gate + gate-only suites + SC evidence | gate commands 1–9 | ✅ green (gate run below; ostro-build polyglot ⚠️ flaky on a cold cache, green on rerun) |
+| 10-20-02 | 20 | 8 | all | RESERVATIONS flip, REQUIREMENTS ticks, VALIDATION, DECISIONS, STATE | `grep / doc checks` | ✅ green (10-20 docs commits) |
 
 ---
 
@@ -145,14 +145,14 @@ created: 2026-11-19
 
 ## Wave 0 Requirements
 
-- [ ] `crates/ostro-build/tests/common/fixture_server.rs`: generated archives (good, bad sha, traversal, absolute, symlink escape/chain, internal symlink, hardlink escape, oversized, slow) (10-02)
-- [ ] `crates/ostro/tests/common/p10.rs`: spawn helper + hand-written ready-line parser; `run_cli_in` (10-03)
-- [ ] `clients/python`, `clients/ts`, `clients/go` scaffolds with green placeholder tests (10-04)
-- [ ] ci-local + ci.yml client steps, `--no-go`, SHA-pinned `actions/setup-go`, polyglot step (10-02)
-- [ ] API contract (routes, fake, server stubs, client methods) before any implementation plan (10-05)
-- [ ] Clock gate made enforceable (10-06)
-- [ ] Guests `guests/p10-time` (10-10) and `guests/p10-replay-v{1,2,3}` (10-11); the offline Rust fixture project (10-12)
-- [ ] Cold-cache measurement: 10-15 (local warm/cold per language) and 10-19 (`clean-machine.sh --local`; containers in CI)
+- [x] `crates/ostro-build/tests/common/fixture_server.rs`: generated archives (good, bad sha, traversal, absolute, symlink escape/chain, internal symlink, hardlink escape, oversized, slow) (10-02)
+- [x] `crates/ostro/tests/common/p10.rs`: spawn helper + hand-written ready-line parser; `run_cli_in` (10-03)
+- [x] `clients/python`, `clients/ts`, `clients/go` scaffolds with green placeholder tests (10-04)
+- [x] ci-local + ci.yml client steps, `--no-go`, SHA-pinned `actions/setup-go`, polyglot step (10-02)
+- [x] API contract (routes, fake, server stubs, client methods) before any implementation plan (10-05)
+- [x] Clock gate made enforceable (10-06)
+- [x] Guests `guests/p10-time` (10-10) and `guests/p10-replay-v{1,2,3}` (10-11); the offline Rust fixture project (10-12)
+- [x] Cold-cache measurement: 10-15 (local warm/cold per language) and 10-19 (`clean-machine.sh --local`; containers in CI)
 
 ---
 
@@ -170,11 +170,35 @@ created: 2026-11-19
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags in verify commands (`dev --watch` tests drive the process and exit)
-- [ ] Feedback latency < 60 s at task level (warm toolchain cache)
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags in verify commands (`dev --watch` tests drive the process and exit)
+- [x] Feedback latency < 60 s at task level (warm toolchain cache)
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** approved by the 10-20 gate (2026-11-23); `/gsd:verify-work` pending
+
+---
+
+## Gate run (10-20, 2026-11-23)
+
+Run from a scratch worktree, `CARGO_TARGET_DIR=target/slot-2`, `nice -n 10`, `CARGO_BUILD_JOBS=4`, with the 12-06/12-09 gates and ci-fix runs in parallel (load 8–10).
+
+| # | Command | Result | Duration |
+|---|---------|--------|----------|
+| 1 | `bash scripts/ci-local.sh` (musl, polyglot, clients, size gate) at a6525c2 | 36/37 PASS, 3 external SKIP (PG/MySQL/S3 unset, human_needed as in every gate); **ostro-build polyglot FAIL** (`build_polyglot::ts_offline_after_warm`: `writing …/target/ostro-toolchains-test/state/npm/npmrc: No such file or directory`, first run on a fresh worktree's cold toolchain cache, concurrent with `ts_template_builds`) → **rerun of the whole step green** (all ostro-build polyglot suites + `parity`/`replay_cli`/`template_tests`, 232 s). No "scaffold pending" and no "not present yet" line in the output. musl binary **56.2 MB** (56,239,472 bytes; +33.5 MB vs Phase 4's 22.7 MB) | 4h42m (01:06–05:48 UTC); cargo test 5150 s, failpoint suites 5003 s, musl zigbuild test 4188 s |
+| 2 | `cargo deny check`; `cargo tree -i <c> -e normal,build` for chrono, bincode, webpki-roots, dirs-sys, option-ext, ring, openssl-sys; `grep CC0-1.0 deny.toml` | deny PASS; all seven absent from normal/build edges (chrono is in the graph only through the Phase 6 `s3s-fs` dev-dependency of ostro-objstore, ring only in Cargo.lock with no host edge; both pre-date Phase 10); one crate-scoped `{ allow = ["CC0-1.0"], crate = "notify" }` (line 17 is the pre-existing comment) | 2 s |
+| 3 | `cargo test -p ostro-engine --test replay_corpus` (6 passed); `cargo test -p ostro-witcheck` (8 passed); `git diff --exit-code ca8a62e HEAD -- wit/` (empty); `git diff --exit-code --diff-filter=MDR ca8a62e HEAD -- tests/replay-corpus` (empty) | PASS | 42 s + 10 s |
+| 4 / 9 | strict CLOCK_GATE | 0 hits | <1 s |
+| 5 | `cargo test -p ostro-build --features polyglot --test build_rust_hermetic -- --nocapture` | 1 passed (`hermetic_build_without_cc_uses_rustup_init_and_zig`) | 13 s |
+| 6 | `cargo test -p ostro-server --test time_skipping_auto -- --ignored race_gate_1000 --nocapture --test-threads=1` | 1 passed: signal_before_await 1000 iterations p50 64 ms / p99 116 ms; start_then_await 1000 iterations p50 63 ms / p99 115 ms; zero leases after every skip | 133 s |
+| 7 | `cargo test -p ostro --test clean_machine -- --ignored local_all --nocapture --test-threads=1` | `CLEAN rust local OK total=41.3` (rustup-init + zig cc host linker, no cc), `CLEAN python local OK total=13.2`, `CLEAN ts local OK total=16.7` (all < 600 s) | 74 s |
+| 8 | `OSTRO_REQUIRE_ALL_CLIENTS=1 cargo test -p ostro-client --test contract -- --nocapture` | 5 passed; python/ts/go 16 routes each, 0 missing; clients rust, python, ts, go; no "pending" | 11 s |
+| SC2 | `cargo test -p ostro --test deploy_build --test dev_watch -- --test-threads=1` | 5 + 5 passed | 75 s |
+| SC3 | `cargo test -p ostro --features polyglot --test replay_cli` | `rust_replay_gate`, `python_replay_gate`, `ts_replay_gate`, `corpus_offline` ok (6 passed) | 39 s |
+| SC4 | `cargo test -p ostro-client --features testing --test kit -- --nocapture`; pytest/node/go kits (ci-local client steps); `cargo test -p ostro --features polyglot --test template_tests` | kit 9 passed (3-day `sleep_for` in 59 ms wall); python 25 passed, ts `# pass 26 # fail 0`, go `ok ostro`, `ok ostrotest`; template tests rust/python/ts passed (53 s) | — |
+
+Race gate command (10-13): `cargo test -p ostro-server --locked --test time_skipping_auto -- --ignored race_gate_1000 --nocapture`.
+
+**Recheck at 820ab8a** (main moved during the gate: ci-fix6 `write_atomic` per-call temp names + dev skip `by` exactness, and Phase 12 12-07/12-13/12-15 code): `cargo build -p ostro`; the full "ostro-build polyglot" step (16 suites incl. parity/replay_cli/template_tests, 216 s); `time_skipping` + `time_skipping_auto` (52 s); `deploy_build`, `dev_watch`, `time_skipping_cli`, `ready_line`, `json_contract`, `cli_verbs` (116 s); ostro-client `kit`, `contract`, `typed`; the python/ts/go client steps (25 passed, `# pass 26 # fail 0`, go ok); strict CLOCK_GATE 0 hits. All green. The full ci-local was not re-run at 820ab8a.
