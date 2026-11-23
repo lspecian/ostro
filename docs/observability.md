@@ -4,8 +4,8 @@ Ostro exposes three signals:
 
 - **Metrics:** a Prometheus scrape endpoint, `GET /metrics`.
 - **Traces:** OTLP over gRPC.
-- **Logs:** node logs on stdout (pretty, compact or JSON), optionally also exported as
-  OTLP LogRecords.
+- **Logs:** node logs on stderr (pretty, compact or JSON), optionally also exported as
+  OTLP LogRecords. stdout carries only the ready line and machine-readable output.
 
 The pipes are set up in plan 08-04 (`crates/ostro-server/src/telemetry.rs` and
 `logging.rs`). The span model and guest logs are filled in by 08-11 and 08-17.

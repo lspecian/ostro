@@ -163,7 +163,7 @@ export class TestEnv {
       stderr.text += d;
       if (stderr.text.length > 2 * STDERR_KEEP) stderr.text = stderr.text.slice(-STDERR_KEEP);
     });
-    // stdout is drained to the end: the server logs there.
+    // stdout is drained to the end so the server never blocks on a full pipe.
     const lines = createInterface({ input: child.stdout });
     let m;
     try {

@@ -258,7 +258,7 @@ func StartE(opts ...Option) (*Env, error) {
 	}
 	ready := make(chan []string, 1)
 	go func() {
-		// Drained to the end: the server logs on stdout.
+		// Drained to the end so the server never blocks on a full pipe.
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 64<<10), 1<<20)
 		sent := false

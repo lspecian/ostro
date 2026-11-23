@@ -235,7 +235,7 @@ async fn busy_port_fails_with_one_line() {
         &["--ephemeral", "--listen", &addr.to_string()],
     ));
     assert!(!st.success(), "must fail on a busy port");
-    let err = err.trim();
+    let err = common::without_logs(&err);
     assert_eq!(err.lines().count(), 1, "one-line error: {err}");
     assert!(err.contains(&addr.to_string()), "names the address: {err}");
     drop(held);

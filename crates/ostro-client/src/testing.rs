@@ -458,7 +458,7 @@ impl TestEnv {
             TestError::Startup(format!("cannot spawn {} dev: {e}", bin.display()))
         })?;
 
-        // stdout: the ready line, then drained (the server logs there) so it never blocks.
+        // stdout: the ready line, then drained so the server never blocks on a full pipe.
         let (tx, rx) = mpsc::channel();
         let out = child.stdout.take().expect("piped stdout");
         std::thread::spawn(move || {

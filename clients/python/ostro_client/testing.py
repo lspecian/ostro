@@ -208,7 +208,7 @@ class TestEnv:
 
         def read_out() -> None:
             assert proc.stdout is not None
-            for line in proc.stdout:  # drained to the end: the server logs on stdout
+            for line in proc.stdout:  # drained to the end so the server never blocks on a full pipe
                 if not got.is_set():
                     m = READY_LINE.match(line.rstrip("\r\n"))
                     if m:

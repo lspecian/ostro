@@ -55,6 +55,27 @@ pub fn free_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], free_port()))
 }
 
+/// `stderr` without the tracing log output (logs go to stderr; a failing start may log
+/// before its error): drops timestamped log lines, the pretty format's `at`/`in`
+/// continuation lines and blank lines, leaving what the CLI itself printed.
+pub fn without_logs(stderr: &str) -> String {
+    let is_log = |l: &str| {
+        let t = l.trim_start();
+        let b = t.as_bytes();
+        let stamped = b.len() > 11
+            && b[..4].iter().all(u8::is_ascii_digit)
+            && b[4] == b'-'
+            && b[7] == b'-'
+            && b[10] == b'T';
+        stamped || l.starts_with("    at ") || l.starts_with("    in ") || t.is_empty()
+    };
+    stderr
+        .lines()
+        .filter(|l| !is_log(l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The binary as a `Command`, with every inherited `OSTRO_*` variable removed (only
 /// the ones a test sets apply) and `RUST_LOG` cleared (the profile level applies).
 pub fn command() -> Command {

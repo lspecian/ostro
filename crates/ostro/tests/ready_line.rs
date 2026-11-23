@@ -2,7 +2,8 @@
 //!
 //! - `ostro dev --ephemeral` prints exactly one stdout line matching
 //!   [`READY_LINE_PATTERN`], with and without `--time-skipping` and `--watch <project>`.
-//!   (The server's own log lines may come before it on stdout; kits scan every line.)
+//!   Logs go to stderr: the ready line is the first stdout line
+//!   (`dev_stdout_has_no_log_lines_before_the_ready_line`); kits still scan every line.
 //! - The four test kits carry the same pattern literal: this test reads them from
 //!   `crates/ostro-client/src/testing.rs`, `clients/python/ostro_client/testing.py`,
 //!   `clients/ts/src/testing.js` and `clients/go/ostrotest/ostrotest.go`.
@@ -220,6 +221,32 @@ fn dev_ephemeral_watch_prints_the_frozen_line() {
         log.iter().any(|l| l.starts_with("ostro dev: deployed")),
         "{}",
         log.join("\n")
+    );
+    kill(child);
+}
+
+/// Logs go to stderr: at `RUST_LOG=info` (≈1600 startup lines) the ready line is still
+/// the first and only stdout line before readiness, and the log lines are on stderr.
+#[test]
+fn dev_stdout_has_no_log_lines_before_the_ready_line() {
+    let (lines, r, child, err, _cwd) = spawn(&[], &[("RUST_LOG", "info"), ("NO_COLOR", "1")]);
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout before the ready line must be the ready line alone: {:#?}",
+        &lines[..lines.len().min(20)]
+    );
+    check(&lines, &r);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut stderr = Vec::new();
+    while Instant::now() < deadline && !stderr.iter().any(|l: &String| l.contains("INFO")) {
+        if let Ok(l) = err.recv_timeout(Duration::from_millis(200)) {
+            stderr.push(l);
+        }
+    }
+    assert!(
+        stderr.iter().any(|l| l.contains("INFO")),
+        "the INFO log lines must be on stderr: {stderr:#?}"
     );
     kill(child);
 }
