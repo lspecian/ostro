@@ -132,6 +132,53 @@ pub struct ServerControlPlane {
     /// Phase 10 (10-10): the dev clock when time skipping is on (`ostro dev --ephemeral
     /// --time-skipping`); `None` = the dev endpoints answer 409 `time_skipping_disabled`.
     pub(crate) dev: Option<Arc<crate::devclock::DevClock>>,
+    /// Phase 12 (12-14, D-P12-21): answers partition-scoped calls on a partition this node
+    /// does not lead with `Unavailable{reason: not_leader, partition, leader, leader_addr}`.
+    pub(crate) leader_hints: Option<Arc<dyn LeaderHints>>,
+    /// Phase 12 (12-14, D-P12-22): pushes a new module blob to enough peers before its
+    /// `Module` record is written.
+    pub(crate) module_push: Option<Arc<dyn ModulePush>>,
+}
+
+/// Phase 12 (12-14, D-P12-22): module blob replication before the `Module` record.
+pub trait ModulePush: Send + Sync + 'static {
+    /// Push blob `sha` (stored locally in `blobs`) to `min(min_insync, live members) − 1`
+    /// peers; `Err` (the reason) when fewer acknowledged it.
+    fn push<'a>(
+        &'a self,
+        blobs: &'a Arc<BlobStore>,
+        sha: [u8; 32],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+/// Phase 12 (12-14, D-P12-21): whether this node leads a partition, and who does otherwise.
+pub trait LeaderHints: Send + Sync + 'static {
+    /// `None` while this node leads `p`; otherwise the `Unavailable` (HTTP 503 / gRPC
+    /// `UNAVAILABLE`) answer with details `{reason: "not_leader", partition, leader,
+    /// leader_addr}` (leader / address `null` when unknown).
+    fn not_leader(&self, p: PartitionId) -> Option<ApiError>;
+}
+
+/// The `Unavailable` answer for a partition this node does not lead (D-P12-21).
+pub fn not_leader_error(
+    p: PartitionId,
+    leader: Option<u64>,
+    leader_addr: Option<String>,
+) -> ApiError {
+    let who = match leader {
+        Some(l) => format!("node {l}"),
+        None => "no node (a new leader is being elected)".to_owned(),
+    };
+    ApiError::unavailable(format!(
+        "not the leader of partition {}: the partition leader is {who}; retry there",
+        p.0
+    ))
+    .with_details(serde_json::json!({
+        "reason": "not_leader",
+        "partition": p.0,
+        "leader": leader,
+        "leader_addr": leader_addr,
+    }))
 }
 
 impl std::fmt::Debug for ServerControlPlane {
@@ -176,7 +223,21 @@ impl ServerControlPlane {
             p7,
             p11: Arc::new(OnceLock::new()),
             dev: None,
+            leader_hints: None,
+            module_push: None,
         }
+    }
+
+    /// Phase 12 (12-14): replicate module blobs before their `Module` record.
+    pub(crate) fn with_module_push(mut self, push: Arc<dyn ModulePush>) -> Self {
+        self.module_push = Some(push);
+        self
+    }
+
+    /// Phase 12 (12-14): answer not-leader calls with leader hints.
+    pub(crate) fn with_leader_hints(mut self, hints: Arc<dyn LeaderHints>) -> Self {
+        self.leader_hints = Some(hints);
+        self
     }
 
     /// Phase 10 (10-10): serve the dev clock endpoints from `dev` (`None`: 409).
@@ -227,8 +288,14 @@ impl ServerControlPlane {
         self.count
     }
 
-    /// Partition `p`'s handle, or `Unavailable` when its slot failed to start.
+    /// Partition `p`'s handle, or `Unavailable` when its slot failed to start or this node
+    /// does not lead it (Phase 12: details name the leader, D-P12-21).
     pub fn partition(&self, p: PartitionId) -> Result<&PartitionHandle<PartitionLog>, ApiError> {
+        if let Some(hints) = &self.leader_hints
+            && let Some(e) = hints.not_leader(p)
+        {
+            return Err(e);
+        }
         self.partitions
             .get(p.index())
             .and_then(Option::as_ref)
@@ -508,10 +575,11 @@ impl ControlPlane for ServerControlPlane {
         replay::replay_module(self, r).await
     }
 
-    /// Serving, meta has a leader, and every partition slot is `Ready` and not failed.
+    /// Serving, meta has a leader (any voter: a cluster node need not lead meta), and every
+    /// partition slot is `Ready` and not failed.
     fn ready(&self) -> bool {
         self.serving.load(Ordering::SeqCst)
-            && self.meta.is_leader()
+            && self.meta.raft().status().leader_id.is_some()
             && self.partitions.iter().all(|slot| {
                 slot.as_ref().is_some_and(|h| {
                     !matches!(

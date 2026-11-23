@@ -52,7 +52,8 @@ pub use leader::placement::{
 pub use leader::{LeaderConfig, LeaderCtx, LeaderTasks};
 pub use leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 pub use node::{
-    Node, NodeConfig, NodeError, PartitionSlot, StartMode, bind_cluster_id, bind_node_id,
+    LocalAssignments, Node, NodeConfig, NodeError, PartitionSlot, StartMode, bind_cluster_id,
+    bind_node_id, bound_cluster_id,
 };
 pub use replica_services::{ReplicaTasks, spawn_replica_services};
 pub use roles::{

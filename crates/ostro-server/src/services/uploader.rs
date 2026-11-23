@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ostro_backup::fence::{self, FenceError};
-use ostro_backup::uploader::{METRIC_FENCED, Uploader, UploaderConfig};
+use ostro_backup::uploader::{METRIC_FENCED, Uploader, UploaderClusterDeps, UploaderConfig};
+use ostro_meta::MetaView;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -47,17 +48,28 @@ pub fn spawn(ctx: &ServiceCtx) -> Option<JoinHandle<()>> {
             .read(|s| s.cluster().map(|c| c.value.cluster_id.clone()))
             .unwrap_or_default();
         let ucfg = UploaderConfig::from_backup(&cfg, cluster_id, ctx.config.node.node_id);
-        let up = Arc::new(Uploader::new(
-            Arc::clone(&ctx.node),
-            Some(ctx.meta.view().clone()),
-            Arc::clone(&ctx.clock),
-            ucfg,
-        ));
+        // Phase 12 (12-15/12-14, D-P12-20): leader-only per-partition uploads with
+        // epoch-fenced heads, single node included; LOCK and manifest/current only while the
+        // cluster has one member (D-P12-3). The member count follows meta's Member records.
+        let members = member_count_watch(ctx.meta.view().clone(), ctx.shutdown.clone());
+        let up = Arc::new(
+            Uploader::new(
+                Arc::clone(&ctx.node),
+                Some(ctx.meta.view().clone()),
+                Arc::clone(&ctx.clock),
+                ucfg,
+            )
+            .with_cluster(UploaderClusterDeps {
+                roles: ctx.node.roles(),
+                members: members.clone(),
+            }),
+        );
         metrics::gauge!(METRIC_FENCED).set(0.0);
         // LOCK (P8-D4).
         loop {
-            match fence::acquire(&store, up.ident(), cfg.takeover).await {
-                Ok(()) => break,
+            let n = *members.borrow();
+            match fence::acquire_if_single_member(&store, up.ident(), cfg.takeover, n).await {
+                Ok(_) => break,
                 Err(FenceError::Store(e)) => {
                     warn!(error = %e, "bottomless LOCK: object store error; retrying");
                     tokio::select! {
@@ -99,4 +111,29 @@ pub fn spawn(ctx: &ServiceCtx) -> Option<JoinHandle<()>> {
             Err(_) => warn!("bottomless final round timed out after {FINAL_ROUND:?}"),
         }
     }))
+}
+
+/// The number of `Member` records in meta, kept current until `stop`.
+fn member_count_watch(
+    view: MetaView,
+    stop: tokio_util::sync::CancellationToken,
+) -> tokio::sync::watch::Receiver<usize> {
+    let count = |v: &MetaView| v.read(|s| s.members().count());
+    let (tx, rx) = tokio::sync::watch::channel(count(&view));
+    tokio::spawn(async move {
+        let mut applied = view.subscribe();
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                r = applied.changed() => if r.is_err() { return },
+            }
+            let n = count(&view);
+            tx.send_if_modified(|cur| {
+                let changed = *cur != n;
+                *cur = n;
+                changed
+            });
+        }
+    });
+    rx
 }

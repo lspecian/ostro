@@ -344,6 +344,17 @@ pub(crate) async fn upload_module(
             .map_err(|e| ApiError::unavailable(format!("storing the module failed: {e}")))?;
         debug_assert_eq!(blob.sha256, sha);
     }
+    // Phase 12 (12-14, D-P12-22): the blob reaches enough peers before the Module record
+    // exists, so a new leader can always run the module.
+    if existing.is_none()
+        && let Some(push) = &cp.module_push
+    {
+        let blobs = std::sync::Arc::clone(cp.blobs()?);
+        push.push(&blobs, sha).await.map_err(|why| {
+            ApiError::unavailable(format!("module replication failed: {why}"))
+                .with_details(serde_json::json!({ "reason": "module_replication" }))
+        })?;
+    }
 
     let now = cp.now_ms();
     for (name, version) in &todo {

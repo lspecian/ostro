@@ -1191,7 +1191,6 @@ impl RoleDriver {
             machine: env.machine_cfg.clone(),
             term: TermMode::Roles,
             leadership: Arc::clone(&env.leadership),
-            clock: Arc::clone(&env.clock),
             node_id: env.node_id,
             events: Arc::clone(&env.events),
         };

@@ -229,14 +229,18 @@ async fn all_state_deleted_full_replay_then_continue() {
     let node = open_node(d.path(), P, StartMode::Leader).await;
     for p in 0..P {
         let ev = node.startup_events();
-        assert!(ev.contains(&ostro_partition::StartupEvent::CaughtUp {
-            p,
-            applied: before[usize::from(p)].applied
-        }));
+        // Roles (12-14): the open replays [applied, HW) with HW = applied (F4, nothing here);
+        // the takeover replays the whole log before LeaderAnnounced, so the new term starts
+        // at the old log end and the state is back at the old applied offset.
+        let applied = before[usize::from(p)].applied;
         assert!(ev.iter().any(|e| matches!(
             e,
-            ostro_partition::StartupEvent::TermStarted { p: q, epoch: 2, .. } if *q == p
+            ostro_partition::StartupEvent::TermStarted { p: q, epoch: 2, offset }
+                if *q == p && *offset == applied
         )));
+        let h = node.handle(PartitionId(p)).expect("ready");
+        assert!(h.machine().applied().borrow().0 > applied);
+        drop(h);
         assert_eq!(
             submit(&node, p, common::start_cmd(&run_on(p))).await,
             ApplyOutcome::Accepted

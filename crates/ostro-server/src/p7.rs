@@ -143,6 +143,10 @@ pub struct P7Ctx {
     /// Cancelled when the server stops serving (client listener, cluster listener, tasks).
     pub shutdown: CancellationToken,
     pub shared: Arc<P7Shared>,
+    /// Phase 12 (D-P12-13): the always-bound cluster listener's Execute slot and bound
+    /// address; `workers::service::start` attaches the worker protocol to it. `None` = bind
+    /// a listener of its own (pre-Phase-12 behaviour; tests).
+    pub cluster_listener: Option<(crate::workers::service::LateExecute, SocketAddr)>,
 }
 
 impl std::fmt::Debug for P7Ctx {
@@ -228,6 +232,7 @@ pub async fn init(i: P7Init) -> Result<P7Ctx, P7Error> {
         lease_ttl,
         shutdown: CancellationToken::new(),
         shared,
+        cluster_listener: None,
     })
 }
 

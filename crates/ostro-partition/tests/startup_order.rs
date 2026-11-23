@@ -30,6 +30,10 @@ fn kind(e: &StartupEvent) -> u8 {
     }
 }
 
+/// Leader-mode startup of one partition: state, log, validation, catch-up, `RoleChanged`
+/// Offline, barrier, `RoleChanged` Announcing, term, leader services, `RoleChanged` Leader.
+const ROLE_ORDER: [u8; 10] = [1, 2, 3, 4, 9, 6, 9, 5, 7, 9];
+
 fn kinds_of(ev: &[StartupEvent], p: u16) -> Vec<u8> {
     ev.iter()
         .filter(|e| e.partition() == Some(p))
@@ -62,9 +66,11 @@ async fn fresh_node_startup_order() {
     let ev = node.startup_events();
     assert_eq!(ev[0], StartupEvent::NodeFileChecked);
     for p in 0..4u16 {
+        // Roles (12-13/12-14: the only Leader-mode path): opened Offline with the barrier
+        // open, then Announcing, the term, the leader services and Leader.
         assert_eq!(
             kinds_of(&ev, p),
-            vec![1, 2, 3, 4, 5, 6, 7],
+            ROLE_ORDER.to_vec(),
             "partition {p}: {ev:?}"
         );
         assert!(node.barrier(PartitionId(p)).expect("barrier").is_open());
@@ -308,7 +314,7 @@ async fn empty_wal_anchors_at_applied_and_rebuild_matches() {
 
     let node = open_node(d.path(), 2, StartMode::Leader).await;
     let ev = node.startup_events();
-    assert_eq!(kinds_of(&ev, 0), vec![1, 2, 3, 4, 5, 6, 7], "{ev:?}");
+    assert_eq!(kinds_of(&ev, 0), ROLE_ORDER.to_vec(), "{ev:?}");
     assert!(
         ev.contains(&StartupEvent::LogRecovered {
             p: 0,

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use ostro_meta::{MetaCommand, MetaResult};
+use ostro_meta::{MetaCommand, MetaRecord, MetaResult};
 use ostro_types::command::decode_command;
 use ostro_types::{Cmd, PartitionId};
 
@@ -45,6 +45,13 @@ pub fn meta_leaders(p: PartitionId, meta_log: &[MetaLogEntry]) -> BTreeMap<u32, 
                 ..
             } if *partition == p.0 => {
                 out.insert(*epoch, *leader);
+            }
+            // 12-14: the bootstrap placement (epoch 0 -> 1) is a `Put(Partition)` CAS.
+            MetaCommand::Put {
+                record: MetaRecord::Partition(a),
+                ..
+            } if a.partition == p.0 && a.epoch > 0 => {
+                out.insert(a.epoch, a.leader);
             }
             _ => {}
         }

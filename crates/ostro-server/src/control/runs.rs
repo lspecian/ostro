@@ -94,8 +94,22 @@ pub const DEFAULT_QUEUE: &str = "default";
 /// partition cannot serve right now" is 503 (retryable).
 pub(crate) fn partition_error(e: PartitionError) -> ApiError {
     match e {
-        PartitionError::NotLeader => ApiError::unavailable("partition leader unavailable"),
+        PartitionError::NotLeader => ApiError::unavailable("partition leader unavailable")
+            .with_details(serde_json::json!({ "reason": "not_leader" })),
         PartitionError::Failed(m) => ApiError::unavailable(format!("partition failed: {m}")),
+        // Phase 12 (12-14): the min_insync gate (D-P12-5).
+        PartitionError::Log(ostro_log::LogError::NotEnoughReplicas { isr, min }) => {
+            ApiError::unavailable(format!(
+                "not enough in-sync replicas: isr {isr} < min_insync {min}"
+            ))
+            .with_details(serde_json::json!({
+                "reason": "not_enough_replicas", "isr": isr, "min_insync": min,
+            }))
+        }
+        PartitionError::Log(ostro_log::LogError::NotLeader { leader }) => {
+            ApiError::unavailable("partition leader unavailable (not the leader)")
+                .with_details(serde_json::json!({ "reason": "not_leader", "leader": leader }))
+        }
         PartitionError::Log(e) => ApiError::unavailable(format!("partition log: {e}")),
         PartitionError::AckLost(off) => ApiError::unavailable(format!(
             "outcome of offset {off} unknown; retry with the same idempotency key"

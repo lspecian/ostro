@@ -33,7 +33,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ostro_api::{ApiError, ErrorCode};
@@ -165,7 +165,28 @@ pub fn start(ctx: &P7Ctx) -> Result<Option<JoinHandle<()>>, P7Error> {
     if !ctx.config.workers.enabled {
         return Ok(None);
     }
+    let deps = ClusterDeps {
+        config: Arc::clone(&ctx.config),
+        tls: Arc::clone(&ctx.shared.tls),
+        registry: Arc::clone(&ctx.shared.registry),
+        join: Arc::clone(&ctx.shared.join),
+        meta: ctx.meta.clone(),
+        clock: Arc::clone(&ctx.clock),
+        node_id: ctx.node_id,
+        lease_ttl: ctx.lease_ttl,
+        shutdown: ctx.shutdown.clone(),
+        wire: None,
+    };
+    // Phase 12 (D-P12-13): the cluster listener is already bound (Replication + MetaPeer
+    // since before meta); the Execute service attaches to it.
+    if let Some((late, addr)) = &ctx.cluster_listener {
+        let (svc, watch) = execute_service(deps, *addr)?;
+        late.attach(svc);
+        info!(addr = %addr, "worker protocol attached to the cluster listener (mTLS)");
+        return Ok(Some(watch));
+    }
     let listener = std::net::TcpListener::bind(ctx.config.cluster.listen)?;
+    drop(deps);
     let (addr, task) = serve(
         listener,
         ClusterDeps {
@@ -241,26 +262,11 @@ pub fn engine_limits(cfg: &ServerConfig) -> v1::EngineLimits {
     }
 }
 
-/// Serve the Execute service on `listener` (must be called inside a tokio runtime).
-/// Returns the bound address and the task (it ends after `deps.shutdown`).
-pub fn serve(
-    listener: std::net::TcpListener,
-    deps: ClusterDeps,
-) -> Result<(SocketAddr, JoinHandle<()>), P7Error> {
-    let addr = listener.local_addr()?;
-    listener.set_nonblocking(true)?;
-    let listener = tokio::net::TcpListener::from_std(listener)?;
-
-    let node = deps
-        .tls
-        .node_cert()
-        .ok_or_else(|| P7Error::Config("no node certificate (TLS state is off)".into()))?;
-    let mut roots = deps
-        .tls
-        .ca_pem()
-        .ok_or_else(|| P7Error::Config("no cluster CA (TLS state is off)".into()))?;
-    let cluster_ca_der = deps.tls.ca_der().unwrap_or_default();
-    let external_ca = match &deps.config.cluster.tls.client_ca {
+/// The client-certificate roots of the cluster listener: the cluster CA plus
+/// `[cluster.tls] client_ca` when configured (the bool says whether it is).
+pub fn listener_client_roots(cfg: &ServerConfig, ca_pem: &str) -> Result<(String, bool), P7Error> {
+    let mut roots = ca_pem.to_owned();
+    match &cfg.cluster.tls.client_ca {
         Some(path) => {
             let pem = std::fs::read_to_string(path).map_err(|e| {
                 P7Error::Config(format!("[cluster.tls] client_ca {}: {e}", path.display()))
@@ -275,14 +281,24 @@ pub fn serve(
                 roots.push('\n');
             }
             roots.push_str(&pem);
-            true
+            Ok((roots, true))
         }
-        None => false,
-    };
-    let tls = ServerTlsConfig::new()
-        .identity(Identity::from_pem(node.chain_pem(), node.key_pem()))
-        .client_ca_root(Certificate::from_pem(roots));
+        None => Ok((roots, false)),
+    }
+}
 
+/// The Execute service for `deps`, advertising the listener bound at `addr`, plus the join
+/// token revocation watch (it ends on `deps.shutdown`).
+pub fn execute_service(
+    deps: ClusterDeps,
+    addr: SocketAddr,
+) -> Result<(ExecuteServer<ExecuteSvc>, JoinHandle<()>), P7Error> {
+    let ca = deps
+        .tls
+        .ca_pem()
+        .ok_or_else(|| P7Error::Config("no cluster CA (TLS state is off)".into()))?;
+    let (_, external_ca) = listener_client_roots(&deps.config, &ca)?;
+    let cluster_ca_der = deps.tls.ca_der().unwrap_or_default();
     let endpoints = advertised_endpoints(&deps.config.cluster, addr);
     deps.join.set_endpoints(endpoints.clone());
     let w = &deps.config.workers;
@@ -317,7 +333,105 @@ pub fn serve(
     })
     .max_decoding_message_size(MAX_MESSAGE_BYTES)
     .max_encoding_message_size(MAX_MESSAGE_BYTES);
-    let keepalive = w.keepalive.get();
+    let watch = tokio::spawn(revocation_watch(
+        deps.meta.clone(),
+        Arc::clone(&deps.registry),
+        Arc::clone(&deps.join),
+        deps.shutdown.clone(),
+    ));
+    Ok((svc, watch))
+}
+
+/// The Execute service slot of the always-bound cluster listener (Phase 12, D-P12-13): the
+/// listener serves `Replication` and `MetaPeer` before meta starts, and the worker protocol
+/// attaches once the Phase 7 state exists. Until then (and with `[workers] enabled = false`)
+/// every Execute call answers `UNAVAILABLE`.
+#[derive(Clone, Default)]
+pub struct LateExecute(Arc<OnceLock<ExecuteServer<ExecuteSvc>>>);
+
+impl std::fmt::Debug for LateExecute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LateExecute")
+            .field("attached", &self.0.get().is_some())
+            .finish()
+    }
+}
+
+impl LateExecute {
+    /// An empty slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the Execute service is attached.
+    pub fn is_attached(&self) -> bool {
+        self.0.get().is_some()
+    }
+
+    fn attach(&self, svc: ExecuteServer<ExecuteSvc>) {
+        if self.0.set(svc).is_err() {
+            warn!("the worker protocol is already attached to the cluster listener");
+        }
+    }
+}
+
+impl tonic::server::NamedService for LateExecute {
+    const NAME: &'static str = <ExecuteServer<ExecuteSvc> as tonic::server::NamedService>::NAME;
+}
+
+impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> for LateExecute {
+    type Response = tonic::codegen::http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: tonic::codegen::http::Request<tonic::body::Body>) -> Self::Future {
+        match self.0.get() {
+            Some(svc) => {
+                let mut svc = svc.clone();
+                Box::pin(async move { svc.call(req).await })
+            }
+            None => Box::pin(async {
+                Ok(
+                    Status::unavailable("the worker protocol is not enabled on this node")
+                        .into_http(),
+                )
+            }),
+        }
+    }
+}
+
+/// Serve the Execute service on `listener` (must be called inside a tokio runtime).
+/// Returns the bound address and the task (it ends after `deps.shutdown`).
+pub fn serve(
+    listener: std::net::TcpListener,
+    deps: ClusterDeps,
+) -> Result<(SocketAddr, JoinHandle<()>), P7Error> {
+    let addr = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+
+    let node = deps
+        .tls
+        .node_cert()
+        .ok_or_else(|| P7Error::Config("no node certificate (TLS state is off)".into()))?;
+    let ca = deps
+        .tls
+        .ca_pem()
+        .ok_or_else(|| P7Error::Config("no cluster CA (TLS state is off)".into()))?;
+    let (roots, _) = listener_client_roots(&deps.config, &ca)?;
+    let tls = ServerTlsConfig::new()
+        .identity(Identity::from_pem(node.chain_pem(), node.key_pem()))
+        .client_ca_root(Certificate::from_pem(roots));
+    let keepalive = deps.config.workers.keepalive.get();
+    let shutdown = deps.shutdown.clone();
+    let (svc, watch) = execute_service(deps, addr)?;
     let router = Server::builder()
         .tls_config(tls)
         .map_err(|e| P7Error::Config(format!("cluster listener TLS: {e}")))?
@@ -325,14 +439,7 @@ pub fn serve(
         .http2_keepalive_timeout((!keepalive.is_zero()).then_some(keepalive * 2))
         .add_service(svc);
     let incoming = TcpIncoming::from(listener).with_nodelay(Some(true));
-    let shutdown = deps.shutdown.clone();
 
-    let watch = tokio::spawn(revocation_watch(
-        deps.meta.clone(),
-        Arc::clone(&deps.registry),
-        Arc::clone(&deps.join),
-        deps.shutdown.clone(),
-    ));
     let task = tokio::spawn(async move {
         let sd = shutdown.clone();
         let mut server = tokio::spawn(async move {
@@ -686,7 +793,7 @@ fn api_status(e: ApiError) -> Status {
 }
 
 #[derive(Clone)]
-struct ExecuteSvc {
+pub struct ExecuteSvc {
     st: Arc<SvcState>,
 }
 

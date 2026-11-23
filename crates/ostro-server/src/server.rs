@@ -13,10 +13,15 @@
 //!    open file description for the server's lifetime, so a `LOCK` file left behind by a
 //!    killed process never blocks the next start. The API listener is bound right after,
 //!    so a busy port fails before meta, node, blob or AOT cache work.
-//! 1. `MetaHandle::start(<data>/meta)`: single voter, campaigns immediately.
-//! 2. `InitCluster` (idempotent for the same partition count; a different count is a
-//!    fatal [`ServerError::PartitionCountMismatch`]). The first boot generates the cluster
-//!    id and the await-token key; every boot reads the stored key back from meta.
+//! 1. [`ClusterServices::start`] (12-14, D-P12-13/14/16; [`crate::cluster`] lists the
+//!    steps): node id and cluster id bound in `node.toml`, joiner and voter checks against
+//!    the persisted meta, TLS, the cluster listener (always bound: `MetaPeer`,
+//!    `Replication`, later the worker protocol), meta over the live transport
+//!    (`MetaHandle::start_with`, a single node is a one-voter group with zero peers), then
+//! 2. `InitCluster` with the bound cluster id (idempotent for the same partition count; a
+//!    different count is a fatal [`ServerError::PartitionCountMismatch`]); the first boot
+//!    stores the await-token key, every boot reads it back. The controller and the
+//!    meta-driven assignment source start (meta before partitions, P13-F1 rule 6).
 //!
 //!    Then [`BridgeServices::build`] (06-14): the Phase 6 effects bridge (sealing key,
 //!    secret providers, egress, connectors, the bridge and its SQL GC task) over the live
@@ -25,13 +30,14 @@
 //!    table right after step 4.
 //! 3. `Runtime::new` with the cluster token key and the AOT cache under
 //!    `<data>/cache/aot`.
-//! 4. `Node::open` with [`MetaLeadership`] as the epoch floor and the dispatcher running
-//!    [`EngineExecutor`] (continue-as-new successors resolve their module through meta,
-//!    [`MetaModules`], and their retention / schedule-to-start through
-//!    [`MetaPolicies`] over the `[runs]` defaults, D9); then every started partition's term
-//!    is recorded in meta with
-//!    `SetPartitionLeader` (meta rejects a lower epoch, so a stale term never overwrites
-//!    a newer one).
+//! 4. `Node::open` with the meta-driven assignment source and the follower fetcher, and the
+//!    dispatcher running [`EngineExecutor`] (continue-as-new successors resolve their module
+//!    through meta, [`MetaModules`], and their retention / schedule-to-start through
+//!    [`MetaPolicies`] over the `[runs]` defaults, D9). Every partition opens Offline and its
+//!    role driver leads, follows or stays offline as meta says: the first boot places every
+//!    partition (`Put(Partition)` epoch 0 -> 1), every later start takes one fresh
+//!    `ElectLeader` term per partition, and the leader appends `LeaderAnnounced` at that
+//!    epoch. A single node waits until it leads every partition (`first_terms`).
 //! 5. `ostro_api::router(ServerControlPlane)` served with graceful shutdown. `/readyz`
 //!    is 200 only while meta has a leader and every partition slot is ready.
 //!    Building the control plane starts the long-poll hub ([`crate::control::RunWatchers`]):
@@ -82,9 +88,9 @@ use std::time::{Duration, Instant};
 use ostro_api::{ApiConfig, ControlPlane};
 use ostro_engine::error::EngineError;
 use ostro_engine::runtime::{Runtime, RuntimeOptions};
-use ostro_meta::{MetaCommand, MetaError, MetaHandle, MetaResult};
+use ostro_meta::{MetaError, MetaHandle};
 use ostro_partition::{
-    Clock, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionSlot,
+    Clock, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionRole, PartitionSlot,
 };
 use ostro_types::PartitionCount;
 use tempfile::TempDir;
@@ -94,6 +100,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::bridge_services::{BridgeEnv, BridgeServices};
+use crate::cluster::{ClusterServices, ClusterStart};
 use crate::config::ServerConfig;
 use crate::control::{ControlCtx, ServerControlPlane};
 use crate::derive::MetaModules;
@@ -158,7 +165,7 @@ pub enum ServerError {
 pub struct StartupTimings {
     /// Data directory resolution + listener bind.
     pub prepare: Duration,
-    /// `MetaHandle::start` until this node leads and has caught up.
+    /// Cluster identity, TLS, listener and `MetaHandle::start_with` until meta is ready.
     pub meta_leader: Duration,
     /// `InitCluster` + token key read back.
     pub init_cluster: Duration,
@@ -166,8 +173,10 @@ pub struct StartupTimings {
     pub runtime: Duration,
     /// `Node::open` (every partition recovered, term started, services spawned).
     pub node_open: Duration,
-    /// `SetPartitionLeader` for every started partition.
-    pub record_leaders: Duration,
+    /// [`ClusterServices::start`] in total (identity, TLS, listener, meta, `InitCluster`).
+    pub cluster_start: Duration,
+    /// After `Node::open`: until every partition took its first term (single node: leads).
+    pub first_terms: Duration,
     /// `start` call to serving.
     pub total: Duration,
 }
@@ -291,8 +300,6 @@ async fn start_inner(
         tls_profile,
         cluster_transport,
     } = opts;
-    // Phase 12: consumed by the cluster wiring (12-14, `cluster::ClusterServices`).
-    drop(cluster_transport);
     // Phase 10 (10-10, D-P10-6): with `[dev] time_skipping` on (ephemeral `ostro dev`
     // only), the dev clock over the seam clock becomes the one clock. Off: no DevClock.
     let server_profile = tls_profile.unwrap_or_else(|| crate::tls::TlsProfile::of(&cfg))
@@ -331,23 +338,24 @@ async fn start_inner(
         ..StartupTimings::default()
     };
 
-    // 1. meta (campaigns immediately).
+    // 1./2. cluster services: identity, TLS, listener, meta, InitCluster, controller.
     let t = Instant::now(); // clock-exempt: startup timing
-    let meta = MetaHandle::start(&data_dir.join("meta"), node_id).await?;
-    timings.meta_leader = t.elapsed();
-
-    // 2. cluster identity + token key.
-    let t = Instant::now(); // clock-exempt: startup timing
-    let (cluster_id, token_key) = match init_cluster(&meta, node_id, count, clock.now_ms()).await {
-        Ok(v) => v,
-        Err(e) => {
-            meta.stop().await;
-            return Err(e);
-        }
-    };
-    timings.init_cluster = t.elapsed();
-    // From here meta is shared (the bridge holds it weakly for presign key writes).
-    let meta = Arc::new(meta);
+    let cluster = ClusterServices::start(ClusterStart {
+        cfg: &cfg,
+        data_dir: &data_dir,
+        count,
+        clock: Arc::clone(&clock),
+        transport: cluster_transport,
+        api_addr: local_addr,
+    })
+    .await?;
+    timings.cluster_start = t.elapsed();
+    timings.meta_leader = cluster.timings.meta_ready;
+    timings.init_cluster = cluster.timings.init_cluster;
+    let cluster_id = cluster.cluster_id().to_owned();
+    let token_key = cluster.token_key();
+    // Meta is shared (the bridge holds it weakly for presign key writes).
+    let meta = Arc::clone(cluster.meta());
 
     // 2b. effects bridge (before the executor: every sink hands out its driver).
     let bridge = match BridgeServices::build(
@@ -367,7 +375,8 @@ async fn start_inner(
     {
         Ok(b) => b,
         Err(e) => {
-            stop_meta(meta).await;
+            drop(meta);
+            abort_cluster(cluster).await;
             return Err(ServerError::Config(format!("effects bridge: {e}")));
         }
     };
@@ -400,14 +409,15 @@ async fn start_inner(
         Ok(rt) => Arc::new(rt),
         Err(e) => {
             bridge.shutdown().await;
-            stop_meta(meta).await;
+            drop(meta);
+            abort_cluster(cluster).await;
             return Err(e.into());
         }
     };
     timings.runtime = t.elapsed();
 
     // 3b. Phase 7 seam (D-W17): TLS state, worker registry, flow control, spill, join.
-    let p7 = match p7::init(p7::P7Init {
+    let mut p7 = match p7::init(p7::P7Init {
         config: Arc::new(cfg.clone()),
         clock: Arc::clone(&clock),
         data_dir: data_dir.clone(),
@@ -425,10 +435,14 @@ async fn start_inner(
         Ok(p) => p,
         Err(e) => {
             bridge.shutdown().await;
-            stop_meta(meta).await;
+            drop(meta);
+            abort_cluster(cluster).await;
             return Err(e.into());
         }
     };
+
+    // Phase 12 (D-P12-13): the worker protocol attaches to the always-bound listener.
+    p7.cluster_listener = Some(cluster.execute_slot());
 
     // 4. node + dispatcher(EngineExecutor).
     let t = Instant::now(); // clock-exempt: startup timing
@@ -476,6 +490,9 @@ async fn start_inner(
         cfg.runs.clone(),
     ));
     node_cfg.backup_enabled = cfg.backup.enabled();
+    // Phase 12 (12-13/12-14): every role comes from meta, RF=1 included.
+    node_cfg.assignments = Some(cluster.assignments());
+    node_cfg.follower_driver = Some(cluster.follower_driver());
     node_cfg.leader.dispatcher = Some(p7::dispatcher_config(
         executor,
         Some(Arc::clone(&stats)),
@@ -485,26 +502,22 @@ async fn start_inner(
         Ok(n) => Arc::new(n),
         Err(e) => {
             bridge.shutdown().await;
-            stop_meta(meta).await;
+            drop(meta);
+            abort_cluster(cluster).await;
             return Err(e.into());
         }
     };
     timings.node_open = t.elapsed();
+    cluster.attach_node(&node);
+    let t = Instant::now(); // clock-exempt: startup timing
+    wait_first_terms(&node, &cluster, count).await;
+    timings.first_terms = t.elapsed();
     p7::attach_node(&p7, &node);
     for slot in node.slots() {
         if let PartitionSlot::Ready(h) = slot {
             bridge.partitions().insert(h.clone());
         }
     }
-
-    let t = Instant::now(); // clock-exempt: startup timing
-    if let Err(e) = record_partition_leaders(&meta, &node, node_id).await {
-        bridge.shutdown().await;
-        shutdown_node(node).await;
-        stop_meta(meta).await;
-        return Err(e);
-    }
-    timings.record_leaders = t.elapsed();
 
     let partitions: Vec<_> = node
         .slots()
@@ -550,13 +563,16 @@ async fn start_inner(
             drop(partitions);
             services.shutdown().await;
             bridge.shutdown().await;
+            cluster.stop_tasks().await;
             shutdown_node(node).await;
-            stop_meta(meta).await;
+            drop(meta);
+            abort_cluster(cluster).await;
             return Err(e.into());
         }
     };
 
     // 5. API.
+    let cluster = Arc::new(cluster);
     let control = Arc::new(
         ServerControlPlane::new(
             Arc::clone(&meta),
@@ -567,7 +583,9 @@ async fn start_inner(
             Arc::clone(&bridge),
             Arc::clone(&p7.shared),
         )
-        .with_dev(dev_clock.clone()),
+        .with_dev(dev_clock.clone())
+        .with_leader_hints(cluster.leader_hints(&node))
+        .with_module_push(cluster.module_push()),
     );
     // Phase 10 (10-13): the idle detector and its API write counter, only with time
     // skipping on.
@@ -609,6 +627,8 @@ async fn start_inner(
     if cfg.telemetry.metrics {
         app = app.merge(crate::telemetry::metrics_router());
     }
+    // Phase 12 (12-14): `GET /v1/admin/replication`, server-local like `/metrics`.
+    app = app.merge(cluster.status_router(&node));
     // Phase 10 (10-13): the `ApiWriteCounter` layer (mutating requests in flight, read by
     // the idle detector); not installed with time skipping off.
     if let Some(t) = &dev_time {
@@ -661,6 +681,7 @@ async fn start_inner(
         control,
         node: Some(node),
         services: Some(services),
+        cluster: Some(cluster),
         clock,
         telemetry: telemetry.take().unwrap_or_else(TelemetryGuard::disabled),
         stats,
@@ -729,13 +750,16 @@ fn ephemeral_dir() -> Result<TempDir, ServerError> {
     })
 }
 
-/// `InitCluster` (first boot creates identity + token key; later boots read them).
-async fn init_cluster(
+/// `InitCluster` with the bound `cluster_id` (the first boot stores it and the await-token
+/// key; later boots and the other voters get `Ok` for the same partition count); returns the
+/// stored token key.
+pub(crate) async fn init_cluster(
     meta: &MetaHandle,
+    cluster_id: &str,
     node_id: u64,
     count: PartitionCount,
     now_ms: u64,
-) -> Result<(String, [u8; 32]), ServerError> {
+) -> Result<[u8; 32], ServerError> {
     let configured = count.get();
     if let Some(stored) = meta
         .view()
@@ -747,96 +771,80 @@ async fn init_cluster(
     let mut key = [0u8; 32];
     getrandom::fill(&mut key)
         .map_err(|e| ServerError::Invariant(format!("OS random source failed: {e}")))?;
-    let cluster_id = uuid::Uuid::now_v7().to_string();
-    let info = match meta
-        .init_cluster(&cluster_id, node_id, configured, now_ms, key)
+    if let Err(e) = meta
+        .init_cluster(cluster_id, node_id, configured, now_ms, key)
         .await
     {
-        Ok(info) => info,
-        Err(e) => {
-            if let Some(stored) = meta
-                .view()
-                .read(|s| s.cluster().map(|c| c.value.partitions))
-                && stored != configured
-            {
-                return Err(ServerError::PartitionCountMismatch { stored, configured });
-            }
-            return Err(e.into());
+        if let Some(stored) = meta
+            .view()
+            .read(|s| s.cluster().map(|c| c.value.partitions))
+            && stored != configured
+        {
+            return Err(ServerError::PartitionCountMismatch { stored, configured });
         }
-    };
-    let token_key = meta
-        .view()
+        return Err(e.into());
+    }
+    meta.view()
         .read(|s| s.token_key())
-        .ok_or_else(|| ServerError::Invariant("token key missing after InitCluster".into()))?;
-    Ok((info.cluster_id, token_key))
+        .ok_or_else(|| ServerError::Invariant("token key missing after InitCluster".into()))
 }
 
-/// Record every started partition's term in meta. A rejection means meta already holds a
-/// newer epoch than the term we just started, which `MetaLeadership` makes impossible:
-/// fatal.
-async fn record_partition_leaders(
-    meta: &MetaHandle,
-    node: &Node,
-    node_id: u64,
-) -> Result<(), ServerError> {
-    // All proposals are submitted concurrently so the meta driver can group-commit them
-    // (one log append for P partitions instead of P sequential round trips); each result
-    // is still checked per partition, in partition order.
-    let mut pending = Vec::new();
-    for slot in node.slots() {
-        match slot {
-            PartitionSlot::Ready(h) => {
-                let p = h.partition().0;
-                let epoch = h.epoch().0;
-                let fut = meta.propose(MetaCommand::SetPartitionLeader {
-                    partition: p,
-                    epoch,
-                    leader: node_id,
-                    isr: vec![node_id],
-                });
-                pending.push((p, epoch, Box::pin(fut)));
-            }
-            PartitionSlot::Failed { partition, reason } => {
-                error!(partition = partition.0, %reason, "partition failed to start");
-            }
-        }
-    }
-    let results = join_all(pending.iter_mut().map(|(_, _, f)| f.as_mut())).await;
-    for ((p, epoch, _), res) in pending.iter().zip(results) {
-        let res = res?;
-        if !matches!(res, MetaResult::Ok { .. }) {
-            let msg = format!("SetPartitionLeader(p{p}, epoch {epoch}) rejected: {res:?}");
-            error!(partition = p, epoch, result = ?res, "{msg}");
-            return Err(ServerError::Invariant(msg));
-        }
-    }
-    Ok(())
-}
+/// How long a multi-node server waits at start for its partitions to take a role.
+const FIRST_TERMS_CLUSTER_WAIT: Duration = Duration::from_secs(10);
+/// How long a single node waits to lead every partition.
+const FIRST_TERMS_SINGLE_WAIT: Duration = Duration::from_secs(60);
 
-/// Poll every future to completion concurrently (no `futures` dependency); results in input
-/// order.
-async fn join_all<F: std::future::Future + Unpin>(
-    futs: impl IntoIterator<Item = F>,
-) -> Vec<F::Output> {
-    let mut slots: Vec<(F, Option<F::Output>)> = futs.into_iter().map(|f| (f, None)).collect();
-    std::future::poll_fn(|cx| {
-        let mut done = true;
-        for (f, out) in slots.iter_mut() {
-            if out.is_none() {
-                match std::pin::Pin::new(f).poll(cx) {
-                    std::task::Poll::Ready(v) => *out = Some(v),
-                    std::task::Poll::Pending => done = false,
+/// After `Node::open`: a single node waits until it leads every started partition (or the
+/// partition failed); a cluster node waits, bounded, until each started partition leads,
+/// takes over or follows. The server serves either way (`/readyz`, 503 not-leader answers).
+async fn wait_first_terms(node: &Node, cluster: &ClusterServices, count: PartitionCount) {
+    let single = cluster.voters().len() == 1;
+    let wait = async {
+        for p in count.ids() {
+            let (Some(mut role), Some(h)) = (node.role(p), node.handle(p)) else {
+                continue;
+            };
+            let mut health = h.machine().health();
+            drop(h);
+            loop {
+                let settled = match &*role.borrow_and_update() {
+                    PartitionRole::Leader { .. } => true,
+                    PartitionRole::Follower { .. } | PartitionRole::Announcing { .. } => !single,
+                    PartitionRole::Offline => false,
+                };
+                if settled
+                    || matches!(
+                        *health.borrow_and_update(),
+                        ostro_partition::PartitionHealth::Failed { .. }
+                    )
+                {
+                    break;
+                }
+                tokio::select! {
+                    r = role.changed() => if r.is_err() { break },
+                    r = health.changed() => if r.is_err() { break },
                 }
             }
         }
-        if done {
-            std::task::Poll::Ready(())
-        } else {
-            std::task::Poll::Pending
-        }
-    })
-    .await;
-    slots.into_iter().filter_map(|(_, o)| o).collect()
+    };
+    let bound = if single {
+        FIRST_TERMS_SINGLE_WAIT
+    } else {
+        FIRST_TERMS_CLUSTER_WAIT
+    };
+    if tokio::time::timeout(bound, wait).await.is_err() {
+        warn!(
+            ?bound,
+            "not every partition took a role at start; serving anyway"
+        );
+    }
+}
+
+/// Stop a cluster side whose server failed to start: tasks, meta, then the listener.
+async fn abort_cluster(cluster: ClusterServices) {
+    let (meta, rest) = cluster.into_meta().await;
+    stop_meta(meta).await;
+    rest.stop().await;
 }
 
 async fn shutdown_node(node: Arc<Node>) {
@@ -866,6 +874,8 @@ pub struct ServerHandle {
     node: Option<Arc<Node>>,
     /// The services seam (P8-D21); stopped before the node.
     services: Option<Services>,
+    /// Phase 12 cluster side (12-14): tasks stop before the node, the listener after meta.
+    cluster: Option<Arc<ClusterServices>>,
     /// The one injectable clock (Phase 10 F5).
     clock: Arc<dyn Clock>,
     /// OTel providers + Prometheus upkeep; shut down last.
@@ -1019,6 +1029,7 @@ impl ServerHandle {
             control,
             node,
             services,
+            cluster,
             mut telemetry,
             p7_shutdown,
             p7_handles,
@@ -1057,6 +1068,11 @@ impl ServerHandle {
         // The bridge next: no effect task outlives the node, and the partition handles in
         // its table are released before `Node::shutdown`.
         control.bridge().shutdown().await;
+        // Phase 12: controller, ISR publishers, fetch contexts, module sync stop before the
+        // node (they hold meta and partition logs).
+        if let Some(c) = &cluster {
+            c.stop_tasks().await;
+        }
         let node_res = match node {
             Some(node) => shutdown_shared_node(node).await,
             None => Ok(()),
@@ -1069,12 +1085,30 @@ impl ServerHandle {
         }
         // The serve task (and every connection) has dropped its control-plane clone, so
         // this is normally the last reference.
+        // The cluster's meta reference goes first (control holds the other one); its
+        // listener stops after meta.
+        let rest = match cluster.map(Arc::try_unwrap) {
+            Some(Ok(c)) => {
+                let (m, rest) = c.into_meta().await;
+                drop(m);
+                Some(rest)
+            }
+            Some(Err(c)) => {
+                warn!("cluster services still referenced at shutdown");
+                c.stop_listener().await;
+                None
+            }
+            None => None,
+        };
         match Arc::try_unwrap(control) {
             Ok(cp) => stop_meta(cp.meta).await,
             Err(cp) => {
                 warn!("control plane still referenced at shutdown; meta stops when released");
                 let _ = tokio::task::spawn_blocking(move || drop(cp)).await;
             }
+        }
+        if let Some(rest) = rest {
+            rest.stop().await;
         }
         // Meta and node are stopped: no writer is left, so another process may open the
         // directory from here on.

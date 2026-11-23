@@ -19,11 +19,13 @@
 //! Since 12-13 snapshots and retention are replica services
 //! ([`replica_services`](crate::replica_services)): they run in every role.
 //!
-//! Roles (12-13, research Pattern 5): with [`NodeConfig::assignments`] set, every partition
-//! has a role driven only by meta ([`roles`](crate::roles)): Leader at a meta-assigned epoch,
-//! Follower of a named leader, or Offline. A partition opens unassigned (Offline) and never
-//! picks its own cluster epoch. Without an assignment source the temporary legacy
-//! self-leader path runs (Phase 12: legacy path, removed by 12-14).
+//! Roles (12-13, research Pattern 5): every partition has a role driven only by its
+//! assignment source ([`roles`](crate::roles)): Leader at an assigned epoch, Follower of a
+//! named leader, or Offline. A partition opens unassigned (Offline) and never picks its own
+//! cluster epoch. The server passes the meta-driven source ([`NodeConfig::assignments`]);
+//! without one (tests, tools) the node uses [`LocalAssignments`], a single-node source that
+//! places every partition on this node, so RF=1 tooling runs the very same role drivers
+//! (12-14, D-P12-15: one path).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -36,13 +38,13 @@ use ostro_log::{
     LogClock, LogError, LogNode, LogNodeConfig, PartitionLog, RawBatch, ReadyBarrier, ReplicaSet,
     ReplicatedLog,
 };
-use ostro_types::{Command, Epoch, Offset, PartitionCount, PartitionId};
+use ostro_types::{Epoch, Offset, PartitionCount, PartitionId};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::acks::PendingAcks;
-use crate::apply::{ApplyOutcome, Cursor};
+use crate::apply::Cursor;
 use crate::clock::{Clock, SystemClock}; // clock-exempt: default clock import
 use crate::handle::{PartitionError, PartitionHandle};
 use crate::leader::cron::{CronConfig, ScheduleSource};
@@ -50,13 +52,12 @@ use crate::leader::retention::{FloorWatches, RetentionConfig};
 use crate::leader::snapshot::{
     self as snap, LocalSnapshot, SnapshotConfig, SnapshotService, SnapshotShared, SnapshotTaken,
 };
-use crate::leader::{self, LeaderConfig, LeaderCtx, LeaderTasks};
+use crate::leader::{self, LeaderConfig, LeaderCtx};
 use crate::leadership::{LeadershipSource, LocalLeadership, next_term_epoch};
 use crate::machine::{MachineConfig, MachineHandle, PartitionHealth};
-use crate::replica_services::{ReplicaTasks, spawn_replica_services};
 use crate::roles::{
     AssignmentSource, DriverCmd, FollowerDriver, InstallGuard, LedSet, NodeTestHooks,
-    PartitionControl, PartitionRole, PartitionRoles, RoleConfig, RoleEnv,
+    PartitionAssignmentView, PartitionControl, PartitionRole, PartitionRoles, RoleConfig, RoleEnv,
 };
 use crate::router::{InProcessRouter, PartitionRouter};
 use crate::startup::{StartupEvent, StartupLog};
@@ -71,8 +72,7 @@ const NODE_FILE: &str = "node.toml";
 /// What the node does after recovery.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StartMode {
-    /// Full startup: roles from meta (or the legacy self-leader term), readiness barrier,
-    /// services.
+    /// Full startup: roles from the assignment source, readiness barrier, services.
     Leader,
     /// Recover and catch up only: no term, no barrier, no leader services, no appends
     /// (digest comparisons, offline inspection). The log leads locally at
@@ -111,10 +111,10 @@ pub struct NodeConfig {
     /// Bottomless backup is on (B4): 08-09 then initialises the upload floor to
     /// `Some(log_start)` in `Node::open` before retention starts.
     pub backup_enabled: bool,
-    /// Meta-published partition assignments (12-13). `Some` = every partition's role is
-    /// driven by meta (RF=1 included: replicas `[self]`). `None` = the temporary legacy
-    /// self-leader path (Phase 12: legacy path, removed by 12-14). Ignored in
-    /// [`StartMode::Inspect`].
+    /// Meta-published partition assignments (12-13): every partition's role is driven by
+    /// them (RF=1 included: replicas `[self]`). `None` = [`LocalAssignments`] (single node,
+    /// no meta: tests and tools), and [`Node::open`] then returns once every started
+    /// partition leads. Ignored in [`StartMode::Inspect`].
     pub assignments: Option<Arc<dyn AssignmentSource>>,
     /// Starts the fetcher of a followed partition (12-11 `FetcherDriver`); `None` = a
     /// follower does not fetch (tests, RF=1).
@@ -127,7 +127,8 @@ pub struct NodeConfig {
 
 impl NodeConfig {
     /// Defaults: node id 1, default store/machine/WAL/leader configs, [`LocalLeadership`],
-    /// [`SystemClock`], [`StartMode::Leader`], no assignment source. // clock-exempt: doc ref
+    /// [`SystemClock`], [`StartMode::Leader`], no assignment source ([`LocalAssignments`]).
+    /// // clock-exempt: doc ref
     pub fn new(data_dir: PathBuf, partitions: PartitionCount) -> Self {
         Self {
             data_dir,
@@ -363,10 +364,7 @@ pub struct Node {
     barriers: Vec<ReadyBarrier>,
     router: Arc<InProcessRouter>,
     events: Arc<StartupLog>,
-    /// Legacy path: leader and replica services of every partition.
-    leaders: Vec<LeaderTasks>,
-    replicas: Vec<ReplicaTasks>,
-    /// Roles path: one role driver per started partition.
+    /// One role driver per started partition.
     drivers: Vec<JoinHandle<()>>,
     control: NodeControl,
     led: Arc<LedSet>,
@@ -403,10 +401,9 @@ impl Node {
         let incarnation = check_node_file(&cfg.data_dir, count, cfg.node_id)?;
         events.push(StartupEvent::NodeFileChecked);
 
-        let term = match (cfg.mode, &cfg.assignments) {
-            (StartMode::Inspect, _) => TermMode::Inspect,
-            (StartMode::Leader, None) => TermMode::Legacy,
-            (StartMode::Leader, Some(_)) => TermMode::Roles,
+        let term = match cfg.mode {
+            StartMode::Inspect => TermMode::Inspect,
+            StartMode::Leader => TermMode::Roles,
         };
 
         // 0b. (08-09) finish or roll back an interrupted snapshot install, note which states
@@ -528,7 +525,7 @@ impl Node {
             }
         }
 
-        // 4./5. catch-up (and, on the legacy path, the term start), partitions in parallel.
+        // 4. catch-up, partitions in parallel.
         let mut tasks = Vec::with_capacity(ready.len());
         for (r, p) in ready.into_iter().zip(count.ids()) {
             tasks.push(r.map(|(store, meta, rf1)| {
@@ -541,7 +538,6 @@ impl Node {
                     machine: cfg.machine.clone(),
                     term,
                     leadership: Arc::clone(&cfg.leadership),
-                    clock: Arc::clone(&cfg.clock),
                     node_id: cfg.node_id,
                     events: Arc::clone(&events),
                 };
@@ -599,16 +595,14 @@ impl Node {
         // floor starts at Some(log_start) with backup on (B4), None (unbounded) otherwise.
         let snap_shared = SnapshotShared::new();
         let mut cells: Vec<Arc<PartCell>> = Vec::with_capacity(started.len());
-        let mut legacy_epochs: Vec<Option<Epoch>> = vec![None; started.len()];
         for (r, p) in started.into_iter().zip(count.ids()) {
             let cell = match r {
                 Ok(s) => {
                     let upload_init = cfg.backup_enabled.then(|| s.handle.log().log_start());
                     let cell = PartCell::new(p, CellState::Quiesced, upload_init);
-                    legacy_epochs[p.index()] = s.epoch;
                     let upload = match term {
                         TermMode::Roles => cell.effective_upload.subscribe(),
-                        TermMode::Legacy | TermMode::Inspect => cell.upload.subscribe(),
+                        TermMode::Inspect => cell.upload.subscribe(),
                     };
                     let services = (term != TermMode::Inspect).then(|| ServicesParts {
                         snapshots: &cfg.snapshots,
@@ -637,44 +631,19 @@ impl Node {
             cells.push(Arc::new(cell));
         }
 
-        let mut leaders = Vec::new();
-        let mut replicas = Vec::new();
         let mut drivers = Vec::new();
         let mut cmds: Vec<Option<mpsc::Sender<DriverCmd>>> = vec![None; cells.len()];
+        let local_source = cfg.assignments.is_none();
         match term {
             TermMode::Inspect => {}
-            TermMode::Legacy => {
-                // Phase 12: legacy path, removed by 12-14 (no assignment source: every
-                // started partition leads at the term `PartitionStart` picked).
-                // 6. barriers + routing, then services once every partition is routable.
-                for cell in &cells {
-                    if let Some(run) = cell.running() {
-                        let p = cell.p;
-                        barriers[p.index()].open();
-                        events.push(StartupEvent::BarrierOpened { p: p.0 });
-                        router.register(run.handle.clone());
-                    }
-                }
-                for cell in &cells {
-                    let Some(run) = cell.running() else {
-                        continue;
-                    };
-                    let Some(ctx) = run.ctx.clone() else {
-                        continue;
-                    };
-                    let p = cell.p;
-                    replicas.push(spawn_replica_services(ctx.clone(), &cfg.leader.retention));
-                    leaders.push(leader::spawn_all(ctx, &leader_cfg));
-                    events.push(StartupEvent::LeaderServicesStarted { p: p.0 });
-                    if let Some(e) = legacy_epochs[p.index()] {
-                        cell.role.send_replace(PartitionRole::Leader { epoch: e });
-                        led.insert(p, e);
-                    }
-                }
-            }
             TermMode::Roles => {
-                let Some(source) = cfg.assignments.clone() else {
-                    unreachable!("TermMode::Roles has an assignment source");
+                let source: Arc<dyn AssignmentSource> = match cfg.assignments.clone() {
+                    Some(s) => s,
+                    None => Arc::new(LocalAssignments::new(
+                        cfg.node_id,
+                        count,
+                        Arc::clone(&cfg.leadership),
+                    )),
                 };
                 let env = Arc::new(RoleEnv {
                     node_id: cfg.node_id,
@@ -714,6 +683,11 @@ impl Node {
                 }
             }
         }
+        if local_source && term == TermMode::Roles {
+            // Single node without meta: the local source places every partition here, so
+            // the node is usable once every started partition leads (or failed).
+            wait_local_terms(&cells).await;
+        }
 
         Ok(Node {
             log,
@@ -724,8 +698,6 @@ impl Node {
             barriers,
             router,
             events,
-            leaders,
-            replicas,
             drivers,
             led,
             shutdown,
@@ -891,8 +863,7 @@ impl Node {
         self.barriers.get(p.index()).cloned()
     }
 
-    /// Partition `p`'s role (12-13). Legacy path: `Leader` at the picked term; Inspect:
-    /// `Offline`.
+    /// Partition `p`'s role (12-13). Inspect: `Offline`.
     pub fn role(&self, p: PartitionId) -> Option<watch::Receiver<PartitionRole>> {
         Some(self.cells.get(p.index())?.role.subscribe())
     }
@@ -924,8 +895,6 @@ impl Node {
             log,
             cells,
             router,
-            leaders,
-            replicas,
             drivers,
             shutdown,
             ..
@@ -933,12 +902,6 @@ impl Node {
         shutdown.send_replace(true);
         for d in drivers {
             let _ = d.await;
-        }
-        for t in leaders {
-            t.shutdown().await;
-        }
-        for t in replicas {
-            t.shutdown().await;
         }
         router.clear();
         for cell in cells {
@@ -986,7 +949,7 @@ impl PartitionControl for NodeControl {
         Box::pin(async move {
             let tx = tx.ok_or_else(|| {
                 PartitionError::Failed(format!(
-                    "partition {} has no role driver (not started, Inspect mode or the legacy path)",
+                    "partition {} has no role driver (not started or Inspect mode)",
                     p.0
                 ))
             })?;
@@ -1003,6 +966,135 @@ struct NodeRoles {
 impl PartitionRoles for NodeRoles {
     fn led(&self) -> watch::Receiver<Arc<Vec<(PartitionId, Epoch)>>> {
         self.led.subscribe()
+    }
+}
+
+/// How long [`Node::open`] waits for the [`LocalAssignments`] terms before returning anyway
+/// (a partition whose takeover keeps failing is reported by its role, not by `open`).
+const LOCAL_TERMS_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wait until every running partition leads (or its apply machine failed): the
+/// [`LocalAssignments`] contract of [`Node::open`].
+async fn wait_local_terms(cells: &[Arc<PartCell>]) {
+    let wait = async {
+        for cell in cells {
+            let Some(run) = cell.running() else {
+                continue;
+            };
+            let mut role = cell.role.subscribe();
+            let mut health = run.handle.machine().health();
+            drop(run);
+            loop {
+                if matches!(*role.borrow_and_update(), PartitionRole::Leader { .. })
+                    || matches!(*health.borrow_and_update(), PartitionHealth::Failed { .. })
+                {
+                    break;
+                }
+                tokio::select! {
+                    r = role.changed() => if r.is_err() { break },
+                    h = health.changed() => if h.is_err() { break },
+                }
+            }
+        }
+    };
+    if tokio::time::timeout(LOCAL_TERMS_WAIT, wait).await.is_err() {
+        warn!("not every partition leads after {LOCAL_TERMS_WAIT:?}; opening anyway");
+    }
+}
+
+/// The single-node [`AssignmentSource`] used when [`NodeConfig::assignments`] is `None`
+/// (tests and tools without meta; the server always passes its meta-driven source). Every
+/// partition is placed on this node (`replicas = isr = [self]`, `min_insync = 1`) at
+/// `max(1, leadership floor)`; a fresh-term request raises the epoch to
+/// `max(min_epoch, floor)`, which is what a single-voter meta controller answers
+/// (`ElectLeader` from ISR `{self}`). A resign takes the partition offline at `epoch + 1`.
+/// The role drivers are the same as with meta (D-P12-15: one path).
+pub struct LocalAssignments {
+    node_id: u64,
+    leadership: Arc<dyn LeadershipSource>,
+    views: watch::Sender<Arc<Vec<PartitionAssignmentView>>>,
+}
+
+impl std::fmt::Debug for LocalAssignments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalAssignments")
+            .field("node_id", &self.node_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LocalAssignments {
+    /// Every partition of `count` placed on `node_id`, epochs floored by `leadership`.
+    pub fn new(node_id: u64, count: PartitionCount, leadership: Arc<dyn LeadershipSource>) -> Self {
+        let views = count
+            .ids()
+            .map(|p| PartitionAssignmentView {
+                partition: p,
+                leader: node_id,
+                epoch: Epoch(leadership.epoch_floor(p).0.max(1)),
+                replicas: vec![node_id],
+                isr: vec![node_id],
+                isr_version: 0,
+                min_insync: 1,
+            })
+            .collect();
+        Self {
+            node_id,
+            leadership,
+            views: watch::channel(Arc::new(views)).0,
+        }
+    }
+
+    fn update(&self, p: PartitionId, f: impl FnOnce(&mut PartitionAssignmentView)) {
+        self.views.send_if_modified(|views| {
+            let mut next = (**views).clone();
+            let Some(v) = next.get_mut(p.index()) else {
+                return false;
+            };
+            let before = v.clone();
+            f(v);
+            if *v == before {
+                return false;
+            }
+            v.isr_version += 1;
+            *views = Arc::new(next);
+            true
+        });
+    }
+}
+
+impl AssignmentSource for LocalAssignments {
+    fn subscribe(&self) -> watch::Receiver<Arc<Vec<PartitionAssignmentView>>> {
+        self.views.subscribe()
+    }
+
+    fn local_node(&self) -> u64 {
+        self.node_id
+    }
+
+    fn request_term(&self, p: PartitionId, min_epoch: Epoch) -> BoxFuture<'_, ()> {
+        let floor = self.leadership.epoch_floor(p);
+        let me = self.node_id;
+        self.update(p, |v| {
+            let epoch = min_epoch.0.max(floor.0).max(v.epoch.0);
+            if epoch > v.epoch.0 || v.leader != me {
+                v.epoch = Epoch(epoch.max(v.epoch.0 + u32::from(v.leader != me)));
+                v.leader = me;
+                v.isr = vec![me];
+            }
+        });
+        Box::pin(async {})
+    }
+
+    fn resign(&self, p: PartitionId, epoch: Epoch) -> BoxFuture<'_, ()> {
+        let me = self.node_id;
+        self.update(p, |v| {
+            if v.epoch == epoch && v.leader == me {
+                v.epoch = Epoch(epoch.0.saturating_add(1));
+                v.leader = 0;
+            }
+        });
+        Box::pin(async {})
     }
 }
 
@@ -1142,9 +1234,6 @@ impl LogClock for LogClockAdapter {
 /// How a partition's log gets its role at open.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TermMode {
-    /// Phase 12: legacy path, removed by 12-14. No assignment source: lead at
-    /// [`next_term_epoch`] with ISR {self} and append `LeaderAnnounced` (the Phase 4 term).
-    Legacy,
     /// Offline tooling: lead locally at [`next_term_epoch`] (HW reaches the durable end, the
     /// whole tail is replayed), append nothing.
     Inspect,
@@ -1157,8 +1246,6 @@ pub(crate) enum TermMode {
 pub(crate) struct Started {
     pub(crate) handle: PartitionHandle<PartitionLog>,
     pub(crate) acks: Arc<PendingAcks>,
-    /// Legacy path: the epoch of the term started at open.
-    pub(crate) epoch: Option<Epoch>,
 }
 
 /// Steps 4 and 5 of one partition (also the reopen after a snapshot install, `Roles`).
@@ -1171,7 +1258,6 @@ pub(crate) struct PartitionStart {
     pub(crate) machine: MachineConfig,
     pub(crate) term: TermMode,
     pub(crate) leadership: Arc<dyn LeadershipSource>,
-    pub(crate) clock: Arc<dyn Clock>,
     pub(crate) node_id: u64,
     pub(crate) events: Arc<StartupLog>,
 }
@@ -1179,13 +1265,13 @@ pub(crate) struct PartitionStart {
 impl PartitionStart {
     pub(crate) async fn run(self) -> Result<Started, String> {
         self.seed_anchored_epochs().await?;
-        // Inspect and the legacy path pick a local term before catch-up (12-08): the log
-        // opened with HW = applied (F4), and leading with ISR {self} is what raises the HW to
-        // the durable LEO, so the replay below covers [applied, LEO). With roles the log stays
-        // unassigned: the role driver leads (and waits for applied >= HW) or follows.
-        let epoch = match self.term {
-            TermMode::Roles => None,
-            TermMode::Legacy | TermMode::Inspect => {
+        // Inspect picks a local term before catch-up (12-08): the log opened with HW =
+        // applied (F4), and leading with ISR {self} is what raises the HW to the durable LEO,
+        // so the replay below covers [applied, LEO). With roles the log stays unassigned: the
+        // role driver leads (and waits for applied >= HW) or follows.
+        match self.term {
+            TermMode::Roles => {}
+            TermMode::Inspect => {
                 let epoch = next_term_epoch(
                     self.leadership.epoch_floor(self.p),
                     self.rf1.epochs().latest(),
@@ -1193,9 +1279,8 @@ impl PartitionStart {
                 self.rf1
                     .become_leader(epoch, ReplicaSet::solo(self.node_id))
                     .map_err(|e| format!("lead at epoch {}: {e}", epoch.0))?;
-                Some(epoch)
             }
-        };
+        }
         let acks = Arc::new(PendingAcks::new());
         let machine = MachineHandle::spawn(
             Arc::clone(&self.store),
@@ -1216,12 +1301,8 @@ impl PartitionStart {
             Arc::clone(&acks),
             Arc::clone(&self.blobs),
         );
-        match self.catch_up_and_announce(&handle, epoch).await {
-            Ok(()) => Ok(Started {
-                handle,
-                acks,
-                epoch: epoch.filter(|_| self.term == TermMode::Legacy),
-            }),
+        match self.catch_up(&handle).await {
+            Ok(()) => Ok(Started { handle, acks }),
             Err(reason) => {
                 drop(handle);
                 let _ = machine.shutdown().await;
@@ -1261,11 +1342,7 @@ impl PartitionStart {
         Ok(())
     }
 
-    async fn catch_up_and_announce(
-        &self,
-        handle: &PartitionHandle<PartitionLog>,
-        epoch: Option<Epoch>,
-    ) -> Result<(), String> {
+    async fn catch_up(&self, handle: &PartitionHandle<PartitionLog>) -> Result<(), String> {
         let p = self.p.0;
         let machine = handle.machine();
 
@@ -1296,27 +1373,6 @@ impl PartitionStart {
         // 11-05: a stale or missing x_run_index rebuilds in the background (never in Inspect;
         // also after a snapshot install's reopen, 12-12).
         self.store.start_run_index_rebuild();
-        let Some(epoch) = epoch else {
-            return Ok(());
-        };
-
-        // 5. (legacy path) a new term: LeaderAnnounced{epoch} is its first record (the log
-        //    already leads at `epoch`, see `run`).
-        handle.set_epoch(epoch);
-        let la = Command::leader_announced(epoch.0, self.node_id, self.clock.now_ms());
-        match handle.submit_one(la).await {
-            Ok(ApplyOutcome::Accepted) => {}
-            Ok(o) => return Err(format!("LeaderAnnounced{{epoch {}}}: {o:?}", epoch.0)),
-            Err(e) => return Err(format!("LeaderAnnounced{{epoch {}}}: {e}", epoch.0)),
-        }
-        let offset = term_offset(&self.rf1, epoch)
-            .ok_or_else(|| format!("epoch {} missing from the log history", epoch.0))?;
-        self.events.push(StartupEvent::TermStarted {
-            p,
-            epoch: epoch.0,
-            offset: offset.0,
-        });
-        machine.set_emit_actions(true);
         Ok(())
     }
 }
@@ -1421,6 +1477,16 @@ pub fn bind_node_id(data_dir: &Path, node_id: u64) -> Result<(), NodeError> {
         ));
     }
     bind_key(data_dir, IdentityKey::NodeId, &node_id.to_string())
+}
+
+/// The `cluster_id` bound in `data_dir/node.toml` (12-14 reads it for the D-P12-14 source
+/// order); `None` when the file or the key is absent.
+pub fn bound_cluster_id(data_dir: &Path) -> Result<Option<String>, NodeError> {
+    match std::fs::read_to_string(data_dir.join(NODE_FILE)) {
+        Ok(s) => Ok(parse_node_keys(&s)?.cluster_id),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Bind `data_dir` to `cluster_id` (12-13, D-P12-16; the server calls it before any partition
