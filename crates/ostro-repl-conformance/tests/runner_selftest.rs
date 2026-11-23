@@ -55,6 +55,13 @@ fn scenario(
     }
 }
 
+fn two_nodes_rf3() -> ClusterSpec {
+    ClusterSpec {
+        rf: 3,
+        ..two_nodes()
+    }
+}
+
 fn two_nodes() -> ClusterSpec {
     ClusterSpec {
         nodes: 2,
@@ -88,12 +95,13 @@ async fn outcomes_are_classified() {
         "{o:?}"
     );
 
-    // An unformed cluster is the scenario's measured red reason, before its body runs.
+    // An unformed cluster is the scenario's measured red reason, before its body runs
+    // (since 12-14 two nodes do form a cluster, but never one with rf 3).
     let mut unformed = scenario("unformed", panicking);
-    unformed.spec = two_nodes;
+    unformed.spec = two_nodes_rf3;
     let o = run_scenario_with(&unformed, Duration::from_secs(1)).await;
     assert!(
-        matches!(&o, Outcome::Failed(f) if f.oracle == "cluster_formed" && f.detail.contains("meta voters")),
+        matches!(&o, Outcome::Failed(f) if f.oracle == "cluster_formed" && f.detail.contains("expected rf 3")),
         "{o:?}"
     );
 

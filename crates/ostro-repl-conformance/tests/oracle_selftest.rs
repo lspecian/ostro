@@ -545,14 +545,14 @@ fn status_reports_an_isr_member_with_nothing_on_disk() {
 // ---------------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cluster_formed_passes_rf1_and_fails_independent_nodes() {
+async fn cluster_formed_passes_formed_clusters_and_names_mismatches() {
     let spec = ClusterSpec::single();
     let c = InProcCluster::start(spec.clone()).await.expect("start");
     let ok = cluster_formed::check_within(&c, &spec, Duration::from_secs(20)).await;
     assert!(ok.is_ok(), "{ok}");
     c.stop().await;
 
-    // Two nodes, rf 2, no replication yet: each node is its own meta voter.
+    // Two nodes, rf 2: since 12-14 they form one cluster, and the oracle passes...
     let spec = ClusterSpec {
         nodes: 2,
         rf: 2,
@@ -561,16 +561,15 @@ async fn cluster_formed_passes_rf1_and_fails_independent_nodes() {
         ..ClusterSpec::default()
     };
     let c = InProcCluster::start(spec.clone()).await.expect("start");
-    let bad = cluster_formed::check_within(&c, &spec, Duration::from_secs(1)).await;
-    assert!(
-        bad.mentions("node 1: meta voters [1] != configured [1, 2]"),
-        "{bad}"
-    );
-    assert!(
-        bad.mentions("node 2: meta voters [2] != configured [1, 2]"),
-        "{bad}"
-    );
-    assert!(bad.mentions("1 replica(s) [1], expected rf 2"), "{bad}");
+    let ok = cluster_formed::check_within(&c, &spec, Duration::from_secs(30)).await;
+    assert!(ok.is_ok(), "{ok}");
+    // ...and fails, naming the culprit, against a spec the cluster does not meet.
+    let wrong = ClusterSpec {
+        rf: 3,
+        ..spec.clone()
+    };
+    let bad = cluster_formed::check_within(&c, &wrong, Duration::from_secs(1)).await;
+    assert!(bad.mentions("expected rf 3"), "{bad}");
     assert_eq!(
         bad.clone().into_result().expect_err("red").oracle,
         "cluster_formed"

@@ -76,12 +76,20 @@ async fn three_nodes_start_kill_restart_and_release_locks() {
     assert_eq!(c.node_ids(), vec![1, 2, 3]);
     for n in c.node_ids() {
         assert!(c.client(n).ready().await, "node {n} ready");
-        // Until 12-14 each node is its own single-voter meta group.
+        // Since 12-14 the nodes form one static three-voter meta group.
         let dump = read_meta_log(&c.node_disk(n).root.join("meta")).expect("meta log");
-        assert_eq!(dump.voters, vec![n], "node {n}");
+        let mut voters = dump.voters.clone();
+        voters.sort_unstable();
+        assert_eq!(voters, vec![1, 2, 3], "node {n}");
         assert!(dump.commit >= 1);
-        // `/v1/admin/replication` does not exist before 12-14.
-        assert_eq!(c.admin_status(n).await, serde_json::Value::Null);
+        // `/v1/admin/replication` (12-14) reports this node and every partition.
+        let st = c.admin_status(n).await;
+        assert_eq!(st["node_id"], n, "{st}");
+        assert_eq!(
+            st["partitions"].as_array().map(Vec::len),
+            Some(usize::from(spec.partitions)),
+            "{st}"
+        );
         assert_eq!(c.config(n).cluster.peers.len(), 2);
         assert_eq!(c.config(n).replication.rf, Some(3));
     }

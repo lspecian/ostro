@@ -8,15 +8,12 @@
 //! timings and the spec's `rf` / `min_insync`) and its [`MemTransport`] through the server
 //! hook `ServerOptions::cluster_transport`.
 //!
-//! **Until 12-14 wires that hook, the server drops the transport**, so the nodes of a
-//! multi-node spec start as independent single-node clusters (each its own meta voter, every
-//! partition RF=1). That is what makes the RF>1 scenarios of 12-06/12-07 red with the
-//! measured `cluster_formed` failure. Raw channels from [`InProcCluster::channel_as`] then
-//! reach nobody (the node never takes its listener), and calls fail at their deadline.
+//! Since 12-14 the server serves `MetaPeer` and `Replication` on that transport's
+//! in-memory incoming, so the nodes form one cluster (static voters = every node).
 //!
 //! `kill(n)` is "isolate + graceful stop" (data dir kept), not a real crash (research
 //! Pitfall 8); real `kill -9` is tier C (12-09). `restart(n)` starts the node again from
-//! the same dirs and config with a fresh transport and heals its links.
+//! the same dirs and config with a fresh transport, its links healed first.
 //!
 //! [`read_meta_log`] decodes a node's metadata Raft log offline (state, snapshot and
 //! segment files of the vendored log store, read-only, CRC-checked) and recomputes every
@@ -365,11 +362,13 @@ impl ClusterHarness for InProcCluster {
             self.kill(node).await;
         }
         let cfg = self.slot(node).cfg.clone();
+        // Heal first (12-14): a node's start waits for its metadata group (meta before
+        // partitions), so it must reach the other voters while it boots.
+        self.net.faults().heal(node);
         let h = boot(cfg, self.net.transport(node)).await?;
         let slot = self.nodes.get_mut(&node).expect("slot");
         slot.api = h.local_addr();
         slot.handle = Some(h);
-        self.net.faults().heal(node);
         Ok(())
     }
 
