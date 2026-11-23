@@ -36,7 +36,8 @@ async fn grpc_health(addr: std::net::SocketAddr) -> String {
 }
 
 /// Budget for `--ephemeral` where the OS has no tmpfs to put the directory on (macOS:
-/// `ephemeral_dir` falls back to `std::env::temp_dir()` on APFS). The start is then a cold
+/// `ostro_server::ephemeral` falls back to `std::env::temp_dir()` on APFS, or on Linux when
+/// `/dev/shm` has less than 512 MiB free). The start is then a cold
 /// first run on a real disk: a default `ostro dev` cold start (and stop) issues ~5,000
 /// `fsync`s (strace count on Linux, mostly creating the partition state stores), each an
 /// `F_FULLFSYNC` on macOS, measured at 2.7-3.4 s on the macos-15 CI runner. The CLI-01 1 s budget assumes an in-memory directory and stays asserted
@@ -49,7 +50,9 @@ const NO_TMPFS_BUDGET: Duration = Duration::from_secs(15);
 async fn ephemeral_under_1s() {
     let _g = SERIAL.lock().await;
     let mut budget = startup_budget();
-    if !cfg!(target_os = "linux") || !std::path::Path::new("/dev/shm").is_dir() {
+    // eph-fix: the server uses /dev/shm only when it exists, is writable and has >= 512 MiB
+    // free (`ostro_server::ephemeral`); a small shm (Docker's 64 MB) means the temp dir.
+    if !ostro_server::ephemeral::would_use_shm() {
         eprintln!(
             "NOTE: no tmpfs for --ephemeral on this OS; asserting {NO_TMPFS_BUDGET:?} instead of \
              the {budget:?} CLI-01 budget (cold start on disk)"
@@ -101,8 +104,13 @@ async fn ephemeral_start_once() -> Duration {
         !cwd.path().join(".ostro").exists(),
         "--ephemeral must not touch ./.ostro"
     );
-    if cfg!(target_os = "linux") && std::path::Path::new("/dev/shm").is_dir() {
+    if ostro_server::ephemeral::would_use_shm() {
         assert!(ready.data_dir.starts_with("/dev/shm"), "{ready:?}");
+    } else {
+        assert!(
+            ready.data_dir.starts_with(std::env::temp_dir()),
+            "{ready:?}"
+        );
     }
 
     s.stop_clean("INT");

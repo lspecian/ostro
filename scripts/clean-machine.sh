@@ -208,8 +208,9 @@ APT='apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq
 
 container_cmd() { # <lang> <workdir-on-host-or-empty>
   local lang="$1" hostwork="$2" docker_bin
-  # --shm-size: `ostro dev --ephemeral` keeps its data under /dev/shm, and Docker's default
-  # 64 MB is too small for a Python module (~19 MB, stored more than once): ENOSPC (10-19).
+  # --shm-size (optional since eph-fix): `ostro dev --ephemeral` uses /dev/shm only with
+  # >= 512 MiB free and otherwise falls back to the temp dir, so Docker's 64 MB default works.
+  # 1g keeps the ephemeral data on tmpfs, so the dev timings compare with a host run.
   CMD=(docker run --rm --network host --shm-size 1g
     -v "$OSTRO_BIN:/usr/local/bin/ostro:ro"
     -v "$SELF:/clean-machine.sh:ro"

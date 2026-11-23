@@ -4,7 +4,8 @@
 //! # Startup order
 //!
 //! 0. Resolve the data directory. `node.ephemeral` uses a fresh `TempDir` on `/dev/shm`
-//!    when it is writable (tmpfs: fsync is nearly free), otherwise in the OS temp dir.
+//!    when it exists, is writable and has at least 512 MiB free (tmpfs: fsync is nearly
+//!    free), otherwise in the OS temp dir ([`crate::ephemeral`], one log line says which).
 //!    Everything below runs on the same code path either way (D5: no in-memory store).
 //!    Then the exclusive data-dir lock is taken (`flock(LOCK_EX|LOCK_NB)` on
 //!    `<data>/LOCK`, plan 05-26) before any other disk work: a second `ostro` process on
@@ -107,8 +108,6 @@ use crate::tls::ClientEndpoint;
 
 /// How long shutdown waits for in-flight HTTP/gRPC requests before closing them.
 const SERVE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-/// Preferred parent of ephemeral data directories (tmpfs on Linux).
-const SHM_DIR: &str = "/dev/shm";
 /// The data-dir lock file (`<data>/LOCK`, plan 05-26). Its content is unused; only the
 /// advisory lock on an open descriptor matters.
 pub const LOCK_FILE: &str = "LOCK";
@@ -722,33 +721,12 @@ fn resolve_data_dir(cfg: &ServerConfig) -> Result<(PathBuf, Option<TempDir>), Se
     }
 }
 
-/// A fresh `ostro-*` directory on `/dev/shm` when it exists and accepts a probe file,
-/// else in `std::env::temp_dir()`.
+/// A fresh `ostro-*` directory under the base [`crate::ephemeral::create_dir`] picks.
 fn ephemeral_dir() -> Result<TempDir, ServerError> {
-    let builder = {
-        let mut b = tempfile::Builder::new();
-        b.prefix("ostro-");
-        b
-    };
-    let shm = Path::new(SHM_DIR);
-    if shm.is_dir() {
-        match builder.tempdir_in(shm) {
-            Ok(dir) if probe(dir.path()) => return Ok(dir),
-            Ok(_) => warn!("{SHM_DIR} is not writable; using the OS temp directory"),
-            Err(e) => warn!(error = %e, "cannot use {SHM_DIR}; using the OS temp directory"),
-        }
-    }
-    builder.tempdir().map_err(|source| ServerError::DataDir {
+    crate::ephemeral::create_dir().map_err(|source| ServerError::DataDir {
         path: std::env::temp_dir(),
         source,
     })
-}
-
-fn probe(dir: &Path) -> bool {
-    let p = dir.join(".probe");
-    let ok = std::fs::write(&p, b"ok").is_ok();
-    let _ = std::fs::remove_file(&p);
-    ok
 }
 
 /// `InitCluster` (first boot creates identity + token key; later boots read them).

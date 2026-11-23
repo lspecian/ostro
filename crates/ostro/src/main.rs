@@ -49,7 +49,8 @@ struct Cli {
 enum Command {
     /// Server + embedded executor + UI shell, zero config.
     Dev {
-        /// Keep all state in a throwaway temp directory (tmpfs) removed on exit.
+        /// Keep all state in a throwaway temp directory removed on exit (/dev/shm when it has
+        /// >= 512 MiB free, else the OS temp dir).
         #[arg(long)]
         ephemeral: bool,
         /// Listen address for HTTP and gRPC [default: 127.0.0.1:7700].

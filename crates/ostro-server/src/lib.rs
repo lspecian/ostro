@@ -54,6 +54,7 @@ pub mod devclock;
 pub mod devtime;
 pub mod effect_trace;
 pub mod effects;
+pub mod ephemeral;
 pub mod executor;
 pub mod flow;
 pub mod journal_io;

@@ -129,8 +129,9 @@ async fn ephemeral_dir_on_tmpfs_removed_on_shutdown() {
     assert!(dir.is_dir(), "{} exists while running", dir.display());
     assert!(dir.join("meta").is_dir());
     assert_ne!(dir, unused.path(), "ephemeral ignores node.data_dir");
-    let shm = std::path::Path::new("/dev/shm");
-    if shm.is_dir() && tempfile::tempdir_in(shm).is_ok() {
+    // eph-fix: /dev/shm only when it exists, is writable and has >= 512 MiB free.
+    let shm = std::path::Path::new(ostro_server::ephemeral::SHM_DIR);
+    if ostro_server::ephemeral::would_use_shm() {
         assert!(dir.starts_with(shm), "{} not on /dev/shm", dir.display());
     } else {
         assert!(dir.starts_with(std::env::temp_dir()));

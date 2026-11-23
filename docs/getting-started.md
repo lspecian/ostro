@@ -157,9 +157,11 @@ ostro replay --server "$OSTRO_SERVER" --sample 20 --module target/ostro/hello.wa
   rustup and zig are pinned for macOS arm64 and x86_64). If a build fails natively,
   `ostro deploy --docker` with Docker Desktop and `OSTRO_LINUX_BIN`
   set to the linux-musl `ostro` is the fallback.
-- **Inside a container.** `ostro dev --ephemeral` keeps its data in `/dev/shm`. Docker's
-  default 64 MB is too small for a Python module, so give the container
-  `--shm-size 1g` (or use `ostro dev` with a data dir).
+- **Inside a container.** `ostro dev --ephemeral` puts its data in `/dev/shm` only when
+  that exists, is writable and has at least 512 MiB free. Otherwise it uses the temp dir
+  (`TMPDIR`, usually `/tmp`), and one startup log line says which it picked and why.
+  Docker's default 64 MB `/dev/shm` therefore works, but startup is slower because the
+  data is on disk. `--shm-size 1g` keeps it on tmpfs (faster startup), and is optional.
 - **`ostro doctor --json`** reports the platform, cache, toolchains, Docker and `cc` in
   the stable JSON envelope ([cli-json.md](cli-json.md)).
 
