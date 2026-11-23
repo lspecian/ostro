@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ostro_log::{EpochHistory, ReplicatedLog};
-use ostro_partition::leader::retention::RetentionConfig;
+use ostro_partition::leader::retention::{RetentionConfig, RetentionStats};
 use ostro_partition::store::derived::IndexState;
 use ostro_partition::store::snapshot::install_snapshot;
 use ostro_partition::{
@@ -71,6 +71,58 @@ async fn submit_n(node: &Node, n: usize) {
 
 fn log_start(node: &Node) -> Offset {
     node.handle(P0).expect("ready").log().log_start()
+}
+
+/// Retention / snapshot state of P0 for a timeout message: the service's counters, the
+/// floors, the retained snapshots, the log bounds, the WAL segment files and one manual pass.
+async fn retention_diag(node: &Node, stats: &RetentionStats, dir: &Path) -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let snaps: Vec<u64> = node
+        .local_snapshots(P0)
+        .await
+        .iter()
+        .map(|s| s.applied_offset.0)
+        .collect();
+    let (start, end, hw) = {
+        let h = node.handle(P0).expect("ready");
+        let log = h.log();
+        (
+            log.log_start(),
+            log.log_end(),
+            *log.high_watermark().borrow(),
+        )
+    };
+    let mut segs = Vec::new();
+    let mut stack = vec![dir.join("wal")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let len = e.metadata().map_or(0, |m| m.len());
+                segs.push(format!("{}={len}", e.file_name().to_string_lossy()));
+            }
+        }
+    }
+    segs.sort();
+    let manual = node.retention_pass(P0).await;
+    format!(
+        "retention passes {} not_ready {} last_checkpoint {} last_floor {} last_log_start {}; \
+         local_floor {:?} upload_floor {:?}; snapshots {snaps:?}; applied {:?}; \
+         log [{}, {}) hw {}; wal files {segs:?}; manual pass {manual:?}",
+        stats.passes.load(Relaxed),
+        stats.not_ready.load(Relaxed),
+        stats.last_checkpoint.load(Relaxed),
+        stats.last_floor.load(Relaxed),
+        stats.last_log_start.load(Relaxed),
+        node.local_floor(P0),
+        node.floor_handles(P0).map(|f| *f.upload.borrow()),
+        node.applied_state(P0).map(|a| a.0),
+        start,
+        end,
+        hw,
+    )
 }
 
 /// sha256 over every `x_run_index` row (marker excluded) once the index is ready.
@@ -189,6 +241,8 @@ async fn leader_snapshots_and_trims_in_replica_services() {
     let fol = FakeFollower::new();
     let mut cfg = roles_cfg(tmp.path(), 1, 1, &asg, &fol);
     tune(&mut cfg, true);
+    let stats = Arc::new(RetentionStats::default());
+    cfg.leader.retention.stats = Some(Arc::clone(&stats));
     let node = open(cfg).await;
     wait_leader(&node, 0, 1).await;
     submit_n(&node, 200).await;
@@ -196,7 +250,21 @@ async fn leader_snapshots_and_trims_in_replica_services() {
         node.local_floor(P0).is_some_and(|f| f > Offset(0))
     })
     .await;
-    eventually("leader trimmed", || log_start(&node) > Offset(0)).await;
+    // The floor is the older of the newest `keep` = 2 snapshots. When the cadence happened to
+    // snapshot once inside the first WAL segment and once at the end of the writes, that floor
+    // stays inside the first segment and nothing can be trimmed until two snapshots lie above
+    // it, which needs more writes (CI linux-aarch64-musl timed out here). Keep writing.
+    let deadline = std::time::Instant::now() + ROLE_T;
+    while log_start(&node) == Offset(0) {
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for leader trimmed: {}",
+                retention_diag(&node, &stats, tmp.path()).await
+            );
+        }
+        submit_n(&node, 10).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert!(log_start(&node) <= node.local_floor(P0).unwrap());
     // Demotion keeps the replica services (and their snapshots) running.
     asg.set(view(0, 2, 2, &[1, 2], &[2], 2, 1));
@@ -206,6 +274,60 @@ async fn leader_snapshots_and_trims_in_replica_services() {
     .await;
     assert!(node.snapshot_now(P0).await.is_ok());
     assert!(node.retention_pass(P0).await.is_ok());
+    node.shutdown().await.expect("shutdown");
+}
+
+/// Why `leader_snapshots_and_trims_in_replica_services` keeps writing (CI linux-aarch64-musl
+/// timed out there): with `keep` = 2 the floor is the older of the two newest snapshots, so an
+/// early snapshot inside the first WAL segment followed directly by one at the end of the
+/// writes pins the floor inside that segment; retention runs healthily and trims nothing
+/// until the next snapshot lifts the floor. Cadence off: snapshots are taken by hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn early_snapshot_in_the_first_segment_pins_the_floor_until_the_next_snapshot() {
+    let tmp = ostro_testkit::fs::tempdir();
+    let asg = FakeAssignments::new(1, vec![solo(0, 1, 1)]);
+    let fol = FakeFollower::new();
+    let mut cfg = roles_cfg(tmp.path(), 1, 1, &asg, &fol);
+    tune(&mut cfg, false);
+    let stats = Arc::new(RetentionStats::default());
+    cfg.leader.retention.stats = Some(Arc::clone(&stats));
+    let node = open(cfg).await;
+    wait_leader(&node, 0, 1).await;
+    submit_n(&node, 10).await;
+    let early = node
+        .snapshot_now(P0)
+        .await
+        .expect("snapshot")
+        .expect("taken");
+    submit_n(&node, 190).await;
+    let late = node
+        .snapshot_now(P0)
+        .await
+        .expect("snapshot")
+        .expect("taken");
+    assert!(early.applied_offset < late.applied_offset);
+    assert_eq!(node.local_floor(P0), Some(early.applied_offset));
+    // ~90 bytes per command and 2 KiB segments: the early snapshot is inside segment 0.
+    let pinned = node.retention_pass(P0).await.expect("pass");
+    assert_eq!(
+        pinned,
+        Offset(0),
+        "floor {} is inside the first segment: {}",
+        early.applied_offset.0,
+        retention_diag(&node, &stats, tmp.path()).await
+    );
+    submit_n(&node, 10).await;
+    node.snapshot_now(P0)
+        .await
+        .expect("snapshot")
+        .expect("taken");
+    assert_eq!(node.local_floor(P0), Some(late.applied_offset));
+    let trimmed = node.retention_pass(P0).await.expect("pass");
+    assert!(
+        trimmed > Offset(0) && trimmed <= late.applied_offset,
+        "trimmed to {trimmed:?}: {}",
+        retention_diag(&node, &stats, tmp.path()).await
+    );
     node.shutdown().await.expect("shutdown");
 }
 
