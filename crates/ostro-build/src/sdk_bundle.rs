@@ -80,7 +80,7 @@ pub fn materialize(dest: &Path) -> io::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "sdk".to_owned());
-    let tmp = parent.join(format!(".{leaf}.tmp-{}", std::process::id()));
+    let tmp = parent.join(format!(".{leaf}.tmp-{}", crate::pipeline::tmp_suffix()));
     if tmp.exists() {
         fs::remove_dir_all(&tmp)?;
     }

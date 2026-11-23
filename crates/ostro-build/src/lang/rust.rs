@@ -497,7 +497,7 @@ fn write_script(path: &Path, text: &str) -> Result<(), BuildError> {
     if std::fs::read_to_string(path).is_ok_and(|t| t == text) {
         return Ok(());
     }
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let tmp = path.with_extension(format!("tmp-{}", crate::pipeline::tmp_suffix()));
     let res = (|| {
         std::fs::write(&tmp, text)?;
         #[cfg(unix)]

@@ -442,7 +442,7 @@ pub fn build_with(
         Err(_) => Cache::with_root(out.join("toolchains")),
     };
 
-    let tmp_wasm = out.join(format!(".{name}.wasm.tmp-{}", std::process::id()));
+    let tmp_wasm = out.join(format!(".{name}.wasm.tmp-{}", tmp_suffix()));
     let _ = std::fs::remove_file(&tmp_wasm);
     let ctx = StepCtx {
         project: &project,
@@ -558,13 +558,26 @@ fn up_to_date(
     })
 }
 
+/// A temp-file suffix unique within this machine: `<pid>-<seq>`. The pid alone is not
+/// enough: threads of one process (parallel builds, the test harness) writing the same
+/// shared file (e.g. the cache's `state/npm/npmrc`) would share one temp path, and the
+/// loser's `rename` fails with ENOENT after the winner renamed it away.
+pub(crate) fn tmp_suffix() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 /// Write `bytes` to a temp file next to `path`, then rename it into place.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BuildError> {
     let file = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{file}.tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(format!(".{file}.tmp-{}", tmp_suffix()));
     std::fs::write(&tmp, bytes)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| {
@@ -653,4 +666,35 @@ where
         .join()
         .unwrap_or_else(|p| std::panic::resume_unwind(p))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CI: `writing .../state/npm/npmrc: No such file or directory` when two build tests
+    /// wrote the shared npmrc at once (both used `.npmrc.tmp-<pid>`).
+    #[test]
+    fn write_atomic_is_safe_across_threads_of_one_process() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("npmrc");
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let path = &path;
+                s.spawn(move || {
+                    for i in 0..200 {
+                        write_atomic(path, format!("{t}-{i}\n").as_bytes())
+                            .unwrap_or_else(|e| panic!("thread {t} write {i}: {e}"));
+                    }
+                });
+            }
+        });
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with('\n'));
+        let leftovers: Vec<_> = std::fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name() != "npmrc")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
 }
