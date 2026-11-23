@@ -30,6 +30,8 @@ use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 const LAG_MAX: Duration = Duration::from_millis(800);
+/// Above `TestMeta::hold` (600 ms), so the injected slow re-proposals still complete.
+const PROPOSE_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// What the test meta adapter does to `AlterIsr` proposals.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +45,9 @@ enum Inject {
     UnknownApplied,
     /// First Remove: a concurrent `ElectLeader` (epoch + 1) applies first.
     ElectFirst,
+    /// First Remove: the call never returns (a request lost on a broken link); later
+    /// calls pass through.
+    HangFirst,
 }
 
 struct TestMeta {
@@ -93,6 +98,11 @@ impl IsrMeta for TestMeta {
                     let applied = self.g.propose(cmd).await;
                     assert!(matches!(applied, MetaResult::Ok { .. }), "{applied:?}");
                     unknown()
+                }
+                Inject::HangFirst if first_remove => {
+                    self.injected.store(true, Ordering::SeqCst);
+                    std::future::pending::<()>().await;
+                    unreachable!()
                 }
                 Inject::ElectFirst if first_remove => {
                     self.injected.store(true, Ordering::SeqCst);
@@ -218,6 +228,7 @@ impl Cluster {
             IsrPublisherConfig {
                 replica_lag_max: LAG_MAX,
                 resolve_retry: Duration::from_millis(200),
+                propose_timeout: PROPOSE_TIMEOUT,
             },
             self.token.clone(),
         )));
@@ -473,6 +484,29 @@ async fn outcome_unknown_not_applied_keeps_the_shrink_pending_w4() {
 #[tokio::test]
 async fn outcome_unknown_applied_is_adopted_from_meta_w4() {
     outcome_unknown(Inject::UnknownApplied).await;
+}
+
+/// 12-16 `isr_slow_follower_shrinks`: an `AlterIsr` whose request is lost (never answered)
+/// is an unknown outcome after `propose_timeout`; the same CAS is re-proposed and the shrink
+/// lands instead of waiting for the forwarder's 10 s call deadline.
+#[tokio::test]
+async fn hung_alter_isr_is_retried_after_the_propose_timeout() {
+    let mut c = full_isr(Inject::HangFirst).await;
+    c.stop_fetcher(3).await;
+    let (astop, appender) = c.appender();
+    let m = Arc::clone(&c.meta);
+    wait_until("injected", LAG_MAX * 6, || {
+        m.injected.load(Ordering::SeqCst)
+    })
+    .await;
+    let v = c.leader().isr_view().unwrap();
+    assert_eq!(v.isr.pending, Some(PendingChange::Remove(3)));
+    c.wait_isr(&[1, 2], PROPOSE_TIMEOUT + Duration::from_secs(2))
+        .await;
+    assert!(m.calls.load(Ordering::SeqCst) >= 2);
+    astop.cancel();
+    appender.await.unwrap();
+    c.shutdown().await;
 }
 
 #[tokio::test]

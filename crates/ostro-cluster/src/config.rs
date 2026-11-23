@@ -117,6 +117,8 @@ impl ReplicationTuning {
     pub fn isr_publisher(&self) -> IsrPublisherConfig {
         IsrPublisherConfig {
             replica_lag_max: self.replica_lag_max,
+            // A leader that waits longer than the session for meta has lost contact anyway.
+            propose_timeout: self.session_timeout,
             ..IsrPublisherConfig::default()
         }
     }

@@ -64,6 +64,11 @@ pub struct IsrPublisherConfig {
     pub replica_lag_max: Duration,
     /// How long to wait for an unknown outcome to become visible before re-proposing.
     pub resolve_retry: Duration,
+    /// Bound on one `AlterIsr` proposal. A proposal still unanswered after it is an unknown
+    /// outcome (step 5): the same CAS is re-proposed, so a request lost on a broken link
+    /// (the forwarder's own call deadline is 10 s) never holds an ISR change back for
+    /// longer than this plus `resolve_retry`.
+    pub propose_timeout: Duration,
 }
 
 impl Default for IsrPublisherConfig {
@@ -71,6 +76,7 @@ impl Default for IsrPublisherConfig {
         Self {
             replica_lag_max: Duration::from_secs(10),
             resolve_retry: Duration::from_millis(500),
+            propose_timeout: Duration::from_secs(3),
         }
     }
 }
@@ -334,7 +340,13 @@ impl IsrPublisher {
             expected_isr_version: expected_version,
             isr: proposed,
         };
-        match self.meta.alter_isr(cmd).await {
+        let outcome = match tokio::time::timeout(self.cfg.propose_timeout, self.meta.alter_isr(cmd))
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => Err(MetaError::Timeout),
+        };
+        match outcome {
             Ok(MetaResult::Ok { .. }) => {
                 // Applied: the assignment watch delivers the new ISR; it stays pending (and
                 // counted in the maximal ISR) until then.
