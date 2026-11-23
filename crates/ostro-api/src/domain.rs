@@ -451,7 +451,8 @@ pub struct StartRunResult {
 /// Run lifecycle status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RunStatus {
-    /// Waiting for its start delay.
+    /// Waiting for its start delay, or suspended on a wait (timer, signal, child run or
+    /// in-flight effect).
     Scheduled,
     /// Ready to be picked up.
     Ready,

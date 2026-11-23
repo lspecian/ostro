@@ -373,7 +373,7 @@ pub enum BulkAction {
         /// Operator reason.
         reason: String,
     },
-    /// Retry (resume) failed runs.
+    /// Retry the selected failed runs (resume in place or restart as a new linked run).
     Retry,
     /// Rerun from a cut.
     Rerun {

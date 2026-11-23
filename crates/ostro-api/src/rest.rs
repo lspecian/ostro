@@ -28,11 +28,14 @@ pub type CpState = Arc<dyn ControlPlane>;
 // DTOs
 // ---------------------------------------------------------------------------------
 
-/// Run status.
+/// Run status. `scheduled` covers both a run waiting for its start delay and a run
+/// suspended on a wait (timer, signal, child run or in-flight effect); there is no
+/// separate suspended status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatusDto {
-    /// Waiting for its start delay.
+    /// Waiting for its start delay, or suspended on a wait (timer, signal, child run or
+    /// in-flight effect).
     Scheduled,
     /// Ready to be picked up.
     Ready,

@@ -4802,7 +4802,7 @@ expression: pretty
           },
           {
             "type": "string",
-            "description": "Retry (resume) failed runs.",
+            "description": "Retry the selected failed runs (resume in place or restart as a new linked run).",
             "enum": [
               "retry"
             ]
@@ -7609,7 +7609,7 @@ expression: pretty
       },
       "RunStatusDto": {
         "type": "string",
-        "description": "Run status.",
+        "description": "Run status. `scheduled` covers both a run waiting for its start delay and a run\nsuspended on a wait (timer, signal, child run or in-flight effect); there is no\nseparate suspended status.",
         "enum": [
           "scheduled",
           "ready",
