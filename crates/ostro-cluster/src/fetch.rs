@@ -373,5 +373,6 @@ pub async fn handle_fetch(
             base = end;
         }
     }
+    log.note_fetch_envelopes(out.envelopes.len());
     Ok(out)
 }

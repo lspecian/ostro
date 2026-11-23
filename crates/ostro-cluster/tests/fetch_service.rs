@@ -131,10 +131,13 @@ async fn validation_order_and_every_error_code() {
     assert_eq!((f.fetch_offset, f.durable_leo), (Offset(0), Offset(0)));
 
     // 5-6. a valid fetch from the start gets data.
+    assert_eq!(fx.log.replica_status().max_envelopes_per_fetch, 0);
     let r = handle_fetch(&c, 2, req(2, 2, 0, 0, 0)).await.unwrap();
     assert_eq!(err(&r), FetchError::None);
     assert!(r.diverging.is_none());
     assert_eq!(r.envelopes.len(), 4, "all four batches fit");
+    // the status reports the measured batching (12-16: it was always 0).
+    assert_eq!(fx.log.replica_status().max_envelopes_per_fetch, 4);
     assert_eq!(r.leader_durable_end, 5);
     assert_eq!(r.log_start, 0);
     // verbatim: byte-identical to the stored envelopes.

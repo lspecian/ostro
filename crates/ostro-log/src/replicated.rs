@@ -221,7 +221,8 @@ pub struct ReplicaStatus {
     pub followers: Vec<FollowerStatus>,
     /// HW publications by the replica tracker (D-P12-15: `> 0` on an RF=1 node).
     pub hw_publishes: u64,
-    /// Fetch response cap in envelopes (replication tuning).
+    /// Largest number of envelopes one fetch response of this leader carried since open
+    /// (measured batching; 0 until a fetch returned data).
     pub max_envelopes_per_fetch: u32,
 }
 

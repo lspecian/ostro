@@ -178,6 +178,8 @@ pub(crate) struct ReplicaCore {
     hw_vector: Arc<HwVector>,
     durable: watch::Sender<Offset>,
     hw_publishes: AtomicU64,
+    /// Largest number of envelopes one fetch response of this leader carried since open.
+    max_envelopes_per_fetch: std::sync::atomic::AtomicU32,
     clock: Arc<dyn LogClock>,
     lag_max_ms: u64,
     state: std::sync::Mutex<ReplicaState>,
@@ -360,6 +362,7 @@ impl PartitionLog {
             hw_vector,
             durable: watch::channel(recovery.leo).0,
             hw_publishes: AtomicU64::new(0),
+            max_envelopes_per_fetch: std::sync::atomic::AtomicU32::new(0),
             clock: Arc::clone(&cfg.clock),
             lag_max_ms: cfg.replica_lag_max_ms,
             state: std::sync::Mutex::new(ReplicaState {
@@ -414,6 +417,20 @@ impl PartitionLog {
     /// RF=1 included, is one publication).
     pub fn hw_publishes(&self) -> u64 {
         self.core.hw_publishes.load(Ordering::Relaxed)
+    }
+
+    /// Record that one fetch response of this leader carried `envelopes` envelopes
+    /// (`ReplicaStatus::max_envelopes_per_fetch` is the maximum since open).
+    pub fn note_fetch_envelopes(&self, envelopes: usize) {
+        let n = u32::try_from(envelopes).unwrap_or(u32::MAX);
+        self.core
+            .max_envelopes_per_fetch
+            .fetch_max(n, Ordering::Relaxed);
+    }
+
+    /// The largest fetch response (in envelopes) this leader served since open.
+    pub fn max_envelopes_per_fetch(&self) -> u32 {
+        self.core.max_envelopes_per_fetch.load(Ordering::Relaxed)
     }
 
     /// Seed the epoch history of a log with **no records** (Phase 12 F3, plan 05-21).
@@ -1442,7 +1459,7 @@ impl ReplicatedLog for PartitionLog {
                 .map(|t| t.status(now, self.core.lag_max_ms))
                 .unwrap_or_default(),
             hw_publishes: self.hw_publishes(),
-            max_envelopes_per_fetch: 0,
+            max_envelopes_per_fetch: self.max_envelopes_per_fetch(),
         }
     }
 }
