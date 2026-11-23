@@ -70,6 +70,9 @@ jobs:
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    # a green leg takes about an hour; a hung test fails the job instead of holding the
+    # runner for the 6 h default (run 45109168904's aarch64 leg hung 2h50m)
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -531,6 +534,7 @@ jobs:
   polyglot:
     name: polyglot (python + typescript)
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Free runner disk space
         # same as the test job: the conformance test build plus three guest toolchains
