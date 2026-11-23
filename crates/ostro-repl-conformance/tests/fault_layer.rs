@@ -162,13 +162,17 @@ async fn cut_fails_fast_and_heal_restores() {
             .await
             .expect("a cut link fails fast, it does not hang")
             .expect_err("cut");
-        // A call already dispatched on the old connection when the reset lands comes back
-        // Cancelled (hyper `Canceled: connection closed`); later ones see Unavailable.
-        // Which one the first call gets is a race (seen on linux-aarch64-musl CI).
-        assert!(
-            matches!(e.code(), Code::Unavailable | Code::Cancelled),
-            "{e:?}"
-        );
+        // The code depends on where the reset catches the call (a race, seen on both musl
+        // CI legs): before dispatch it is Unavailable; on the old connection it is
+        // Cancelled (hyper `Canceled: connection closed`) or, mid-exchange, Unknown
+        // "transport error" carrying the fault layer's ConnectionReset. All are the
+        // transport failing, never a handler answer.
+        let transport = match e.code() {
+            Code::Unavailable | Code::Cancelled => true,
+            Code::Unknown => e.message() == "transport error",
+            _ => false,
+        };
+        assert!(transport, "{e:?}");
         assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     }
     // A fresh channel: connect refused.
