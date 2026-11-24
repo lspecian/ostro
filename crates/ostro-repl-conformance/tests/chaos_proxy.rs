@@ -188,12 +188,20 @@ async fn a_dead_upstream_resets_the_client() {
     dead_sock.bind(LOCAL).expect("bind");
     let dead = dead_sock.local_addr().expect("addr");
     let p = proxy_to(dead).await;
-    let mut s = TcpStream::connect(p.addr(1, 2)).await.expect("connect");
-    let _ = s.write_all(b"z").await;
-    assert_eq!(
-        read_end(&mut s, Duration::from_secs(10)).await,
-        Err(ErrorKind::ConnectionReset)
-    );
+    // The refused upstream connect is immediate, so the proxy's RST can reach the client
+    // before (or during) its connect/write. Linux reports a reset exactly once: to whichever
+    // call sees it first, and the socket then reads as a clean EOF. So the reset must surface
+    // in the first call that observes it (connect, write or read), and an error swallowed at
+    // the write is not allowed to turn into `Ok(())` at the read (seen on linux-*-musl CI).
+    let end = async {
+        let mut s = TcpStream::connect(p.addr(1, 2))
+            .await
+            .map_err(|e| e.kind())?;
+        s.write_all(b"z").await.map_err(|e| e.kind())?;
+        read_end(&mut s, Duration::from_secs(10)).await
+    }
+    .await;
+    assert_eq!(end, Err(ErrorKind::ConnectionReset));
     drop(dead_sock);
 }
 
