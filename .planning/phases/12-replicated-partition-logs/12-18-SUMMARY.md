@@ -218,6 +218,56 @@ disk-backed cluster dir).
   so the partitions were wedged. This is a liveness bug and needs a server fix before the 10k run.
   Evidence: `target/campaign-p12-10k/` (POSTMORTEM.txt, campaign log, kept cluster `ostro-proc-Y9CzGN/`).
 
+**Follow-up p12-wedge (2026-11-24): the wedge is fixed (1bb395b).**
+
+- Root cause (confirmed by a deterministic test): `go_leader` handled `StaleEpoch` from
+  `become_leader` as a plain "cannot lead" and went Offline without a term request. After a
+  takeover at `e` is cut short by self-demotion (Announcing, `LeaderAnnounced{e}` refused on
+  NotEnoughReplicas, nothing logged at `e`), the log stays in `Mode::Leader{e}` while its epoch
+  cache is still below `e`. So when contact returns, `decide()` says Lead(e), the log refuses
+  `e`, and nothing ever asks meta for a new term.
+- Fix (option a): on `StaleEpoch{cur}`, the driver stays Offline and calls `request_term(cur + 1)`
+  (the existing B2 path, retried every `term_retry`). A pending request survives `Lead`
+  decisions and is cleared once the log leads. Why this option:
+  - No log-level guard changes. `become_leader` still refuses any epoch at or below the mode
+    epoch or the latest logged epoch, so `e` is never led twice.
+  - The new term comes from meta's `ElectLeader` via `request_fresh_term` (leader == self,
+    self in the ISR, epoch above the current one, CAS on `isr_version`). Fencing, ISR-only
+    election and min_insync are unchanged.
+  - A demoted leader stays Offline: handle epoch 0, acks refuse NotLeader, unroutable.
+  - Rejected (c), resetting the log mode on demotion: it would let `become_leader(e)` succeed a
+    second time at the same epoch.
+  - Rejected (b), `decide()` reading the mode epoch: it widens the trait and the follower case
+    for the same outcome.
+- Regression: `role_lifecycle::self_demotion_while_announcing_requests_a_fresh_term` (tier B,
+  in-process). On 3ba83e8 it fails with "timed out waiting for request_term(p0, 2)"; on 1bb395b
+  it passes.
+- Suites at 1bb395b, all green:
+  - `ostro-partition` tests, default and `--features failpoints`, 1 thread.
+  - Mutant matrix (`OSTRO_REPL_REQUIRE_ALL=1`): 11 `FAILED as expected`, 0 pending.
+  - Red run: 29/29. `no_pending_left` ok. `oracle_selftest` green.
+  - Tier C, `OSTRO_PROC_ITERS=5`: `process_divergence` 5/5, `process_power_loss` 5/5.
+  - Clippy `-D warnings` (with and without failpoints), fmt, `scripts/p12-grep-gates.sh`.
+- 10k re-run: Gate Evidence row 6c (result below once finished).
+
+**Side observation checked (p12-wedge): not the wedge's cause, not fixed.** In the
+`campaign-p12-gate` cluster at 08:58:12:
+- Node 2 was Announcing p0/p1/p3 (e315/e437/e310). Within ~160 ms it was demoted to follower of
+  node 3 at e316/e438/e311.
+- 2 ms later its fetches got `SNAPSHOT_REQUIRED`.
+- Node 2's aborted takeover had very likely logged its own uncommitted `LeaderAnnounced` at
+  e437. Its `last_fetched_epoch` was then above every epoch node 3 had logged, because node 3
+  had not appended `LeaderAnnounced{438}` yet. `end_offset_for_epoch` answers UNDEFINED, which
+  means `SNAPSHOT_REQUIRED`.
+- Once node 3's `LeaderAnnounced` is logged, the same fetch gets `Diverging{436, start of 438}`
+  and a cheap truncation instead.
+
+This is the new-leader window (the same mechanism as the macOS `stale_epoch` harness bug above),
+not the stale-epoch term wedge. It is safe but costly. A fix (seed the new epoch into the leader's
+history at `become_leader`, Kafka `makeLeader`-style, or answer UNDEFINED with a retriable error
+until `LeaderAnnounced` is logged) changes the epoch-history and fetch protocol. It stays a Phase 13
+follow-up.
+
 Side observation (follow-up, not investigated further): node 2 got `SNAPSHOT_REQUIRED` from a
 leader whose own log was not trimmed at that moment. That is safe (an install replaces the
 follower's state with committed state) but costly. A likely cause is the same new-leader window
