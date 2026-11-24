@@ -464,7 +464,7 @@ Plans:
 - [ ] 13-03-PLAN.md — Wire surface: Cluster/ModuleLifecycle/Membership/NodeOps protos (ModuleRefs with partition/epoch coverage), worker Hello feature_level, REST/gRPC adapters + RequestMeta, production GrpcControlPlane with parity (wave 3; API-08, CLUS-05..07)
 - [ ] 13-04-PLAN.md — Compatibility gate (require, finalizer, hold, NodeVersion, boot/running fences, level emulation) + partition fail-stop on unknown commands (wave 2; CLUS-06)
 - [x] 13-05-PLAN.md — Vendored driver FatalApply (halt before applied) + MetaSm fail-stop, TransferLeader/ReadIndex/progress, MetaHandle surface, MetaPeer large snapshots + lease anchor, remedy text (wave 2; CLUS-05, CLUS-06, API-08)
-- [ ] 13-06-PLAN.md — Pure algorithms (TDD): reconciler with joint 1->3->5 changes, placement planner, reassignment state machine (shrink only when target in ISR), leader balancer, proptest models (wave 2; CLUS-05)
+- [x] 13-06-PLAN.md — Pure algorithms (TDD): reconciler with joint 1->3->5 changes, placement planner, reassignment state machine (shrink only when target in ISR), leader balancer, proptest models (wave 2; CLUS-05)
 - [ ] 13-07-PLAN.md — LinkerSet by WIT major line, JOURNAL_IFACE fix, per-function level requirement, test-only 0.1.1 host and 0.2 fixture line, cache key by line (wave 2; ENG-10)
 - [ ] 13-08-PLAN.md — Harness: P13Harness in tiers B and C + RYW/membership/upgrade/GC oracles (wave 3; all)
 - [ ] 13-09-PLAN.md — Membership: dynamic address book, join handshake + CA secret + resume, marker-first joiner with five crash tests, both voter checks lifted, Member upsert RMW, reconciler driver, removal/--force/orphan tombstones, status (wave 4; CLUS-05)
