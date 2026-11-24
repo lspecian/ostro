@@ -20,6 +20,7 @@
      **Phase 12 gate 2026-11-22 (12-01):** the code was re-verified against this file before any Phase 12 code (`12-01-rescheck.py`, output in 12-01-SUMMARY: every Cmd tag, StartRun field, intent, outbox kind, TerminalStatus, journal kind, keyspace, RejectReason, InvalidCode, MetaRecord/MetaKind, MetaCommand and ext tag in code is `exists` or a canonical placeholder; MetaCommand is exactly 0–3; Cmd 41–42, MetaRecord 26 and ext tags 80–95 are empty; RESERVATIONS CHECK: PASS). F7 landed in 05-07, so Cmd 41–42 and MetaRecord 26 stay **unused**. Phase 12 allocations: MetaCommand 4 `ElectLeader`, 5 `AlterIsr`, 6 `ResignLeader` (7 spare), ext tag 80 `ElectionInfo` (81–95 spare) and the §11 Phase 12 names (D-P12-11/12).
      **Phase 10 end gate 2026-11-23 (10-20):** Phase 10 allocated no ordinal (F7): the ordinal spaces in code are identical at the 10-01 baseline (ca8a62e) and HEAD (`10-20-rescheck.py`, output in 10-20-SUMMARY; RESERVATIONS CHECK: PASS). The 15 §11 Phase 10 name rows read `exists (P10, ...)`.
      **Phase 11 end gate 2026-11-22 (11-18):** every Phase 11 ordinal in code was re-verified against this file (`11-18-rescheck.py`, output in 11-18-SUMMARY: every Cmd tag in code is `exists`; StartRun 40/41, JournalEvent.4, InvalidCode 29/30, meta ext 144/145 and `x_run_index` are in code; RESERVATIONS CHECK: PASS). Used rows read `exists (P11, <plan>)`: Cmd 45 `DlqUpdate`, StartRun 40/41, JournalEvent.4, InvalidCode 29/30, ext 144 `OnFailure` / 145 `DlqPolicy` and `x_run_index`. Unused P11 slots stay `reserved P11`: Cmd 46–49, StartRun 42–43, InvalidCode 31 (no `ReservedP11_31` placeholder is declared yet), ext 146–159, and the metric prefix `ostro_ui_`. The §11 Phase 11 names that shipped read `exists (P11, <plan>)`; 11-18 added the CLI verb row and `index_rebuilding`. **Not allocated (follow-up):** `RunInfo.retry_of` / `RunInfo.status_seq` and a `RunPage` order-fallback flag (header `X-Ostro-Order-Fallback`) need `ostro.api.v1` proto field numbers, and this file has no API-proto block to take them from; they are left to a later plan that adds such a block (no numbers invented).
+     **Phase 12 end gate 2026-11-24 (12-18):** the P12 block re-verified against the final tree (output in 12-18-SUMMARY): MetaCommand is exactly 0–6 (`InitCluster`, `Put`, `Delete`, `SetPartitionLeader`, `ElectLeader`, `AlterIsr`, `ResignLeader`), the only registered ext tag in 80–95 is 80 (`EXT_ELECTION_INFO`), the `Cmd` oneof tags are 1–13, 20, 21, 27, 45 (no 41–42), and `MetaRecord`/`MetaKind` end at index 16 (no 26). Rows MetaCommand 4–6 and ext tag 80 flipped to `exists (P12)`; MetaCommand 7, ext tags 81–95, Cmd 41–42 and MetaRecord 26 are `reserved P12, unused`. Phase 12 allocated no other ordinal; §11 names unchanged.
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -52,7 +53,7 @@ Sources:
 | 27 | ScheduleFire | exists (P8, 08-01) |
 | 28–33 | spare | reserved P8 |
 | 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) (unused at Phase 9 end; fallback not needed) |
-| 41–42 | — (contingency, expected use 0) | reserved P12, **unused** (F7 landed in 05-07; verified by 12-01) |
+| 41–42 | — (contingency, expected use 0) | reserved P12, unused (F7 landed in 05-07; verified by 12-01, re-verified by 12-18: no Cmd tag 41–42 in code) |
 | 43 | RepinRun (`ostro migrate-runs`) | reserved P13 |
 | 44 | spare | reserved P13 |
 | 45 | DlqUpdate `{run_id 1, op oneof {HookStarted 2, Dismissed 3, Requeued 4}, episode_completed_at_ms 5}` (research proposed 43, which is taken by P13 RepinRun) | exists (P11, 11-02; apply 11-08) |
@@ -269,7 +270,7 @@ Rules (D20):
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
 | 22–23 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) (unused at Phase 9 end; fallback not needed) |
 | 24–25 | — (fallback only if Phase 14 F2/F3/F4 had not landed pre-freeze) | reserved P14 |
-| 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12, **unused** (F7 landed in 05-07: `PartitionAssignment.{replicas, isr_version, min_insync}`, `MemberRecord.{cluster_addr, repl_addr}`; verified by 12-01). No Phase 12 META_FORMAT bump. |
+| 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12, unused (12-18: MetaRecord ends at index 16) (F7 landed in 05-07: `PartitionAssignment.{replicas, isr_version, min_insync}`, `MemberRecord.{cluster_addr, repl_addr}`; verified by 12-01). No Phase 12 META_FORMAT bump. |
 | 27+ | — | unallocated |
 
 META_FORMAT: bumped once pre-freeze by 05-07. **Frozen baseline: `META_FORMAT = 2`** (verified by 05-20 at the freeze, 2026-11-19; `crates/ostro-meta/src/command.rs`, golden `crates/ostro-meta/tests/golden/meta_v2.txt` pinned in `golden_frozen.rs`; format 1 = pre-Phase-5 dev format, rejected). Each post-freeze bump is recorded here with its phase.
@@ -284,10 +285,10 @@ Appending a `MetaCommand` variant changes no existing encoding and needs **no ME
 | 1 | Put | exists (P4) |
 | 2 | Delete | exists (P4) |
 | 3 | SetPartitionLeader | exists (P4) |
-| 4 | ElectLeader | exists (P12, 12-02 shape; apply planned 12-05) |
-| 5 | AlterIsr | exists (P12, 12-02 shape; apply planned 12-05) |
-| 6 | ResignLeader | exists (P12, 12-02 shape; apply planned 12-05) |
-| 7 | spare | reserved P12 |
+| 4 | ElectLeader | exists (P12) — shape 12-02, apply 12-05, proposed by the 12-10 controller |
+| 5 | AlterIsr | exists (P12) — shape 12-02, apply 12-05, proposed by the 12-11 ISR publisher and the controller |
+| 6 | ResignLeader | exists (P12) — shape 12-02, apply 12-05, proposed on a Failed leader (12-13) |
+| 7 | spare | reserved P12, unused (12-18: MetaCommand is exactly 0–6 in code) |
 | 8 | AlterReplicas | reserved P13 |
 | 9–11 | spare | reserved P13 |
 | 12+ | — | unallocated |
@@ -309,8 +310,8 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 32–47 | reserved P7 | — |
 | 48–63 | reserved P8 | — |
 | 64–79 | reserved P9 | — (unused at Phase 9 end; fallback not needed) |
-| 80 | `PartitionAssignment` ElectionInfo `{reason u8: 0 Bootstrap 1 Startup 2 Failover 3 Resign 4 Offline, elected_at_ms u64, prev_leader u64}` | exists (P12, 12-02: `ext::EXT_ELECTION_INFO`, `ElectionInfo`) |
-| 81–95 | spare (Member, PartitionAssignment, cluster) | reserved P12 |
+| 80 | `PartitionAssignment` ElectionInfo `{reason u8: 0 Bootstrap 1 Startup 2 Failover 3 Resign 4 Offline, elected_at_ms u64, prev_leader u64}` | exists (P12) — `ext::EXT_ELECTION_INFO`, `ElectionInfo` (12-02), written by ElectLeader/ResignLeader apply |
+| 81–95 | spare (Member, PartitionAssignment, cluster) | reserved P12, unused (12-18: only tag 80 registered in code) |
 | 96 | `Member` NodeVersion `{ostro_version, level_min, level_max, wasmtime, event_codec_ver, wit_lines, reported_at_ms}` | reserved P13 |
 | 97 | `Member` MemberState `{state: Joining/Active/Draining/Removed, changed_at_ms}` (tombstone; node ids never reused) | reserved P13 |
 | 98 | `ClusterInfo` ClusterVersion `{finalized, hold: Option<u32>, finalized_at_ms}` (the 1.0 binary must already read it; absent = baseline level) | reserved P13 |

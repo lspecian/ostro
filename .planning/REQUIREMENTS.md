@@ -184,10 +184,10 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 
 ### Cluster
 
-- [ ] **CLUS-01**: Replication conformance suite (placement, ISR honesty from measured LEOs, divergence/truncation, failover, min-insync) exists and fails on a deliberately broken build before replication is integrated
-- [ ] **CLUS-02**: Partition logs replicate by follower-pull Fetch over the cluster listener; HW = min(LEO over ISR); leader epochs validated on every fetch; divergent tails truncated (incl. in object storage)
-- [ ] **CLUS-03**: Partition leaders are elected only from the published ISR; writes stop when ISR < `min_insync_replicas`
-- [ ] **CLUS-04**: Followers apply committed entries (hot standby) and can bootstrap from a snapshot; leader failover p99 < 10 s
+- [x] **CLUS-01**: Replication conformance suite (placement, ISR honesty from measured LEOs, divergence/truncation, failover, min-insync) exists and fails on a deliberately broken build before replication is integrated
+- [x] **CLUS-02**: Partition logs replicate by follower-pull Fetch over the cluster listener; HW = min(LEO over ISR); leader epochs validated on every fetch; divergent tails truncated (incl. in object storage)
+- [x] **CLUS-03**: Partition leaders are elected only from the published ISR; writes stop when ISR < `min_insync_replicas`
+- [x] **CLUS-04**: Followers apply committed entries (hot standby) and can bootstrap from a snapshot; leader failover p99 < 10 s
 - [ ] **CLUS-05**: Multi-voter metadata Raft (3/5 nodes) with membership changes; `ostro cluster init/join/remove`; a single node is promoted to a cluster without export [FR-0.4]
 - [ ] **CLUS-06**: Rolling upgrade across one minor version without draining runs; workers advertise WIT/engine versions and receive compatible activations only [FR-6.5]
 - [ ] **CLUS-07**: Module GC is reference-counted against non-terminal runs; `ostro migrate-runs` re-pins runs only after a passing dry-run replay
@@ -364,10 +364,10 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | SEC-03 | Phase 14 | Pending |
 | SEC-04 | Phase 14 | Pending |
 | SEC-05 | Phase 14 | Pending |
-| CLUS-01 | Phase 12 | Pending |
-| CLUS-02 | Phase 12 | Pending |
-| CLUS-03 | Phase 12 | Pending |
-| CLUS-04 | Phase 12 | Pending |
+| CLUS-01 | Phase 12 | Complete (12-06 6b69f20/cf9e801 + 12-07 4ef0c25/32b3d72: red-run tables before integration, RF>1 red / RF=1 green; 12-16 3519eb6/543a8ed: 11/11 tier-B mutant pairs bite on their target oracle; 12-17 f5c281b: tier-C count_nondurable_leo bites 5/5; 12-18 5782db7/141954f: mutant matrix mandatory in ci-local (OSTRO_REPL_REQUIRE_ALL=1 in the failpoint suites + "replication mutant matrix" step), gate run 11 bites / 0 pending (target/p12-gate/mutant-matrix.log); ci.yml half handed to the coordinator in 12-18-SUMMARY) |
+| CLUS-02 | Phase 12 | Complete (12-16 red run 29/29 green, 0 pending: hw_is_min_over_isr, isr_slow_follower_shrinks, fetch_with_stale_epoch_fenced (12-18 aaa5eab harness fix), leader_dies_with_unreplicated_writes, isolated_leader_rejoin_truncates, two_quick_leader_changes_truncate, remote_chain_equals_committed_prefix, remote_chain_never_above_hw; 12-15 fdb8bb8 cluster_repair; 12-17 f5c281b process_leader_dies_with_unreplicated_writes, 12-18 gate 10/10 (target/p12-gate/12-18-process_divergence.log); 12-18 campaign: see 12-18-SUMMARY) |
+| CLUS-03 | Phase 12 | Complete (12-05 46928ae elect_leader apply tables; 12-10 65db628 controller tests; 12-16 failover_elects_isr_member, whole_isr_dead_goes_offline, writes_stop_below_min_insync green with the election::isr_only audit of every proposed ElectLeader; unclean_election and ignore_min_insync mutants bite (12-18 gate log)) |
+| CLUS-04 | Phase 12 | Complete (12-16 followers_are_hot_standbys, empty_node_bootstraps_from_snapshot, node_behind_log_start_reinstalls, install_stream_cut_resumes; 12-12 e95c298 install_crash 3 x 20 iterations; 12-18 failover_p99 200 iterations incl. 67 controller faults: p99 5.44 s < 10 s, every run resumed (target/failover-p99/report.txt); RF=1 one path: one_path_rf1_hw_through_tracker + rf1_bypass mutant + grep gates; native-Linux p99/benchmark human_needed (12-VALIDATION)) |
 | CLUS-05 | Phase 13 | Pending |
 | CLUS-06 | Phase 13 | Pending |
 | CLUS-07 | Phase 13 | Pending |
