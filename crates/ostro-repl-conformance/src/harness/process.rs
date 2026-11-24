@@ -10,8 +10,9 @@
 //!
 //! **Addresses.** Each cluster picks a random `r` in `2..=250` and puts node `i` on
 //! `127.r.r.i` (Linux routes all of 127/8 on `lo`, no root needed), so parallel tests never
-//! collide. On that IP the node runs its API on port 0 (the bound port comes from the ready
-//! line) and its cluster listener on [`CLUSTER_PORT`]. The proxy listener of the directed link
+//! collide. On that IP the node runs its API on port 0 at its first start (the bound port
+//! comes from the ready line and is then pinned in its config, so restarts keep the address)
+//! and its cluster listener on [`CLUSTER_PORT`]. The proxy listener of the directed link
 //! `from → to` is `127.r.r.<to>:<PROXY_PORT_BASE + from>`: it sits on the *target's* IP, so
 //! the TLS name check of a client dialing it sees the address the target's certificate is
 //! issued for, and A's view of B is a port of its own. `[[cluster.peers]] addr` of node A
@@ -412,7 +413,7 @@ impl ProcCluster {
         let t0 = Instant::now();
         for (i, rx) in pending {
             let api = c.await_ready(i, rx).await?;
-            c.nodes.get_mut(&i).expect("node").api = api;
+            c.set_api(i, api)?;
         }
         c.timings.last_start = t0.elapsed();
         Ok(c)
@@ -556,6 +557,21 @@ impl ProcCluster {
         }
     }
 
+    /// Record node `i`'s API address and pin its port in the node's config, so a restart
+    /// binds the same address (12-17: clients and leader hints stay valid across restarts,
+    /// like a server with a fixed port).
+    fn set_api(&mut self, i: u64, api: SocketAddr) -> Result<(), HarnessError> {
+        let node = self.nodes.get_mut(&i).expect("node");
+        node.api = api;
+        if node.cfg.api.listen != api {
+            node.cfg.api.listen = api;
+            std::fs::write(&node.config_path, node.cfg.to_toml_string()).map_err(|e| {
+                start_err(format!("write {}: {e}", node.config_path.display()))
+            })?;
+        }
+        Ok(())
+    }
+
     fn node(&self, i: u64) -> &ProcNode {
         self.nodes
             .get(&i)
@@ -694,7 +710,7 @@ impl ProcCluster {
         }
         for (n, rx) in pending {
             let api = self.await_ready(n, rx).await?;
-            self.nodes.get_mut(&n).expect("node").api = api;
+            self.set_api(n, api)?;
         }
         self.timings.last_start = t0.elapsed();
         Ok(())
@@ -806,7 +822,7 @@ impl ClusterHarness for ProcCluster {
         let rx = self.spawn(node)?;
         let api = self.await_ready(node, rx).await?;
         self.timings.last_start = t0.elapsed();
-        self.nodes.get_mut(&node).expect("node").api = api;
+        self.set_api(node, api)?;
         Ok(())
     }
 
