@@ -77,7 +77,10 @@ old epoch's tokens and are re-granted at once (no `lease_ttl` wait).
 and no leader hint. A leader that has not heard from the meta leader for `session_timeout`
 masks its led partitions as leaderless (self-demotion, `ostro_repl_self_demotions_total`), so
 its clients fail fast; safety never depends on this, because a cut-off leader cannot advance
-its HW without the ISR, and the ISR can change only through meta.
+its HW without the ISR, and the ISR can change only through meta. A takeover cut short by
+self-demotion (still announcing, `LeaderAnnounced{e}` not yet logged) never resumes at `e`: when
+contact returns and meta still names it at `e`, the node asks meta for a fresh term above `e`
+and takes over at that one.
 
 **Hot standby.** Followers apply committed entries to their own state store, take snapshots and
 trim their own log, so a new leader does not replay from scratch.

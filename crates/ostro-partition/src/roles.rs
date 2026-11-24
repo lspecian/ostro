@@ -24,6 +24,7 @@
 //! | `leader == self`, `e` | Leader/Announcing at `e` | keep leading, adopt ISR |
 //! | `leader == self`, `e > latest` | anything else | Lead(e) (full step-down + step-up from an older term) |
 //! | `leader == self`, `e <= latest` | anything else | stay, `request_term(latest + 1)` (B2) |
+//! | Lead(e), log refuses `e` (`StaleEpoch{cur}`, e.g. a takeover aborted by self-demotion) | any | Offline, `request_term(cur + 1)` (p12-wedge) |
 //! | partition failed | any | Offline, `resign(p, e)` once if it led at `e` (W3) |
 //!
 //! Become leader: stop the fetcher → `become_leader(e, replica set)` → wait applied ≥ local
@@ -690,7 +691,12 @@ impl RoleDriver {
         }
         loop {
             let (d, hint) = self.decide_now();
-            if !matches!(d, RoleDecision::RequestTerm { .. }) {
+            // A pending term request survives a `Lead` decision: `go_leader` re-requests it
+            // when the log refuses the epoch (StaleEpoch) and clears it once it leads.
+            if !matches!(
+                d,
+                RoleDecision::RequestTerm { .. } | RoleDecision::Lead { .. }
+            ) {
                 self.term = None;
             }
             let flow = match d {
@@ -838,10 +844,30 @@ impl RoleDriver {
         let Some(run) = self.cell.running() else {
             return Flow::Done;
         };
-        if let Err(e) = self.log.become_leader(epoch, set) {
-            warn!(partition = p.0, epoch = epoch.0, error = %e, "cannot lead");
-            self.set_role(PartitionRole::Offline);
-            return Flow::Done;
+        match self.log.become_leader(epoch, set) {
+            Ok(()) => self.term = None,
+            Err(LogError::StaleEpoch { current }) => {
+                // p12-wedge: the log already led (or holds records of) an epoch >= `epoch`,
+                // typically a takeover at `epoch` aborted by self-demotion before its
+                // `LeaderAnnounced` was appended (the epoch cache, hence `decide`, still sits
+                // below `epoch`, the log's mode does not). Never lead at a reused epoch: stay
+                // Offline and ask meta for a fresh term above it (B2), retried every
+                // `term_retry` until meta's assignment moves.
+                warn!(
+                    partition = p.0,
+                    epoch = epoch.0,
+                    current = current.0,
+                    "cannot lead at a stale epoch: requesting a fresh term"
+                );
+                self.set_role(PartitionRole::Offline);
+                self.request_term(Epoch(current.0.saturating_add(1)));
+                return Flow::Done;
+            }
+            Err(e) => {
+                warn!(partition = p.0, epoch = epoch.0, error = %e, "cannot lead");
+                self.set_role(PartitionRole::Offline);
+                return Flow::Done;
+            }
         }
         self.env.router.set_leader_hint(p, None);
         self.set_role(PartitionRole::Announcing { epoch });

@@ -429,6 +429,75 @@ async fn failed_leader_steps_down_and_resigns_once() {
     node.shutdown().await.expect("shutdown");
 }
 
+/// p12-wedge (10k campaign, seed 1741, fault ~641): a leader that self-demotes while
+/// `Announcing` (its `LeaderAnnounced{e}` refused on `NotEnoughReplicas`, nothing appended
+/// at `e`) must not wedge once metadata contact returns. Meta still names it leader at `e`;
+/// the log's epoch cache is still below `e` (so `decide` says Lead), but the aborted term
+/// left the log leading `e`, so `become_leader(e)` is `StaleEpoch`. The driver must ask
+/// for a fresh term above `e` (never reuse `e`) and lead once meta grants it; meanwhile it
+/// stays Offline and accepts no writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn self_demotion_while_announcing_requests_a_fresh_term() {
+    let tmp = ostro_testkit::fs::tempdir();
+    // ISR {1} < min_insync 2: the takeover at epoch 1 stays Announcing.
+    let announcing = view(0, 1, 1, &[1, 2], &[1], 1, 2);
+    let asg = FakeAssignments::new(1, vec![announcing.clone()]);
+    let fol = FakeFollower::new();
+    let node = open(roles_cfg(tmp.path(), 1, 1, &asg, &fol)).await;
+    wait_role(&node, 0, "Announcing{1}", |r| {
+        *r == PartitionRole::Announcing { epoch: Epoch(1) }
+    })
+    .await;
+    let h = node.handle(P0).expect("ready");
+    assert!(
+        h.log().latest_epoch() < Some(Epoch(1)),
+        "nothing appended at epoch 1 yet"
+    );
+
+    // Self-demotion: meta's view masked as leaderless (the cluster's views_of).
+    asg.set(view(0, 0, 1, &[1, 2], &[1], 1, 2));
+    wait_role(&node, 0, "Offline after self-demotion", |r| {
+        *r == PartitionRole::Offline
+    })
+    .await;
+    assert!(
+        h.log().latest_epoch() < Some(Epoch(1)),
+        "epoch 1 stayed empty"
+    );
+
+    // Contact back: meta still names this node leader at epoch 1, ISR {1}.
+    asg.set(announcing);
+    p12_roles::eventually("request_term(p0, 2)", || {
+        asg.term_requests().contains(&(P0, Epoch(2)))
+    })
+    .await;
+    assert!(
+        asg.term_requests().iter().all(|(_, e)| *e >= Epoch(2)),
+        "epoch 1 is never reused: {:?}",
+        asg.term_requests()
+    );
+    assert_eq!(*node.role(P0).unwrap().borrow(), PartitionRole::Offline);
+    assert!(
+        !routable(&node, P0).await,
+        "a demoted leader routes nothing"
+    );
+    let r = timeout(
+        Duration::from_millis(800),
+        h.submit_one(Command::start_run(common::start_run(&common::run_on(0)))),
+    )
+    .await
+    .expect("a submit to the demoted leader is refused at once");
+    assert!(r.is_err(), "a demoted leader accepts no writes: {r:?}");
+    assert!(term_started(&events_of(&node, 0)).is_empty());
+
+    // Meta grants the fresh term (and the ISR recovers): the partition leads again.
+    asg.set(view(0, 1, 2, &[1, 2], &[1], 2, 1));
+    wait_leader(&node, 0, 2).await;
+    assert_eq!(term_started(&events_of(&node, 0)), vec![2]);
+    assert!(routable(&node, P0).await);
+    node.shutdown().await.expect("shutdown");
+}
+
 #[cfg(feature = "failpoints")]
 mod failpoints {
     use super::*;
