@@ -338,11 +338,12 @@ impl Controller {
             let record = bootstrap::bootstrap_record(a, replicas, self.cfg.min_insync, now)?;
             return Some(bootstrap::bootstrap_command(record));
         }
-        if a.replicas.len() == 1 && self.cfg.rf > 1 && st.warned_rf.insert(p) {
+        if a.replicas.len() < self.cfg.rf && st.warned_rf.insert(p) {
             tracing::info!(
                 partition = p,
                 replicas = ?a.replicas,
-                "partition at epoch >= 1 with one replica is not re-placed (grow with `ostro cluster init`, Phase 13)"
+                rf = self.cfg.rf,
+                "partition at epoch >= 1 with fewer replicas than rf is not re-placed (grow with `ostro cluster init`, Phase 13)"
             );
         }
         let info = get_election_info(&a.ext).ok().flatten();

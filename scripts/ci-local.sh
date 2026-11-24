@@ -226,10 +226,25 @@ check_failpoints() {
       cargo clippy -p "$crate" --features failpoints --all-targets --locked -- -D warnings || return 1
     fi
   done
+  # 12-18: a pending or non-biting replication mutant fails the suites (CLUS-01).
   for c in "${FAILPOINT_CRATES[@]}"; do
     mapfile -t cmd < <(failpoint_test_cmd "$c")
-    "${cmd[@]}" || return 1
+    OSTRO_REPL_REQUIRE_ALL=1 "${cmd[@]}" || return 1
   done
+}
+
+# Phase 12 (12-18, CLUS-01): the replication mutant matrix is mandatory. Every tier-B
+# mutant must bite (>= 11 "FAILED as expected" lines) and none may be skipped as pending.
+# Keep in sync with the "Replication mutant matrix" step of .github/workflows/ci.yml.
+check_repl_mutants() {
+  local out bites
+  out="$(OSTRO_REPL_REQUIRE_ALL=1 cargo test -p ostro-repl-conformance --features failpoints --locked --test mutants -- --test-threads=1 --nocapture 2>&1)" || { echo "$out"; return 1; }
+  grep -E 'MUTANT |test result' <<<"$out" || true
+  grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<<"$out" || { echo "the mutant matrix ran no test"; return 1; }
+  bites="$(grep -c 'FAILED as expected' <<<"$out" || true)"
+  if [[ "$bites" -lt 11 ]]; then echo "only ${bites} mutant bites (need >= 11)"; return 1; fi
+  if grep -q 'SKIP (pending)' <<<"$out"; then echo "a mutant scenario is still pending"; return 1; fi
+  echo "${bites} mutant bites, none pending"
 }
 
 # Rust guest SDK (plan 04-20): a separate cargo workspace (sdks/rust, no committed lock,
@@ -286,12 +301,41 @@ check_forbidden_crates() {
 # Phase 12 (12-08, D5 / docs/04 §4 rule 1): one partition log implementation. The former
 # RF=1 type name must not come back, and the log crate must not branch on the replication
 # factor (RF=1 is a replica set of one, not a second path).
+#
+# 12-18 adds: no RF-specific branch in ostro-cluster either, no SetPartitionLeader proposal
+# in ostro-server / ostro-cluster (comments allowed), no legacy self-leader path in
+# ostro-partition, and the Phase 12 clock gate (time only through the injected Clock;
+# a line may opt out with a `clock-exempt:` comment). Keep in sync with the "Phase 12
+# grep gates" step of .github/workflows/ci.yml.
+# gate_hits <grep args...>: grep's matches; "no match" (status 1) is empty, errors fail.
+gate_hits() {
+  local out rc=0
+  out="$(grep "$@")" || rc=$?
+  if [[ $rc -gt 1 ]]; then echo "grep $* failed ($rc)" >&2; return 2; fi
+  printf '%s' "$out"
+}
+
 check_one_log_path() {
   local hits rc=0
-  hits=$(grep -rn "Rf1Log" crates/ || true)
+  hits=$(gate_hits -rn "Rf1Log" crates/) || return 1
   if [ -n "$hits" ]; then echo "Rf1Log is gone (use PartitionLog):"; echo "$hits"; rc=1; fi
-  hits=$(grep -rnE "rf *== *1|replicas\.len\(\) *== *1" crates/ostro-log/src || true)
-  if [ -n "$hits" ]; then echo "RF-specific branch in ostro-log:"; echo "$hits"; rc=1; fi
+  hits=$(gate_hits -rnE "rf *== *1|replicas\.len\(\) *== *1" crates/ostro-log/src crates/ostro-cluster/src) || return 1
+  if [ -n "$hits" ]; then echo "RF-specific branch in ostro-log / ostro-cluster:"; echo "$hits"; rc=1; fi
+  hits=$(gate_hits -rn "SetPartitionLeader" crates/ostro-server/src crates/ostro-cluster/src) || return 1
+  hits=$(grep -vE '^[^:]+:[0-9]+: *//' <<<"$hits" || true)
+  if [ -n "$hits" ]; then echo "SetPartitionLeader proposal (Phase 12: ElectLeader only):"; echo "$hits"; rc=1; fi
+  hits=$(gate_hits -rn "legacy path" crates/ostro-partition/src) || return 1
+  if [ -n "$hits" ]; then echo "legacy self-leader path in ostro-partition:"; echo "$hits"; rc=1; fi
+  hits=$(gate_hits -rnE "SystemTime::now\(|SystemClock\b|Instant::now\(" crates/ostro-cluster/src \
+    crates/ostro-partition/src/roles.rs crates/ostro-partition/src/replica_services.rs \
+    crates/ostro-log/src/partition_log.rs crates/ostro-log/src/replica crates/ostro-server/src/cluster.rs \
+    crates/ostro-backup/src/cluster.rs) || return 1
+  hits=$(grep -v "clock-exempt:" <<<"$hits" || true)
+  if [ -n "$hits" ]; then echo "wall clock outside the injected Clock (clock gate):"; echo "$hits"; rc=1; fi
+  # chrono and bincode are banned for normal dependencies by deny.toml (cargo deny step);
+  # bincode and object_store must not appear in the lock file at all.
+  hits=$(gate_hits -nE '^name = "(bincode|object_store)"$' Cargo.lock) || return 1
+  if [ -n "$hits" ]; then echo "forbidden crate in Cargo.lock:"; echo "$hits"; rc=1; fi
   return $rc
 }
 
@@ -580,13 +624,14 @@ fi
 step "semantics sleepers (serial)" check_sleepers
 step "failpoint list sync (ci.yml)" check_failpoint_sync
 step "failpoint suites" check_failpoints
+step "replication mutant matrix" check_repl_mutants
 step "server campaign smoke (20 kills)" check_campaign_smoke
 step "phase 7 failpoint legs + manifests" check_phase7
 step "cargo deny check" cargo deny check
 step "check-vendored.sh" bash scripts/check-vendored.sh
 step "check-deny-fixtures.sh" bash scripts/check-deny-fixtures.sh
 step "no chronik/tokio-uring/prometheus" check_forbidden_crates
-step "one partition log path (12-08)" check_one_log_path
+step "one log path + P12 grep gates" check_one_log_path
 if [[ -f "$WORKFLOW" ]]; then
   step "workflow validation" check_workflow
 else

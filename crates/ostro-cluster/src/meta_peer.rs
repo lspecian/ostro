@@ -489,7 +489,7 @@ async fn run_peer(shared: Arc<Shared>, peer: u64, q: Arc<PeerQueue>) {
             q.notify.notified().await;
             continue;
         }
-        let started = Instant::now();
+        let started = Instant::now(); // clock-exempt: connection lifetime for the reconnect backoff, not replication time
         let mut snapshot_sent = false;
         let failure = match shared.transport.channel(peer) {
             Err(e) => e.to_string(),
