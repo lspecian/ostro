@@ -22,6 +22,10 @@
 //! 5. builds the API router (`ostro_api::router_with`) and merges the `ostro_ui` router
 //!    (`/ui`, D-P11-17) onto it, so both share the one port.
 //!
+//! Phase 13 (13-02, deviation from "final after 11-04"): `wire` takes the Phase 13
+//! extension filler (`p13::fill_extensions`), applied after the Phase 8/11 slots, and the API
+//! and UI use `ControlCtx::routed` (the routed control plane, D-P13-14).
+//!
 //! # Ownership
 //!
 //! `P11Ctx::cc` holds the control plane strongly (`ControlCtx::partitions`), so the
@@ -204,6 +208,7 @@ pub fn ui_config(cfg: &ServerConfig) -> ostro_ui::UiConfig {
 
 /// Build the Phase 11 context and the one-port router (see the module docs). `router` is
 /// the base the API and UI routers are merged onto (`server.rs` passes an empty one).
+#[allow(clippy::too_many_arguments)]
 pub fn wire(
     cc: &ControlCtx,
     runtime: Arc<Runtime>,
@@ -212,6 +217,7 @@ pub fn wire(
     api_cfg: &mut ApiConfig,
     router: axum::Router,
     cfg: &Arc<ServerConfig>,
+    p13_extensions: &dyn Fn(&mut ApiExtensions),
 ) -> axum::Router {
     let limits = cfg.limits.to_run_limits();
     let bulk = BulkRegistry::new(cc.data_dir.clone(), cfg.bulk.clone(), Arc::clone(&cc.clock));
@@ -238,8 +244,11 @@ pub fn wire(
     api_cfg.max_payload_bytes = usize::try_from(ctx.limits.max_payload_bytes).unwrap_or(usize::MAX);
     api_cfg.root_redirect = ui.enabled.then(|| "/ui/".to_owned());
 
-    let ext = extensions(cc, &ctx);
-    let cp: Arc<dyn ControlPlane> = Arc::clone(&cc.partitions) as Arc<dyn ControlPlane>;
+    let mut ext = extensions(cc, &ctx);
+    // Phase 13 (13-02): the Phase 13 slots and routing over every slot, then the routed
+    // control plane for the API and the UI.
+    p13_extensions(&mut ext);
+    let cp: Arc<dyn ControlPlane> = Arc::clone(&cc.routed);
     let api = ostro_api::router_with(Arc::clone(&cp), api_cfg.clone(), ext.clone());
     let ui_router = ostro_ui::router(ostro_ui::UiDeps {
         cp,

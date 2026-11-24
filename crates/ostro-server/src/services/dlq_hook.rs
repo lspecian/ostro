@@ -57,7 +57,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ostro_api::ApiError;
-use ostro_api::ControlPlane;
 use ostro_api::domain::{ConflictPolicy, StartRunRequest};
 use ostro_partition::query::{self, IndexError};
 use ostro_partition::store::derived::IndexState;
@@ -296,7 +295,11 @@ pub async fn drive(ctx: &P11Ctx, run: RunId) -> Result<HookOutcome, ApiError> {
         tags: &rec.tags,
         input,
     });
-    let started = cp
+    // Phase 13 (13-02): the hook run starts through the routed control plane (its
+    // idempotency key may hash to a partition led elsewhere).
+    let started = ctx
+        .cc
+        .routed
         .start_run(StartRunRequest {
             workflow: hook.workflow.clone(),
             input_json: body.to_string().into_bytes(),

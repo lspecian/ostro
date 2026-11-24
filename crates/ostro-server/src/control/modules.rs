@@ -45,7 +45,7 @@ use ostro_api::domain::{
 use ostro_engine::error::EngineError;
 use ostro_engine::runtime::WorkflowMeta;
 use ostro_meta::{
-    ActiveVersion, MetaCommand, MetaError, MetaKey, MetaRecord, MetaResult, MetaState,
+    ActiveVersion, MetaCommand, MetaError, MetaKey, MetaRecord, MetaResult, MetaState, MetaView,
     ModuleRecord, Versioned, WorkflowVersion,
 };
 use sha2::{Digest, Sha256};
@@ -286,6 +286,14 @@ pub(crate) async fn upload_module(
                 .prepare_cached(&req.wasm)
                 .await
                 .map_err(engine_error)?;
+            // Phase 13 (13-14): the WIT line / feature level gate. 13-14 takes the selection
+            // from `linker_set::select` (13-07); until then every module is a 0.1 / level-1
+            // module.
+            let selection = ostro_engine::host::linker_set::WitSelection {
+                line: ostro_engine::host::linker_set::WitLine::V0_1,
+                min_level: ostro_types::compat::LEVEL_MIN,
+            };
+            upload_gate(cp.meta.view(), &selection)?;
             let metas = cp.runtime.describe(&prepared).await.map_err(|e| {
                 ApiError::invalid_argument(format!("describe() of the module failed: {e}"))
             })?;
@@ -514,6 +522,16 @@ pub(crate) fn list_workflows(cp: &ServerControlPlane) -> Vec<WorkflowInfo> {
     })
 }
 
+/// Phase 13 (13-14, ENG-10): refuse an upload whose WIT selection needs a feature level the
+/// cluster has not finalized (409 `feature_not_enabled`). Stub: allows every module.
+fn upload_gate(
+    view: &MetaView,
+    selection: &ostro_engine::host::linker_set::WitSelection,
+) -> Result<(), ApiError> {
+    let _ = (view, selection);
+    Ok(())
+}
+
 pub(crate) async fn activate_workflow(
     cp: &ServerControlPlane,
     req: ActivateWorkflow,
@@ -548,6 +566,13 @@ pub(crate) async fn activate_workflow(
         }
         if info.active_version == Some(req.version) {
             return Ok(info);
+        }
+        // Phase 13 (13-15): a retired module's versions cannot be activated.
+        if let Some(sha) = cp.meta.view().read(|s| {
+            s.workflow(&req.name, req.version)
+                .map(|w| w.value.module_sha256)
+        }) {
+            super::module_retire::check_not_retired(cp.meta.view(), &sha)?;
         }
         let res = cp
             .meta

@@ -67,6 +67,9 @@ pub const SECTIONS: &[&str] = &[
     "replication",
     // Phase 10 (D-P10-6/19, RESERVATIONS §11), parsed since 10-10.
     "dev",
+    // Phase 13 (D-P13-23, RESERVATIONS §11), parsed since 13-02. The other Phase 13 keys
+    // live in `[cluster]`, `[api]` and `[workers]`.
+    "modules",
 ];
 
 static PARSER: SpanParser = SpanParser::new();
@@ -183,6 +186,15 @@ pub struct ApiSection {
     pub max_request_bytes: u64,
     /// `[api.tls]`: client-listener TLS (Phase 7, SEC-01; implemented by 07-06/07-10).
     pub tls: ApiTlsSection,
+    /// Phase 13 (D-P13-14, 13-12): where a start without an idempotency key or run id is
+    /// placed: `local` (a partition this node leads, zero hops) or `uniform`.
+    pub unkeyed_start_placement: UnkeyedStartPlacement,
+    /// Phase 13 (D-P13-15, 13-13): serve partition reads only after a full barrier instead
+    /// of under the leader lease (default false).
+    pub strict_reads: bool,
+    /// Phase 13 (D-P13-15/26, 13-13): leader-lease safety margin as a fraction of
+    /// `[replication] session_timeout` (0 < m < 0.5, default 0.2).
+    pub lease_margin: f64,
 }
 
 impl Default for ApiSection {
@@ -192,6 +204,9 @@ impl Default for ApiSection {
             max_module_bytes: 64 * MIB,
             max_request_bytes: 4 * MIB,
             tls: ApiTlsSection::default(),
+            unkeyed_start_placement: UnkeyedStartPlacement::default(),
+            strict_reads: false,
+            lease_margin: 0.2,
         }
     }
 }
@@ -434,6 +449,8 @@ pub struct ServerConfig {
     pub replication: ReplicationSection,
     // Phase 10 section (D-P10-6, plan 10-10).
     pub dev: DevSection,
+    // Phase 13 section (D-P13-23, plan 13-02).
+    pub modules: ModulesSection,
 }
 
 impl ServerConfig {
@@ -554,6 +571,65 @@ impl ServerConfig {
         self.validate_phase11()?;
         // Phase 12 (12-02).
         self.validate_phase12()?;
+        // Phase 13 (13-02).
+        self.validate_phase13()?;
+        Ok(())
+    }
+
+    /// Phase 13 value checks (the D-P13-23 keys in `[cluster]`, `[api]`, `[modules]`;
+    /// 13-02, defaults D-P13-26).
+    pub fn validate_phase13(&self) -> Result<(), ConfigError> {
+        let c = &self.cluster;
+        for (key, d) in [
+            ("cluster.join_timeout", c.join_timeout),
+            ("cluster.join_orphan_timeout", c.join_orphan_timeout),
+            ("cluster.handoff_grace", c.handoff_grace),
+            ("cluster.handoff_catchup_timeout", c.handoff_catchup_timeout),
+            (
+                "cluster.shutdown_handoff_timeout",
+                c.shutdown_handoff_timeout,
+            ),
+            (
+                "cluster.leader_rebalance_interval",
+                c.leader_rebalance_interval,
+            ),
+            ("modules.gc_interval", self.modules.gc_interval),
+        ] {
+            if d.get().is_zero() {
+                return Err(ConfigError::Invalid(format!("{key} must be non-zero")));
+            }
+        }
+        // D-P13-8 (W8): an orphan joiner is tombstoned only after its join token expired.
+        if c.join_orphan_timeout.get() < self.workers.join_token_ttl.get() {
+            return Err(ConfigError::Invalid(format!(
+                "cluster.join_orphan_timeout ({}) must be at least the join token lifetime workers.join_token_ttl ({})",
+                c.join_orphan_timeout, self.workers.join_token_ttl
+            )));
+        }
+        if c.max_concurrent_moves == 0 {
+            return Err(ConfigError::Invalid(
+                "cluster.max_concurrent_moves must be at least 1".into(),
+            ));
+        }
+        if c.meta_max_message_bytes < 4 * MIB {
+            return Err(ConfigError::Invalid(format!(
+                "cluster.meta_max_message_bytes must be at least 4 MiB ({}; got {})",
+                4 * MIB,
+                c.meta_max_message_bytes
+            )));
+        }
+        if usize::try_from(c.meta_max_message_bytes).is_err() {
+            return Err(ConfigError::Invalid(format!(
+                "cluster.meta_max_message_bytes ({}) does not fit this platform's usize",
+                c.meta_max_message_bytes
+            )));
+        }
+        let m = self.api.lease_margin;
+        if !(m > 0.0 && m < 0.5) {
+            return Err(ConfigError::Invalid(format!(
+                "api.lease_margin must be within 0 < m < 0.5 (got {m})"
+            )));
+        }
         Ok(())
     }
 
@@ -1443,6 +1519,10 @@ pub struct WorkersSection {
     pub default_placement: PlacementSetting,
     /// `[workers.spill]`.
     pub spill: SpillSection,
+    /// Phase 13 (D-P13-18, 13-14): worker admission by version. `compatible` (default)
+    /// admits a worker whose feature level and WIT lines fit the cluster level and the
+    /// module; `exact` keeps the Phase 7 same-version rule (`require_same_version`).
+    pub version_policy: VersionPolicy,
 }
 
 impl Default for WorkersSection {
@@ -1458,6 +1538,7 @@ impl Default for WorkersSection {
             join_token_ttl: FriendlyDuration::from_secs(24 * 3600),
             default_placement: PlacementSetting::Embedded,
             spill: SpillSection::default(),
+            version_policy: VersionPolicy::default(),
         }
     }
 }
@@ -1520,6 +1601,31 @@ pub struct ClusterSection {
     /// Phase 12: the other voters of a static cluster (`[[cluster.peers]]`); empty = single
     /// node.
     pub peers: Vec<PeerConfig>,
+    // Phase 13 keys (D-P13-23, defaults D-P13-26; 13-02 parses, the owning plans consume).
+    /// Finalize the cluster feature level automatically once every member supports it
+    /// (D-P13-4, 13-04; default true).
+    pub auto_finalize: bool,
+    /// A joiner fails loudly when meta has no leader after this long (D-P13-9, 13-09;
+    /// default 120 s).
+    pub join_timeout: FriendlyDuration,
+    /// A Joining member without contact for this long is tombstoned (D-P13-8, 13-09;
+    /// default 25 h; at least `[workers] join_token_ttl`).
+    pub join_orphan_timeout: FriendlyDuration,
+    /// A learner is promoted once it is within this many entries of the commit index
+    /// (D-P13-8, 13-09; default 64).
+    pub promote_lag: u64,
+    /// Handoff: wait this long for in-flight activations (D-P13-13, 13-11; default 2 s).
+    pub handoff_grace: FriendlyDuration,
+    /// Handoff: wait this long for the target to catch up (13-11; default 10 s).
+    pub handoff_catchup_timeout: FriendlyDuration,
+    /// Controlled shutdown: hand off for at most this long (13-11; default 30 s).
+    pub shutdown_handoff_timeout: FriendlyDuration,
+    /// Preferred-leader balancing period (D-P13-12, 13-10; default 5 m).
+    pub leader_rebalance_interval: FriendlyDuration,
+    /// Concurrent partition moves of the placement controller (13-10; default 2).
+    pub max_concurrent_moves: u32,
+    /// MetaPeer gRPC encode/decode limit in bytes (Pitfall 4, 13-05; default 256 MiB).
+    pub meta_max_message_bytes: u64,
 }
 
 impl Default for ClusterSection {
@@ -1531,6 +1637,16 @@ impl Default for ClusterSection {
             cluster_id: None,
             replication_listen: None,
             peers: Vec::new(),
+            auto_finalize: true,
+            join_timeout: FriendlyDuration::from_secs(120),
+            join_orphan_timeout: FriendlyDuration::from_secs(25 * 3600),
+            promote_lag: 64,
+            handoff_grace: FriendlyDuration::from_secs(2),
+            handoff_catchup_timeout: FriendlyDuration::from_secs(10),
+            shutdown_handoff_timeout: FriendlyDuration::from_secs(30),
+            leader_rebalance_interval: FriendlyDuration::from_secs(300),
+            max_concurrent_moves: 2,
+            meta_max_message_bytes: 256 * MIB,
         }
     }
 }
@@ -1821,6 +1937,54 @@ impl Default for DlqSection {
         Self {
             hook_catchup: FriendlyDuration::from_secs(24 * 3600),
             hooks_enabled: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 13 (D-P13-23, RESERVATIONS §11; parsed since plan 13-02)
+// ---------------------------------------------------------------------------------
+
+/// `[api] unkeyed_start_placement` (D-P13-14, 13-12).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnkeyedStartPlacement {
+    /// A partition this node leads (zero hops); uniform when it leads none.
+    #[default]
+    Local,
+    /// A uniformly random partition (may forward).
+    Uniform,
+}
+
+/// `[workers] version_policy` (D-P13-18, 13-14).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VersionPolicy {
+    /// Admit compatible worker versions (feature level, WIT lines, event codec).
+    #[default]
+    Compatible,
+    /// The Phase 7 rule: the same Ostro and Wasmtime version only.
+    Exact,
+}
+
+/// `[modules]`: module retirement and garbage collection (D-P13-20, 13-15).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModulesSection {
+    /// Module GC period on the meta leader (default 10 m).
+    pub gc_interval: FriendlyDuration,
+    /// A module unreferenced for this long may be collected (default 10 m).
+    pub gc_grace: FriendlyDuration,
+    /// Keep modules referenced by resumable terminal runs (retry in place) (default true).
+    pub gc_protect_resumable: bool,
+}
+
+impl Default for ModulesSection {
+    fn default() -> Self {
+        Self {
+            gc_interval: FriendlyDuration::from_secs(600),
+            gc_grace: FriendlyDuration::from_secs(600),
+            gc_protect_resumable: true,
         }
     }
 }

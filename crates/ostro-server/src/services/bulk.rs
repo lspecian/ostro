@@ -1027,6 +1027,8 @@ async fn op_once(
     job: &Job,
 ) -> Result<Outcome, ApiError> {
     let cp = &ctx.cc.partitions;
+    // Phase 13 (13-02): the action itself goes through the routed control plane.
+    let routed = &ctx.cc.routed;
     let Ok(run) = run_id.parse::<RunId>() else {
         return Ok(Outcome::Failed(format!("invalid run id {run_id:?}")));
     };
@@ -1038,7 +1040,7 @@ async fn op_once(
     let reason_text = Some(format!("bulk {job_id}"));
     match action {
         BulkAction::Cancel => {
-            let r = cp
+            let r = routed
                 .cancel_run(CancelRequest {
                     run_id: run_id.to_owned(),
                     reason: reason_text,
@@ -1052,16 +1054,17 @@ async fn op_once(
             })
         }
         BulkAction::Terminate { reason } => {
-            cp.terminate_run(TerminateRequest {
-                run_id: run_id.to_owned(),
-                reason: Some(if reason.is_empty() {
-                    format!("bulk {job_id}")
-                } else {
-                    reason.clone()
-                }),
-                dry_run: false,
-            })
-            .await?;
+            routed
+                .terminate_run(TerminateRequest {
+                    run_id: run_id.to_owned(),
+                    reason: Some(if reason.is_empty() {
+                        format!("bulk {job_id}")
+                    } else {
+                        reason.clone()
+                    }),
+                    dry_run: false,
+                })
+                .await?;
             Ok(Outcome::Done)
         }
         BulkAction::Retry => {
@@ -1071,11 +1074,12 @@ async fn op_once(
                 return Ok(Outcome::Skipped);
             }
             if rec.resumable {
-                cp.retry_run(RetryRequest {
-                    run_id: run_id.to_owned(),
-                    dry_run: false,
-                })
-                .await?;
+                routed
+                    .retry_run(RetryRequest {
+                        run_id: run_id.to_owned(),
+                        dry_run: false,
+                    })
+                    .await?;
                 return Ok(Outcome::Done);
             }
             restart_with_key(ctx, run, rec, &dedupe_key(job_id, run_id)).await?;
@@ -1108,22 +1112,23 @@ async fn op_once(
             Ok(Outcome::Done)
         }
         BulkAction::Pause => {
-            cp.pause_run(run_id.to_owned(), reason_text).await?;
+            routed.pause_run(run_id.to_owned(), reason_text).await?;
             Ok(Outcome::Done)
         }
         BulkAction::Resume => {
-            cp.resume_run(run_id.to_owned()).await?;
+            routed.resume_run(run_id.to_owned()).await?;
             Ok(Outcome::Done)
         }
         BulkAction::Signal { name, payload } => {
-            cp.signal_run(SignalRequest {
-                run_id: run_id.to_owned(),
-                name: name.clone(),
-                payload: payload.clone(),
-                request_id: Some(signal_request_id(job_id, run_id)),
-                dry_run: false,
-            })
-            .await?;
+            routed
+                .signal_run(SignalRequest {
+                    run_id: run_id.to_owned(),
+                    name: name.clone(),
+                    payload: payload.clone(),
+                    request_id: Some(signal_request_id(job_id, run_id)),
+                    dry_run: false,
+                })
+                .await?;
             // A duplicate (the job already delivered it before a restart) is done too.
             Ok(Outcome::Done)
         }

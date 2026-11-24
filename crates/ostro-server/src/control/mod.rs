@@ -85,6 +85,9 @@ pub mod dev;
 pub mod history;
 pub mod lifecycle;
 pub mod list;
+// Phase 13 (13-02 declares; 13-17 / 13-15 implement).
+pub mod migrate;
+pub mod module_retire;
 pub mod modules;
 pub mod names;
 pub mod p11_bulk;
@@ -663,6 +666,11 @@ pub struct ControlCtx {
     /// The partition client: start / signal / complete-token through the same code path
     /// as the API (submit, wait for apply), plus partition handles and the run watchers.
     pub partitions: Arc<ServerControlPlane>,
+    /// Phase 13 (13-02, D-P13-14): the routed control plane (`p13::wrap_control_plane`).
+    /// In-process consumers make their `ControlPlane` calls (start, signal, complete-token,
+    /// cancel, retry, ...) through it so they reach the partition's leader; partition
+    /// handles still come from [`Self::partitions`]. Defaults to `partitions` itself.
+    pub routed: Arc<dyn ControlPlane>,
     /// Sealed meta secrets.
     pub secrets: SecretsAccess,
     /// The one injectable clock (Phase 10 F5): the same instance as `NodeConfig.clock`
@@ -695,6 +703,7 @@ impl ControlCtx {
         data_dir: PathBuf,
     ) -> Self {
         let secrets = SecretsAccess::new(meta.view().clone());
+        let routed = Arc::clone(&partitions) as Arc<dyn ControlPlane>;
         Self {
             node: Arc::downgrade(node),
             meta,
@@ -702,10 +711,17 @@ impl ControlCtx {
             blobs,
             guest_logs,
             partitions,
+            routed,
             secrets,
             clock,
             data_dir,
         }
+    }
+
+    /// Use `routed` for the in-process `ControlPlane` calls (Phase 13, server.rs).
+    pub fn with_routed(mut self, routed: Arc<dyn ControlPlane>) -> Self {
+        self.routed = routed;
+        self
     }
 
     /// The node, or `Unavailable` once shutdown has released it.

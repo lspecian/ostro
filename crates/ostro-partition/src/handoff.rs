@@ -107,6 +107,30 @@ impl Drop for HandoffGuard {
     }
 }
 
+/// Phase 13 stub (13-02 needs the impl so the server seam can build `LocalHandoff` over the
+/// node; 13-11 replaces the body): no handoff is ever prepared and no partition is ever in
+/// handoff, so every caller keeps the Phase 12 behaviour.
+impl HandoffControl for crate::Node {
+    fn prepare_handoff(
+        &self,
+        p: PartitionId,
+        grace: Duration,
+    ) -> BoxFuture<'_, Result<HandoffGuard, PartitionError>> {
+        let _ = grace;
+        Box::pin(async move {
+            Err(PartitionError::Failed(format!(
+                "partition {}: graceful handoff is implemented in 13-11",
+                p.0
+            )))
+        })
+    }
+
+    fn in_handoff(&self, p: PartitionId) -> bool {
+        let _ = p;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

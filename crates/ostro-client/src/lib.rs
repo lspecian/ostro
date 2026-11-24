@@ -41,6 +41,8 @@
 //! ```
 
 pub mod client;
+// Phase 13 (13-02 stubs; 13-16 fills): cluster, upgrade, migration, module lifecycle.
+pub mod cluster;
 pub mod error;
 pub mod typed;
 

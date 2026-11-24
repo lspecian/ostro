@@ -57,6 +57,7 @@ use std::cmp::Reverse;
 use std::collections::VecDeque;
 
 use bytes::Bytes;
+use ostro_api::ApiError;
 use ostro_api::domain::{ListOrder, ListRunsRequest, RetryRequest, effective_limit};
 use ostro_api::phase8::version_mismatch;
 use ostro_api::phase11::{
@@ -64,7 +65,6 @@ use ostro_api::phase11::{
     FailurePolicy, PolicyScope, RequeueMode, RerunRequest, RerunVersion, dlq_not_member,
 };
 use ostro_api::rest::RunStatusDto;
-use ostro_api::{ApiError, ControlPlane};
 use ostro_log::PartitionLog;
 use ostro_meta::{MetaKey, MetaRecord, QueuePolicy, WorkflowPolicy};
 use ostro_partition::query::{self, IndexError};
@@ -679,11 +679,14 @@ pub async fn requeue_dlq(
             if let ApplyOutcome::Rejected(r) = submit_mark(handle, &run, ep, op).await? {
                 return Err(mark_rejected(&req.run_id, r));
             }
-            cp.retry_run(RetryRequest {
-                run_id: req.run_id.clone(),
-                dry_run: false,
-            })
-            .await?;
+            // Phase 13 (13-02): through the routed control plane.
+            ctx.cc
+                .routed
+                .retry_run(RetryRequest {
+                    run_id: req.run_id.clone(),
+                    dry_run: false,
+                })
+                .await?;
             count_requeue("resume");
             return Ok(DlqRequeueResponse {
                 run_id: req.run_id,

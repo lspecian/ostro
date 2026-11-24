@@ -283,6 +283,8 @@ pub(crate) async fn start_run(
         .map(|q| names::qualify_request_name("queue", tenant.as_deref(), &q))
         .transpose()?;
     let wf = resolve_version(cp, &workflow, req.version)?;
+    // Phase 13 (13-15): a retired module takes no new runs (`module_retired`).
+    super::module_retire::check_not_retired(cp.meta().view(), &wf.module_sha256)?;
     let queue = match req_queue {
         Some(q) => q,
         None => {
@@ -308,9 +310,13 @@ pub(crate) async fn start_run(
     let count = cp.partition_count();
     let uuid = uuid::Uuid::now_v7();
     let idem = non_empty(req.idempotency_key);
-    let p = match &idem {
-        Some(k) => partition_for_key(&workflow, k.as_bytes(), count),
-        None => partition_for_new_run(&uuid, count),
+    // Phase 13 (13-12): a forwarded unkeyed start keeps the partition the routing node
+    // picked (`ostro-partition`, honoured from node identities only).
+    let pinned = crate::route::table::pinned_partition().filter(|p| p.0 < count.get());
+    let p = match (&idem, pinned) {
+        (Some(k), _) => partition_for_key(&workflow, k.as_bytes(), count),
+        (None, Some(p)) => p,
+        (None, None) => partition_for_new_run(&uuid, count),
     };
     let handle = &cp.partition(p)?;
     let policy = match req.conflict_policy {

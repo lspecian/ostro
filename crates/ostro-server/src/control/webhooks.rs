@@ -442,8 +442,10 @@ impl WebhookController {
         &self.ctx
     }
 
+    /// Phase 13 (13-02): the routed control plane (deliveries start / signal / complete on
+    /// the partition's leader).
     fn cp(&self) -> &dyn ControlPlane {
-        self.ctx.partitions.as_ref()
+        self.ctx.routed.as_ref()
     }
 
     fn stored(&self, name: &str) -> Option<(u64, Webhook)> {

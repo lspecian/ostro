@@ -43,6 +43,11 @@
 //! Phase 12 (12-02): [`cluster`] is the cluster wiring seam (12-14: transport, meta peers,
 //! controller, fetchers, replication listener); `[replication]` and the `[cluster]` peer
 //! keys live in [`config`]; [`ServerOptions::cluster_transport`] is the transport hook.
+//!
+//! Phase 13 (13-02, D-P13-24): [`p13`] is the single seam (final after 13-02) with fixed
+//! call sites in [`cluster`] (join marker, boot rule, both voter checks, boot fence) and
+//! [`server`] (routed control plane, API slots, cluster-listener services, background
+//! tasks, controlled shutdown); [`route`] holds the routing stubs (13-12 / 13-13).
 
 pub mod bridge_services;
 pub mod children;
@@ -63,9 +68,11 @@ pub mod logging;
 pub mod meta_view;
 pub mod onfailure;
 pub mod p11;
+pub mod p13;
 pub mod p7;
 pub mod rerun;
 pub mod retention;
+pub mod route;
 pub mod run_started;
 pub mod server;
 pub mod services;

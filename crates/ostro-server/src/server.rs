@@ -67,6 +67,17 @@
 //! served by [`p7::serve_client`] (plaintext until 07-06). The control plane holds
 //! [`p7::P7Shared`]; the ready line reads [`ServerHandle::client_endpoint`].
 //!
+//! Phase 13 (13-02, D-P13-24) has one seam, [`crate::p13`] (final after 13-02):
+//! [`ClusterServices::boot_fence`] runs immediately before `Node::open`; the single
+//! [`ServerControlPlane`] construction is wrapped by [`p13::wrap_control_plane`] and every
+//! consumer (REST, gRPC, the UI, triggers, bulk, on_failure hooks, DLQ requeue) gets the
+//! wrapped `Arc<dyn ControlPlane>` through `ControlCtx::routed`; [`p13::fill_extensions`]
+//! fills the Phase 13 API slots after the Phase 7/8/11 ones; the cluster listener gains
+//! [`p13::cluster_listener_services`]; [`p13::start`] starts the Phase 13 tasks; and
+//! [`p13::before_shutdown`] runs first in [`ServerHandle::shutdown`]. The node id is the
+//! cluster's effective one (`[node] node_id` or the join marker's), written back into the
+//! configuration every later consumer reads.
+//!
 //! One injectable clock (Phase 10 F5): [`ServerOptions::clock`] (the system clock by
 //! default) is the single `Arc<dyn Clock>` handed to `InitCluster`'s timestamp,
 //! `NodeConfig.clock` and the services' [`crate::services::ServiceCtx::clock`].
@@ -107,6 +118,7 @@ use crate::derive::MetaModules;
 use crate::executor::{EngineExecutor, ExecutorConfig, ExecutorHooks};
 use crate::leadership::MetaLeadership;
 use crate::p7::{self, P7Handles, P7Shared};
+use crate::p13::{self, P13Ctx, P13Init, P13Services};
 use crate::retention::MetaPolicies;
 use crate::services::guest_logs::GuestLogSink;
 use crate::services::{ServiceCtx, Services};
@@ -217,6 +229,11 @@ pub struct ServerOptions {
     /// so retention can trim a small log (whole segments only) and replicas behind the
     /// leader's `log_start` exercise snapshot installs. The binary never sets it.
     pub wal_rotation_bytes: Option<u64>,
+    /// Phase 13 test hook (D-P13-7, tier B): this node's `level_max` (gate, advertisement
+    /// and fences) instead of `ostro_types::compat::level_max()`; in-process nodes share the
+    /// process globals, so the env emulation cannot tell them apart. The binary never sets it.
+    #[doc(hidden)]
+    pub level_max_override: Option<u32>,
 }
 
 impl Default for ServerOptions {
@@ -228,6 +245,7 @@ impl Default for ServerOptions {
             tls_profile: None,
             cluster_transport: None,
             wal_rotation_bytes: None,
+            level_max_override: None,
         }
     }
 }
@@ -272,6 +290,14 @@ impl ServerOptions {
         self.wal_rotation_bytes = Some(bytes);
         self
     }
+
+    /// Emulate a binary whose `level_max` is `level` (Phase 13 test hook, see
+    /// [`ServerOptions::level_max_override`]).
+    #[doc(hidden)]
+    pub fn with_level_max_override(mut self, level: Option<u32>) -> Self {
+        self.level_max_override = level;
+        self
+    }
 }
 
 /// [`start`] with executor test hooks (full-server lease/zombie tests). The binary never
@@ -301,7 +327,7 @@ pub async fn start_with_options(
 
 /// The startup sequence; takes the telemetry guard into the handle on success.
 async fn start_inner(
-    cfg: ServerConfig,
+    mut cfg: ServerConfig,
     opts: ServerOptions,
     telemetry: &mut Option<TelemetryGuard>,
 ) -> Result<ServerHandle, ServerError> {
@@ -311,7 +337,10 @@ async fn start_inner(
         tls_profile,
         cluster_transport,
         wal_rotation_bytes,
+        level_max_override,
     } = opts;
+    // Phase 13 (D-P13-7): this node's feature level ceiling.
+    let level_max = level_max_override.unwrap_or_else(ostro_types::compat::level_max);
     // Phase 10 (10-10, D-P10-6): with `[dev] time_skipping` on (ephemeral `ostro dev`
     // only), the dev clock over the seam clock becomes the one clock. Off: no DevClock.
     let server_profile = tls_profile.unwrap_or_else(|| crate::tls::TlsProfile::of(&cfg))
@@ -331,7 +360,6 @@ async fn start_inner(
     let t0 = Instant::now(); // clock-exempt: startup timing
     let count = PartitionCount::new(cfg.node.partitions)
         .ok_or_else(|| ServerError::Config("node.partitions must be at least 1".into()))?;
-    let node_id = cfg.node.node_id;
     let (data_dir, tempdir) = resolve_data_dir(&cfg)?;
     // Before any other disk work (meta, node, blobs, AOT cache): one process per data dir.
     let data_lock = lock_data_dir(&data_dir)?;
@@ -364,6 +392,10 @@ async fn start_inner(
     timings.cluster_start = t.elapsed();
     timings.meta_leader = cluster.timings.meta_ready;
     timings.init_cluster = cluster.timings.init_cluster;
+    // Phase 13: the effective node id (the join marker's on a joined node); every later
+    // consumer of the configuration sees it.
+    let node_id = cluster.node_id();
+    cfg.node.node_id = node_id;
     let cluster_id = cluster.cluster_id().to_owned();
     let token_key = cluster.token_key();
     // Meta is shared (the bridge holds it weakly for presign key writes).
@@ -514,6 +546,13 @@ async fn start_inner(
         Some(Arc::clone(&stats)),
         &p7,
     ));
+    // Phase 13 (P13-F1 rule 6): the boot fence, immediately before any partition opens.
+    if let Err(e) = cluster.boot_fence(level_max).await {
+        bridge.shutdown().await;
+        drop(meta);
+        abort_cluster(cluster).await;
+        return Err(e);
+    }
     let node = match Node::open(node_cfg).await {
         Ok(n) => Arc::new(n),
         Err(e) => {
@@ -590,6 +629,22 @@ async fn start_inner(
         .with_leader_hints(cluster.leader_hints(&node))
         .with_module_push(cluster.module_push()),
     );
+    // Phase 13 (13-02): the seam context, the routed control plane (every consumer below
+    // gets it), the cluster-listener services and the Phase 13 tasks.
+    let p13_ctx = P13Ctx::new(P13Init {
+        cfg: Arc::clone(&cfg),
+        meta: Arc::clone(&meta),
+        cluster: Arc::clone(&cluster),
+        node: Arc::clone(&node),
+        runtime: Arc::clone(&runtime),
+        local_cp: Arc::clone(&control),
+        level_max,
+        clock: Arc::clone(&clock),
+    });
+    let routed = p13::wrap_control_plane(&p13_ctx, Arc::clone(&control));
+    cluster.attach_p13_services(p13::cluster_listener_services(&p13_ctx));
+    let p13_services = p13::start(Arc::clone(&p13_ctx)).await;
+    let fatal_rx = p13_ctx.fatal_watch();
     // Phase 10 (10-13): the idle detector and its API write counter, only with time
     // skipping on.
     let dev_time = dev_clock.as_ref().map(|d| {
@@ -615,8 +670,10 @@ async fn start_inner(
         Arc::clone(&control),
         Arc::clone(&clock),
         data_dir.clone(),
-    );
-    // Phase 11 (11-04): the single seam call; builds the API + UI router.
+    )
+    .with_routed(routed);
+    // Phase 11 (11-04): the single seam call; builds the API + UI router. Phase 13 fills
+    // its slots there, after the Phase 7/8/11 ones.
     let mut app = crate::p11::wire(
         &ctl,
         Arc::clone(&runtime),
@@ -625,6 +682,7 @@ async fn start_inner(
         &mut api_cfg,
         axum::Router::new(),
         &cfg,
+        &|ext| p13::fill_extensions(&p13_ctx, ext),
     );
     drop(ctl);
     if cfg.telemetry.metrics {
@@ -692,6 +750,9 @@ async fn start_inner(
         dev_auto,
         p7_shutdown: p7.shutdown.clone(),
         p7_handles: Some(p7_handles),
+        p13: Some(p13_ctx),
+        p13_services: Some(p13_services),
+        fatal_rx,
         client_endpoint,
         serve: Some(serve),
         done_rx,
@@ -892,6 +953,13 @@ pub struct ServerHandle {
     p7_shutdown: CancellationToken,
     /// Phase 7 tasks (07-02 seam); joined after the listener drained, before the services.
     p7_handles: Option<P7Handles>,
+    /// Phase 13 seam context (13-02); `before_shutdown` uses it first, then it is dropped
+    /// with the Phase 13 tasks before the node shuts down.
+    p13: Option<Arc<P13Ctx>>,
+    /// Phase 13 background tasks.
+    p13_services: Option<P13Services>,
+    /// Phase 13 fail-stop (running fence, removed node): `wait()` returns once it is set.
+    fatal_rx: watch::Receiver<Option<String>>,
     /// How clients reach the client listener (scheme, address, fingerprint).
     client_endpoint: ClientEndpoint,
     serve: Option<JoinHandle<std::io::Result<()>>>,
@@ -1017,10 +1085,27 @@ impl ServerHandle {
         &self.stats
     }
 
-    /// Resolves when the API server stops (shutdown, or a listener error).
+    /// Resolves when the API server stops (shutdown, or a listener error), or when a Phase 13
+    /// fail-stop fired ([`ServerHandle::fatal`]).
     pub async fn wait(&self) {
         let mut rx = self.done_rx.clone();
-        let _ = rx.wait_for(|done| *done).await;
+        let mut fatal = self.fatal_rx.clone();
+        tokio::select! {
+            _ = rx.wait_for(|done| *done) => {}
+            Ok(_) = fatal.wait_for(Option::is_some) => {}
+        }
+    }
+
+    /// Phase 13: why this node must stop (the running fence saw a finalized level above its
+    /// `level_max`, or the node was removed), if it must. The binary exits non-zero.
+    pub fn fatal(&self) -> Option<String> {
+        self.fatal_rx.borrow().clone()
+    }
+
+    /// Phase 13 seam context (tests).
+    #[doc(hidden)]
+    pub fn p13(&self) -> Option<&Arc<P13Ctx>> {
+        self.p13.as_ref()
     }
 
     /// Graceful shutdown: stop accepting and drain requests, shut the node down
@@ -1040,8 +1125,15 @@ impl ServerHandle {
             data_lock,
             tempdir,
             dev_auto,
+            p13,
+            p13_services,
             ..
         } = self;
+        // Phase 13 (13-11): controlled shutdown first (hand off led partitions, transfer
+        // meta leadership), while the node still serves.
+        if let Some(ctx) = &p13 {
+            p13::before_shutdown(ctx).await;
+        }
         // Phase 10 (10-13): no auto skip during shutdown.
         if let Some((stop, task)) = dev_auto {
             stop.cancel();
@@ -1060,6 +1152,12 @@ impl ServerHandle {
                 }
             }
         }
+        // Phase 13 tasks, then the seam context (it holds the cluster side, meta and the
+        // control plane).
+        if let Some(s) = p13_services {
+            s.stop().await;
+        }
+        drop(p13);
         // Phase 7 tasks (stopped by `p7_shutdown` above).
         if let Some(h) = p7_handles {
             h.join().await;

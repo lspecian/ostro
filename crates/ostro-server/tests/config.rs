@@ -1363,3 +1363,139 @@ fn phase12_sections_round_trip_through_toml_and_print() {
         assert_eq!(back, c);
     }
 }
+
+// --------------------------------------------------------------- Phase 13 keys (13-02)
+
+#[test]
+fn phase13_defaults_match_d_p13_26_in_both_profiles() {
+    use ostro_server::config::{UnkeyedStartPlacement, VersionPolicy};
+    for c in both_profiles() {
+        let k = &c.cluster;
+        assert!(k.auto_finalize);
+        assert_eq!(k.join_timeout.get(), Duration::from_secs(120));
+        assert_eq!(k.join_orphan_timeout.get(), Duration::from_secs(25 * 3600));
+        assert_eq!(k.promote_lag, 64);
+        assert_eq!(k.handoff_grace.get(), Duration::from_secs(2));
+        assert_eq!(k.handoff_catchup_timeout.get(), Duration::from_secs(10));
+        assert_eq!(k.shutdown_handoff_timeout.get(), Duration::from_secs(30));
+        assert_eq!(k.leader_rebalance_interval.get(), Duration::from_secs(300));
+        assert_eq!(k.max_concurrent_moves, 2);
+        assert_eq!(k.meta_max_message_bytes, 268_435_456);
+        assert_eq!(c.api.unkeyed_start_placement, UnkeyedStartPlacement::Local);
+        assert!(!c.api.strict_reads);
+        assert!((c.api.lease_margin - 0.2).abs() < f64::EPSILON);
+        assert_eq!(c.modules.gc_interval.get(), Duration::from_secs(600));
+        assert_eq!(c.modules.gc_grace.get(), Duration::from_secs(600));
+        assert!(c.modules.gc_protect_resumable);
+        assert_eq!(c.workers.version_policy, VersionPolicy::Compatible);
+        c.validate_phase13().expect("defaults are valid");
+    }
+}
+
+const PHASE13_KEYS: &str = r#"
+[cluster]
+auto_finalize = false
+join_timeout = "30s"
+join_orphan_timeout = "48h"
+promote_lag = 16
+handoff_grace = "500ms"
+handoff_catchup_timeout = "5s"
+shutdown_handoff_timeout = "1m"
+leader_rebalance_interval = "10m"
+max_concurrent_moves = 4
+meta_max_message_bytes = 67108864
+
+[api]
+unkeyed_start_placement = "uniform"
+strict_reads = true
+lease_margin = 0.3
+
+[modules]
+gc_interval = "1m"
+gc_grace = "2m"
+gc_protect_resumable = false
+
+[workers]
+version_policy = "exact"
+"#;
+
+#[test]
+fn phase13_keys_parse_and_round_trip_in_both_profiles() {
+    use ostro_server::config::{UnkeyedStartPlacement, VersionPolicy};
+    for base in both_profiles() {
+        let c = load_profile(base.clone(), PHASE13_KEYS).expect("phase 13 keys");
+        let k = &c.cluster;
+        assert!(!k.auto_finalize);
+        assert_eq!(k.join_timeout.get(), Duration::from_secs(30));
+        assert_eq!(k.join_orphan_timeout.get(), Duration::from_secs(48 * 3600));
+        assert_eq!(k.promote_lag, 16);
+        assert_eq!(k.handoff_grace.get(), Duration::from_millis(500));
+        assert_eq!(k.handoff_catchup_timeout.get(), Duration::from_secs(5));
+        assert_eq!(k.shutdown_handoff_timeout.get(), Duration::from_secs(60));
+        assert_eq!(k.leader_rebalance_interval.get(), Duration::from_secs(600));
+        assert_eq!(k.max_concurrent_moves, 4);
+        assert_eq!(k.meta_max_message_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            c.api.unkeyed_start_placement,
+            UnkeyedStartPlacement::Uniform
+        );
+        assert!(c.api.strict_reads);
+        assert!((c.api.lease_margin - 0.3).abs() < f64::EPSILON);
+        assert_eq!(c.modules.gc_interval.get(), Duration::from_secs(60));
+        assert_eq!(c.modules.gc_grace.get(), Duration::from_secs(120));
+        assert!(!c.modules.gc_protect_resumable);
+        assert_eq!(c.workers.version_policy, VersionPolicy::Exact);
+        // The profile's own keys are untouched.
+        assert_eq!(c.api.listen, base.api.listen);
+        let s = c.to_toml_string();
+        assert!(s.contains("[modules]"), "{s}");
+        let back = load_profile(base, &s).expect("reload printed config");
+        assert_eq!(back, c);
+    }
+}
+
+#[test]
+fn phase13_invalid_values_are_rejected_and_named() {
+    for base in both_profiles() {
+        for (body, needle) in [
+            ("[api]\nlease_margin = 0.0\n", "api.lease_margin"),
+            ("[api]\nlease_margin = 0.5\n", "api.lease_margin"),
+            ("[api]\nunkeyed_start_placement = \"random\"\n", "random"),
+            ("[workers]\nversion_policy = \"loose\"\n", "loose"),
+            ("[cluster]\njoin_timeout = \"0s\"\n", "cluster.join_timeout"),
+            (
+                "[cluster]\njoin_orphan_timeout = \"1h\"\n",
+                "cluster.join_orphan_timeout",
+            ),
+            (
+                "[cluster]\nmax_concurrent_moves = 0\n",
+                "cluster.max_concurrent_moves",
+            ),
+            (
+                "[cluster]\nmeta_max_message_bytes = 1024\n",
+                "cluster.meta_max_message_bytes",
+            ),
+            ("[modules]\ngc_interval = \"0s\"\n", "modules.gc_interval"),
+            ("[modules]\nbogus = 1\n", "bogus"),
+        ] {
+            let err = load_profile(base.clone(), body).expect_err(body);
+            assert!(err.contains(needle), "{body:?}: {err}");
+        }
+    }
+}
+
+#[test]
+fn phase13_env_overrides() {
+    let c = load_toml_env(
+        "",
+        &env(&[
+            ("OSTRO_CLUSTER__JOIN_TIMEOUT", "45s"),
+            ("OSTRO_API__STRICT_READS", "true"),
+            ("OSTRO_MODULES__GC_GRACE", "30m"),
+        ]),
+    )
+    .expect("env overrides");
+    assert_eq!(c.cluster.join_timeout.get(), Duration::from_secs(45));
+    assert!(c.api.strict_reads);
+    assert_eq!(c.modules.gc_grace.get(), Duration::from_secs(1800));
+}

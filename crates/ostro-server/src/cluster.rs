@@ -4,27 +4,43 @@
 //!
 //! # Boot order ([`ClusterServices::start`], before any partition opens)
 //!
+//! 0. Phase 13 (13-02, D-P13-29b NB1): [`p13::join_identity`] reads the join marker first,
+//!    before `bind_node_id` and any TLS load. With a marker, node_id = node.toml → marker →
+//!    config and the marker joins the cluster-id sources after node.toml; no cluster id is
+//!    generated while a marker exists. The stub returns no marker (Phase 12 unchanged).
 //! 1. `bind_node_id` (node.toml), before meta opens.
 //! 2. Probe the persisted meta read-only (`identity::probe_meta`) and resolve the cluster id:
 //!    configured → node.toml → the CA's stored id → `ClusterInfo.cluster_id` → fresh (blank
 //!    meta only); disagreeing sources are fatal.
-//! 3. Joiner check: blank meta over existing partition data fail-stops (wiped-voter remedy
-//!    with peers, "meta dir missing" without). Blank meta without partition data bootstraps
-//!    with `voters = self ∪ peers`.
-//! 4. Meta voter check: a persisted ConfState whose voters differ from `self ∪ peers` is fatal
-//!    ("grow via Phase 13").
+//! 3. Boot rule through [`p13::boot_mode`] (stub = the Phase 12 rule): blank meta over
+//!    existing partition data fail-stops (wiped-voter remedy with peers, "meta dir missing"
+//!    without). Blank meta without partition data bootstraps with `voters = self ∪ peers`.
+//!    A Joiner (13-09: blank meta + marker) starts meta with no voters, seeds from the
+//!    marker, waits for a leader within `[cluster] join_timeout` and never runs
+//!    `InitCluster`.
+//! 4. Meta voter check through [`p13::voter_check`] `PreStart` (stub = Phase 12): a
+//!    persisted ConfState whose voters differ from `self ∪ peers` is fatal ("grow via
+//!    Phase 13").
 //! 5. `bind_cluster_id`, then TLS: the shared CA (`[cluster.tls] ca_cert_file/ca_key_file`,
 //!    `ClusterCa::import_pem`) or this node's own CA, and the node certificate.
 //! 6. The cluster listener, bound in every profile: `MetaPeer` + `Replication` (+ the
 //!    Phase 7 Execute service once it attaches), mTLS on `[cluster] listen`, or the
 //!    in-memory incoming of the injected transport (`ServerOptions::cluster_transport`).
 //! 7. Meta: `MetaHandle::start_with(voters, PeerOutbox, GrpcForwarder, [replication] ticks)`,
-//!    `RaftSlot::set`, `wait_ready`, then the live voters must equal the configured set.
+//!    `RaftSlot::set`, `wait_ready`, then [`p13::voter_check`] `PostReady` (stub: the live
+//!    voters must equal the configured set). The MetaPeer encode/decode limit is
+//!    `[cluster] meta_max_message_bytes` (13-05 consumes it).
 //! 8. `InitCluster` with the bound id (idempotent), `ClusterInfo.cluster_id` must equal it
 //!    (W2); the own `Member` record is upserted.
 //! 9. The controller (bootstrap placement of epoch-0 partitions, failover) runs on every
 //!    node and acts only as meta leader; the meta-driven [`MetaAssignments`] source and the
 //!    self-demotion watchdog start.
+//!
+//! Before the node opens, the server calls [`ClusterServices::boot_fence`] (13-04's
+//! `compat::boot_fence`, P13-F1 rule 6). After the control plane exists it attaches the
+//! Phase 13 cluster-listener services ([`ClusterServices::attach_p13_services`]: a late-bound
+//! fallback behind the Phase 12 services, detached again in
+//! [`ClusterServices::stop_tasks`]).
 //!
 //! The server then opens the node with that source and [`ClusterServices::follower_driver`],
 //! and calls [`ClusterServices::attach_node`]: fetch / snapshot contexts are bound into the
@@ -57,7 +73,7 @@ use ostro_cluster::install::InstallCtx;
 use ostro_cluster::isr_publisher::{IsrMeta, IsrPublisher};
 use ostro_cluster::liveness::{Liveness, LivenessHandle};
 use ostro_cluster::meta_peer::{
-    DEFAULT_META_MAX_MESSAGE, GrpcForwarder, MetaPeerService, OutboxConfig, PeerOutbox, RaftSlot,
+    GrpcForwarder, MetaPeerService, OutboxConfig, PeerOutbox, RaftSlot,
 };
 use ostro_cluster::service::{self as repl_service, ListenerIo, ReplicationService};
 use ostro_cluster::snapshot::{Exporter, SnapshotCtx, SnapshotServeConfig};
@@ -80,6 +96,7 @@ use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tracing::{debug, info, warn};
 
 use crate::config::ServerConfig;
+use crate::p13::{self, BootMode, DataDirProbe, VoterCheckPhase};
 use crate::server::ServerError;
 use crate::tls::ca::ClusterCa;
 use crate::workers::service::{LateExecute, listener_client_roots};
@@ -121,6 +138,124 @@ fn partition_data_exists(data_dir: &Path) -> bool {
     non_empty(data_dir.join("state")) || non_empty(data_dir.join("wal"))
 }
 
+/// The bound cluster id: the resolved source, the join marker's id when nothing else names
+/// one (never generated while a marker exists), else a fresh id on a blank meta. A marker
+/// that disagrees with a present source is a conflict.
+fn resolved_cluster_id(
+    source: &ClusterIdSource,
+    marker: Option<&p13::JoinMarker>,
+) -> Result<String, BootError> {
+    match (source, marker) {
+        (ClusterIdSource::GenerateFresh, Some(m)) => Ok(m.cluster_id.clone()),
+        (ClusterIdSource::GenerateFresh, None) => Ok(uuid::Uuid::now_v7().to_string()),
+        (other, m) => {
+            let id = other.id().unwrap_or_default().to_owned();
+            if let Some(m) = m
+                && m.cluster_id != id
+            {
+                return Err(BootError::ClusterIdConflict {
+                    first: "the resolved cluster id",
+                    first_id: id,
+                    second: "the join marker",
+                    second_id: m.cluster_id.clone(),
+                });
+            }
+            Ok(id)
+        }
+    }
+}
+
+/// A joiner's await-token key: wait (bounded) until the seed's `ClusterInfo` reached the
+/// local meta, then check the partition count.
+async fn joined_token_key(
+    meta: &MetaHandle,
+    count: PartitionCount,
+    wait: Duration,
+) -> Result<[u8; 32], ServerError> {
+    let mut applied = meta.view().subscribe();
+    let read = || {
+        meta.view()
+            .read(|s| s.cluster().map(|c| c.value.partitions).zip(s.token_key()))
+    };
+    let found = tokio::time::timeout(wait, async {
+        loop {
+            if let Some(v) = read() {
+                return Some(v);
+            }
+            if applied.changed().await.is_err() {
+                return None;
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((stored, key)) = found else {
+        return Err(ServerError::Config(format!(
+            "joining: the cluster metadata did not reach this node within [cluster] join_timeout ({wait:?})"
+        )));
+    };
+    if stored != count.get() {
+        return Err(ServerError::PartitionCountMismatch {
+            stored,
+            configured: count.get(),
+        });
+    }
+    Ok(key)
+}
+
+/// A late-bound gRPC fallback of the cluster listener (Phase 13 services, attached after the
+/// control plane exists and detached before the node shuts down).
+#[derive(Clone, Default)]
+struct LateRoutes(Arc<arc_swap::ArcSwapOption<Routes>>);
+
+impl LateRoutes {
+    fn set(&self, routes: Option<Routes>) {
+        self.0.store(routes.map(Arc::new));
+    }
+}
+
+impl tonic::codegen::Service<axum::http::Request<axum::body::Body>> for LateRoutes {
+    type Response = axum::http::Response<tonic::body::Body>;
+    type Error = std::convert::Infallible;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: axum::http::Request<axum::body::Body>) -> Self::Future {
+        match self.0.load_full() {
+            Some(routes) => {
+                let mut routes = (*routes).clone();
+                Box::pin(async move {
+                    tonic::codegen::Service::<axum::http::Request<axum::body::Body>>::call(
+                        &mut routes,
+                        req,
+                    )
+                    .await
+                })
+            }
+            None => Box::pin(async {
+                Ok(tonic::Status::unimplemented("").into_http::<tonic::body::Body>())
+            }),
+        }
+    }
+}
+
+/// One `Routes` trying each of `routes` in order (each one's unknown-service fallback is
+/// the next one).
+fn chain_routes(routes: Vec<Routes>) -> Option<Routes> {
+    let mut it = routes.into_iter().rev();
+    let last = it.next()?;
+    Some(it.fold(last, |next, r| {
+        Routes::from(r.into_axum_router().fallback_service(next))
+    }))
+}
+
 /// Inputs of [`ClusterServices::start`].
 pub struct ClusterStart<'a> {
     pub cfg: &'a ServerConfig,
@@ -160,6 +295,14 @@ pub struct ClusterServices {
     execute: LateExecute,
     listener_addr: SocketAddr,
     liveness: LivenessHandle,
+    /// The TCP transport's address book (`None` with an injected transport); 13-09 keeps it
+    /// in step with the meta `Member` records.
+    book: Option<Arc<AddressBook>>,
+    /// Phase 13 services of the cluster listener (late-bound, see
+    /// [`ClusterServices::attach_p13_services`]).
+    p13_routes: LateRoutes,
+    /// How meta was started ([`p13::boot_mode`]).
+    boot_mode: BootMode,
     /// Cluster tasks that hold meta (controller, publishers, sync, views): stopped before
     /// the node.
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -195,9 +338,20 @@ impl ClusterServices {
         } = s;
         // clock-exempt: startup step durations are reported, never used for logic.
         let t0 = std::time::Instant::now(); // clock-exempt: startup timing
+
+        // 0. Phase 13 (NB1): the join marker, first (before bind_node_id and any TLS load).
+        let marker = p13::join_identity(data_dir).map_err(boot)?;
+        // node_id = node.toml → marker → config: a marker's id replaces the configured one
+        // and `bind_node_id` refuses a node.toml that disagrees. Every check below sees the
+        // effective id.
+        let mut effective = cfg.clone();
+        if let Some(m) = &marker {
+            effective.node.node_id = m.node_id;
+        }
+        let cfg = &effective;
         let node_id = cfg.node.node_id;
         let tuning = tuning(cfg);
-        let peers: Vec<u64> = cfg.cluster.peers.iter().map(|p| p.id).collect();
+        let mut peers: Vec<u64> = cfg.cluster.peers.iter().map(|p| p.id).collect();
         let mut voters = peers.clone();
         voters.push(node_id);
         voters.sort_unstable();
@@ -205,7 +359,7 @@ impl ClusterServices {
         // 1. node id before meta opens.
         ostro_partition::bind_node_id(data_dir, node_id)?;
 
-        // 2.-4. identity and voter checks, read-only.
+        // 2.-4. identity, boot rule and voter check, read-only.
         let meta_dir = data_dir.join("meta");
         let probe = identity::probe_meta(&meta_dir).map_err(boot)?;
         let tls_dir = data_dir.join("tls");
@@ -216,60 +370,96 @@ impl ClusterServices {
             node_toml.as_deref(),
             stored_ca.as_deref(),
             probe.cluster_id.as_deref(),
-            probe.blank,
+            // A marker names the id, so "no source" with a non-blank meta is not fatal here.
+            probe.blank || marker.is_some(),
         )
         .map_err(boot)?;
-        if identity::is_joiner(probe.blank, partition_data_exists(data_dir)) {
-            return Err(boot(identity::joiner_error(!peers.is_empty(), &meta_dir)));
-        }
-        identity::check_meta_voters(probe.conf.clone(), &voters).map_err(boot)?;
-        let cluster_id = match &source {
-            ClusterIdSource::GenerateFresh => uuid::Uuid::now_v7().to_string(),
-            other => other.id().unwrap_or_default().to_owned(),
-        };
+        let mode = p13::boot_mode(
+            cfg,
+            &DataDirProbe {
+                data_dir: data_dir.to_path_buf(),
+                meta_dir: meta_dir.clone(),
+                meta_blank: probe.blank,
+                has_partition_data: partition_data_exists(data_dir),
+                join_marker: marker.clone(),
+                tls_complete: p13::tls_complete(data_dir),
+            },
+        )
+        .map_err(boot)?;
+        p13::voter_check(
+            &probe.conf.clone().unwrap_or_default(),
+            cfg,
+            p13::members_known(data_dir, None),
+            VoterCheckPhase::PreStart,
+        )
+        .map_err(boot)?;
+        let cluster_id = resolved_cluster_id(&source, marker.as_ref()).map_err(boot)?;
         ostro_partition::bind_cluster_id(data_dir, &cluster_id)?;
-        info!(cluster_id = %cluster_id, source = ?source, voters = ?voters, "cluster identity bound");
-
-        // 5. TLS: the shared CA (peers) or this node's own CA, and the node certificate.
-        let ca = match (&cfg.cluster.tls.ca_cert_file, &cfg.cluster.tls.ca_key_file) {
-            (Some(crt), Some(key)) => {
-                let read = |p: &PathBuf| {
-                    std::fs::read_to_string(p).map_err(|e| {
-                        ServerError::Config(format!("[cluster.tls] {}: {e}", p.display()))
-                    })
-                };
-                ClusterCa::import_pem(&tls_dir, &cluster_id, &read(crt)?, &read(key)?)
-                    .map_err(|e| ServerError::Config(format!("[cluster.tls] CA: {e}")))?
+        if mode == BootMode::Joiner {
+            // D-P13-29b: no initial voters; the seeds (marker) are the meta peers until the
+            // leader adds this node.
+            voters.clear();
+            for s in marker.iter().flat_map(|m| m.seeds.iter()) {
+                if s.id != node_id && !peers.contains(&s.id) {
+                    peers.push(s.id);
+                }
             }
-            _ => ClusterCa::load_or_create(&tls_dir, &cluster_id)
-                .map_err(|e| ServerError::Config(format!("cluster CA: {e}")))?,
+        }
+        info!(cluster_id = %cluster_id, source = ?source, mode = ?mode, voters = ?voters, "cluster identity bound");
+
+        // 5. TLS: a joined node's certificate set, else the shared CA (peers) or this node's
+        // own CA, and the node certificate.
+        let (cert_chain_pem, key_pem, ca_pem) = match p13::joined_tls(data_dir).map_err(boot)? {
+            Some(t) => (t.cert_chain_pem, t.key_pem, t.ca_pem),
+            None => {
+                let ca = match (&cfg.cluster.tls.ca_cert_file, &cfg.cluster.tls.ca_key_file) {
+                    (Some(crt), Some(key)) => {
+                        let read = |p: &PathBuf| {
+                            std::fs::read_to_string(p).map_err(|e| {
+                                ServerError::Config(format!("[cluster.tls] {}: {e}", p.display()))
+                            })
+                        };
+                        ClusterCa::import_pem(&tls_dir, &cluster_id, &read(crt)?, &read(key)?)
+                            .map_err(|e| ServerError::Config(format!("[cluster.tls] CA: {e}")))?
+                    }
+                    _ => ClusterCa::load_or_create(&tls_dir, &cluster_id)
+                        .map_err(|e| ServerError::Config(format!("cluster CA: {e}")))?,
+                };
+                let node_cert = ca
+                    .load_or_issue_node_cert(node_id, &cfg.cluster.advertise)
+                    .map_err(|e| ServerError::Config(format!("node certificate: {e}")))?;
+                (node_cert.chain_pem(), node_cert.key_pem(), ca.cert_pem())
+            }
         };
-        let node_cert = ca
-            .load_or_issue_node_cert(node_id, &cfg.cluster.advertise)
-            .map_err(|e| ServerError::Config(format!("node certificate: {e}")))?;
-        let ca_pem = ca.cert_pem();
 
         // 6. transport + the always-bound cluster listener.
+        let mut book = None;
         let transport: Arc<dyn ClusterTransport> = match injected {
             Some(t) => t,
             None => {
-                let book = Arc::new(AddressBook::from_peers(cfg.cluster.peers.iter().map(|p| {
-                    PeerEntry {
-                        id: p.id,
-                        addr: p.addr.clone(),
-                        repl_addr: p.repl_addr.clone(),
-                    }
-                })));
+                let seeds = marker.iter().flat_map(|m| m.seeds.iter().cloned());
+                let b = Arc::new(AddressBook::from_peers(
+                    cfg.cluster
+                        .peers
+                        .iter()
+                        .map(|p| PeerEntry {
+                            id: p.id,
+                            addr: p.addr.clone(),
+                            repl_addr: p.repl_addr.clone(),
+                        })
+                        .chain(seeds),
+                ));
+                book = Some(Arc::clone(&b));
                 Arc::new(
                     TcpTransport::new(
                         &cluster_id,
                         node_id,
                         NodeTls {
-                            cert_chain_pem: node_cert.chain_pem(),
-                            key_pem: node_cert.key_pem(),
+                            cert_chain_pem: cert_chain_pem.clone(),
+                            key_pem: key_pem.clone(),
                             ca_pem: ca_pem.clone(),
                         },
-                        book,
+                        b,
                     )
                     .map_err(|e| ServerError::Config(format!("cluster transport: {e}")))?,
                 )
@@ -282,6 +472,9 @@ impl ClusterServices {
         let replication = ReplicationService::new();
         let execute = LateExecute::new();
         let limit = tuning.replication_message_limit();
+        let meta_max_message =
+            usize::try_from(cfg.cluster.meta_max_message_bytes).unwrap_or(usize::MAX);
+        let p13_routes = LateRoutes::default();
         let routes = Routes::new(repl_service::replication_server(
             replication.clone(),
             identity.clone(),
@@ -294,16 +487,19 @@ impl ClusterServices {
                 slot.clone(),
                 Arc::new(liveness.clone()),
             )
-            .into_server(identity.clone(), DEFAULT_META_MAX_MESSAGE),
+            .into_server(identity.clone(), meta_max_message),
         )
         .add_service(execute.clone());
+        // Phase 13 (13-02): unknown services fall through to the late-bound Phase 13 set.
+        let routes = Routes::from(
+            routes
+                .into_axum_router()
+                .fallback_service(p13_routes.clone()),
+        );
         let tls_config = || -> Result<ServerTlsConfig, ServerError> {
             let (roots, _) = listener_client_roots(cfg, &ca_pem)?;
             Ok(ServerTlsConfig::new()
-                .identity(Identity::from_pem(
-                    node_cert.chain_pem(),
-                    node_cert.key_pem(),
-                ))
+                .identity(Identity::from_pem(&cert_chain_pem, &key_pem))
                 .client_ca_root(Certificate::from_pem(roots)))
         };
         let listener_stop = CancellationToken::new();
@@ -363,7 +559,10 @@ impl ClusterServices {
             &peers,
             Arc::clone(&transport),
             slot.clone(),
-            OutboxConfig::default(),
+            OutboxConfig {
+                max_message: meta_max_message,
+                ..OutboxConfig::default()
+            },
         );
         let started = MetaHandle::start_with(
             &meta_dir,
@@ -385,8 +584,31 @@ impl ClusterServices {
         };
         slot.set(meta.raft().clone());
         let ready = async {
-            meta.wait_ready().await.map_err(ServerError::from)?;
-            identity::check_voters_after_ready(&meta.raft().status().voters, &voters).map_err(boot)
+            if mode == BootMode::Joiner {
+                // D-P13-29b: a joiner fails loudly when no leader adds it in time.
+                let wait = cfg.cluster.join_timeout.get();
+                tokio::time::timeout(wait, meta.wait_ready())
+                    .await
+                    .map_err(|_| {
+                        ServerError::Config(format!(
+                            "joining: no metadata leader reached this node within [cluster] join_timeout ({wait:?})"
+                        ))
+                    })?
+                    .map_err(ServerError::from)?;
+            } else {
+                meta.wait_ready().await.map_err(ServerError::from)?;
+            }
+            let st = meta.raft().status();
+            p13::voter_check(
+                &p13::ConfView {
+                    voters: st.voters,
+                    learners: st.learners,
+                },
+                cfg,
+                p13::members_known(data_dir, Some(meta.view())),
+                VoterCheckPhase::PostReady,
+            )
+            .map_err(boot)
         };
         if let Err(e) = ready.await {
             meta.stop().await;
@@ -398,9 +620,13 @@ impl ClusterServices {
         // 8. InitCluster with the bound id, then the own Member record.
         let t = std::time::Instant::now(); // clock-exempt: startup timing
         let init = async {
-            let token_key =
+            let token_key = if mode == BootMode::Joiner {
+                // Never InitCluster on a joiner: the seed's ClusterInfo arrives through the log.
+                joined_token_key(&meta, count, cfg.cluster.join_timeout.get()).await?
+            } else {
                 crate::server::init_cluster(&meta, &cluster_id, node_id, count, clock.now_ms())
-                    .await?;
+                    .await?
+            };
             let stored = meta
                 .view()
                 .read(|s| s.cluster().map(|c| c.value.cluster_id.clone()));
@@ -434,6 +660,12 @@ impl ClusterServices {
         let init_cluster = t.elapsed();
         let meta = Arc::new(meta);
 
+        // A joiner's voter set is the group's (it starts with none of its own).
+        if mode == BootMode::Joiner {
+            voters = meta.raft().status().voters;
+            voters.sort_unstable();
+        }
+
         // 9. controller, assignment source, self-demotion watchdog.
         let tasks_stop = CancellationToken::new();
         let mut tasks = Vec::new();
@@ -441,7 +673,7 @@ impl ClusterServices {
             Controller::new(
                 Arc::clone(&meta),
                 Arc::new(liveness.clone()),
-                tuning.controller(voters.len()),
+                tuning.controller(voters.len().max(1)),
                 Arc::clone(&clock),
             )
             .run(tasks_stop.clone()),
@@ -472,6 +704,9 @@ impl ClusterServices {
             execute,
             listener_addr,
             liveness,
+            book,
+            p13_routes,
+            boot_mode: mode,
             tasks: Mutex::new(tasks),
             tasks_stop,
             listener_tasks: Mutex::new(listener_tasks),
@@ -486,6 +721,36 @@ impl ClusterServices {
     /// The bound cluster id.
     pub fn cluster_id(&self) -> &str {
         &self.cluster_id
+    }
+
+    /// This node's effective id (`[node] node_id`, or the join marker's).
+    pub fn node_id(&self) -> u64 {
+        self.node_id
+    }
+
+    /// How meta was started this boot (Phase 13, [`p13::boot_mode`]).
+    pub fn boot_mode(&self) -> BootMode {
+        self.boot_mode
+    }
+
+    /// The TCP transport's address book (`None` with an injected transport).
+    pub fn address_book(&self) -> Option<&Arc<AddressBook>> {
+        self.book.as_ref()
+    }
+
+    /// Phase 13 (P13-F1 rule 6): the boot fence, immediately before `Node::open`
+    /// ([`p13::boot_fence`], 13-04).
+    pub async fn boot_fence(&self, level_max: u32) -> Result<(), ServerError> {
+        p13::boot_fence(&self.meta, level_max)
+            .await
+            .map_err(|e| ServerError::Config(e.to_string()))
+    }
+
+    /// Phase 13: serve `routes` (Membership, NodeOps, the forwarded API) on the cluster
+    /// listener behind the Phase 12 services ([`p13::cluster_listener_services`]). Calls
+    /// before this answer `UNIMPLEMENTED`, like any unknown service.
+    pub fn attach_p13_services(&self, routes: Vec<Routes>) {
+        self.p13_routes.set(chain_routes(routes));
     }
 
     /// The await-token key stored in meta.
@@ -694,6 +959,8 @@ impl ClusterServices {
 
     /// Stop the tasks that hold meta or partition logs (before `Node::shutdown`).
     pub async fn stop_tasks(&self) {
+        // Phase 13: the late-bound listener services may hold the Phase 13 context.
+        self.p13_routes.set(None);
         self.tasks_stop.cancel();
         self.follower.clear();
         self.replication.unbind();

@@ -16,6 +16,12 @@
 //! drains. `ostro worker token create|list|revoke` are client verbs
 //! ([`ostro_cli::commands::worker_tokens`]).
 //!
+//! `ostro cluster join` (Phase 13, 13-02 interception; D-P13-9) is not a plain client verb:
+//! [`ostro_server::p13::joiner::run_join`] prepares the blank data dir through the seed
+//! (marker, `tls/`, node.toml), then this binary starts the server on it (unless
+//! `--no-start`). A Phase 13 fail-stop (running fence, removed node) ends `dev` / `server`
+//! with a non-zero exit after the graceful shutdown.
+//!
 //! `dev` and `server` load the layered configuration (base profile < optional TOML file
 //! < `OSTRO_<SECTION>__<KEY>` env < flags), start [`ostro_server::Server`], print one
 //! ready line on stdout, then wait for SIGINT / SIGTERM (or the API server stopping) and
@@ -244,7 +250,14 @@ fn main() -> ExitCode {
             clap_complete::generate(shell, &mut Cli::command(), "ostro", &mut std::io::stdout());
             ExitCode::SUCCESS
         }
-        Some(Command::Client(cmd)) => ostro_cli::run(*cmd).into(),
+        Some(Command::Client(cmd)) => match *cmd {
+            // Phase 13 (13-02): `ostro cluster join` prepares the data dir and starts the
+            // server, so the binary runs it.
+            ostro_cli::ClientCommand::Cluster {
+                command: ostro_cli::commands::cluster::ClusterCmd::Join(a),
+            } => run_cluster_join(a, started),
+            other => ostro_cli::run(other).into(),
+        },
         None => {
             use clap::CommandFactory;
             Cli::command().print_help().expect("print help");
@@ -434,11 +447,67 @@ fn run_server(
             }
         }
         drop(stop_watch);
-        match handle.shutdown().await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(format!("shutdown: {e}")),
+        // Phase 13: a fail-stop (running fence, removed node) exits non-zero.
+        let fatal = handle.fatal();
+        match (handle.shutdown().await, fatal) {
+            (Ok(()), None) => ExitCode::SUCCESS,
+            (Ok(()), Some(reason)) => fail(reason),
+            (Err(e), _) => fail(format!("shutdown: {e}")),
         }
     })
+}
+
+/// `ostro cluster join` (Phase 13, D-P13-9): the joiner library prepares the data dir
+/// through the seed; then the server profile starts on it (`--config`, `--data`) unless
+/// `--no-start`.
+fn run_cluster_join(a: ostro_cli::commands::cluster::JoinArgs, started: Instant) -> ExitCode {
+    let args = ostro_server::p13::JoinArgs {
+        seed: a.seed,
+        token: a.token,
+        ca_hash: a.ca_hash,
+        data_dir: a.data_dir.clone(),
+        config: a.config.clone(),
+        advertise_api: a.advertise_api,
+        advertise_cluster: a.advertise_cluster,
+        advertise_repl: a.advertise_repl,
+        no_start: a.no_start,
+    };
+    let rt = match runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    let prepared = match rt.block_on(ostro_server::p13::joiner::run_join(args)) {
+        Ok(p) => p,
+        Err(e) => return fail(format!("cluster join: {e}")),
+    };
+    drop(rt);
+    eprintln!(
+        "joined cluster {} as node {} (data: {})",
+        prepared.cluster_id,
+        prepared.node_id,
+        prepared.data_dir.display()
+    );
+    if a.no_start {
+        return ExitCode::SUCCESS;
+    }
+    let overrides = Overrides {
+        listen: None,
+        data_dir: Some(prepared.data_dir),
+    };
+    let cfg = match load_layered(
+        ServerConfig::server_defaults(),
+        a.config.as_deref(),
+        a.config.is_some(),
+        &EnvSource::Process,
+        &overrides,
+    ) {
+        Ok(cfg) => cfg,
+        Err(e) => return fail(e),
+    };
+    if let Err(e) = ostro_server::tls::effective_mode(&cfg, TlsProfile::Server) {
+        return fail(e);
+    }
+    run_server("ostro server", cfg, TlsProfile::Server, started, None)
 }
 
 /// `ostro dev --watch` (10-16): run the watch loop against this server on its own task

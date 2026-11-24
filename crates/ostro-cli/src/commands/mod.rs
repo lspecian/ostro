@@ -34,6 +34,10 @@ pub mod build;
 pub mod init;
 pub mod replay;
 pub mod toolchain;
+// Phase 13 (13-02 clap shapes; 13-16 implements the verbs).
+pub mod cluster;
+pub mod migrate_runs;
+pub mod modules_lc;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -166,6 +170,19 @@ pub enum ClientCommand {
     Doctor(toolchain::DoctorArgs),
     /// Replay recorded runs against a module and report divergence (exit 4).
     Replay(replay::ReplayArgs),
+    /// Cluster membership, placement and rolling upgrades (init, join, remove, drain,
+    /// status, token, reassign, rebalance, upgrade).
+    Cluster {
+        #[command(subcommand)]
+        command: cluster::ClusterCmd,
+    },
+    /// Replay-check runs against another workflow version and repin the ones that pass.
+    MigrateRuns(migrate_runs::MigrateRunsArgs),
+    /// Module lifecycle: retire a module (rm), run module GC now (gc).
+    Modules {
+        #[command(subcommand)]
+        command: modules_lc::ModulesCommand,
+    },
 }
 
 /// Run a verb to completion on a current-thread runtime.
@@ -272,6 +289,15 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Dlq { command } => command.conn(),
         ClientCommand::Limits(a) => &a.conn,
         ClientCommand::Bulk { command } => command.conn(),
+        ClientCommand::Cluster { command } => match command.conn() {
+            Some(c) => c,
+            None => {
+                eprintln!("ostro: error: `ostro cluster join` is run by the ostro binary");
+                return Outcome::Usage;
+            }
+        },
+        ClientCommand::MigrateRuns(a) => &a.conn,
+        ClientCommand::Modules { command } => command.conn(),
         ClientCommand::Init(_)
         | ClientCommand::Build(_)
         | ClientCommand::Toolchain(_)
@@ -311,6 +337,9 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Dlq { command } => dlq::run(&client, out, command).await,
         ClientCommand::Limits(a) => limits::limits(&client, out, a).await,
         ClientCommand::Bulk { command } => bulk::run(&client, out, command).await,
+        ClientCommand::Cluster { command } => cluster::run(&client, out, command).await,
+        ClientCommand::MigrateRuns(a) => migrate_runs::run(&client, out, a).await,
+        ClientCommand::Modules { command } => modules_lc::run(&client, out, command).await,
         ClientCommand::Init(_)
         | ClientCommand::Build(_)
         | ClientCommand::Toolchain(_)
