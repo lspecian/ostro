@@ -213,7 +213,12 @@ fn op_strategy() -> impl Strategy<Value = Op> {
             proptest::bool::weighted(0.2),
         )
             .prop_map(|(p, i, mode, timer, signal, complete)| Op::Events { p, i, mode, timer, signal, complete }),
-        1 => (p.clone(), proptest::collection::vec(any::<u8>(), 0..24)).prop_map(|(p, bytes)| Op::Raw { p, bytes }),
+        // Malformed input stays on the reject-and-continue path (empty / undecodable). Since
+        // 13-04 (D-P13-6) bytes that decode with unknown fields or an unknown Cmd tag
+        // fail-stop the partition instead (tests/apply_newer_format.rs), so such draws get a
+        // leading 0x07 (field number 0: never decodable).
+        1 => (p.clone(), proptest::collection::vec(any::<u8>(), 0..24))
+            .prop_map(|(p, bytes)| Op::Raw { p, bytes: reject_path(bytes) }),
         1 => cfg_strategy().prop_map(Op::Restart),
         // Plan 04-12 additions (the arms above are unchanged).
         3 => (p.clone(), proptest::option::weighted(0.2, 0u8..4))
@@ -268,6 +273,17 @@ struct RunModel {
     id: RunId,
     token: Option<AttemptToken>,
     next_seq: u64,
+}
+
+/// `bytes` unchanged when empty or undecodable, else `0x07 ‖ bytes` (undecodable).
+fn reject_path(bytes: Vec<u8>) -> Vec<u8> {
+    if bytes.is_empty() || ostro_types::command::decode_command(&bytes).is_err() {
+        bytes
+    } else {
+        let mut b = vec![0x07];
+        b.extend(bytes);
+        b
+    }
 }
 
 async fn open(dir: &Path, cfg: &Cfg, mode: StartMode) -> Node {
