@@ -565,9 +565,8 @@ impl ProcCluster {
         node.api = api;
         if node.cfg.api.listen != api {
             node.cfg.api.listen = api;
-            std::fs::write(&node.config_path, node.cfg.to_toml_string()).map_err(|e| {
-                start_err(format!("write {}: {e}", node.config_path.display()))
-            })?;
+            std::fs::write(&node.config_path, node.cfg.to_toml_string())
+                .map_err(|e| start_err(format!("write {}: {e}", node.config_path.display())))?;
         }
         Ok(())
     }
