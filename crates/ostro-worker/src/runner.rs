@@ -115,7 +115,9 @@ pub(crate) fn spawn(shared: &Arc<Shared>, act: v1::Activate) -> bool {
             act.journal_len,
         );
     };
-    let cancel = CancellationToken::new();
+    // `fence` (lease lost) also stops the engine; `cancel` alone is an eviction (drain).
+    let fence = CancellationToken::new();
+    let cancel = fence.child_token();
     let (in_tx, in_rx) = mpsc::unbounded_channel();
     let generation = shared.next_generation();
     {
@@ -126,7 +128,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, act: v1::Activate) -> bool {
                 return true;
             }
             // A newer token for the same run: the old activation is fenced.
-            prev.cancel.cancel();
+            prev.fence.cancel();
             active.remove(&run.run_id);
         }
         if active.len() >= shared.cfg.slots as usize {
@@ -141,6 +143,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, act: v1::Activate) -> bool {
                 run: run.clone(),
                 token,
                 cancel: cancel.clone(),
+                fence: fence.clone(),
                 inputs: in_tx,
                 generation,
             },
@@ -150,7 +153,7 @@ pub(crate) fn spawn(shared: &Arc<Shared>, act: v1::Activate) -> bool {
     let shared = Arc::clone(shared);
     tokio::spawn(async move {
         let key = run.run_id.clone();
-        run_activation(&shared, act, run, token, cancel, in_rx).await;
+        run_activation(&shared, act, run, token, cancel, fence, in_rx).await;
         {
             let mut active = shared.active();
             if active.get(&key).is_some_and(|a| a.generation == generation) {
@@ -168,6 +171,7 @@ async fn run_activation(
     run: v1::RunRef,
     token: v1::Token,
     cancel: CancellationToken,
+    fence: CancellationToken,
     inputs: mpsc::UnboundedReceiver<u64>,
 ) {
     let fail_start = |error: String, outcome: ActivationOutcome, run_id: String| {
@@ -274,11 +278,13 @@ async fn run_activation(
         cancel.clone(),
     ));
     // 4. Engine.
+    // The sink fences on `fence` only: after a drain's eviction the engine's final flush
+    // is still appended under the (valid) lease.
     let sink = Arc::new(RemoteSink::new(
         Arc::clone(shared),
         run.clone(),
         token,
-        cancel.clone(),
+        fence,
         end,
     ));
     let eng_act = Activate {

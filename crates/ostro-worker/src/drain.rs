@@ -4,6 +4,9 @@
 //!    `Credit{0}` is sent.
 //! 2. `Drain` tells the server this session is going away.
 //! 3. Every in-flight activation is evicted (engine cancel → `Done{Evicted{External}}`).
+//!    Evicted, not fenced: the leases are still this worker's, so each engine's final flush
+//!    of its unflushed events is appended (a fenced flush would report `Fenced`, which the
+//!    server reads as "a newer lease owns the run" and does not re-grant; ci-fix7).
 //! 4. The worker waits for the activations to finish (bounded by [`DRAIN_BOUND`]), closes
 //!    its half of the stream and waits briefly for the server to close the other half, so
 //!    the queued `Done`s are flushed.
@@ -27,7 +30,7 @@ pub(crate) async fn drain(shared: &Shared, s: Session) {
     shared.draining.store(true, Ordering::Release);
     s.send(v1::worker_msg::Msg::Credit(v1::Credit { free_slots: 0 }));
     s.send(v1::worker_msg::Msg::Drain(v1::Drain {}));
-    let n = shared.cancel_all();
+    let n = shared.evict_all();
     info!(evicted = n, "draining");
     let wait = async {
         loop {

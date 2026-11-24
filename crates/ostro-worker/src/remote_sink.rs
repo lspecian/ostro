@@ -9,8 +9,10 @@
 //!   `rejected` and transport errors to `Unavailable`; `PERMISSION_DENIED` /
 //!   `FAILED_PRECONDITION` (lease not held) to `Fenced`. A successful append renews the
 //!   lease on the server.
-//! - **self-fence:** once the activation's token is cancelled, `append` answers `Fenced`
-//!   locally and nothing more is sent.
+//! - **self-fence:** once the activation is fenced (its lease is not this worker's any
+//!   more: `Cancel`, `LeaseLost`, a newer token, session loss), `append` answers `Fenced`
+//!   locally and nothing more is sent. A drain only evicts the activation, so its final
+//!   flush is still sent.
 //! - **fetch_blob:** [`crate::blob_fetch`] (length + sha256 verified).
 //! - **done:** `Done{run, token, postcard(WireOutcome), engine_end_seq}` on the session.
 //! - **effects:** [`crate::effect_proxy::EffectProxy`].

@@ -183,7 +183,13 @@ pub(crate) struct Link {
 pub(crate) struct ActiveRun {
     pub(crate) run: v1::RunRef,
     pub(crate) token: v1::Token,
+    /// Stops the engine (eviction). A child of `fence`: fencing also stops it.
     pub(crate) cancel: CancellationToken,
+    /// The lease is no longer this worker's (`Cancel`, `LeaseLost`, a newer token, session
+    /// loss): the sink refuses appends locally and the effect proxy sends nothing. A drain
+    /// only evicts (`cancel`); the lease stays valid, so the engine's final flush of the
+    /// evicted activation still reaches the server.
+    pub(crate) fence: CancellationToken,
     pub(crate) inputs: mpsc::UnboundedSender<u64>,
     /// Distinguishes a replaced entry for the same run.
     pub(crate) generation: u64,
@@ -269,8 +275,19 @@ impl Shared {
         Ok(rt)
     }
 
-    /// Cancel every in-flight activation (self-fence / drain); returns how many.
-    pub(crate) fn cancel_all(&self) -> usize {
+    /// Fence every in-flight activation (session lost: the leases are not ours any more);
+    /// returns how many.
+    pub(crate) fn fence_all(&self) -> usize {
+        let g = self.active();
+        for a in g.values() {
+            a.fence.cancel();
+        }
+        g.len()
+    }
+
+    /// Evict every in-flight activation (drain: the leases stay ours until the `Done`s);
+    /// returns how many.
+    pub(crate) fn evict_all(&self) -> usize {
         let g = self.active();
         for a in g.values() {
             a.cancel.cancel();

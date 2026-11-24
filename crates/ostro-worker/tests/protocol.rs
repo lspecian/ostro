@@ -344,6 +344,57 @@ async fn drain_evicts_and_exits_cleanly() {
     );
 }
 
+/// ci-fix7: a drain evicts, it does not fence. The lease is still the worker's, so the
+/// journal events the engine has not flushed yet (here: the `StepCompleted`s of a long
+/// single-activation run) are appended and the `Done` is `Evicted{External}`, which the
+/// server re-grants. Before, the drain cancelled the token the sink self-fences on, the
+/// final flush was refused locally and the worker reported `Fenced`; the server took that
+/// for a newer lease owning the run and dropped its lease without re-granting, leaving the
+/// run open with nothing queued or leased (keda_sim's pool at 0 with a short run open).
+#[tokio::test]
+async fn drain_flushes_unflushed_events_and_reports_evicted() {
+    let h = Harness::new(FakeConfig::default()).await;
+    // ~1 s of steps here (~30 us each), under the 50,000-event history limit.
+    let n: u32 = 45_000;
+    // Warm the worker's module cache so the long activation starts running at once.
+    let warm = run_id(30);
+    let sha = h.seed("trivial-steps", "trivial-steps", &warm, json!({"n": 1}));
+    let id = run_id(31);
+    h.seed("trivial-steps", "trivial-steps", &id, json!({"n": n}));
+    let mut w = spawn_worker(h.cfg());
+    w.wait_event(T, "connected", is_connected).await;
+    assert!(h.st().send(activate(&warm, 1, &sha, 1)));
+    h.st()
+        .wait_for(T, "warm-up Done", |st| !st.dones(&warm).is_empty())
+        .await;
+    assert!(h.st().send(activate(&id, 1, &sha, 1)));
+    // Mid-run: steps completed, their events still unflushed (the engine flushes at a
+    // park, a step retry or the end of the activation).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        h.st().dones(&id).is_empty(),
+        "the run ended before the drain"
+    );
+    w.stop().await.expect("clean exit");
+    let st = h.st();
+    let dones = st.dones(&id);
+    assert_eq!(dones.len(), 1);
+    assert!(
+        matches!(outcome(&dones[0]), WireOutcome::Evicted { .. }),
+        "a drain must evict, not fence: {:?}",
+        outcome(&dones[0])
+    );
+    let steps = st
+        .journal(&id)
+        .iter()
+        .filter(|e| matches!(e.body, EventBody::StepCompleted(_)))
+        .count();
+    assert!(
+        steps > 0,
+        "the completed steps were flushed before the Done"
+    );
+}
+
 #[tokio::test]
 async fn renewal_swaps_channel_without_dropping_the_lease() {
     let h = Harness::new(FakeConfig {

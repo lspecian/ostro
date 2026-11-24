@@ -272,7 +272,7 @@ fn handle(shared: &Arc<Shared>, msg: v1::server_msg::Msg) -> Option<DriveEnd> {
                 if let Some(a) = g.get(&run.run_id)
                     && token_eq(&a.token, token.as_ref())
                 {
-                    a.cancel.cancel();
+                    a.fence.cancel();
                 }
             }
         }
@@ -324,7 +324,7 @@ async fn drive(
 /// Self-fence: cancel every in-flight activation and drop the link.
 fn self_fence(shared: &Shared) {
     shared.set_link(None);
-    let n = shared.cancel_all();
+    let n = shared.fence_all();
     if n > 0 {
         warn!(
             cancelled = n,
