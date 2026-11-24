@@ -219,6 +219,74 @@ Phase 12 also defines the divergent-tail rules: after install the follower's log
 `applied_offset`, and its log is truncated / refetched from there under the leader's epoch
 history (§10).
 
+### 9.1 Phase 12 follower install (as built, 12-12; D-P12-8)
+
+A follower that is empty, or whose fetch offset is below the leader's `log_start`, gets
+`SNAPSHOT_REQUIRED` from `Replication.Fetch` and installs a snapshot from the leader
+(`crates/ostro-cluster/src/{snapshot,install}.rs`).
+
+**Framing (`Replication.FetchSnapshot`).** Request `{partition, replica_id, resume_frame}`;
+response: a stream of `SnapshotFrame{index, bytes, last}`. Frame 0 is the 64-byte OSNP header
+(§2); frame `i ≥ 1` is the `i`-th stored frame exactly as on disk (§3, `u32 LE len | kind |
+payload | u32 LE crc32c`), checked against its CRC before sending; `last = true` marks the
+trailer (§5). Concatenating the frames in index order reproduces the file byte for byte, so the
+snapshot is never re-encoded. Authorization is the one of `Fetch`: the calling node must be
+`replica_id` and an assigned replica of the partition. The `Replication` server's message limit
+covers the largest OSNP frame (64 MiB plus framing).
+
+**Which snapshot.** The leader's newest local snapshot with `applied_offset ≥ log_start` that
+passes the Phase 8 quick check; if there is none, one is taken now through the partition's
+snapshot service (or exported from the store for the duration of the transfer). Exports are
+single-flight per partition.
+
+**Resume.** The leader pins the streamed file per requesting replica (an open descriptor keeps
+an unlinked file readable, so local retention cannot cut a stream) for `pin_ttl` (10 min). A
+request with `resume_frame = k` continues the **same** file from frame `k`; without a pin it is
+refused with `FAILED_PRECONDITION` and the follower restarts at frame 0, so frames of two
+snapshots are never spliced. The follower resumes at most 5 times per install (frame timeout
+30 s).
+
+**Staging and verification.** Staging file `snapshots/pNNNN/.incoming-<applied 20d>` (stale
+ones are deleted first; Phase 8's directory scan ignores them). Each frame is checked on arrival
+(index, header CRC / partition / partition count for frame 0, frame CRC, `last` only on the
+trailer). Then: fsync the file and the directory; re-read it through `verify_snapshot` (every
+CRC, structure, row order, trailer digest and counts); the re-read sha256 must equal the sha256
+of the received bytes and the size must match; the `cursor` row's epoch must equal the header's
+`latest_epoch`, and its `epoch_history` becomes the anchor history.
+
+**Fixed install order** (never reordered):
+
+1. stage and verify (above);
+2. `quiesce_for_install(p)`: the partition's machine stops and releases its store;
+3. `reset_to(S, history)`: delete every log segment, fsync the partition directory, anchor the
+   log at `S = applied_offset`, seed the epoch cache from the snapshot's history
+   (failpoint `install::after_log_reset`);
+4. failpoint `install::before_rename`, then Phase 8 `install_snapshot` (staged
+   `.install-pNNNN`, digest and applied check, rename swap, fsync, §7), a digest equality
+   check, failpoint `install::after_rename`;
+5. rename the staging file to `snapshots/pNNNN/<S>.osnap` and write the `.blobrefs` sidecar;
+6. reopen the partition (`x_run_index` rebuild); the follower fetches from `S` with
+   `last_fetched_epoch = header.latest_epoch`.
+
+**Crash analysis per step** (pinned by `crates/ostro-cluster/tests/install_crash.rs`: 20
+iterations per failpoint with random frame-level stream cuts; the failpoint panics the install
+task, the follower's processes are dropped, its data dir is reopened through `Node::open`, then
+the install is retried):
+
+| Crash point | What is on disk | Next open |
+|-------------|-----------------|-----------|
+| during staging (1) | old log, old state, a partial `.incoming-*` | old state; the next install deletes the staging file |
+| after `reset_to` (3, `install::after_log_reset`) | empty log, old state at `A` | empty-log anchoring opens at `A` (storage-format §10 step 3); the follower asks for the snapshot again |
+| before the rename (4, `install::before_rename`) | empty log, old state, staged `.install-pNNNN` | Phase 8 `recover_install` drops the staging dir; open at `A` as above |
+| inside `install_snapshot` (old state renamed aside) | `.old-pNNNN` and/or `.install-pNNNN` | Phase 8 `recover_install` restores a complete state (old or new); the log is anchored to it |
+| after the rename (`install::after_rename`) | empty log anchored at `S`, new state at `S` | opens at `S` with the leader's digest |
+
+The invariant in every row: the log is never ahead of or behind the state in a way recovery
+cannot anchor ("state ahead of log" never happens), because the log is emptied before the state
+changes and an empty log anchors at whatever state survived. A failure without a crash in steps
+3-4 runs `recover_install`, re-anchors the log at the live state's `(applied, epoch_history)` and
+reopens; a failure after the rename reopens on `S`.
+
 ## 10. Epoch history (F7)
 
 The meta `cursor` row (postcard `CursorMeta`: `epoch`, `epoch_history: [(epoch, start_offset)]`,
@@ -233,30 +301,31 @@ snapshot install.
 ## 11. Phase 12 checklist
 
 What Phase 12 (replication, follower install) must build on top of OSNP v1, and what it may
-rely on without change:
+rely on without change. All done in Phase 12: §9.1 (12-12), `docs/bottomless.md` § "Cluster
+mode" (12-15), the single HW publication point (12-08):
 
-- [ ] **Frame streaming.** Forward `RawFrame`s from `OsnpReader::next_raw()` over the
+- [x] **Frame streaming.** Forward `RawFrame`s from `OsnpReader::next_raw()` over the
   `ostro.cluster.v1` replication stream; never re-encode. The follower writes them through the
   same staged install (§7: `.install-pNNNN`, reopen + digest check, rename swap), so a partial
   transfer never touches the live state.
-- [ ] **Resumption.** Resume at a frame boundary (frame index *i*, header kept); the 1 MiB
+- [x] **Resumption.** Resume at a frame boundary (frame index *i*, header kept); the 1 MiB
   `Rows` target bounds the lost work. The leader must stream from the same snapshot file
   (identified by `applied_offset` + sha256) or restart the transfer; a retained snapshot can
   be deleted by `keep` retention, so the leader pins the file for the transfer's duration.
-- [ ] **Epoch history.** Read `cursor.epoch_history` from the installed state (§10) and seed the
+- [x] **Epoch history.** Read `cursor.epoch_history` from the installed state (§10) and seed the
   follower's log epoch cache from it (`Rf1Log::seed_epochs` pattern, storage-format §10 step 3
   / §14.5 F5) before fetching the tail from `applied_offset`.
-- [ ] **Divergent-tail truncation, local.** After install the follower's log starts at
+- [x] **Divergent-tail truncation, local.** After install the follower's log starts at
   `applied_offset` (empty-log anchoring, storage-format §10); anything it held above that is
   discarded, then the tail is fetched under the leader's epoch history (KIP-101/279).
-- [ ] **Divergent-tail truncation in object storage.** Bottomless chains are hash-linked
+- [x] **Divergent-tail truncation in object storage.** Bottomless chains are hash-linked
   (`prev_chunk_sha256`) and split at epoch boundaries; a new leader for a partition must not
   extend a remote chain whose last chunk ends in a tail it truncated. Per-partition chain
   repair (Phase 12 F12c): fence per-partition writers by leader epoch, walk back from the
   manifest head (F12b) to the last chunk at or below the new leader's divergence point, and
   start a new chain segment from there (or from a fresh snapshot, the chain start rule in
   bottomless.md). LOCK and the single manifest writer stay single-node constructs.
-- [ ] **HW publication.** Publish tracker-driven HW through `HwVector::publish_hw` (the single
+- [x] **HW publication.** Publish tracker-driven HW through `HwVector::publish_hw` (the single
   publication point, F12a) so the uploader's consistent cut stays correct with replication.
 - [x] Already in v1: header `partition` / `partition_count` (install refuses a mismatch),
   `state_format` + migrators (§6), the trailer `logical_digest` (§5), blob refs (followers

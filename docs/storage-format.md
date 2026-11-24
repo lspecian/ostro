@@ -29,7 +29,7 @@ All multi-byte integers are **little-endian in the log** (WAL frame, envelope) a
 └── tmp/<sha256 hex>.<pid>.<n>      # in-flight blob writes; deleted by BlobStore::open
 ```
 
-- **`node.toml`**: two `key = value` lines, `format_version = 1` and `partitions = <P>`. The file is written durably (tmp + fsync + rename + dir fsync) on first start. A different `partitions` value at open is fatal (`NodeError::PartitionCountMismatch`, STOR-09). The partition count is also recorded in every state store.
+- **`node.toml`**: two `key = value` lines, `format_version = 1` and `partitions = <P>`. Since Phase 12 it also holds `node_id` and `cluster_id` (additive keys, D-P12-16): both are bound **before meta starts, at the first boot, single-node included**. Absent → written durably (tmp + fsync + rename + dir fsync); present and different from the configured or resolved value → fatal. `cluster_id` comes from, in order: `[cluster] cluster_id`, `node.toml`, the existing CA's stored id, the `ClusterInfo.cluster_id` of a non-blank persisted meta, and only for a blank meta (single node) a fresh one; two present sources that disagree are fatal. `node_id = 0` is refused (the no-leader sentinel). A wiped meta directory over existing partition data fail-stops instead of creating a new cluster id (D-P12-14). The file is written durably (tmp + fsync + rename + dir fsync) on first start. A different `partitions` value at open is fatal (`NodeError::PartitionCountMismatch`, STOR-09). The partition count is also recorded in every state store.
 - **WAL**: one shared group-commit WAL per node (`wal/`), topic `p`, one partition directory per partition. The vendored WAL opens a **new** segment on each process's first append to a partition, rotates at 250 MB or 30 min (vendored defaults), and fsyncs a segment before rotating away from it. Empty segment files can exist and are ignored. Retention deletes only whole segments below the safe floor (§8).
 - **State**: one fjall `Database` per partition. Deleting `state/pNNNN` and reopening rebuilds that partition from its log (STOR-06). The fjall-internal file layout is not part of Ostro's format. Ostro's format is the logical content (keyspaces, keys, values) in §5–§6.
 - **Blobs**: payloads over 256 KiB are written as `blobs/<hh>/<sha256>` (tmp write, fsync, rename, dir fsync) **before** the command that references them is appended. A visible blob is always complete. A `put` of a blob that already exists touches its mtime (Phase 8, 08-19), and blob GC (§15) deletes only unreferenced blobs older than its grace.
@@ -197,7 +197,7 @@ Order (`Node::open`, `crates/ostro-partition/src/node.rs`):
 1. `node.toml` (format and partition count).
 2. Open every state store in parallel. Its `applied_offset` is the partition's durable floor. An unreadable store gets floor `u64::MAX`, so its log tail is never cut.
 3. Recover every log in parallel (`crates/ostro-log/src/recovery.rs`): list segments, read and verify every record (§2–§3), classify the first failure, then make the log durable.
-   **Empty-log anchoring (Phase 12 F3, plan 05-21).** If a partition's log has no records (no segment files, only empty ones, or nothing left after a torn-tail cut) and its state store is readable, the log is anchored at the state's applied offset: `log_start = LEO = HW = applied_offset`, and the next append is assigned offset `applied_offset`. The log epoch cache, which is otherwise derived from envelope epochs, is seeded from `cursor.epoch_history` (`Rf1Log::seed_epochs`, called by `Node::open` before catch-up), so the new term's epoch is above every applied `LeaderAnnounced` epoch. No bytes are written by anchoring. An unreadable state (floor sentinel `u64::MAX`) anchors at 0. A **non-empty** log with `applied > LEO` stays fatal ("state ahead of log"), and `applied < log_start` stays "snapshot required". Anchoring does not change the torn-tail rule: with no verified record before it, a bad first record counts as above the floor only when `applied_offset == 0`.
+   **Empty-log anchoring (Phase 12 F3, plan 05-21).** If a partition's log has no records (no segment files, only empty ones, or nothing left after a torn-tail cut) and its state store is readable, the log is anchored at the state's applied offset: `log_start = LEO = HW = applied_offset`, and the next append is assigned offset `applied_offset`. The log epoch cache, which is otherwise derived from envelope epochs, is seeded from `cursor.epoch_history` (`PartitionLog::seed_epochs`, called by `Node::open` before catch-up), so the new term's epoch is above every applied `LeaderAnnounced` epoch. No bytes are written by anchoring. An unreadable state (floor sentinel `u64::MAX`) anchors at 0. A **non-empty** log with `applied > LEO` stays fatal ("state ahead of log"), and `applied < log_start` stays "snapshot required". Anchoring does not change the torn-tail rule: with no verified record before it, a bad first record counts as above the floor only when `applied_offset == 0`.
 4. Validate: for a non-empty log, `applied > LEO` is "state ahead of log" (fatal for the partition); `applied < log_start` is "snapshot required". An empty log is anchored (above) and always validates.
 5. Replay from the state's **own `applied_offset`** (not `checkpointed_offset`), up to the HW. Then the epoch bump, `LeaderAnnounced{e+1}` as the first entry of the new term, readiness barrier, leader services.
 
@@ -215,6 +215,47 @@ Anything else fails the partition with `LogError::Corrupt`, naming the segment a
 **State durability.** Apply commits use fjall's buffered journal (`write(2)`, no fsync). `checkpoint` writes `checkpointed_offset` and calls `persist(SyncAll)` every 100 ms or 256 chunks (`MachineConfig`), on `force_checkpoint`, and on graceful shutdown. After a crash, fjall may reopen ahead of the last checkpoint. That is safe because the state only ever applies WAL-durable commands (HW = fsynced LEO at RF=1).
 
 **Trim floor.** Retention deletes whole segments below `min(durable checkpoint, snapshot_floor, retention_floor)`, and only with a `TrimPermit` minted after the partition's readiness barrier opened. `snapshot_floor` stayed 0 until Phase 8, so Phases 2–7 never deleted log segments. From Phase 8 on the floor is `min(durable checkpoint, local snapshot floor, upload floor?, retention floor?)` (P8-D2, §15), so trimming keeps the invariant `log_start ≤ applied_offset(oldest retained local snapshot)`.
+
+### 10.1 Phase 12 behavioural notes (post-freeze; no byte format changed)
+
+Phase 12 (replication) changed **no on-disk byte format**: WAL frames, envelopes, commands,
+state keyspaces, OSNP v1 and the meta encodings are as frozen in §14. Replication carries
+envelopes verbatim (§14.5 F1). The changes below are recovery and open semantics only, which
+the freeze allows (§14.2).
+
+- **HW at open = `applied_offset` (F4).** A partition log opens unassigned (role `Offline`)
+  with its HW at the state store's `applied_offset`, clamped into `[log_start, LEO]`, never at
+  the recovered LEO: in a cluster the tail above `applied_offset` may be uncommitted, and a
+  follower must not apply it. A leader whose ISR is `{self}` (RF=1) raises the HW to its
+  durable LEO the moment it becomes leader; with RF > 1 the HW moves only through the replica
+  tracker (`min(durable LEO over the ISR)`, published at the single `HwVector::publish_hw`
+  point). Step 5 above therefore replays up to the HW the role sets, and the epoch of the new
+  term is the meta-assigned one (§14.5 F2).
+- **Torn first record of an anchored log (D-P12-4, parsed-base rule).** In
+  `recover_partition`, with `floor > 0` and no verified record before the bad one, the first
+  bad record counts as **torn** (cut, as at floor 0) iff all hold: it is in the last segment;
+  it has the existing torn shape (runs to EOF / zero-filled tail); and **either** its frame
+  header is complete and its parsed base offset equals `floor`, **or** fewer bytes than one
+  frame header remain from its start to EOF. A complete header whose base differs from
+  `floor` stays `Corrupt`. As built: the WAL V2 frame header carries no offset (base and last
+  are in the trailer after the payload), so the base is read from the envelope header right
+  after the topic, partition and payload length, i.e. the first 47 bytes of the record
+  (`BASE_PREFIX_LEN`); "one frame header" above means that prefix. A prefix that does not
+  parse also stays `Corrupt`, and the "state unreadable" floor sentinel never qualifies. Why
+  this shape can only be a torn write: install (`reset_to`) fsyncs the emptied partition
+  directory, so after a crash the log is either the old one or empty, and the first append
+  after an anchor is the only way to reach it (power loss before its first fsync). Pinned by
+  `torn_first_record_of_anchored_log` and a header-mismatch variant that stays `Corrupt`
+  (`crates/ostro-log/tests/recovery_empty_anchor.rs`). The marker-file alternative was
+  rejected because it would add an on-disk artefact next to frozen WAL files.
+- **Snapshot install resets the log first** (`reset_to(S)`: delete all segments, fsync the
+  directory, anchor at `S`, seed the epoch cache from the snapshot's `cursor.epoch_history`),
+  then installs the state. A crash between the two leaves an empty log with the old state,
+  which empty-log anchoring (step 3) opens at the old `applied_offset`; the follower then asks
+  for the snapshot again. See `docs/snapshot-format.md` § "Phase 12 follower install".
+- **Trimming on followers.** Followers take their own snapshots and trim their own logs with
+  the same floor rule (above); a follower whose fetch offset falls below the leader's
+  `log_start` installs a snapshot (`SNAPSHOT_REQUIRED`).
 
 ## 11. fjall configuration and measurements
 

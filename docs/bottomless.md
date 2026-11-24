@@ -163,7 +163,77 @@ never removes data a restore from the bucket would still need from this node.
 bottomless restore is deferred. Phase 12 does per-partition chain repair only:
 divergent-tail truncation and per-partition writer fencing by leader epoch. Restore walks
 each chain back from the manifest head (`chunk::walk_back`), following `prev_chunk_sha256`,
-so forked chunks left by an old writer are ignored.
+so forked chunks left by an old writer are ignored. Cluster mode (per-partition heads, takeover repair, restore refusal) is described in
+§ "Cluster mode" below.
+
+## Cluster mode (Phase 12, D-P12-20)
+
+With replication every node runs the uploader, but **only a partition's current leader uploads
+that partition**. Each round the uploader reads the node's led partitions (`PartitionRoles`) and
+skips the rest; uploads stay capped at the HW, which with RF > 1 is the replicated HW
+(`min(durable LEO over the ISR)`, published at the single `HwVector::publish_hw` point).
+The `[backup]` configuration is unchanged; all members share the same prefix.
+
+**Per-partition head and epoch fencing.** Each partition has a head object `p/<pppp>/head`
+(JSON, written by the partition's leader):
+
+```json
+{"format":1,"epoch":3,"last_chunk_key":"p/0000/seg/0000000002-…-….oseg","last_chunk_sha256":"<64 hex>",
+ "chain_start":0,"end":7,"snapshot_key":null,"snapshot_offset":null,"snapshot_sha256":null,
+ "snapshot_state_hash":null,"node_id":2,"members":2}
+```
+
+| Key | Contents | Written |
+|-----|----------|---------|
+| `p/<pppp>/head` | the partition's chain pointer: leader epoch, last chunk key + sha256, `chain_start`, `end`, the referenced snapshot | by the leader after each round that changed the partition, `If-Match` on its etag (`If-None-Match` when absent) |
+
+A head PUT whose precondition fails is re-read: if `head.epoch` is above the writer's epoch, the
+writer is **fenced for that partition only** (`ostro_repl_upload_fenced{partition} = 1`), drops
+its state for it and stops uploading it until it leads the partition at a higher epoch. Other
+partitions keep uploading. A stale epoch can never move a head. Chunk keys already contain the
+epoch and use `put_if_absent`, so two writers never overwrite each other's chunks. The head is
+written in single-node mode too (one code path).
+
+**Takeover repair.** Before its first upload at a new epoch, a leader runs
+`reconcile_on_takeover` (`crates/ostro-backup/src/cluster.rs`):
+
+1. read the head (fallback: the partition's entry in a Phase 8 `manifest/current`, as epoch 0);
+   a head at a higher epoch → fenced;
+2. walk the chain back from the head to `chain_start` (`chunk::walk_back`, following
+   `prev_chunk_sha256`); a chain that does not verify or does not reach `chain_start` is
+   re-chained;
+3. find the first envelope that ends above the new leader's end for that chunk's epoch, or whose
+   bytes differ from the local committed log;
+4. **gap** (the remote tail ends below the new leader's `log_start`, above its HW, or the chain
+   was unusable): re-chain from the newest local snapshot `S ∈ [log_start, HW]`: upload it, set
+   the head to an empty chain at `S` referencing it, then delete the old chain. Without such a
+   snapshot a snapshot is requested and nothing is written this round (`log_start == 0` simply
+   restarts the chain at 0). Followers trim by their own snapshot floor, so a new leader's
+   `log_start` can lie above the old leader's uploaded tail (W4);
+5. **divergence**: re-cut the straddling chunk to its committed prefix (same epoch and `prev`,
+   new key), move the head to it with `If-Match`, and delete every chunk from the divergent one
+   on only **after** the head PUT returned. A crash in between leaves the old head and chain
+   intact; the re-run finds the same re-cut object and converges;
+6. nothing divergent: ready, no write.
+
+**`LOCK` and `manifest/current` are single-member constructs.** The uploader reads the member
+count every round. With one member it writes heads **and** the Phase 8 manifest
+(`manifest/current`, generation manifests, meta snapshot), and `LOCK` is acquired as before. With
+two or more members it writes heads only: no manifest, no meta snapshot, no `LOCK`
+(`fence::acquire_if_single_member`). Floors and remote retention then run per led partition
+right after its head moved.
+
+**Restore of a cluster bucket is refused.** Cluster-wide restore is deferred to Phase 13/14
+(D-P12-3): partitions led by different nodes have no common instant, so no single manifest names
+a consistent cut. `ostro restore` on a bucket with `p/<pppp>/head` objects but no
+`manifest/current` fails before writing anything:
+
+```text
+cluster-wide restore is deferred (Phase 13/14); see docs/replication.md (the bucket has no manifest/current but N per-partition head object(s), e.g. p/0000/head)
+```
+
+A bucket written while the cluster had a single member still has `manifest/current` and restores
+as in Phase 8. See also `docs/replication.md` § 7.
 
 ## Remote retention
 
