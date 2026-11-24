@@ -460,7 +460,7 @@ Plans:
 
 Plans:
 - [x] 13-01-PLAN.md — PHASE-13 GATE (Phase 12 + 9-11 complete, seams incl. both voter-check sites, route inventory, reservations) + decisions/USER REVIEW to STATE + manifests first + library contracts (compat levels, RepinRun/AlterReplicas shapes, ext 96-102, NewerFormat, handoff/address-book constructor stubs, phase13 API traits) (all)
-- [ ] 13-02-PLAN.md — Server/CLI/harness seam: p13/ with call sites (both voter checks, boot rule, fence, routing wrap, start, shutdown), config keys, client/CLI stubs, P13Harness trait + stub modules (wave 2; all)
+- [x] 13-02-PLAN.md — Server/CLI/harness seam: p13/ with call sites (both voter checks, boot rule, fence, routing wrap, start, shutdown), config keys, client/CLI stubs, P13Harness trait + stub modules (wave 2; all)
 - [ ] 13-03-PLAN.md — Wire surface: Cluster/ModuleLifecycle/Membership/NodeOps protos (ModuleRefs with partition/epoch coverage), worker Hello feature_level, REST/gRPC adapters + RequestMeta, production GrpcControlPlane with parity (wave 3; API-08, CLUS-05..07)
 - [ ] 13-04-PLAN.md — Compatibility gate (require, finalizer, hold, NodeVersion, boot/running fences, level emulation) + partition fail-stop on unknown commands (wave 2; CLUS-06)
 - [x] 13-05-PLAN.md — Vendored driver FatalApply (halt before applied) + MetaSm fail-stop, TransferLeader/ReadIndex/progress, MetaHandle surface, MetaPeer large snapshots + lease anchor, remedy text (wave 2; CLUS-05, CLUS-06, API-08)
