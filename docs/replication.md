@@ -176,12 +176,24 @@ min_insync 2, shipped defaults; every third fault hits the controller, a third o
 are no-RST blackholes). See `.planning/phases/12-replicated-partition-logs/12-VALIDATION.md`
 for the gate run and `target/failover-p99/report.txt` for the per-iteration table.
 
-| Run | n | p50 | p99 | max |
-|-----|---|-----|-----|-----|
-| 12-17 (before the 12-18 liveness fix) overall | 200 | 2.47 s | 5.42 s | 5.70 s |
-| 12-17 `kill -9` | 134 | 2.45 s | 3.49 s | 3.49 s |
-| 12-17 blackhole (no RST) | 66 | 4.08 s | 5.70 s | 5.70 s |
-| 12-18 gate | see 12-VALIDATION.md | | | |
+12-18 gate run (200 iterations, after the 12-18 liveness fixes), with the 12-17 run for comparison:
+
+| Fault | n | p50 | p99 | max | 12-17 p50 / p99 |
+|-------|---|-----|-----|-----|-----------------|
+| overall | 200 | 2.43 s | 5.44 s | 5.49 s | 2.47 s / 5.42 s |
+| `kill -9`, non-controller leader | 89 | 0.89 s | 0.95 s | 0.95 s | 2.45 s / 2.50 s |
+| `kill -9`, controller | 45 | 2.44 s | 3.46 s | 3.46 s | 2.46 s / 3.49 s |
+| blackhole (no RST), non-controller | 44 | 4.10 s | 4.20 s | 4.20 s | 4.06 s / 4.23 s |
+| blackhole (no RST), controller | 22 | 5.13 s | 5.49 s | 5.49 s | 4.80 s / 5.70 s |
+
+Steps (12-18): detection p50 1.04 s / p99 4.05 s (suspect report confirmed in 89
+iterations, new-controller seeding in 67, session-timeout sample in 44); metadata re-election
+p50 1.18 s / p99 1.75 s; `ElectLeader` apply p99 55 ms; `LeaderAnnounced` commit p99 53 ms;
+catch-up and re-grant p50 68 ms, p99 2.42 s (the blackholed-controller iterations, see "Cut-off
+old leaders" below). Every pre-fault run resumed in every iteration. A controller kill is
+dominated by the metadata re-election plus the new controller's seeding window
+(`session_timeout / 3`) and confirmation; a blackhole is detected only by the session-timeout
+sample.
 
 The native-Linux run is human_needed (commands in 12-17-SUMMARY.md § "Reproduce on native
 Linux").
@@ -189,11 +201,14 @@ Linux").
 **Cut-off old leaders.** A leader that is alive but cut off keeps believing it leads until it
 self-demotes. A cut-off **meta leader** first has to lose its Raft leadership (check-quorum,
 about one election timeout) before its meta contact age starts to grow, so it self-demotes
-`session_timeout` after that: about 4-5.75 s after the cut, while a new partition leader can
-already be serving from about 3 s. In that window the old leader answers reads from its last
-committed state and its writes hang (they can never commit: the ISR cannot advance without its
-followers, and the ISR can only change through meta, which it cannot reach). Reads are not
-linearizable in Phase 12; ReadIndex and leader leases are Phase 13 (13-03).
+`session_timeout` after that: 4.6-5.2 s after the cut in the 12-18 investigation, while the new
+partition leader served (and completed the in-flight run) from 2.9-3.4 s. In that window the old
+leader answers reads from its last committed state, and a write sent to it hangs and is then
+refused with 503 at the self-demotion; it never commits (the HW cannot advance without its
+followers, and the ISR can only change through meta, which it cannot reach), and after the heal
+it is on no replica's log. The failover harness's client follows the cut-off leader's self-hint
+for reads, which is why the "catch-up and re-grant" step shows about 2.4 s for those iterations.
+Reads are not linearizable in Phase 12; ReadIndex and leader leases are Phase 13 (13-03).
 
 ## 4. `GET /v1/admin/replication`
 
