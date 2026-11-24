@@ -189,24 +189,36 @@ async fn run_bench(label: &str, spec: ClusterSpec, secs: u64) -> BenchResult {
             }
         }
     }
-    // Every acknowledged run completes (its 10 steps acknowledged by the run's completion).
+    // Every acknowledged run completes (checked 32 at a time, each within 120 s).
     let mut completed = 0usize;
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut set = tokio::task::JoinSet::new();
+    let mut queue = acks.iter().map(|(a, _)| a.run_id.clone());
     let cl = HintClient::new(&c, 1);
-    for (a, _) in &acks {
-        loop {
-            if let Some((200, v)) = cl
-                .get(&format!("/v1/runs/{}", a.run_id), Duration::from_secs(5))
-                .await
-                && v["status"] == "completed"
-            {
-                completed += 1;
-                break;
-            }
-            if Instant::now() > deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    loop {
+        while set.len() < 32
+            && let Some(run_id) = queue.next()
+        {
+            let cl = cl.clone();
+            set.spawn(async move {
+                let t = Instant::now();
+                let path = format!("/v1/runs/{run_id}");
+                loop {
+                    if let Some((200, v)) = cl.get(&path, Duration::from_secs(5)).await
+                        && v["status"] == "completed"
+                    {
+                        return true;
+                    }
+                    if t.elapsed() > Duration::from_secs(120) {
+                        return false;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            });
+        }
+        match set.join_next().await {
+            None => break,
+            Some(Ok(true)) => completed += 1,
+            Some(_) => {}
         }
     }
     // Stop, keep the data dirs, verify offline.
