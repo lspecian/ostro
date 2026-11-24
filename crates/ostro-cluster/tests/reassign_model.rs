@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use ostro_cluster::placement::reassign::{
-    cancel_target, next_step, next_step_at, shrink_min_insync, PartitionObs, ReassignStep,
+    PartitionObs, ReassignStep, cancel_target, next_step, next_step_at, shrink_min_insync,
 };
 use ostro_meta::ext::Reassignment;
 use proptest::prelude::*;
@@ -26,24 +26,37 @@ fn part(replicas: &[u64], isr: &[u64], leader: u64, min_insync: u8) -> Partition
     }
 }
 
+/// `(replicas, isr, min_insync, ext 100)` of one proposed `AlterReplicas`.
+type Alter = (Vec<u64>, Vec<u64>, u8, Option<Reassignment>);
+
 /// The AlterReplicas a controller would propose for `step` (None for non-proposals).
-fn alter(p: &PartitionObs, step: &ReassignStep) -> Option<(Vec<u64>, Vec<u64>, u8, Option<Reassignment>)> {
+fn alter(p: &PartitionObs, step: &ReassignStep) -> Option<Alter> {
     match step {
-        ReassignStep::Expand { replicas, reassignment } => Some((
+        ReassignStep::Expand {
+            replicas,
+            reassignment,
+        } => Some((
             replicas.clone(),
             p.isr.clone(),
             p.min_insync,
             Some(reassignment.clone()),
         )),
-        ReassignStep::Shrink { replicas, isr, min_insync } => {
-            Some((replicas.clone(), isr.clone(), *min_insync, None))
-        }
+        ReassignStep::Shrink {
+            replicas,
+            isr,
+            min_insync,
+        } => Some((replicas.clone(), isr.clone(), *min_insync, None)),
         _ => None,
     }
 }
 
 /// The D-P13-12 `AlterReplicas` apply validation.
-fn valid_alter(p: &PartitionObs, replicas: &[u64], isr: &[u64], min_insync: u8) -> Result<(), String> {
+fn valid_alter(
+    p: &PartitionObs,
+    replicas: &[u64],
+    isr: &[u64],
+    min_insync: u8,
+) -> Result<(), String> {
     let rs: BTreeSet<u64> = replicas.iter().copied().collect();
     let is: BTreeSet<u64> = isr.iter().copied().collect();
     if p.epoch == 0 {
@@ -62,7 +75,10 @@ fn valid_alter(p: &PartitionObs, replicas: &[u64], isr: &[u64], min_insync: u8) 
         return Err(format!("leader {} not in isr {isr:?}", p.leader));
     }
     if min_insync < 1 || usize::from(min_insync) > isr.len() {
-        return Err(format!("min_insync {min_insync} outside 1..=|isr| ({})", isr.len()));
+        return Err(format!(
+            "min_insync {min_insync} outside 1..=|isr| ({})",
+            isr.len()
+        ));
     }
     Ok(())
 }
@@ -193,7 +209,10 @@ fn rf3_to_1_with_min_insync_2() {
 fn leader_moves_before_shrink_when_not_in_target() {
     let mut p = part(&[1, 2, 3], &[1, 2, 3], 1, 2);
     let steps = drive(&mut p, &[2, 3, 4], 2);
-    assert!(steps.contains(&ReassignStep::LeaderMove { to: 2 }), "{steps:?}");
+    assert!(
+        steps.contains(&ReassignStep::LeaderMove { to: 2 }),
+        "{steps:?}"
+    );
     assert_eq!(p.replicas, vec![2, 3, 4]);
     assert_eq!(p.leader, 2);
 }
@@ -333,26 +352,45 @@ impl Sim {
                 return Err(format!("{s:?} raises min_insync"));
             }
             if mi < p.min_insync && mi < floor {
-                return Err(format!("{s:?} lowers min_insync below min(policy, |target|) = {floor}"));
+                return Err(format!(
+                    "{s:?} lowers min_insync below min(policy, |target|) = {floor}"
+                ));
             }
         }
         match &s {
-            ReassignStep::Expand { replicas, reassignment } => {
-                if !p.replicas.iter().chain(&self.target).all(|x| replicas.contains(x)) {
+            ReassignStep::Expand {
+                replicas,
+                reassignment,
+            } => {
+                if !p
+                    .replicas
+                    .iter()
+                    .chain(&self.target)
+                    .all(|x| replicas.contains(x))
+                {
                     return Err(format!("Expand {replicas:?} ⊉ old ∪ target"));
                 }
                 if reassignment.target != self.target {
-                    return Err(format!("Expand ext target {:?} ≠ {:?}", reassignment.target, self.target));
+                    return Err(format!(
+                        "Expand ext target {:?} ≠ {:?}",
+                        reassignment.target, self.target
+                    ));
                 }
             }
-            ReassignStep::Shrink { replicas, isr, min_insync } => {
+            ReassignStep::Shrink {
+                replicas,
+                isr,
+                min_insync,
+            } => {
                 if *replicas != self.target {
                     return Err(format!("Shrink to {replicas:?}, target {:?}", self.target));
                 }
                 if !self.target.iter().all(|x| p.isr.contains(x)) {
                     return Err(format!("Shrink before target ⊆ ISR: {p:?}"));
                 }
-                if usize::from(*min_insync) > self.target.len() || usize::from(*min_insync) > isr.len() {
+                if usize::from(*min_insync) > self.target.len()
+                    || usize::from(*min_insync) > isr.len()
+                {
                     return Err(format!("Shrink min_insync {min_insync} > |target|/|isr|"));
                 }
                 if *min_insync != shrink_min_insync(p.min_insync, self.policy, self.target.len()) {
@@ -363,8 +401,15 @@ impl Sim {
                 }
             }
             ReassignStep::LeaderMove { to } => {
-                if !self.target.contains(to) || !p.isr.contains(to) || *to == p.leader || p.leader == 0 {
-                    return Err(format!("LeaderMove to {to}: {p:?} target {:?}", self.target));
+                if !self.target.contains(to)
+                    || !p.isr.contains(to)
+                    || *to == p.leader
+                    || p.leader == 0
+                {
+                    return Err(format!(
+                        "LeaderMove to {to}: {p:?} target {:?}",
+                        self.target
+                    ));
                 }
             }
             ReassignStep::CatchUp => {
@@ -391,8 +436,13 @@ impl Sim {
                 }
             }
             Action::IsrLeave(i) => {
-                let cands: Vec<u64> =
-                    self.p.isr.iter().copied().filter(|x| *x != self.p.leader).collect();
+                let cands: Vec<u64> = self
+                    .p
+                    .isr
+                    .iter()
+                    .copied()
+                    .filter(|x| *x != self.p.leader)
+                    .collect();
                 if !cands.is_empty() {
                     let x = cands[i % cands.len()];
                     self.p.isr.retain(|y| *y != x);
@@ -400,8 +450,13 @@ impl Sim {
                 }
             }
             Action::Failover(i) => {
-                let cands: Vec<u64> =
-                    self.p.isr.iter().copied().filter(|x| *x != self.p.leader).collect();
+                let cands: Vec<u64> = self
+                    .p
+                    .isr
+                    .iter()
+                    .copied()
+                    .filter(|x| *x != self.p.leader)
+                    .collect();
                 if !cands.is_empty() {
                     self.p.leader = cands[i % cands.len()];
                     self.p.epoch += 1;
@@ -420,7 +475,12 @@ impl Sim {
                 if let Some(old) = cancel_target(&self.p) {
                     let orig: Vec<u64> = {
                         let ext = self.p.reassignment.as_ref().unwrap();
-                        self.p.replicas.iter().copied().filter(|x| !ext.adding.contains(x)).collect()
+                        self.p
+                            .replicas
+                            .iter()
+                            .copied()
+                            .filter(|x| !ext.adding.contains(x))
+                            .collect()
                     };
                     if old != orig {
                         return Err(format!("cancel target {old:?} ≠ original {orig:?}"));

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ostro_cluster::placement::leaders::{decide, preferred_leader_moves, LeaderMove, LeaderObs};
+use ostro_cluster::placement::leaders::{LeaderMove, LeaderObs, decide, preferred_leader_moves};
 use ostro_cluster::placement::plan::target_replicas;
 use proptest::prelude::*;
 
@@ -51,10 +51,15 @@ fn check_plan(
             return Err(format!("partition {p} holds a node twice: {r:?}"));
         }
         if r.len() != eff {
-            return Err(format!("partition {p} has {} replicas, want {eff}", r.len()));
+            return Err(format!(
+                "partition {p} has {} replicas, want {eff}",
+                r.len()
+            ));
         }
         if !set.is_subset(&ms) {
-            return Err(format!("partition {p} on a non-member: {r:?} (members {ms:?})"));
+            return Err(format!(
+                "partition {p} on a non-member: {r:?} (members {ms:?})"
+            ));
         }
         for n in r {
             *counts.get_mut(n).unwrap() += 1;
@@ -133,18 +138,31 @@ fn no_members_no_moves() {
 // ---------------------------------------------------------------------------------------
 
 fn scenario() -> impl Strategy<Value = (BTreeMap<u16, Vec<u64>>, Vec<u64>, u8)> {
-    (1u64..=7, prop_oneof![Just(4u16), Just(16), Just(64)], 1u8..=3).prop_flat_map(
-        |(nodes, p, rf)| {
-            let members = proptest::sample::subsequence((1..=nodes).collect::<Vec<_>>(), 1..=nodes as usize);
+    (
+        1u64..=7,
+        prop_oneof![Just(4u16), Just(16), Just(64)],
+        1u8..=3,
+    )
+        .prop_flat_map(|(nodes, p, rf)| {
+            let members =
+                proptest::sample::subsequence((1..=nodes).collect::<Vec<_>>(), 1..=nodes as usize);
             let random = proptest::collection::vec(
                 proptest::collection::vec(1..=nodes + 1, 0..=3),
                 p as usize,
             )
-            .prop_map(|v| v.into_iter().enumerate().map(|(i, r)| (i as u16, r)).collect());
+            .prop_map(|v| {
+                v.into_iter()
+                    .enumerate()
+                    .map(|(i, r)| (i as u16, r))
+                    .collect()
+            });
             let promoted = Just(assignment(p, |_| vec![1]));
-            (prop_oneof![3 => random.boxed(), 1 => promoted.boxed()], members, Just(rf))
-        },
-    )
+            (
+                prop_oneof![3 => random.boxed(), 1 => promoted.boxed()],
+                members,
+                Just(rf),
+            )
+        })
 }
 
 proptest! {
@@ -213,12 +231,19 @@ fn no_move_when_preferred_leaders_lead() {
 #[test]
 fn moves_only_to_in_isr_live_preferred() {
     let parts = vec![obs(0, &[2, 1], &[1], 1)];
-    assert_eq!(decide(&parts, &live(&[1, 2]), 2), None, "preferred not in ISR");
+    assert_eq!(
+        decide(&parts, &live(&[1, 2]), 2),
+        None,
+        "preferred not in ISR"
+    );
     let parts = vec![obs(0, &[2, 1], &[1, 2], 1)];
     assert_eq!(decide(&parts, &live(&[1]), 2), None, "preferred not live");
     assert_eq!(
         decide(&parts, &live(&[1, 2]), 2),
-        Some(LeaderMove { partition: 0, to: 2 })
+        Some(LeaderMove {
+            partition: 0,
+            to: 2
+        })
     );
 }
 
@@ -232,7 +257,10 @@ fn most_loaded_leader_moves_first() {
     ];
     assert_eq!(
         decide(&parts, &live(&[1, 2, 3]), 3),
-        Some(LeaderMove { partition: 1, to: 3 })
+        Some(LeaderMove {
+            partition: 1,
+            to: 3
+        })
     );
 }
 
@@ -283,7 +311,12 @@ fn leader_scenario() -> impl Strategy<Value = (Vec<LeaderObs>, BTreeSet<u64>, us
                             .filter(|(r, b)| **r == leader || **b)
                             .map(|(r, _)| *r)
                             .collect();
-                        LeaderObs { partition: i as u16, replicas, isr, leader }
+                        LeaderObs {
+                            partition: i as u16,
+                            replicas,
+                            isr,
+                            leader,
+                        }
                     })
                     .collect();
                 (parts, live.into_iter().collect(), n)
