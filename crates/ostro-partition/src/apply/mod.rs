@@ -112,7 +112,8 @@ fn dispatch(
             InvalidCode::Decode,
         )));
     };
-    let Some(cmd) = cmd.cmd else {
+    // P13-F1 rule 2: a command written by a newer Ostro halts the partition (`Err`).
+    let Some(cmd) = newer_format(cmd, cmd_bytes)? else {
         return Ok(ApplyOutcome::Rejected(RejectReason::Invalid(
             InvalidCode::Empty,
         )));
@@ -164,6 +165,65 @@ fn dispatch(
         Cmd::DlqUpdate(d) => dlq::apply_dlq_update(b, cur, d, actions),
         // Phase 13 (13-01 contract, 13-17 semantics): repin a run (`repin.rs`).
         Cmd::RepinRun(r) => repin::apply_repin_run(b, cur, r, actions),
+    }
+}
+
+/// The `reject_and_continue` mutant (RESERVATIONS §11): unknown input is rejected as
+/// `Invalid(Empty)` and apply continues (the pre-13-04 behaviour).
+pub const MUTANT_REJECT_AND_CONTINUE: &str = "upgrade::mutant::reject_and_continue";
+
+#[cfg(feature = "failpoints")]
+fn reject_and_continue() -> bool {
+    fail::eval(MUTANT_REJECT_AND_CONTINUE, |_| ()).is_some()
+}
+
+#[cfg(not(feature = "failpoints"))]
+#[inline(always)]
+fn reject_and_continue() -> bool {
+    false
+}
+
+/// P13-F1 rule 2 (D-P13-6): fail-stop on a command written by a newer Ostro.
+///
+/// - The prost re-encoding is shorter than the bytes: the command carries fields this build
+///   does not know (prost skips them on decode). Prost re-encodes every frozen golden and
+///   every format-corpus command to exactly its bytes (`tests/apply_newer_format.rs`), so a
+///   length mismatch means unknown input, never a re-encoding artefact.
+/// - No known oneof variant in non-empty bytes: an unknown `Cmd` tag.
+/// - `level-emulation`: a command of a feature above `level_max()` (an emulated older
+///   binary treats it as unknown).
+///
+/// `Ok(None)` = genuinely empty bytes (`Rejected(Invalid(Empty))`, unchanged).
+fn newer_format(cmd: ostro_types::Command, cmd_bytes: &[u8]) -> Result<Option<Cmd>, StoreError> {
+    use prost::Message;
+    let unknown = if cmd.cmd.is_none() && !cmd_bytes.is_empty() {
+        Some("unknown command tag".to_string())
+    } else if cmd.encoded_len() != cmd_bytes.len() {
+        Some("command carries fields unknown to this version".to_string())
+    } else if let Some(f) = cmd.cmd.as_ref().and_then(gated_feature)
+        && f.introduced_at() > ostro_types::compat::level_max()
+    {
+        Some(format!(
+            "command {} needs feature level {} (this binary supports up to {})",
+            f.name(),
+            f.introduced_at(),
+            ostro_types::compat::level_max()
+        ))
+    } else {
+        None
+    };
+    match unknown {
+        Some(_) if reject_and_continue() => Ok(None),
+        Some(why) => Err(StoreError::NewerFormat(why)),
+        None => Ok(cmd.cmd),
+    }
+}
+
+/// The gated feature of a known command (`ostro_types::compat::feature_for_cmd_tag`).
+fn gated_feature(cmd: &Cmd) -> Option<ostro_types::compat::Feature> {
+    match cmd {
+        Cmd::RepinRun(_) => ostro_types::compat::feature_for_cmd_tag(43),
+        _ => None,
     }
 }
 
