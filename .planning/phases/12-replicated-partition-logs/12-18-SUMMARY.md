@@ -196,6 +196,28 @@ approve wiring D-P12-27 into the tier-C campaign (a state probe that opens a rea
 trimmed node's state store), then re-run `OSTRO_CAMPAIGN_FAULTS=10000`. That run needs ~18 GB in
 `/dev/shm` (or a disk-backed test dir) and 7-12 h on WSL2, so the native machine is recommended.
 
+**Follow-up p12-campaign (2026-11-24, after the user approved D-P12-28).** The D-P12-27 rule is now
+wired into the campaign's batch `disk_check` and `tools::final_checks` (df9c153:
+`oracle::disk::acked_on_disk_copies` = `acked_on_disk_with` + a probe that opens a copy of a trimmed
+node's state store; `acked_on_disk` / `acked_on_scans` unchanged; harness knob `OSTRO_PROC_ROOT` for a
+disk-backed cluster dir).
+
+- Fault-1030 recheck on the kept cluster: 133,443 of 133,443 flagged runs are evidenced on 3/3 nodes
+  (node 1 WAL; nodes 2 and 3 trimmed copy + state store), 0 violations at min_insync 2 and 3. The WAL-only
+  oracle still reports all 133,443.
+- The rule still catches loss: `count_nondurable_leo` (tier C) still bites on the disk oracle (baseline
+  passes through the new final checks), and `oracle_selftest` passes 11/11, including a new tier-C-shaped
+  test over real WAL dirs and state stores (trimmed + in state passes; trimmed + missing fails; untrimmed
+  stays strict; a missing store is reported).
+- 10,000-fault re-run (cluster on disk): **FAILED at fault ~641-650 on availability**, not on a disk
+  check. 64 batch disk checks passed (640 faults, 72,209 acks, 2,808 s), then every partition sat at
+  `leader 3 isr [3]` for 90 s. Cause (code read, not fixed): node 3 lost metadata contact while
+  Announcing e259 (LeaderAnnounced pending on NotEnoughReplicas). The log stayed in `Mode::Leader{259}`
+  with no record at 259. When contact came back, `decide()` said Lead(259) because the epoch cache said 258,
+  `become_leader(259)` returned StaleEpoch{259}, and `go_leader` went Offline without requesting a term,
+  so the partitions were wedged. This is a liveness bug and needs a server fix before the 10k run.
+  Evidence: `target/campaign-p12-10k/` (POSTMORTEM.txt, campaign log, kept cluster `ostro-proc-Y9CzGN/`).
+
 Side observation (follow-up, not investigated further): node 2 got `SNAPSHOT_REQUIRED` from a
 leader whose own log was not trimmed at that moment. That is safe (an install replaces the
 follower's state with committed state) but costly. A likely cause is the same new-leader window
