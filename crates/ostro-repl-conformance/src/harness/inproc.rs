@@ -15,6 +15,16 @@
 //! Pitfall 8); real `kill -9` is tier C (12-09). `restart(n)` starts the node again from
 //! the same dirs and config with a fresh transport, its links healed first.
 //!
+//! Phase 13 (13-08, D-P13-25): [`InProcCluster`] implements [`P13Harness`]. `start_single`
+//! is one server-profile node (no `[[cluster.peers]]`, `[cluster] advertise = ["mem://1"]`,
+//! the test CA imported, cluster listener bound); `add_node` takes a node join token from the
+//! lowest running node (`POST /v1/cluster/tokens`), runs the joiner library
+//! (`ostro_server::p13::joiner::run_join`, `--no-start`) against that node's API and boots
+//! the prepared data dir in process with `ServerOptions::level_max_override`; `upgrade`
+//! gracefully stops a node and boots it again from the same data dir at the new override.
+//! The in-memory transport routes by node id, so a joined node's advertised `mem://` address
+//! is informational only.
+//!
 //! [`read_meta_log`] decodes a node's metadata Raft log offline (state, snapshot and
 //! segment files of the vendored log store, read-only, CRC-checked) and recomputes every
 //! apply verdict by replaying a fresh `MetaState`, so oracles see every committed proposal,
@@ -36,6 +46,7 @@ use tempfile::TempDir;
 
 use super::certs::TestPki;
 use super::fault::{MemNet, MemTransport};
+use super::p13::{NodeOpts, P13Harness};
 use super::{ApiClient, ClusterHarness, ClusterSpec, DataDirView, HarnessError, MetaLogEntry};
 
 /// Bound on one server start (fresh fjall stores cost ~300 fsyncs each; generous under load).
@@ -51,6 +62,9 @@ struct NodeSlot {
     handle: Option<ServerHandle>,
     /// Last API address (kept after a stop, so clients fail with "connection refused").
     api: SocketAddr,
+    /// Phase 13: `ServerOptions::level_max_override` of every (re)start (`None` = the
+    /// build's level).
+    level_max: Option<u32>,
 }
 
 /// The tier-B cluster.
@@ -99,9 +113,12 @@ async fn boot(
     cfg: ServerConfig,
     transport: Arc<MemTransport>,
     wal_rotation_bytes: Option<u64>,
+    level_max: Option<u32>,
 ) -> Result<ServerHandle, HarnessError> {
     let node = cfg.node.node_id;
-    let mut opts = ServerOptions::default().with_cluster_transport(transport);
+    let mut opts = ServerOptions::default()
+        .with_cluster_transport(transport)
+        .with_level_max_override(level_max);
     if let Some(b) = wal_rotation_bytes {
         opts = opts.with_wal_rotation_bytes(b);
     }
@@ -211,6 +228,13 @@ impl InProcCluster {
             cfg.cluster.tls.ca_cert_file = Some(ca.0.clone());
             cfg.cluster.tls.ca_key_file = Some(ca.1.clone());
         }
+        self.test_timings(&mut cfg);
+        cfg
+    }
+
+    /// The `[replication]` test timings, `rf` / `min_insync` and the shared bucket.
+    fn test_timings(&self, cfg: &mut ServerConfig) {
+        let spec = &self.spec;
         let r = &mut cfg.replication;
         r.session_timeout = FriendlyDuration::from_millis(600);
         r.replica_lag_max = FriendlyDuration::from_secs(2);
@@ -224,12 +248,65 @@ impl InProcCluster {
                 self.root.path().join("bucket").display()
             ));
         }
+    }
+
+    /// Start one server-profile node at an emulated level (`level_max` = its
+    /// `ServerOptions::level_max_override`; `None` = this build's level). [`P13Harness::
+    /// start_single`] is `start_single_with(spec, None)`.
+    pub async fn start_single_with(
+        spec: ClusterSpec,
+        level_max: Option<u32>,
+    ) -> Result<Self, HarnessError> {
+        if spec.nodes != 1 {
+            return Err(HarnessError::Start(format!(
+                "start_single needs spec.nodes == 1, got {}",
+                spec.nodes
+            )));
+        }
+        Self::launch(spec, Some(level_max)).await
+    }
+
+    /// The emulated level `node` (re)starts with (`None` = this build's level).
+    pub fn level_max(&self, node: u64) -> Option<u32> {
+        self.slot(node).level_max
+    }
+
+    /// The lowest running node other than `except` (the node the Phase 13 REST calls go to).
+    fn running_node(&self, except: Option<u64>) -> Result<u64, HarnessError> {
+        self.nodes
+            .iter()
+            .find(|(id, s)| s.handle.is_some() && Some(**id) != except)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| HarnessError::Other("no running node to send the request to".into()))
+    }
+
+    /// The configuration of a node joined through the join flow: the prepared data dir and
+    /// its id, no peers and no CA files (the joined certificate set lives in `<data>/tls`).
+    fn joined_config(
+        &self,
+        id: u64,
+        cluster_id: &str,
+        data_dir: PathBuf,
+        api: SocketAddr,
+        advertise: bool,
+    ) -> ServerConfig {
+        let mut cfg = ServerConfig::server_defaults();
+        cfg.api.listen = api;
+        cfg.cluster.listen = SocketAddr::from(([127, 0, 0, 1], 0));
+        if advertise {
+            cfg.cluster.advertise = vec![format!("mem://{id}")];
+        }
+        cfg.node.data_dir = data_dir;
+        cfg.node.partitions = self.spec.partitions;
+        cfg.node.node_id = id;
+        cfg.cluster.cluster_id = Some(cluster_id.to_owned());
+        self.test_timings(&mut cfg);
         cfg
     }
-}
 
-impl ClusterHarness for InProcCluster {
-    async fn start(spec: ClusterSpec) -> Result<Self, HarnessError> {
+    /// Start every node of `spec`; `single = Some(level)` is the Phase 13 single-node
+    /// profile (`[cluster] advertise` set, the test CA imported) at that emulated level.
+    async fn launch(spec: ClusterSpec, single: Option<Option<u32>>) -> Result<Self, HarnessError> {
         if spec.nodes == 0 {
             return Err(HarnessError::Start(
                 "a cluster needs at least one node".into(),
@@ -255,11 +332,18 @@ impl ClusterHarness for InProcCluster {
         let ids: Vec<u64> = (1..=c.spec.nodes as u64).collect();
         let mut boots = Vec::new();
         for id in &ids {
-            let cfg = c.node_config(*id, &ca);
+            let mut cfg = c.node_config(*id, &ca);
+            let level_max = single.flatten();
+            if single.is_some() {
+                cfg.cluster.advertise = vec![format!("mem://{id}")];
+                cfg.cluster.tls.ca_cert_file = Some(ca.0.clone());
+                cfg.cluster.tls.ca_key_file = Some(ca.1.clone());
+            }
             boots.push(boot(
                 cfg.clone(),
                 c.net.transport(*id),
                 c.spec.wal_rotation_bytes,
+                level_max,
             ));
             c.nodes.insert(
                 *id,
@@ -267,6 +351,7 @@ impl ClusterHarness for InProcCluster {
                     cfg,
                     handle: None,
                     api: SocketAddr::from(([127, 0, 0, 1], 0)),
+                    level_max,
                 },
             );
         }
@@ -289,6 +374,12 @@ impl ClusterHarness for InProcCluster {
             return Err(e);
         }
         Ok(c)
+    }
+}
+
+impl ClusterHarness for InProcCluster {
+    async fn start(spec: ClusterSpec) -> Result<Self, HarnessError> {
+        Self::launch(spec, None).await
     }
 
     fn node_ids(&self) -> Vec<u64> {
@@ -370,10 +461,17 @@ impl ClusterHarness for InProcCluster {
             self.kill(node).await;
         }
         let cfg = self.slot(node).cfg.clone();
+        let level_max = self.slot(node).level_max;
         // Heal first (12-14): a node's start waits for its metadata group (meta before
         // partitions), so it must reach the other voters while it boots.
         self.net.faults().heal(node);
-        let h = boot(cfg, self.net.transport(node), self.spec.wal_rotation_bytes).await?;
+        let h = boot(
+            cfg,
+            self.net.transport(node),
+            self.spec.wal_rotation_bytes,
+            level_max,
+        )
+        .await?;
         let slot = self.nodes.get_mut(&node).expect("slot");
         slot.api = h.local_addr();
         slot.handle = Some(h);
@@ -410,6 +508,243 @@ impl ClusterHarness for InProcCluster {
 
     async fn stop(mut self) {
         self.stop_all().await;
+    }
+}
+
+// ------------------------------------------------------------------------------------
+// Phase 13 lifecycle (13-08)
+// ------------------------------------------------------------------------------------
+
+/// Bound on the wait of [`P13Harness::remove`] / [`P13Harness::drain`].
+pub const MEMBERSHIP_T: Duration = Duration::from_secs(120);
+
+/// A non-2xx answer of a Phase 13 REST call: `"{METHOD} {path}: HTTP {status}: {body}"`.
+/// Transport failures (connection refused, reset) never use this form, so a scenario can
+/// tell "the server answered with an error" from "the call never reached a server".
+pub fn http_error(method: &str, path: &str, st: reqwest::StatusCode, body: &Value) -> HarnessError {
+    HarnessError::Other(format!("{method} {path}: HTTP {}: {body}", st.as_u16()))
+}
+
+/// Whether `e` is a [`http_error`] (the call reached a server).
+pub fn is_http_error(e: &HarnessError) -> bool {
+    matches!(e, HarnessError::Other(m) if m.contains(": HTTP "))
+}
+
+/// `POST path` with a JSON body; the 2xx body, else [`http_error`].
+pub(crate) async fn p13_post(
+    api: &ApiClient,
+    path: &str,
+    body: &Value,
+) -> Result<Value, HarnessError> {
+    let (st, v) = api.post_json(path, body).await?;
+    if st.is_success() {
+        Ok(v)
+    } else {
+        Err(http_error("POST", path, st, &v))
+    }
+}
+
+/// `GET path`; the 2xx body, else [`http_error`].
+pub(crate) async fn p13_get(api: &ApiClient, path: &str) -> Result<Value, HarnessError> {
+    let (st, v) = api.get_json(path).await?;
+    if st.is_success() {
+        Ok(v)
+    } else {
+        Err(http_error("GET", path, st, &v))
+    }
+}
+
+/// `POST /v1/cluster/tokens` (a node join token and the CA pin).
+pub(crate) async fn node_token(
+    api: &ApiClient,
+) -> Result<ostro_api::phase13::NodeTokenResponse, HarnessError> {
+    let v = p13_post(api, "/v1/cluster/tokens", &json!({})).await?;
+    serde_json::from_value(v.clone()).map_err(|e| other(&format!("token response {v}"), e))
+}
+
+/// The `state` of member `id` in a `GET /v1/cluster/status` document.
+pub fn member_state(status: &Value, id: u64) -> Option<String> {
+    status["members"]
+        .as_array()?
+        .iter()
+        .find(|m| m["node_id"].as_u64() == Some(id))
+        .and_then(|m| m["state"].as_str())
+        .map(str::to_owned)
+}
+
+/// `POST /v1/cluster/members/{id}/remove`, then poll the status on `api` until `id` is
+/// `removed` (bounded by [`MEMBERSHIP_T`]).
+pub(crate) async fn remove_and_wait(
+    api: &ApiClient,
+    id: u64,
+    force: bool,
+) -> Result<(), HarnessError> {
+    let path = format!("/v1/cluster/members/{id}/remove");
+    p13_post(api, &path, &json!({ "force": force })).await?;
+    // clock-exempt: test timeout
+    let deadline = tokio::time::Instant::now() + MEMBERSHIP_T;
+    loop {
+        if let Ok(st) = p13_get(api, "/v1/cluster/status").await
+            && member_state(&st, id).as_deref() == Some("removed")
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(HarnessError::Deadline(MEMBERSHIP_T));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// A free `ip:port` (bound and released), so a joining node can advertise its API address
+/// before its server starts.
+pub(crate) fn free_addr(ip: std::net::IpAddr) -> Result<SocketAddr, HarnessError> {
+    let l = std::net::TcpListener::bind(SocketAddr::new(ip, 0)).map_err(|e| other("bind", e))?;
+    l.local_addr().map_err(|e| other("local addr", e))
+}
+
+impl InProcCluster {
+    /// Wait (bounded) until no partition lists `id` as a replica, from the meta view.
+    async fn wait_no_replica(&self, id: u64) -> Result<(), HarnessError> {
+        // clock-exempt: test timeout
+        let deadline = tokio::time::Instant::now() + MEMBERSHIP_T;
+        loop {
+            let mut holds = false;
+            for p in 0..self.spec.partitions {
+                if self.assignment(p).await.replicas.contains(&id) {
+                    holds = true;
+                    break;
+                }
+            }
+            if !holds {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(HarnessError::Deadline(MEMBERSHIP_T));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+impl P13Harness for InProcCluster {
+    async fn start_single(spec: ClusterSpec) -> Result<Self, HarnessError> {
+        Self::start_single_with(spec, None).await
+    }
+
+    async fn cluster_init(&mut self, node: u64) -> Result<Value, HarnessError> {
+        // `[cluster] advertise` stays the Phase 7 list (13-02 open issue, orchestrator
+        // decision): its first entry is the cluster address the init advertises.
+        let advertise = self.slot(node).cfg.cluster.advertise.first().cloned();
+        p13_post(
+            &self.client(node),
+            "/v1/cluster/init",
+            &json!({ "advertise": advertise }),
+        )
+        .await
+    }
+
+    async fn add_node(&mut self, opts: NodeOpts) -> Result<u64, HarnessError> {
+        let seed = self.running_node(None)?;
+        let api = self.client(seed);
+        let token = node_token(&api).await?;
+        let slot = self.nodes.keys().max().copied().unwrap_or(0) + 1;
+        let data_dir = self.root.path().join(format!("join{slot}"));
+        let api_addr = free_addr(std::net::IpAddr::from([127, 0, 0, 1]))?;
+        let args = ostro_server::p13::JoinArgs {
+            seed: api.base_url.clone(),
+            token: token.token,
+            ca_hash: token.ca_hash,
+            data_dir: Some(data_dir.clone()),
+            config: None,
+            advertise_api: opts.advertise.then(|| api_addr.to_string()),
+            advertise_cluster: opts.advertise.then(|| format!("mem://{slot}")),
+            advertise_repl: None,
+            no_start: true,
+        };
+        // clock-exempt: test timeout
+        let prepared = tokio::time::timeout(START_T, ostro_server::p13::joiner::run_join(args))
+            .await
+            .map_err(|_| HarnessError::Other(format!("join timed out after {START_T:?}")))?
+            .map_err(|e| HarnessError::Other(format!("join: {e}")))?;
+        let id = prepared.node_id;
+        if self.nodes.contains_key(&id) {
+            return Err(HarnessError::Other(format!(
+                "join allocated node id {id}, which this harness already runs"
+            )));
+        }
+        let cfg = self.joined_config(
+            id,
+            &prepared.cluster_id,
+            prepared.data_dir,
+            api_addr,
+            opts.advertise,
+        );
+        let h = boot(
+            cfg.clone(),
+            self.net.transport(id),
+            self.spec.wal_rotation_bytes,
+            opts.level_max,
+        )
+        .await?;
+        self.nodes.insert(
+            id,
+            NodeSlot {
+                cfg,
+                api: h.local_addr(),
+                handle: Some(h),
+                level_max: opts.level_max,
+            },
+        );
+        Ok(id)
+    }
+
+    async fn remove(&mut self, id: u64, force: bool) -> Result<(), HarnessError> {
+        let via = self.running_node(Some(id))?;
+        remove_and_wait(&self.client(via), id, force).await
+    }
+
+    async fn drain(&mut self, id: u64) -> Result<(), HarnessError> {
+        let via = self
+            .running_node(Some(id))
+            .or_else(|_| self.running_node(None))?;
+        p13_post(
+            &self.client(via),
+            &format!("/v1/cluster/members/{id}/drain"),
+            &json!({}),
+        )
+        .await?;
+        self.wait_no_replica(id).await
+    }
+
+    async fn upgrade(&mut self, node: u64, level_max: Option<u32>) -> Result<(), HarnessError> {
+        let slot = self
+            .nodes
+            .get_mut(&node)
+            .unwrap_or_else(|| panic!("no node {node}"));
+        slot.level_max = level_max;
+        // A graceful stop without isolating the node (the controlled shutdown may hand its
+        // partitions off), then the same data dir and config at the new override. Fault
+        // rules are left as they are.
+        if let Some(h) = slot.handle.take() {
+            shutdown(node, h).await;
+        }
+        let cfg = slot.cfg.clone();
+        let h = boot(
+            cfg,
+            self.net.transport(node),
+            self.spec.wal_rotation_bytes,
+            level_max,
+        )
+        .await?;
+        let slot = self.nodes.get_mut(&node).expect("slot");
+        slot.api = h.local_addr();
+        slot.handle = Some(h);
+        Ok(())
+    }
+
+    async fn cluster_status(&self, node: u64) -> Result<Value, HarnessError> {
+        p13_get(&self.client(node), "/v1/cluster/status").await
     }
 }
 
@@ -506,6 +841,25 @@ impl ApiClient {
             .send()
             .await
             .map_err(|e| other(&format!("GET {path}"), e))?;
+        let st = r.status();
+        let b = r.bytes().await.map_err(|e| other("body", e))?;
+        Ok((st, serde_json::from_slice(&b).unwrap_or(Value::Null)))
+    }
+
+    /// `POST path` with a JSON body: `(status, body)` (`Null` for an empty or non-JSON
+    /// body). `Err` only when the request did not get an HTTP answer.
+    pub async fn post_json(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> Result<(reqwest::StatusCode, Value), HarnessError> {
+        let r = self
+            .http
+            .post(self.url(path))
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| other(&format!("POST {path}"), e))?;
         let st = r.status();
         let b = r.bytes().await.map_err(|e| other("body", e))?;
         Ok((st, serde_json::from_slice(&b).unwrap_or(Value::Null)))

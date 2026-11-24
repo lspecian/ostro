@@ -35,6 +35,21 @@
 //!
 //! Since 12-14 the processes of a multi-node spec form one cluster (each node advertises its
 //! `127.r.r.i`, which its certificate names); a starting node waits for a metadata leader.
+//!
+//! **Phase 13 (13-08, D-P13-25).** [`ProcCluster`] implements [`P13Harness`].
+//! `start_single` is one node on `127.r.r.1` (no peers, `[cluster] advertise = [ip]`, the
+//! test CA imported). `add_node` takes a node join token from the lowest running node and
+//! spawns, on the next free `127.r.r.k`,
+//! `ostro cluster join http://<seed api> --token <njt_…> --ca-hash sha256:<hex> --data
+//! <root>/join<k> -c <root>/join<k>.toml [--advertise-api <ip:port> --advertise-cluster
+//! <ip:17701>]`; the joiner starts the server after the handshake, its ready line gives the
+//! API address and its `joined cluster <id> as node <n>` line the allocated id. Chaos-proxy
+//! links `n → m` / `m → n` (the Phase 12 scheme `127.r.r.<to>:<PROXY_PORT_BASE + from>`) are
+//! registered for the joined node with every existing node, so `isolate` / `heal` /
+//! `partition` / `kill` take its id like any other. Restarts of a joined node run
+//! `ostro server -c <its config>`. `upgrade(node, Some(k))` stops the process gracefully
+//! (SIGTERM, then SIGKILL after [`STOP_T`]) and respawns it with `OSTRO_TEST_LEVEL_MAX=k`
+//! (`None` removes the variable).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -55,7 +70,10 @@ use tempfile::TempDir;
 
 use super::certs::TestPki;
 use super::chaos_proxy::{ChaosProxy, Link};
-use super::inproc::read_meta_log;
+use super::inproc::{
+    MEMBERSHIP_T, free_addr, node_token, p13_get, p13_post, read_meta_log, remove_and_wait,
+};
+use super::p13::{NodeOpts, P13Harness};
 use super::{ApiClient, ClusterHarness, ClusterSpec, DataDirView, HarnessError, MetaLogEntry};
 
 /// Every node's cluster listener port (on its own `127.r.r.i`).
@@ -66,6 +84,8 @@ pub const PROXY_PORT_BASE: u16 = 17800;
 pub const PROC_START_T: Duration = Duration::from_secs(120);
 /// The binary the harness looks for when `OSTRO_FAILPOINT_BIN` is unset (repo-relative).
 pub const DEFAULT_BIN: &str = "target/failpoints/debug/ostro";
+/// Bound on a graceful (SIGTERM) stop before [`ProcCluster::upgrade`] falls back to SIGKILL.
+pub const STOP_T: Duration = Duration::from_secs(60);
 /// The skip line of tests gated on the failpoint binary (W14).
 pub const SKIP_NO_BIN: &str = "SKIP: failpoint ostro binary not built (cargo build -p ostro \
                                --features failpoints --target-dir target/failpoints)";
@@ -216,6 +236,11 @@ struct ProcNode {
     child: Option<Child>,
     /// Last API address (kept after a kill, so clients fail with "connection refused").
     api: SocketAddr,
+    /// Phase 13: `OSTRO_TEST_LEVEL_MAX` of every (re)start (`None` = unset).
+    level_max: Option<u32>,
+    /// Phase 13: the arguments of the next spawn instead of `server -c <config>` (the
+    /// `cluster join` command line of a joining node; taken by that spawn).
+    next_args: Option<Vec<String>>,
 }
 
 /// The tier-C cluster.
@@ -226,6 +251,8 @@ pub struct ProcCluster {
     bin: PathBuf,
     pki: TestPki,
     proxy: ChaosProxy,
+    /// Phase 13: the proxy links of joined nodes (one proxy per join).
+    join_proxies: Vec<ChaosProxy>,
     nodes: BTreeMap<u64, ProcNode>,
     env: Vec<(String, String)>,
     replication: Option<ReplicationSection>,
@@ -277,6 +304,15 @@ pub fn parse_ready(line: &str) -> Option<SocketAddr> {
     let (addr, rest) = rest.split_once(" (data: ")?;
     rest.contains(") ready in ").then_some(())?;
     addr.parse().ok()
+}
+
+/// `joined cluster <cluster id> as node <id> (data: …)` (the `ostro cluster join` line) ->
+/// `(cluster id, node id)`.
+pub fn parse_joined(line: &str) -> Option<(String, u64)> {
+    let (_, rest) = line.split_once("joined cluster ")?;
+    let (cluster, rest) = rest.split_once(" as node ")?;
+    let (id, _) = rest.split_once(" (data: ")?;
+    Some((cluster.to_owned(), id.trim().parse().ok()?))
 }
 
 fn kill_child(mut c: Child) {
@@ -349,6 +385,34 @@ async fn allocate(n: u64) -> Result<(u8, ChaosProxy), HarnessError> {
 impl ProcCluster {
     /// Start a cluster with explicit process options.
     pub async fn start_with(spec: ClusterSpec, opts: ProcOptions) -> Result<Self, HarnessError> {
+        Self::launch(spec, opts, None).await
+    }
+
+    /// Start one server-profile node (Phase 13 single-node profile) with explicit process
+    /// options at an emulated level (`OSTRO_TEST_LEVEL_MAX`; `None` = unset).
+    /// [`P13Harness::start_single`] is `start_single_with(spec, ProcOptions::default(),
+    /// None)`.
+    pub async fn start_single_with(
+        spec: ClusterSpec,
+        opts: ProcOptions,
+        level_max: Option<u32>,
+    ) -> Result<Self, HarnessError> {
+        if spec.nodes != 1 {
+            return Err(start_err(format!(
+                "start_single needs spec.nodes == 1, got {}",
+                spec.nodes
+            )));
+        }
+        Self::launch(spec, opts, Some(level_max)).await
+    }
+
+    /// Start every node of `spec`; `single = Some(level)` is the Phase 13 single-node
+    /// profile (the test CA imported) at that emulated level.
+    async fn launch(
+        spec: ClusterSpec,
+        opts: ProcOptions,
+        single: Option<Option<u32>>,
+    ) -> Result<Self, HarnessError> {
         if spec.nodes == 0 || spec.nodes > 200 {
             return Err(start_err(format!(
                 "nodes must be 1..=200, got {}",
@@ -374,6 +438,7 @@ impl ProcCluster {
             bin,
             pki,
             proxy,
+            join_proxies: Vec::new(),
             nodes: BTreeMap::new(),
             env: opts.env,
             replication: opts.replication,
@@ -390,7 +455,11 @@ impl ProcCluster {
                 std::fs::write(pki_dir.join(format!("node{i}.{ext}")), pem)
                     .map_err(|e| start_err(format!("write node cert: {e}")))?;
             }
-            let cfg = c.node_config(i, &ca);
+            let mut cfg = c.node_config(i, &ca);
+            if single.is_some() {
+                cfg.cluster.tls.ca_cert_file = Some(ca.0.clone());
+                cfg.cluster.tls.ca_key_file = Some(ca.1.clone());
+            }
             let config_path = c.root().join(format!("node{i}.toml"));
             std::fs::write(&config_path, cfg.to_toml_string())
                 .map_err(|e| start_err(format!("write {}: {e}", config_path.display())))?;
@@ -409,6 +478,8 @@ impl ProcCluster {
                     failpoints,
                     child: None,
                     api: SocketAddr::new(IpAddr::V4(ip), 0),
+                    level_max: single.flatten(),
+                    next_args: None,
                 },
             );
         }
@@ -454,6 +525,14 @@ impl ProcCluster {
             cfg.cluster.tls.ca_cert_file = Some(ca.0.clone());
             cfg.cluster.tls.ca_key_file = Some(ca.1.clone());
         }
+        self.test_timings(&mut cfg);
+        cfg
+    }
+
+    /// The `[replication]` timings (test or [`ProcOptions::replication`]), `rf` /
+    /// `min_insync` and the shared bucket.
+    fn test_timings(&self, cfg: &mut ServerConfig) {
+        let spec = &self.spec;
         let r = &mut cfg.replication;
         if let Some(timings) = &self.replication {
             *r = timings.clone();
@@ -468,7 +547,6 @@ impl ProcCluster {
         if spec.objstore {
             cfg.backup.url = Some(format!("file://{}", self.root().join("bucket").display()));
         }
-        cfg
     }
 
     /// Spawn node `i`'s process; the receiver yields the API address of its ready line.
@@ -505,10 +583,15 @@ impl ProcCluster {
             Some(fp) => cmd.env("FAILPOINTS", fp),
             None => cmd.env_remove("FAILPOINTS"),
         };
-        cmd.arg("server")
-            .arg("-c")
-            .arg(&node.config_path)
-            .stdin(Stdio::null())
+        // Phase 13: level emulation of the failpoint binary (D-P13-7).
+        if let Some(k) = node.level_max {
+            cmd.env(ostro_types::compat::TEST_LEVEL_MAX_ENV, k.to_string());
+        }
+        match node.next_args.take() {
+            Some(args) => cmd.args(args),
+            None => cmd.arg("server").arg("-c").arg(&node.config_path),
+        };
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr_log));
         let mut child = cmd
@@ -714,7 +797,7 @@ impl ProcCluster {
         let t0 = Instant::now();
         let mut pending = Vec::new();
         for &n in ids {
-            self.proxy.heal_node(n);
+            self.heal_links(n);
             pending.push((n, self.spawn(n)?));
         }
         for (n, rx) in pending {
@@ -731,6 +814,131 @@ impl ProcCluster {
                 kill_child(c);
             }
         }
+    }
+
+    /// Clear every proxy rule of `node`'s links (the Phase 12 links and the joined nodes').
+    fn heal_links(&self, node: u64) {
+        self.proxy.heal_node(node);
+        for p in &self.join_proxies {
+            p.heal_node(node);
+        }
+    }
+
+    /// The proxy that carries `from → to` (the Phase 12 proxy or a joined node's).
+    pub fn proxy_for(&self, from: u64, to: u64) -> Option<&ChaosProxy> {
+        std::iter::once(&self.proxy)
+            .chain(&self.join_proxies)
+            .find(|p| p.links().iter().any(|l| l.from == from && l.to == to))
+    }
+
+    /// The emulated level node `i` (re)starts with (`OSTRO_TEST_LEVEL_MAX`; `None` = unset).
+    pub fn level_max(&self, i: u64) -> Option<u32> {
+        self.node(i).level_max
+    }
+
+    /// The lowest running node other than `except`.
+    fn running_node(&self, except: Option<u64>) -> Result<u64, HarnessError> {
+        self.nodes
+            .iter()
+            .find(|(id, n)| n.child.is_some() && Some(**id) != except)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| HarnessError::Other("no running node to send the request to".into()))
+    }
+
+    /// SIGTERM node `i` and wait up to [`STOP_T`] for it to exit (SIGKILL after that).
+    async fn stop_gracefully(&mut self, i: u64) -> Result<(), HarnessError> {
+        let Some(mut child) = self.nodes.get_mut(&i).expect("node").child.take() else {
+            return Ok(());
+        };
+        if let Ok(Some(_)) = child.try_wait() {
+            return Ok(());
+        }
+        let pid = libc::pid_t::try_from(child.id())
+            .map_err(|e| HarnessError::Other(format!("pid: {e}")))?;
+        // SAFETY: signals only our own, not yet reaped child (its pid cannot be reused
+        // before the wait below).
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        // clock-exempt: test timeout
+        let deadline = Instant::now() + STOP_T;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                _ => {
+                    tracing::warn!(node = i, "graceful stop timed out; SIGKILL");
+                    kill_child(child);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// The last `joined cluster <cid> as node <n>` line in node slot `key`'s log.
+    fn joined_id(&self, key: u64) -> Option<u64> {
+        let text = std::fs::read_to_string(self.log_path(key)).unwrap_or_default();
+        text.lines().rev().find_map(parse_joined).map(|(_, id)| id)
+    }
+
+    /// Wait (bounded) until no partition lists `id` as a replica (offline meta logs).
+    async fn wait_no_replica(&self, id: u64) -> Result<(), HarnessError> {
+        // clock-exempt: test timeout
+        let deadline = Instant::now() + MEMBERSHIP_T;
+        loop {
+            let mut holds = false;
+            for p in 0..self.spec.partitions {
+                if self.assignment(p).await.replicas.contains(&id) {
+                    holds = true;
+                    break;
+                }
+            }
+            if !holds {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(HarnessError::Deadline(MEMBERSHIP_T));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Register the proxy links between joined node `id` (on `ip`) and every other node.
+    async fn add_links(&mut self, id: u64, ip: Ipv4Addr) -> Result<(), HarnessError> {
+        let port = |n: u64| -> Result<u16, HarnessError> {
+            u16::try_from(n)
+                .ok()
+                .and_then(|n| PROXY_PORT_BASE.checked_add(n))
+                .ok_or_else(|| start_err(format!("node id {n} has no proxy port")))
+        };
+        let mut links = Vec::new();
+        for (m, node) in &self.nodes {
+            if *m == id {
+                continue;
+            }
+            links.push(Link {
+                from: id,
+                to: *m,
+                listen: SocketAddr::new(IpAddr::V4(node.ip), port(id)?),
+                upstream: node.cfg.cluster.listen,
+            });
+            links.push(Link {
+                from: *m,
+                to: id,
+                listen: SocketAddr::new(IpAddr::V4(ip), port(*m)?),
+                upstream: SocketAddr::new(IpAddr::V4(ip), CLUSTER_PORT),
+            });
+        }
+        if links.is_empty() {
+            return Ok(());
+        }
+        let proxy = ChaosProxy::start(links)
+            .await
+            .map_err(|e| start_err(format!("proxy links of joined node {id}: {e}")))?;
+        self.join_proxies.push(proxy);
+        Ok(())
     }
 
     /// Kill every node and hand back the root instead of deleting it.
@@ -803,14 +1011,20 @@ impl ClusterHarness for ProcCluster {
 
     fn isolate(&mut self, node: u64) {
         self.proxy.isolate(node);
+        for p in &self.join_proxies {
+            p.isolate(node);
+        }
     }
 
     fn heal(&mut self, node: u64) {
-        self.proxy.heal_node(node);
+        self.heal_links(node);
     }
 
     fn partition(&mut self, a: u64, b: u64) {
         self.proxy.partition(a, b);
+        for p in &self.join_proxies {
+            p.partition(a, b);
+        }
     }
 
     async fn kill(&mut self, node: u64) {
@@ -826,7 +1040,7 @@ impl ClusterHarness for ProcCluster {
         }
         // Heal first: since 12-14 a starting node waits for a metadata leader before its
         // ready line, so a node restarted behind cut links would never become ready.
-        self.proxy.heal_node(node);
+        self.heal_links(node);
         let t0 = Instant::now();
         let rx = self.spawn(node)?;
         let api = self.await_ready(node, rx).await?;
@@ -873,6 +1087,175 @@ impl ClusterHarness for ProcCluster {
     async fn stop(mut self) {
         self.kill_all();
         // `self.root` drops here: the dirs are removed.
+    }
+}
+
+impl P13Harness for ProcCluster {
+    async fn start_single(spec: ClusterSpec) -> Result<Self, HarnessError> {
+        Self::start_single_with(spec, ProcOptions::default(), None).await
+    }
+
+    async fn cluster_init(&mut self, node: u64) -> Result<Value, HarnessError> {
+        // `[cluster] advertise` stays the Phase 7 list of names (13-02 open issue,
+        // orchestrator decision); the init advertises the node's cluster listener.
+        let advertise = self.node(node).cfg.cluster.listen.to_string();
+        p13_post(
+            &self.client(node),
+            "/v1/cluster/init",
+            &serde_json::json!({ "advertise": advertise }),
+        )
+        .await
+    }
+
+    async fn add_node(&mut self, opts: NodeOpts) -> Result<u64, HarnessError> {
+        let seed = self.running_node(None)?;
+        let api = self.client(seed);
+        let token = node_token(&api).await?;
+        // The next free 127.r.r.k (k above every address in use).
+        let k = self
+            .nodes
+            .values()
+            .map(|n| u64::from(n.ip.octets()[3]))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        if k > 254 {
+            return Err(start_err("no free 127.r.r.k address left"));
+        }
+        let ip = node_ip(self.r, k);
+        drop(
+            std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(ip), CLUSTER_PORT))
+                .map_err(|e| start_err(format!("{ip}:{CLUSTER_PORT} is taken: {e}")))?,
+        );
+        let api_addr = free_addr(IpAddr::V4(ip))?;
+        let data_dir = self.root().join(format!("join{k}"));
+        let mut cfg = ServerConfig::server_defaults();
+        cfg.api.listen = api_addr;
+        cfg.cluster.listen = SocketAddr::new(IpAddr::V4(ip), CLUSTER_PORT);
+        cfg.cluster.advertise = vec![ip.to_string()];
+        cfg.cluster.cluster_id = Some(self.cluster_id.clone());
+        cfg.node.data_dir = data_dir.clone();
+        cfg.node.partitions = self.spec.partitions;
+        self.test_timings(&mut cfg);
+        let config_path = self.root().join(format!("join{k}.toml"));
+        std::fs::write(&config_path, cfg.to_toml_string())
+            .map_err(|e| start_err(format!("write {}: {e}", config_path.display())))?;
+        let mut args = vec![
+            "cluster".to_owned(),
+            "join".to_owned(),
+            api.base_url.clone(),
+            "--token".to_owned(),
+            token.token,
+            "--ca-hash".to_owned(),
+            token.ca_hash,
+            "--data".to_owned(),
+            data_dir.display().to_string(),
+            "-c".to_owned(),
+            config_path.display().to_string(),
+        ];
+        if opts.advertise {
+            args.extend([
+                "--advertise-api".to_owned(),
+                api_addr.to_string(),
+                "--advertise-cluster".to_owned(),
+                cfg.cluster.listen.to_string(),
+            ]);
+        }
+        // Spawned under a provisional key (ids are allocated by the cluster), re-keyed by the
+        // id of the `joined cluster … as node <n>` line.
+        let key = u64::MAX - k;
+        self.nodes.insert(
+            key,
+            ProcNode {
+                ip,
+                cfg,
+                log_path: self.root().join(format!("join{k}.log")),
+                config_path,
+                failpoints: None,
+                child: None,
+                api: api_addr,
+                level_max: opts.level_max,
+                next_args: Some(args),
+            },
+        );
+        let started = async {
+            let rx = self.spawn(key)?;
+            let api = self.await_ready(key, rx).await?;
+            let id = self.joined_id(key).ok_or_else(|| {
+                start_err(format!(
+                    "joined node on {ip}: no `joined cluster … as node <n>` line; log tail:\n{}",
+                    self.log_tail(key, 30)
+                ))
+            })?;
+            Ok::<_, HarnessError>((api, id))
+        }
+        .await;
+        let (api_bound, id) = match started {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(mut n) = self.nodes.remove(&key)
+                    && let Some(c) = n.child.take()
+                {
+                    kill_child(c);
+                }
+                return Err(e);
+            }
+        };
+        let mut node = self.nodes.remove(&key).expect("joined node");
+        if self.nodes.contains_key(&id) {
+            if let Some(c) = node.child.take() {
+                kill_child(c);
+            }
+            return Err(HarnessError::Other(format!(
+                "join allocated node id {id}, which this harness already runs"
+            )));
+        }
+        node.cfg.node.node_id = id;
+        self.nodes.insert(id, node);
+        // Pins the API port and rewrites the config with the allocated id (restarts run
+        // `ostro server -c <config>` on the prepared data dir).
+        self.set_api(id, api_bound)?;
+        std::fs::write(
+            &self.node(id).config_path,
+            self.node(id).cfg.to_toml_string(),
+        )
+        .map_err(|e| start_err(format!("write joined config: {e}")))?;
+        self.add_links(id, ip).await?;
+        Ok(id)
+    }
+
+    async fn remove(&mut self, id: u64, force: bool) -> Result<(), HarnessError> {
+        let via = self.running_node(Some(id))?;
+        remove_and_wait(&self.client(via), id, force).await
+    }
+
+    async fn drain(&mut self, id: u64) -> Result<(), HarnessError> {
+        let via = self
+            .running_node(Some(id))
+            .or_else(|_| self.running_node(None))?;
+        p13_post(
+            &self.client(via),
+            &format!("/v1/cluster/members/{id}/drain"),
+            &serde_json::json!({}),
+        )
+        .await?;
+        self.wait_no_replica(id).await
+    }
+
+    async fn upgrade(&mut self, node: u64, level_max: Option<u32>) -> Result<(), HarnessError> {
+        self.nodes.get_mut(&node).expect("node").level_max = level_max;
+        // Graceful stop (the controlled shutdown may hand partitions off), then the same
+        // config and data dir with the new environment. Proxy rules are left as they are.
+        self.stop_gracefully(node).await?;
+        let t0 = Instant::now();
+        let rx = self.spawn(node)?;
+        let api = self.await_ready(node, rx).await?;
+        self.timings.last_start = t0.elapsed();
+        self.set_api(node, api)
+    }
+
+    async fn cluster_status(&self, node: u64) -> Result<Value, HarnessError> {
+        p13_get(&self.client(node), "/v1/cluster/status").await
     }
 }
 
