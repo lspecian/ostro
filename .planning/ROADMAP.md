@@ -443,7 +443,7 @@ Plans:
 - [x] 12-14-PLAN.md — Server integration: cluster-id + meta-voter checks before meta, meta-first boot (single node included), always-live meta transport, not-leader 503 + hints, self-demotion, module blob replication, /v1/admin/replication, first conformance run (CLUS-02..04) (W6)
 - [x] 12-15-PLAN.md — Bottomless in cluster mode: leader-only per-partition uploads, epoch-fenced p/<pppp>/head, takeover repair + gap re-chain from a remote snapshot, restore refuses cluster buckets (CLUS-02) (W6)
 - [x] 12-16-PLAN.md — Tier-B conformance suite 100% green with every tier-B mutant biting (>= 11 bites, REQUIRE_ALL) (CLUS-01..04) (W7)
-- [ ] 12-17-PLAN.md — Multi-process: SC2 kill path, follower power-loss + tier-C mutant, failover p99 (>= 200 iterations incl. controller faults and no-RST blackholes) + meta election tick tuning, RF=3 bytes-on-disk benchmark, crash-campaign smoke (CLUS-02, CLUS-04) (W8)
+- [x] 12-17-PLAN.md — Multi-process: SC2 kill path, follower power-loss + tier-C mutant, failover p99 (>= 200 iterations incl. controller faults and no-RST blackholes) + meta election tick tuning, RF=3 bytes-on-disk benchmark, crash-campaign smoke (CLUS-02, CLUS-04) (W8)
 - [ ] 12-18-PLAN.md — PHASE GATE: mutant matrix required in CI, grep gates, full ci-local, p99 + 10,000-fault campaign recorded, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (all CLUS) (W9)
 **Research flag**: Snapshot install; failover liveness detection
 
