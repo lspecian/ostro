@@ -87,7 +87,12 @@ impl Group {
         let (tx, mut rx) =
             mpsc::unbounded_channel::<Vec<ostro_raft_driver::raft::eraftpb::Message>>();
         let dir: &Path = self.dirs[&id].path();
-        let h = MetaHandle::start_with(
+        // No fsync: the 5 s failover bound below is a Raft timing claim (election timeout
+        // 1-2 s plus a pre-vote and a vote round); on macOS CI a single multi-second
+        // F_FULLFSYNC of a candidate's HardState or the new leader's first append left both
+        // survivors at the same term with no leader past the bound (ci-fix7; reproduced
+        // here with one injected 4.5 s `meta::fsync` sleep). Durability has its own suites.
+        let h = MetaHandle::start_with_unsynced_log(
             dir,
             MetaStart {
                 node_id: id,
@@ -125,8 +130,25 @@ impl Group {
 
     /// The single leader every running node agrees on.
     async fn leader(&self, within: Duration) -> u64 {
-        let deadline = Instant::now() + within;
+        let start = Instant::now();
+        let deadline = start + within;
+        // (elapsed, node, term, leader, is_leader) at every change, for a failure report
+        let mut seen: HashMap<u64, (u64, Option<u64>, bool)> = HashMap::new();
+        let mut trail: Vec<String> = Vec::new();
         loop {
+            for (&i, h) in &self.nodes {
+                let s = h.raft().status();
+                let now = (s.term, s.leader_id, s.is_leader);
+                if seen.insert(i, now) != Some(now) {
+                    trail.push(format!(
+                        "{:?}: node {i} term {} leader {:?} is_leader {}",
+                        start.elapsed(),
+                        s.term,
+                        s.leader_id,
+                        s.is_leader
+                    ));
+                }
+            }
             let leaders: Vec<u64> = self
                 .nodes
                 .iter()
@@ -154,7 +176,7 @@ impl Group {
                         )
                     })
                     .collect();
-                panic!("no agreed leader within {within:?}: {status:#?}");
+                panic!("no agreed leader within {within:?}: {status:#?}\ntrail: {trail:#?}");
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

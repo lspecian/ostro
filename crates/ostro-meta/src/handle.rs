@@ -210,6 +210,30 @@ impl MetaHandle {
     ///
     /// The pre-Phase-5 format check of [`MetaHandle::start`] applies to both.
     pub async fn start_with(dir: &Path, start: MetaStart) -> Result<MetaHandle, MetaError> {
+        Self::start_with_store(dir, start, true).await
+    }
+
+    /// [`MetaHandle::start_with`] over a Raft log store that does not fsync (the vendored
+    /// driver's `LogStoreOptions::sync = false`, "only tests turn this off").
+    ///
+    /// Test-only (ci-fix7): election and failover tests assert Raft timing bounds derived
+    /// from the tick configuration. On macOS CI one `F_FULLFSYNC` of the log store stalled
+    /// for seconds inside that window (a candidate's HardState or the new leader's first
+    /// append), so the bound measured the runner's disk instead of the election. Durability
+    /// is covered by the meta persistence and failpoint suites, which keep fsync on.
+    #[doc(hidden)]
+    pub async fn start_with_unsynced_log(
+        dir: &Path,
+        start: MetaStart,
+    ) -> Result<MetaHandle, MetaError> {
+        Self::start_with_store(dir, start, false).await
+    }
+
+    async fn start_with_store(
+        dir: &Path,
+        start: MetaStart,
+        sync: bool,
+    ) -> Result<MetaHandle, MetaError> {
         let MetaStart {
             node_id,
             voters,
@@ -237,6 +261,10 @@ impl MetaHandle {
             tick_interval: tick.interval,
             election_tick: tick.election_tick,
             heartbeat_tick: tick.heartbeat_tick,
+            log_store: ostro_raft_driver::LogStoreOptions {
+                sync,
+                ..ostro_raft_driver::LogStoreOptions::default()
+            },
             ..DriverConfig::new(node_id)
         };
         let (sm, view) = MetaSm::new();
