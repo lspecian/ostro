@@ -86,6 +86,20 @@ impl LogScan {
     }
 }
 
+/// The run ids of every `StartRun` command in `scan` ([`LogScan::has_start_run`] for all runs
+/// at once).
+pub fn start_run_ids(scan: &LogScan) -> BTreeSet<Vec<u8>> {
+    scan.commands()
+        .filter_map(|(_, c)| match decode_command(c) {
+            Ok(cmd) => match cmd.cmd {
+                Some(Cmd::StartRun(s)) => Some(s.run_id),
+                _ => None,
+            },
+            Err(_) => None,
+        })
+        .collect()
+}
+
 /// Offline verified scan of `view`'s partition `p` (see the module docs).
 pub fn scan_partition(view: &DataDirView, p: PartitionId) -> Result<LogScan, String> {
     scan_wal_dir(view.node, &view.root.join("wal"), p)
@@ -226,6 +240,9 @@ pub fn acked_on_scans(
     in_state: impl Fn(u64, PartitionId, &RunId) -> bool,
 ) -> Report {
     let mut report = Report::new("disk");
+    // The StartRun ids of each scan, decoded once (12-17: the per-ack `has_start_run` scan
+    // was quadratic in the log length for campaign-sized ack logs; same answer).
+    let started: Vec<BTreeSet<Vec<u8>>> = scans.iter().map(start_run_ids).collect();
     for a in acks {
         let run: RunId = match a.run_id.parse() {
             Ok(r) => r,
@@ -236,11 +253,13 @@ pub fn acked_on_scans(
         };
         let holders: Vec<u64> = scans
             .iter()
-            .filter(|s| s.partition.0 == a.partition)
-            .filter(|s| {
-                s.has_start_run(&run) || (s.is_trimmed() && in_state(s.node, s.partition, &run))
+            .zip(&started)
+            .filter(|(s, _)| s.partition.0 == a.partition)
+            .filter(|(s, ids)| {
+                ids.contains(run.as_bytes().as_slice())
+                    || (s.is_trimmed() && in_state(s.node, s.partition, &run))
             })
-            .map(|s| s.node)
+            .map(|(s, _)| s.node)
             .collect();
         if holders.len() < min_insync {
             report.violation(format!(
