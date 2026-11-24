@@ -2933,6 +2933,7 @@ fn phase10_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
         (name = "inventory", description = "Modules, queues and partitions (Phase 11)"),
         (name = "dev", description = "Dev clock / time skipping; REST-only, only with `ostro dev --ephemeral --time-skipping` (Phase 10)"),
         (name = "tooling", description = "Server-side module replay; REST-only (Phase 10)"),
+        (name = "cluster", description = "Cluster membership, placement and upgrades (Phase 13)"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )

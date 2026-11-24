@@ -399,6 +399,567 @@ expression: pretty
         }
       }
     },
+    "/v1/cluster/init": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Promote this single node to a cluster.",
+        "operationId": "init",
+        "requestBody": {
+          "description": "Optional; an empty body takes the defaults",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cluster status after promotion",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already a cluster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/join": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Admit a joining node. Authenticated by the node join token in the body (no client\nidentity; mounted outside the API middleware).",
+        "operationId": "join",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClusterJoinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Admitted (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterJoinResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or token (details.reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "feature_not_enabled / incompatible binary (details.reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/members/{id}/drain": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Drain a member: hand off its partition leaderships and replicas.",
+        "operationId": "drain",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Node id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cluster status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown member, or cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/members/{id}/remove": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Remove a member (`force` skips waiting for a dead node, never the quorum check).",
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Node id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveMemberBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cluster status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown member, or cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Would lose quorum (details.reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/reassign": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Start or cancel a partition reassignment.",
+        "operationId": "reassign",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReassignRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cluster status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid replica set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Reassignment in progress / not cancellable (details.reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/rebalance": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Rebalance replicas and preferred leaders.",
+        "operationId": "rebalance",
+        "responses": {
+          "200": {
+            "description": "Cluster status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/status": {
+      "get": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Cluster status: members, meta voters / learners, levels, policy, reassignments.",
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Cluster status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/tokens": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Create a node join token (`njt_…`). The secret is in this response only.",
+        "operationId": "create_node_token",
+        "requestBody": {
+          "description": "Optional; an empty body means the default lifetime",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeTokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid ttl_secs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/upgrade": {
+      "get": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Feature levels and finalization state.",
+        "operationId": "upgrade_status",
+        "responses": {
+          "200": {
+            "description": "Upgrade status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/upgrade/finalize": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Finalize the highest common feature level.",
+        "operationId": "upgrade_finalize",
+        "responses": {
+          "200": {
+            "description": "Upgrade status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not ready / held (details.reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/upgrade/hold": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Hold the current feature level (keep the downgrade window open).",
+        "operationId": "upgrade_hold",
+        "responses": {
+          "200": {
+            "description": "Upgrade status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/cluster/upgrade/release": {
+      "post": {
+        "tags": [
+          "cluster"
+        ],
+        "summary": "Release a hold.",
+        "operationId": "upgrade_release",
+        "responses": {
+          "200": {
+            "description": "Upgrade status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Cluster API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/connections": {
       "get": {
         "tags": [
@@ -1211,6 +1772,37 @@ expression: pretty
         }
       }
     },
+    "/v1/modules/gc": {
+      "post": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "Run one module GC round now.",
+        "operationId": "run_module_gc",
+        "responses": {
+          "200": {
+            "description": "Round report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GcRunReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Module lifecycle API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/modules/{sha256}": {
       "get": {
         "tags": [
@@ -1355,6 +1947,66 @@ expression: pretty
           },
           "413": {
             "description": "Module exceeds api.max_module_bytes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "modules"
+        ],
+        "summary": "Retire a module and its workflow versions (refused while a version is active).",
+        "operationId": "retire_module",
+        "parameters": [
+          {
+            "name": "sha256",
+            "in": "path",
+            "description": "Module sha256 (64 lowercase hex digits)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetireModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid sha",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown module, or module lifecycle API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A version is active (details.reason)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2235,6 +2887,67 @@ expression: pretty
           },
           "400": {
             "description": "Invalid filter or page token; > 8 tags: details.limit = search_tags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/runs/migrate": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Replay-check runs against another workflow version and repin the clean ones.",
+        "operationId": "migrate_runs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MigrateRunsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Per-run outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrateRunsReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown workflow / version, or module lifecycle API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Target retired (details.reason)",
             "content": {
               "application/json": {
                 "schema": {
@@ -4764,6 +5477,31 @@ expression: pretty
         },
         "additionalProperties": false
       },
+      "Advertise": {
+        "type": "object",
+        "description": "The addresses a joining node advertises.",
+        "required": [
+          "api",
+          "cluster"
+        ],
+        "properties": {
+          "api": {
+            "type": "string",
+            "description": "Client API address."
+          },
+          "cluster": {
+            "type": "string",
+            "description": "Cluster listener address."
+          },
+          "repl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Separate replication listener, if any."
+          }
+        }
+      },
       "BackupTar": {
         "type": "string",
         "format": "binary",
@@ -5181,6 +5919,255 @@ expression: pretty
           "one",
           "all"
         ]
+      },
+      "ClusterJoinRequest": {
+        "type": "object",
+        "description": "`POST /v1/cluster/join` (D-P13-9).",
+        "required": [
+          "token",
+          "csr_pem",
+          "advertise",
+          "node_version"
+        ],
+        "properties": {
+          "advertise": {
+            "$ref": "#/components/schemas/Advertise",
+            "description": "Advertised addresses."
+          },
+          "csr_pem": {
+            "type": "string",
+            "description": "PEM CSR for the node certificate."
+          },
+          "node_version": {
+            "$ref": "#/components/schemas/NodeVersionDto",
+            "description": "The joiner's binary."
+          },
+          "resume_node_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Resume a still-Joining id from the join marker.",
+            "minimum": 0
+          },
+          "token": {
+            "type": "string",
+            "description": "Node join token (`njt_…`)."
+          }
+        }
+      },
+      "ClusterJoinResponse": {
+        "type": "object",
+        "description": "Answer of a join.",
+        "required": [
+          "node_id",
+          "cluster_id",
+          "partitions",
+          "ca_cert_pem",
+          "node_cert_pem",
+          "seeds",
+          "finalized_level"
+        ],
+        "properties": {
+          "ca_cert_pem": {
+            "type": "string",
+            "description": "Cluster CA certificate (PEM)."
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "The cluster id."
+          },
+          "finalized_level": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The cluster's finalized feature level.",
+            "minimum": 0
+          },
+          "node_cert_pem": {
+            "type": "string",
+            "description": "Signed node certificate (PEM)."
+          },
+          "node_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The allocated (or resumed) node id.",
+            "minimum": 0
+          },
+          "partitions": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Partition count.",
+            "minimum": 0
+          },
+          "seeds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SeedDto"
+            },
+            "description": "Seeds (current members' cluster addresses)."
+          }
+        }
+      },
+      "ClusterMember": {
+        "type": "object",
+        "description": "One member in [`ClusterStatus`].",
+        "required": [
+          "node_id",
+          "addr",
+          "state",
+          "live",
+          "raft_role"
+        ],
+        "properties": {
+          "addr": {
+            "type": "string",
+            "description": "Client API address."
+          },
+          "cluster_addr": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cluster listener address."
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Live per the meta leader's liveness view."
+          },
+          "node_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Node id.",
+            "minimum": 0
+          },
+          "raft_role": {
+            "type": "string",
+            "description": "Meta Raft role: `voter`, `learner`, `outgoing` or `none`."
+          },
+          "state": {
+            "type": "string",
+            "description": "`joining`, `active`, `draining` or `removed`."
+          },
+          "version": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NodeVersionDto",
+                "description": "Reported binary, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ClusterStatus": {
+        "type": "object",
+        "description": "`GET /v1/cluster/status`.",
+        "required": [
+          "cluster_id",
+          "members",
+          "voters",
+          "learners",
+          "voters_outgoing",
+          "meta_leader",
+          "finalized",
+          "level_min",
+          "level_max",
+          "reassignments"
+        ],
+        "properties": {
+          "cluster_id": {
+            "type": "string",
+            "description": "Cluster id."
+          },
+          "finalized": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Finalized feature level.",
+            "minimum": 0
+          },
+          "hold": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Operator hold.",
+            "minimum": 0
+          },
+          "learners": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Meta learners."
+          },
+          "level_max": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lowest `level_max` over members.",
+            "minimum": 0
+          },
+          "level_min": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lowest `level_min` over members.",
+            "minimum": 0
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClusterMember"
+            },
+            "description": "Every member (tombstones included)."
+          },
+          "meta_leader": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Meta leader (0 = unknown).",
+            "minimum": 0
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplicationPolicyDto",
+                "description": "Replication policy."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reassignments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReassignmentDto"
+            },
+            "description": "In-flight reassignments."
+          },
+          "voters": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Meta voters."
+          },
+          "voters_outgoing": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Outgoing voters (non-empty while joint)."
+          }
+        }
       },
       "CompleteTokenBody": {
         "type": "object",
@@ -5779,6 +6766,50 @@ expression: pretty
           }
         }
       },
+      "GcRunReport": {
+        "type": "object",
+        "description": "`POST /v1/modules/gc`.",
+        "required": [
+          "candidates",
+          "deleted",
+          "referenced",
+          "postponed"
+        ],
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Retired modules considered."
+          },
+          "deleted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Modules deleted this round."
+          },
+          "postponed": {
+            "type": "boolean",
+            "description": "The round was postponed (uncovered partitions, single scan so far, ...)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was postponed."
+          },
+          "referenced": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Modules still referenced."
+          }
+        }
+      },
       "GrantDto": {
         "type": "object",
         "description": "An origin-bound secret grant.",
@@ -5909,6 +6940,37 @@ expression: pretty
         "type": "string",
         "format": "binary",
         "description": "Raw webhook payload (documentation-only schema of the hook body)."
+      },
+      "InitRequest": {
+        "type": "object",
+        "description": "`POST /v1/cluster/init`: promote a running single node to a cluster (D-P13-11).",
+        "properties": {
+          "advertise": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cluster listener address peers dial (`[cluster] advertise` when absent)."
+          },
+          "min_insync": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Target min_insync (default 2).",
+            "minimum": 0
+          },
+          "rf": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Target replication factor (default 3).",
+            "minimum": 0
+          }
+        }
       },
       "JoinRequest": {
         "type": "object",
@@ -6065,6 +7127,158 @@ expression: pretty
           "error"
         ]
       },
+      "MemberLevel": {
+        "type": "object",
+        "description": "One member's supported levels in [`UpgradeStatus`].",
+        "required": [
+          "node_id",
+          "level_min",
+          "level_max",
+          "live"
+        ],
+        "properties": {
+          "level_max": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Highest emitted level.",
+            "minimum": 0
+          },
+          "level_min": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lowest supported level.",
+            "minimum": 0
+          },
+          "live": {
+            "type": "boolean",
+            "description": "Live."
+          },
+          "node_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Node id.",
+            "minimum": 0
+          }
+        }
+      },
+      "MigrateFailure": {
+        "type": "object",
+        "description": "A run that failed the replay check.",
+        "required": [
+          "run_id",
+          "seq",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Divergence / error detail."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run id."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Journal seq of the divergence (0 = error before replay).",
+            "minimum": 0
+          }
+        }
+      },
+      "MigrateRunsReport": {
+        "type": "object",
+        "description": "Result of a migrate-runs call (run ids per outcome).",
+        "required": [
+          "passed",
+          "repinned",
+          "failed",
+          "busy",
+          "seq_mismatch"
+        ],
+        "properties": {
+          "busy": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Runs refused as `RunBusy` (leased)."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MigrateFailure"
+            },
+            "description": "Runs that diverged or errored."
+          },
+          "passed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Runs whose journal replayed cleanly against the target."
+          },
+          "repinned": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Runs repinned (`RepinRun` accepted; empty on a dry run)."
+          },
+          "seq_mismatch": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Runs refused as `SeqMismatch` (progressed since the check; dry-run again)."
+          }
+        }
+      },
+      "MigrateRunsRequest": {
+        "type": "object",
+        "description": "`POST /v1/runs/migrate` (D-P13-21).",
+        "required": [
+          "workflow",
+          "from",
+          "to_version"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean",
+            "description": "Replay-check only; submit no `RepinRun`."
+          },
+          "filter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional run filter (tag expression, as `ostro ls --tag`)."
+          },
+          "from": {
+            "$ref": "#/components/schemas/VersionOrSha",
+            "description": "Source version or module."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum runs to process.",
+            "minimum": 0
+          },
+          "to_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Target workflow version.",
+            "minimum": 0
+          },
+          "workflow": {
+            "type": "string",
+            "description": "Workflow name."
+          }
+        }
+      },
       "ModuleDto": {
         "type": "object",
         "description": "A stored module.",
@@ -6169,6 +7383,98 @@ expression: pretty
               "type": "string"
             },
             "description": "Workflows whose versions reference it."
+          }
+        }
+      },
+      "NodeTokenRequest": {
+        "type": "object",
+        "description": "`POST /v1/cluster/tokens`.",
+        "properties": {
+          "ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Token lifetime in seconds (server default when absent).",
+            "minimum": 0
+          }
+        }
+      },
+      "NodeTokenResponse": {
+        "type": "object",
+        "description": "A created node join token (shown once).",
+        "required": [
+          "id",
+          "token",
+          "expires_at_ms",
+          "ca_hash"
+        ],
+        "properties": {
+          "ca_hash": {
+            "type": "string",
+            "description": "`sha256:<hex>` of the cluster CA (the joiner's pin)."
+          },
+          "expires_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry (Unix ms).",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Token id (`njt_…`)."
+          },
+          "token": {
+            "type": "string",
+            "description": "The secret token."
+          }
+        }
+      },
+      "NodeVersionDto": {
+        "type": "object",
+        "description": "What a node's binary supports (wire form of meta ext 96).",
+        "required": [
+          "ostro_version",
+          "level_min",
+          "level_max",
+          "wasmtime",
+          "event_codec_ver",
+          "wit_lines"
+        ],
+        "properties": {
+          "event_codec_ver": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Event codec version.",
+            "minimum": 0
+          },
+          "level_max": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Highest emitted feature level.",
+            "minimum": 0
+          },
+          "level_min": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lowest supported feature level.",
+            "minimum": 0
+          },
+          "ostro_version": {
+            "type": "string",
+            "description": "Ostro version."
+          },
+          "wasmtime": {
+            "type": "string",
+            "description": "Wasmtime version."
+          },
+          "wit_lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "WIT lines linked by the engine."
           }
         }
       },
@@ -6678,6 +7984,96 @@ expression: pretty
           }
         }
       },
+      "ReassignRequest": {
+        "type": "object",
+        "description": "`POST /v1/cluster/reassign`.",
+        "required": [
+          "partition"
+        ],
+        "properties": {
+          "cancel": {
+            "type": "boolean",
+            "description": "Cancel an in-flight reassignment (allowed before LeaderMove)."
+          },
+          "partition": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Partition.",
+            "minimum": 0
+          },
+          "replicas": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Target replica set (ignored when `cancel`)."
+          }
+        }
+      },
+      "ReassignmentDto": {
+        "type": "object",
+        "description": "One in-flight reassignment (wire form of meta ext 100).",
+        "required": [
+          "partition",
+          "target",
+          "adding",
+          "removing",
+          "started_at_ms"
+        ],
+        "properties": {
+          "adding": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Replicas being added."
+          },
+          "partition": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Partition.",
+            "minimum": 0
+          },
+          "removing": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Replicas being removed."
+          },
+          "started_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Start time (Unix ms).",
+            "minimum": 0
+          },
+          "target": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Target replica set."
+          }
+        }
+      },
+      "RemoveMemberBody": {
+        "type": "object",
+        "description": "`POST /v1/cluster/members/{id}/remove` body.",
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "description": "Do not wait for a dead node (never skips the quorum check)."
+          }
+        }
+      },
       "ReplayBody": {
         "type": "object",
         "description": "`POST /v1/modules/{sha}/replay` body: exactly one of `runs` or `sample`.",
@@ -6850,6 +8246,35 @@ expression: pretty
           "skipped",
           "error"
         ]
+      },
+      "ReplicationPolicyDto": {
+        "type": "object",
+        "description": "Replication policy (wire form of meta ext 99).",
+        "required": [
+          "rf",
+          "min_insync",
+          "max_voters"
+        ],
+        "properties": {
+          "max_voters": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum meta voters.",
+            "minimum": 0
+          },
+          "min_insync": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Target min_insync.",
+            "minimum": 0
+          },
+          "rf": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Target replication factor.",
+            "minimum": 0
+          }
+        }
       },
       "RequeueBody": {
         "type": "object",
@@ -7148,6 +8573,34 @@ expression: pretty
           }
         ],
         "description": "Which workflow version a rerun executes."
+      },
+      "RetireModuleResponse": {
+        "type": "object",
+        "description": "`DELETE /v1/modules/{sha}`.",
+        "required": [
+          "sha256",
+          "retired_at_ms",
+          "versions"
+        ],
+        "properties": {
+          "retired_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Retirement time (Unix ms).",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Module sha256 (hex)."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowVersionRef"
+            },
+            "description": "Workflow versions retired with it."
+          }
+        }
       },
       "RetryBody": {
         "type": "object",
@@ -7836,6 +9289,33 @@ expression: pretty
           }
         }
       },
+      "SeedDto": {
+        "type": "object",
+        "description": "One seed in a [`JoinResponse`] (written to `<data>/cluster-seeds.toml`).",
+        "required": [
+          "id",
+          "addr"
+        ],
+        "properties": {
+          "addr": {
+            "type": "string",
+            "description": "Cluster listener address."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Node id.",
+            "minimum": 0
+          },
+          "repl_addr": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Separate replication listener, if any."
+          }
+        }
+      },
       "SignalBody": {
         "type": "object",
         "description": "Signal body.",
@@ -8129,6 +9609,50 @@ expression: pretty
           }
         }
       },
+      "UpgradeStatus": {
+        "type": "object",
+        "description": "`GET /v1/cluster/upgrade`.",
+        "required": [
+          "finalized",
+          "common_level_max",
+          "auto_finalize",
+          "members"
+        ],
+        "properties": {
+          "auto_finalize": {
+            "type": "boolean",
+            "description": "`[cluster] auto_finalize`."
+          },
+          "common_level_max": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The highest level every member supports.",
+            "minimum": 0
+          },
+          "finalized": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Finalized feature level.",
+            "minimum": 0
+          },
+          "hold": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Operator hold.",
+            "minimum": 0
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberLevel"
+            },
+            "description": "Per-member levels."
+          }
+        }
+      },
       "UploadModuleResponse": {
         "type": "object",
         "description": "Upload result.",
@@ -8224,6 +9748,39 @@ expression: pretty
           "standard",
           "hmac"
         ]
+      },
+      "VersionOrSha": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A workflow version number.",
+            "required": [
+              "version"
+            ],
+            "properties": {
+              "version": {
+                "type": "integer",
+                "format": "int32",
+                "description": "A workflow version number.",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A module sha256 (hex).",
+            "required": [
+              "sha"
+            ],
+            "properties": {
+              "sha": {
+                "type": "string",
+                "description": "A module sha256 (hex)."
+              }
+            }
+          }
+        ],
+        "description": "The source of a migration: a workflow version or a module sha."
       },
       "WasmBytes": {
         "type": "string",
@@ -8619,6 +10176,26 @@ expression: pretty
             "minimum": 0
           }
         }
+      },
+      "WorkflowVersionRef": {
+        "type": "object",
+        "description": "One workflow version named by a retirement.",
+        "required": [
+          "name",
+          "version"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Workflow name."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Version.",
+            "minimum": 0
+          }
+        }
       }
     }
   },
@@ -8682,6 +10259,10 @@ expression: pretty
     {
       "name": "tooling",
       "description": "Server-side module replay; REST-only (Phase 10)"
+    },
+    {
+      "name": "cluster",
+      "description": "Cluster membership, placement and upgrades (Phase 13)"
     },
     {
       "name": "health",

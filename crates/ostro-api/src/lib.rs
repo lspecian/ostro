@@ -15,6 +15,8 @@ mod openapi;
 pub mod phase11;
 // Phase 13 (13-01): ClusterApi + ModuleLifecycleApi extension traits and domain types.
 pub mod phase13;
+// Phase 13 (13-03): REST + gRPC adapters of the Phase 13 slots.
+pub mod phase13_adapters;
 pub mod phase7;
 pub mod phase8;
 pub mod request_meta;
@@ -165,7 +167,9 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
         );
     let grpc = phase8::add_grpc_services(grpc, &ext, cfg.max_request_bytes);
     // Phase 11 (11-09): RunOps / Inventory for the slots that are present.
-    let grpc = phase11::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
+    let grpc = phase11::add_grpc_services(grpc, &ext, cfg.max_request_bytes);
+    // Phase 13 (13-03): Cluster / ModuleLifecycle for the slots that are present.
+    let grpc = phase13_adapters::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
         .into_axum_router()
         .layer(axum::middleware::map_response(grpc::map_size_limit_status));
     // The local presign route (06-08) sits outside the API middleware stack below: API
@@ -177,16 +181,25 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes));
     // Phase 11 (11-09): payload cap and root redirect for the core handlers.
     let opts = phase11::RestOptions::from_config(&cfg);
+    // Phase 13 (13-03): `POST /v1/cluster/join` authenticates with the node join token in
+    // its body, so it sits outside the API middleware stack, like the presign route.
+    let join = phase13_adapters::join_router(ext.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes));
     rest.with_state(cp)
         .layer(axum::Extension(opts))
         .merge(phase11::router(ext.clone()))
+        .merge(phase13_adapters::router(ext.clone()))
         .merge(phase8::router(ext))
         // Route-level limits (the module upload, the hook body) are inner layers and win
         // over this one.
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .merge(objects)
+        .merge(join)
         .merge(grpc)
+        // Phase 13 (13-03): request metadata (`ostro-*` headers, deadline) for every REST and
+        // gRPC call; `ostro-consistency` out on success.
+        .layer(axum::middleware::from_fn(request_meta::middleware))
 }
 
 #[cfg(test)]

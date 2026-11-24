@@ -19,6 +19,9 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         );
         // Phase 11 (11-09): paths and schemas only (tags live in the base document).
         doc.merge(crate::phase11::api_routes().split_for_parts().1);
+        // Phase 13 (13-03): cluster / module lifecycle paths and schemas (join included).
+        doc.merge(crate::phase13_adapters::api_routes().split_for_parts().1);
+        doc.merge(crate::phase13_adapters::join_routes().split_for_parts().1);
         // Phase 6 (06-08): the presign route, mounted outside the API middleware.
         doc.merge(crate::rest::object_routes().split_for_parts().1);
         doc

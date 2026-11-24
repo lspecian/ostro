@@ -2252,6 +2252,664 @@ mod p11 {
     }
 }
 
+/// In-memory Phase 13 traits (cluster membership / upgrades, module lifecycle), 13-03.
+pub use p13::{FAKE_P13_CLUSTER_ID, FakeCluster, FakeMigrateOutcome, FakeModuleLifecycle};
+
+mod p13 {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    use crate::error::{ApiError, ErrorCode};
+    use crate::phase8::ApiExtensions;
+    use crate::phase13::*;
+
+    use super::{FAKE_EPOCH_MS, FAKE_TICK_MS};
+
+    /// The fake cluster id of [`FakeCluster`].
+    pub const FAKE_P13_CLUSTER_ID: &str = "fake-cluster";
+    /// Default node-token lifetime of the fake (seconds).
+    const DEFAULT_TTL_SECS: u64 = 3600;
+    /// The fake cluster CA pin.
+    const FAKE_CA_HASH: &str =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn reason(code: ErrorCode, msg: String, reason: &str) -> ApiError {
+        ApiError::new(code, msg).with_details(serde_json::json!({ "reason": reason }))
+    }
+
+    #[derive(Default)]
+    struct ClusterState {
+        clock: u64,
+        initialized: bool,
+        members: BTreeMap<u64, ClusterMember>,
+        voters: BTreeSet<u64>,
+        learners: BTreeSet<u64>,
+        next_node: u64,
+        next_token: u64,
+        tokens: BTreeMap<String, u64>,
+        finalized: u32,
+        hold: Option<u32>,
+        reassignments: BTreeMap<u16, ReassignmentDto>,
+        policy: Option<ReplicationPolicyDto>,
+        errors: BTreeMap<String, ApiError>,
+    }
+
+    impl ClusterState {
+        fn tick(&mut self) -> u64 {
+            self.clock += 1;
+            FAKE_EPOCH_MS + self.clock * FAKE_TICK_MS
+        }
+
+        fn version(level_max: u32) -> NodeVersionDto {
+            NodeVersionDto {
+                ostro_version: "0.1.0".into(),
+                level_min: 1,
+                level_max,
+                wasmtime: "50.0.2".into(),
+                event_codec_ver: 1,
+                wit_lines: vec!["0.1".into()],
+            }
+        }
+
+        fn levels(&self) -> (u32, u32) {
+            let live = self.members.values().filter(|m| m.state != "removed");
+            let (mut lo, mut hi) = (u32::MAX, u32::MAX);
+            for m in live {
+                if let Some(v) = &m.version {
+                    lo = lo.min(v.level_min);
+                    hi = hi.min(v.level_max);
+                }
+            }
+            if lo == u32::MAX { (1, 1) } else { (lo, hi) }
+        }
+
+        fn role(&self, id: u64) -> &'static str {
+            if self.voters.contains(&id) {
+                "voter"
+            } else if self.learners.contains(&id) {
+                "learner"
+            } else {
+                "none"
+            }
+        }
+
+        fn status(&self) -> ClusterStatus {
+            let (level_min, level_max) = self.levels();
+            ClusterStatus {
+                cluster_id: FAKE_P13_CLUSTER_ID.into(),
+                members: self
+                    .members
+                    .values()
+                    .map(|m| ClusterMember {
+                        raft_role: self.role(m.node_id).into(),
+                        ..m.clone()
+                    })
+                    .collect(),
+                voters: self.voters.iter().copied().collect(),
+                learners: self.learners.iter().copied().collect(),
+                voters_outgoing: vec![],
+                meta_leader: self.voters.iter().next().copied().unwrap_or(0),
+                finalized: self.finalized,
+                hold: self.hold,
+                level_min,
+                level_max,
+                policy: self.policy.clone(),
+                reassignments: self.reassignments.values().cloned().collect(),
+            }
+        }
+
+        fn upgrade(&self) -> UpgradeStatus {
+            let (_, common) = self.levels();
+            UpgradeStatus {
+                finalized: self.finalized,
+                hold: self.hold,
+                common_level_max: common,
+                auto_finalize: false,
+                members: self
+                    .members
+                    .values()
+                    .filter(|m| m.state != "removed")
+                    .map(|m| MemberLevel {
+                        node_id: m.node_id,
+                        level_min: m.version.as_ref().map_or(1, |v| v.level_min),
+                        level_max: m.version.as_ref().map_or(1, |v| v.level_max),
+                        live: m.live,
+                    })
+                    .collect(),
+            }
+        }
+
+        fn member(&self, id: u64) -> Result<&ClusterMember, ApiError> {
+            self.members
+                .get(&id)
+                .filter(|m| m.state != "removed")
+                .ok_or_else(|| ApiError::not_found(format!("node {id} is not a member")))
+        }
+
+        fn require_cluster(&self) -> Result<(), ApiError> {
+            if self.initialized {
+                Ok(())
+            } else {
+                Err(ApiError::precondition_failed(
+                    "this node is not a cluster yet (POST /v1/cluster/init)",
+                ))
+            }
+        }
+    }
+
+    /// In-memory [`ClusterApi`] for adapter, CLI and parity tests. Deterministic: node ids
+    /// count from 2 after `init` (node 1), token ids are `njt_<n>` with secret
+    /// `njt_<n>.fake-secret-<n>`, times come from a fake clock starting at
+    /// [`FAKE_EPOCH_MS`].
+    ///
+    /// - `init` makes node 1 the only voter (`rf`/`min_insync` default 3/2, max voters 5);
+    ///   a second `init` is 409. Everything except `status`/`upgrade_status` before `init`
+    ///   is 412 `precondition_failed`.
+    /// - `join` needs a token from `create_node_token` (else 400 `join_token_invalid`,
+    ///   tokens are single-use); the joiner becomes a `joining` learner whose binary is
+    ///   the request's `node_version`. `resume_node_id` of a joining member returns it again.
+    /// - `remove` refuses (409 `quorum`) to remove the last voter, unless it is not a voter;
+    ///   removed members stay as `removed` tombstones. `drain` marks a member `draining`.
+    /// - `reassign` records an in-flight reassignment (409 `reassignment_in_progress` if one
+    ///   exists for the partition); `cancel` drops it (404 if none). `rebalance` is a no-op.
+    /// - Upgrades: `finalize` raises `finalized` to the lowest member `level_max` (409
+    ///   `held` while held); `hold` holds the current level; `release` clears it.
+    /// - [`FakeCluster::fail`] makes a method (by trait method name) answer an error.
+    #[derive(Default)]
+    pub struct FakeCluster {
+        state: Mutex<ClusterState>,
+    }
+
+    impl FakeCluster {
+        /// A single node, not yet a cluster.
+        pub fn new() -> Arc<Self> {
+            let fake = FakeCluster::default();
+            {
+                let mut st = fake.lock();
+                st.finalized = 1;
+                st.next_node = 2;
+                st.members.insert(
+                    1,
+                    ClusterMember {
+                        node_id: 1,
+                        addr: "127.0.0.1:7070".into(),
+                        cluster_addr: None,
+                        state: "active".into(),
+                        version: Some(ClusterState::version(2)),
+                        live: true,
+                        raft_role: "none".into(),
+                    },
+                );
+            }
+            Arc::new(fake)
+        }
+
+        fn lock(&self) -> MutexGuard<'_, ClusterState> {
+            self.state.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        fn check(&self, method: &str) -> Result<MutexGuard<'_, ClusterState>, ApiError> {
+            let st = self.lock();
+            match st.errors.get(method) {
+                Some(e) => Err(e.clone()),
+                None => Ok(st),
+            }
+        }
+
+        /// Make `method` (a [`ClusterApi`] method name) answer `err` (`None` clears it).
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            let mut st = self.lock();
+            match err {
+                Some(e) => st.errors.insert(method.to_owned(), e),
+                None => st.errors.remove(method),
+            };
+        }
+
+        /// Mark a member live / dead.
+        pub fn set_live(&self, id: u64, live: bool) {
+            if let Some(m) = self.lock().members.get_mut(&id) {
+                m.live = live;
+            }
+        }
+
+        /// Promote a joining learner to an active voter (what the reconciler does).
+        pub fn promote(&self, id: u64) {
+            let mut st = self.lock();
+            if let Some(m) = st.members.get_mut(&id) {
+                m.state = "active".into();
+                st.learners.remove(&id);
+                st.voters.insert(id);
+            }
+        }
+
+        /// Fill `ext.cluster` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.cluster = Some(Arc::clone(self) as Arc<dyn ClusterApi>);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClusterApi for FakeCluster {
+        async fn init(&self, r: InitRequest) -> Result<ClusterStatus, ApiError> {
+            let mut st = self.check("init")?;
+            if st.initialized {
+                return Err(reason(
+                    ErrorCode::Conflict,
+                    "this node is already a cluster".into(),
+                    "already_cluster",
+                ));
+            }
+            st.tick();
+            st.initialized = true;
+            st.voters.insert(1);
+            if let Some(m) = st.members.get_mut(&1) {
+                m.cluster_addr = Some(r.advertise.unwrap_or_else(|| "127.0.0.1:7071".into()));
+            }
+            st.policy = Some(ReplicationPolicyDto {
+                rf: r.rf.unwrap_or(3),
+                min_insync: r.min_insync.unwrap_or(2),
+                max_voters: 5,
+            });
+            Ok(st.status())
+        }
+
+        async fn join(&self, r: JoinRequest) -> Result<JoinResponse, ApiError> {
+            let mut st = self.check("join")?;
+            st.require_cluster()?;
+            let resumed = r
+                .resume_node_id
+                .filter(|id| st.members.get(id).is_some_and(|m| m.state == "joining"));
+            let id = match resumed {
+                Some(id) => id,
+                None => {
+                    if st.tokens.remove(&r.token).is_none() {
+                        return Err(reason(
+                            ErrorCode::InvalidArgument,
+                            "invalid node join token".into(),
+                            "join_token_invalid",
+                        ));
+                    }
+                    st.tick();
+                    let id = st.next_node;
+                    st.next_node += 1;
+                    st.members.insert(
+                        id,
+                        ClusterMember {
+                            node_id: id,
+                            addr: r.advertise.api.clone(),
+                            cluster_addr: Some(r.advertise.cluster.clone()),
+                            state: "joining".into(),
+                            version: Some(r.node_version.clone()),
+                            live: true,
+                            raft_role: "learner".into(),
+                        },
+                    );
+                    st.learners.insert(id);
+                    id
+                }
+            };
+            let seeds = st
+                .members
+                .values()
+                .filter(|m| m.node_id != id && m.state != "removed")
+                .map(|m| SeedDto {
+                    id: m.node_id,
+                    addr: m.cluster_addr.clone().unwrap_or_default(),
+                    repl_addr: None,
+                })
+                .collect();
+            Ok(JoinResponse {
+                node_id: id,
+                cluster_id: FAKE_P13_CLUSTER_ID.into(),
+                partitions: 16,
+                ca_cert_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
+                    .into(),
+                node_cert_pem: format!(
+                    "-----BEGIN CERTIFICATE-----\nfake-node-{id}\n-----END CERTIFICATE-----\n"
+                ),
+                seeds,
+                finalized_level: st.finalized,
+            })
+        }
+
+        async fn status(&self) -> Result<ClusterStatus, ApiError> {
+            Ok(self.check("status")?.status())
+        }
+
+        async fn create_node_token(
+            &self,
+            r: NodeTokenRequest,
+        ) -> Result<NodeTokenResponse, ApiError> {
+            let mut st = self.check("create_node_token")?;
+            st.require_cluster()?;
+            if r.ttl_secs == Some(0) {
+                return Err(ApiError::invalid_argument("ttl_secs must be > 0"));
+            }
+            let now = st.tick();
+            st.next_token += 1;
+            let n = st.next_token;
+            let token = format!("njt_{n}.fake-secret-{n}");
+            st.tokens.insert(token.clone(), n);
+            Ok(NodeTokenResponse {
+                id: format!("njt_{n}"),
+                token,
+                expires_at_ms: now + r.ttl_secs.unwrap_or(DEFAULT_TTL_SECS) * 1000,
+                ca_hash: FAKE_CA_HASH.into(),
+            })
+        }
+
+        async fn remove(&self, id: u64, force: bool) -> Result<ClusterStatus, ApiError> {
+            let mut st = self.check("remove")?;
+            st.require_cluster()?;
+            let live = st.member(id)?.live;
+            if st.voters.contains(&id) && st.voters.len() == 1 {
+                return Err(reason(
+                    ErrorCode::Conflict,
+                    format!("removing node {id} would leave no meta voter"),
+                    "quorum",
+                ));
+            }
+            if !live && !force {
+                return Err(ApiError::unavailable(format!(
+                    "node {id} is not live; use force to remove it without waiting"
+                )));
+            }
+            st.tick();
+            st.voters.remove(&id);
+            st.learners.remove(&id);
+            if let Some(m) = st.members.get_mut(&id) {
+                m.state = "removed".into();
+                m.live = false;
+            }
+            Ok(st.status())
+        }
+
+        async fn drain(&self, id: u64) -> Result<ClusterStatus, ApiError> {
+            let mut st = self.check("drain")?;
+            st.require_cluster()?;
+            st.member(id)?;
+            st.tick();
+            if let Some(m) = st.members.get_mut(&id) {
+                m.state = "draining".into();
+            }
+            Ok(st.status())
+        }
+
+        async fn reassign(&self, r: ReassignRequest) -> Result<ClusterStatus, ApiError> {
+            let mut st = self.check("reassign")?;
+            st.require_cluster()?;
+            if r.cancel {
+                if st.reassignments.remove(&r.partition).is_none() {
+                    return Err(ApiError::not_found(format!(
+                        "partition {} has no reassignment in flight",
+                        r.partition
+                    )));
+                }
+                st.tick();
+                return Ok(st.status());
+            }
+            if st.reassignments.contains_key(&r.partition) {
+                return Err(reason(
+                    ErrorCode::Conflict,
+                    format!("partition {} is already being reassigned", r.partition),
+                    "reassignment_in_progress",
+                ));
+            }
+            for id in &r.replicas {
+                st.member(*id)?;
+            }
+            let now = st.tick();
+            st.reassignments.insert(
+                r.partition,
+                ReassignmentDto {
+                    partition: r.partition,
+                    target: r.replicas.clone(),
+                    adding: r.replicas,
+                    removing: vec![],
+                    started_at_ms: now,
+                },
+            );
+            Ok(st.status())
+        }
+
+        async fn rebalance(&self) -> Result<ClusterStatus, ApiError> {
+            let st = self.check("rebalance")?;
+            st.require_cluster()?;
+            Ok(st.status())
+        }
+
+        async fn upgrade_status(&self) -> Result<UpgradeStatus, ApiError> {
+            Ok(self.check("upgrade_status")?.upgrade())
+        }
+
+        async fn upgrade_finalize(&self) -> Result<UpgradeStatus, ApiError> {
+            let mut st = self.check("upgrade_finalize")?;
+            if let Some(h) = st.hold {
+                return Err(reason(
+                    ErrorCode::Conflict,
+                    format!("the cluster is held at level {h}"),
+                    "held",
+                ));
+            }
+            let (_, common) = st.levels();
+            if common > st.finalized {
+                st.tick();
+                st.finalized = common;
+            }
+            Ok(st.upgrade())
+        }
+
+        async fn upgrade_hold(&self) -> Result<UpgradeStatus, ApiError> {
+            let mut st = self.check("upgrade_hold")?;
+            st.tick();
+            st.hold = Some(st.finalized);
+            Ok(st.upgrade())
+        }
+
+        async fn upgrade_release(&self) -> Result<UpgradeStatus, ApiError> {
+            let mut st = self.check("upgrade_release")?;
+            st.tick();
+            st.hold = None;
+            Ok(st.upgrade())
+        }
+    }
+
+    /// Outcome of one run in [`FakeModuleLifecycle`]'s migration.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum FakeMigrateOutcome {
+        /// Replays cleanly (repinned unless dry run).
+        Pass,
+        /// Diverges at `seq` with `detail`.
+        Fail { seq: u64, detail: String },
+        /// Leased (`RunBusy`).
+        Busy,
+        /// Progressed since the check (`SeqMismatch`).
+        SeqMismatch,
+    }
+
+    #[derive(Default)]
+    struct LifecycleState {
+        clock: u64,
+        /// sha -> (versions, active, retired_at_ms)
+        modules: BTreeMap<String, (Vec<WorkflowVersionRef>, bool, Option<u64>)>,
+        referenced: BTreeSet<String>,
+        deleted: BTreeSet<String>,
+        /// run id -> (workflow, outcome)
+        runs: BTreeMap<String, (String, FakeMigrateOutcome)>,
+        migrations: Vec<MigrateRunsRequest>,
+        errors: BTreeMap<String, ApiError>,
+    }
+
+    /// In-memory [`ModuleLifecycleApi`] for adapter, CLI and parity tests.
+    ///
+    /// - Modules are seeded with [`FakeModuleLifecycle::add_module`]; retiring an unknown
+    ///   module is 404, an active one 409, a retired one 409 `module_retired`.
+    /// - A GC round deletes every retired module not marked referenced
+    ///   ([`FakeModuleLifecycle::set_referenced`]); deleted modules are gone (404 after).
+    /// - Migration processes the seeded runs of the workflow in run-id order up to `limit`;
+    ///   `Pass` runs are `passed` and, unless dry run, `repinned`.
+    #[derive(Default)]
+    pub struct FakeModuleLifecycle {
+        state: Mutex<LifecycleState>,
+    }
+
+    impl FakeModuleLifecycle {
+        /// Empty fake.
+        pub fn new() -> Arc<Self> {
+            Arc::new(FakeModuleLifecycle::default())
+        }
+
+        fn lock(&self) -> MutexGuard<'_, LifecycleState> {
+            self.state.lock().unwrap_or_else(|p| p.into_inner())
+        }
+
+        fn check(&self, method: &str) -> Result<MutexGuard<'_, LifecycleState>, ApiError> {
+            let st = self.lock();
+            match st.errors.get(method) {
+                Some(e) => Err(e.clone()),
+                None => Ok(st),
+            }
+        }
+
+        /// Make `method` (a [`ModuleLifecycleApi`] method name) answer `err`.
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            let mut st = self.lock();
+            match err {
+                Some(e) => st.errors.insert(method.to_owned(), e),
+                None => st.errors.remove(method),
+            };
+        }
+
+        /// Seed a module with its workflow versions; `active` = a version is active.
+        pub fn add_module(&self, sha: &str, versions: &[(&str, u32)], active: bool) {
+            let versions = versions
+                .iter()
+                .map(|(n, v)| WorkflowVersionRef {
+                    name: (*n).to_owned(),
+                    version: *v,
+                })
+                .collect();
+            self.lock()
+                .modules
+                .insert(sha.to_owned(), (versions, active, None));
+        }
+
+        /// Mark a module as still referenced by some run.
+        pub fn set_referenced(&self, sha: &str, referenced: bool) {
+            let mut st = self.lock();
+            if referenced {
+                st.referenced.insert(sha.to_owned());
+            } else {
+                st.referenced.remove(sha);
+            }
+        }
+
+        /// Seed a run of `workflow` with its migration outcome.
+        pub fn add_run(&self, run_id: &str, workflow: &str, outcome: FakeMigrateOutcome) {
+            self.lock()
+                .runs
+                .insert(run_id.to_owned(), (workflow.to_owned(), outcome));
+        }
+
+        /// Every migration request received.
+        pub fn migrations(&self) -> Vec<MigrateRunsRequest> {
+            self.lock().migrations.clone()
+        }
+
+        /// Fill `ext.module_lifecycle` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.module_lifecycle = Some(Arc::clone(self) as Arc<dyn ModuleLifecycleApi>);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModuleLifecycleApi for FakeModuleLifecycle {
+        async fn retire_module(&self, sha: String) -> Result<RetireModuleResponse, ApiError> {
+            let mut st = self.check("retire_module")?;
+            st.clock += 1;
+            let now = FAKE_EPOCH_MS + st.clock * FAKE_TICK_MS;
+            let Some((versions, active, retired)) = st.modules.get_mut(&sha) else {
+                return Err(ApiError::not_found(format!("module {sha} not found")));
+            };
+            if retired.is_some() {
+                return Err(reason(
+                    ErrorCode::Conflict,
+                    format!("module {sha} is already retired"),
+                    "module_retired",
+                ));
+            }
+            if *active {
+                return Err(ApiError::conflict(format!(
+                    "module {sha} has an active workflow version"
+                )));
+            }
+            *retired = Some(now);
+            Ok(RetireModuleResponse {
+                sha256: sha,
+                retired_at_ms: now,
+                versions: versions.clone(),
+            })
+        }
+
+        async fn run_module_gc(&self) -> Result<GcRunReport, ApiError> {
+            let mut st = self.check("run_module_gc")?;
+            let candidates: Vec<String> = st
+                .modules
+                .iter()
+                .filter(|(_, (_, _, r))| r.is_some())
+                .map(|(s, _)| s.clone())
+                .collect();
+            let (referenced, deleted): (Vec<String>, Vec<String>) = candidates
+                .iter()
+                .cloned()
+                .partition(|s| st.referenced.contains(s));
+            for s in &deleted {
+                st.modules.remove(s);
+                st.deleted.insert(s.clone());
+            }
+            Ok(GcRunReport {
+                candidates,
+                deleted,
+                referenced,
+                postponed: false,
+                reason: None,
+            })
+        }
+
+        async fn migrate_runs(&self, r: MigrateRunsRequest) -> Result<MigrateRunsReport, ApiError> {
+            let mut st = self.check("migrate_runs")?;
+            st.migrations.push(r.clone());
+            let limit = r.limit.map_or(usize::MAX, |l| l as usize);
+            let mut out = MigrateRunsReport::default();
+            let runs: Vec<(String, FakeMigrateOutcome)> = st
+                .runs
+                .iter()
+                .filter(|(_, (w, _))| *w == r.workflow)
+                .take(limit)
+                .map(|(id, (_, o))| (id.clone(), o.clone()))
+                .collect();
+            for (id, o) in runs {
+                match o {
+                    FakeMigrateOutcome::Pass => {
+                        out.passed.push(id.clone());
+                        if !r.dry_run {
+                            out.repinned.push(id);
+                        }
+                    }
+                    FakeMigrateOutcome::Fail { seq, detail } => out.failed.push(MigrateFailure {
+                        run_id: id,
+                        seq,
+                        detail,
+                    }),
+                    FakeMigrateOutcome::Busy => out.busy.push(id),
+                    FakeMigrateOutcome::SeqMismatch => out.seq_mismatch.push(id),
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

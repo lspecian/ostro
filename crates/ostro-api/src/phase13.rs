@@ -85,7 +85,9 @@ pub struct NodeVersionDto {
 }
 
 /// `POST /v1/cluster/join` (D-P13-9).
+// 13-03: OpenAPI name `ClusterJoinRequest` (Phase 7's worker `JoinRequest` owns the plain name).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[schema(as = ClusterJoinRequest)]
 pub struct JoinRequest {
     /// Node join token (`njt_…`).
     pub token: String,
@@ -113,7 +115,9 @@ pub struct SeedDto {
 }
 
 /// Answer of a join.
+// 13-03: OpenAPI name `ClusterJoinResponse` (Phase 7's worker `JoinResponse` owns the plain name).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[schema(as = ClusterJoinResponse)]
 pub struct JoinResponse {
     /// The allocated (or resumed) node id.
     pub node_id: u64,
