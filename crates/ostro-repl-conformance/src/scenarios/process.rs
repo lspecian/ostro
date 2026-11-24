@@ -702,9 +702,11 @@ pub mod tools {
             if *cur != failed {
                 return;
             }
-            match hint {
-                Some(addr) => *cur = format!("http://{addr}"),
-                None => {
+            // A hint naming the node that just refused (a stale view, e.g. a cut-off old
+            // leader that still sees itself in its meta record) is not followed: rotate.
+            match hint.map(|addr| format!("http://{addr}")) {
+                Some(next) if next != failed => *cur = next,
+                _ => {
                     let i = self.bases.iter().position(|b| b == failed).unwrap_or(0);
                     *cur = self.bases[(i + 1) % self.bases.len()].clone();
                 }
