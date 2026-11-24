@@ -354,8 +354,9 @@ async fn drain_evicts_and_exits_cleanly() {
 #[tokio::test]
 async fn drain_flushes_unflushed_events_and_reports_evicted() {
     let h = Harness::new(FakeConfig::default()).await;
-    // ~1 s of steps here (~30 us each), under the 50,000-event history limit.
-    let n: u32 = 45_000;
+    // ~1.6 s of steps on x86-64 WSL2 (~33 us each), under the 50,000-event history limit;
+    // macos-aarch64 CI ran 45,000 of them in under ~0.35 s.
+    let n: u32 = 49_000;
     // Warm the worker's module cache so the long activation starts running at once.
     let warm = run_id(30);
     let sha = h.seed("trivial-steps", "trivial-steps", &warm, json!({"n": 1}));
@@ -368,9 +369,19 @@ async fn drain_flushes_unflushed_events_and_reports_evicted() {
         .wait_for(T, "warm-up Done", |st| !st.dones(&warm).is_empty())
         .await;
     assert!(h.st().send(activate(&id, 1, &sha, 1)));
+    let rid = ostro_types::RunId::from_bytes(&id)
+        .expect("run id")
+        .to_string();
+    w.wait_event(
+        T,
+        "the long activation started",
+        |e| matches!(e, WorkerEvent::ActivationStarted { run_id, .. } if *run_id == rid),
+    )
+    .await;
     // Mid-run: steps completed, their events still unflushed (the engine flushes at a
-    // park, a step retry or the end of the activation).
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // park, a step retry or the end of the activation). The module is warm, so the guest
+    // runs within milliseconds of the start.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         h.st().dones(&id).is_empty(),
         "the run ended before the drain"
