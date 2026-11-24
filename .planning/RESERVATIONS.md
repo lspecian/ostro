@@ -451,6 +451,7 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Id prefix / token scope | `njt_` node join tokens, scope `node:join` (`ApiToken{id: "njt_<id>", scopes: ["node:join"]}`, D-P13-9) | P13 (13-01 row; 13-09) |
 | Data-dir file | `<data>/cluster-seeds.toml` `{node_id, cluster_id, seeds}` (durable join marker, written first by `ostro cluster join`, D-P13-9 / D-P13-29) | P13 (13-01 row; 13-09) |
 | Headers | `ostro-hop`, `ostro-partition`, `ostro-partitions`, `ostro-principal`, `ostro-consistency`, `ostro-read-after` | P13 (13-01 row; 13-03 / 13-12 / 13-13) |
+| Header | `ostro-deadline-ms` (REST remaining deadline in ms, the twin of `grpc-timeout`) | P13 (13-03) |
 | API error `details.reason` values | `feature_not_enabled`, `module_retired`, `module_gone`, `leader_changed` | P13 (13-01 row) |
 | Env vars | `OSTRO_TEST_LEVEL_MAX` (read only with `ostro-types/level-emulation`), `OSTRO_PREV_BIN`, `OSTRO_UPGRADE_ITERS`, `OSTRO_P13_REQUIRE_ALL` | P13 (13-01 row) |
 | Cargo features | `level-emulation` (crate `ostro-types`; enabled only through the failpoints chains of `ostro-server`, `ostro`, `ostro-repl-conformance`), `wit-next-fixture` (crate `ostro-engine`) | P13 (13-01 Task 2 manifests) |
