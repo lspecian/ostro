@@ -37,7 +37,7 @@ use ostro_meta::{
     META_FORMAT, MetaCommand, MetaError, MetaHandle, MetaKey, MetaRecord, MetaResult, MetaState,
     MetaView,
 };
-use ostro_partition::{Clock, SystemClock};
+use ostro_partition::Clock;
 use ostro_types::compat::{Feature, LEVEL_MIN};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -201,6 +201,18 @@ pub fn check_meta_format(found: u8) -> Result<(), CompatError> {
     }
 }
 
+/// Map a [`MetaError`] to the fence's message family: 13-05's
+/// [`MetaError::NewerFormat`] is [`CompatError::NewerMetaFormat`]; other errors go through
+/// [`meta_open_error`] (string form, e.g. from `identity::probe_meta`).
+pub fn meta_error(err: &MetaError) -> Option<CompatError> {
+    match err {
+        MetaError::NewerFormat { found, .. } => {
+            Some(CompatError::NewerMetaFormat { found: *found })
+        }
+        e => meta_open_error(&e.to_string()),
+    }
+}
+
 /// Map an error from opening meta (`MetaHandle::start_with`, `identity::probe_meta`) to the
 /// fence's message family: a "unknown metadata format byte N" decode error with `N` above
 /// this build's [`META_FORMAT`] is [`CompatError::NewerMetaFormat`]. Anything else is
@@ -221,7 +233,7 @@ pub async fn boot_fence(meta: &MetaHandle, level_max: u32) -> Result<(), CompatE
     match tokio::time::timeout(BOOT_FENCE_CATCH_UP, meta.wait_ready()).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            if let Some(c) = meta_open_error(&e.to_string()) {
+            if let Some(c) = meta_error(&e) {
                 return Err(c);
             }
             // Not a compatibility verdict: the caller's meta checks report it. Use what
@@ -231,6 +243,11 @@ pub async fn boot_fence(meta: &MetaHandle, level_max: u32) -> Result<(), CompatE
         Err(_) => {
             tracing::warn!("boot fence: meta did not catch up in time; checking the local view");
         }
+    }
+    if let Some(found) = meta.view().newer_format() {
+        let e = CompatError::NewerMetaFormat { found };
+        tracing::error!(found, "boot fence refused: {e}");
+        return Err(e);
     }
     let finalized = meta.view().read(finalized_level);
     let r = fence(finalized, level_max);
@@ -376,19 +393,20 @@ pub async fn advertise_once(
     )))
 }
 
-/// Keep this node's `Member` ext 96 (NodeVersion) current, with the system clock and the
-/// default [`AdvertiserConfig`].
+/// Keep this node's `Member` ext 96 (NodeVersion) current, with the node's injected clock
+/// (`reported_at_ms`) and the default [`AdvertiserConfig`].
 pub fn start_advertiser(
     meta: Arc<MetaHandle>,
     node_id: u64,
     version: NodeVersion,
+    clock: Arc<dyn Clock>,
     stop: CancellationToken,
 ) -> JoinHandle<()> {
     start_advertiser_with(
         meta,
         node_id,
         version,
-        Arc::new(SystemClock),
+        clock,
         AdvertiserConfig::default(),
         stop,
     )
@@ -445,7 +463,7 @@ pub fn running_fence_message(finalized: u32, level_max: u32) -> String {
 }
 
 /// Fail-stop when the finalized level rises above `level_max` (`on_fatal` gets the message,
-/// once; the task then ends). Checks at start and after every applied meta change.
+/// once; the task then ends). Checks at start, after every applied meta change and every raft status change; also fail-stops on a refused newer meta format or a halted meta apply (13-05).
 pub fn start_running_fence(
     meta: Arc<MetaHandle>,
     level_max: u32,
@@ -454,20 +472,40 @@ pub fn start_running_fence(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut applied = meta.view().subscribe();
+        let mut raft = meta.raft().subscribe();
         loop {
-            let finalized = meta.view().read(finalized_level);
-            if finalized > level_max {
-                let msg = running_fence_message(finalized, level_max);
-                tracing::error!(finalized, level_max, "{msg}");
+            if let Some(msg) = running_fence_verdict(&meta, level_max) {
+                tracing::error!(level_max, "{msg}");
                 on_fatal(msg);
                 return;
             }
             tokio::select! {
                 _ = stop.cancelled() => return,
                 r = applied.changed() => if r.is_err() { return },
+                r = raft.changed() => if r.is_err() { return },
             }
         }
     })
+}
+
+/// The running fence's fail-stop reason, if any: finalized above `level_max`, a refused
+/// newer meta format (`MetaView::newer_format`, 13-05), or a metadata apply halted on
+/// unknown input (`RaftStatus::fatal`, 13-05).
+fn running_fence_verdict(meta: &MetaHandle, level_max: u32) -> Option<String> {
+    let finalized = meta.view().read(finalized_level);
+    if finalized > level_max {
+        return Some(running_fence_message(finalized, level_max));
+    }
+    if let Some(found) = meta.view().newer_format() {
+        return Some(format!(
+            "running fence: {}; stopping",
+            CompatError::NewerMetaFormat { found }
+        ));
+    }
+    meta.raft()
+        .status()
+        .fatal
+        .map(|f| format!("running fence: metadata apply halted ({f}); stopping"))
 }
 
 #[cfg(test)]
@@ -526,6 +564,17 @@ mod tests {
         );
         assert_eq!(meta_open_error("disk full"), None);
         assert_eq!(check_meta_format(META_FORMAT), Ok(()));
+        let e = MetaError::NewerFormat {
+            found: META_FORMAT + 1,
+            supported: META_FORMAT,
+        };
+        assert_eq!(
+            meta_error(&e),
+            Some(CompatError::NewerMetaFormat {
+                found: META_FORMAT + 1
+            })
+        );
+        assert_eq!(meta_error(&MetaError::Timeout), None);
     }
 
     #[test]

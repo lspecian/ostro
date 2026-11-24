@@ -27,7 +27,7 @@ use ostro_meta::ext::{
     put_cluster_version,
 };
 use ostro_meta::{MetaCommand, MetaHandle, MetaKey, MetaRecord, MetaResult, MetaState};
-use ostro_partition::{Clock, SystemClock};
+use ostro_partition::Clock;
 use ostro_types::compat::LEVEL_MIN;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -184,11 +184,13 @@ impl Default for FinalizerConfig {
     }
 }
 
-/// The meta leader's auto-finalizer, with the system clock and the default liveness window.
+/// The meta leader's auto-finalizer, with the node's injected clock (`finalized_at_ms`) and
+/// the default liveness window.
 pub fn start_finalizer(
     meta: Arc<MetaHandle>,
     auto_finalize: bool,
     interval: Duration,
+    clock: Arc<dyn Clock>,
     stop: CancellationToken,
 ) -> JoinHandle<()> {
     start_finalizer_with(
@@ -198,7 +200,7 @@ pub fn start_finalizer(
             interval,
             live_window: LIVE_WINDOW,
         },
-        Arc::new(SystemClock),
+        clock,
         stop,
     )
 }
@@ -216,6 +218,7 @@ pub fn start_finalizer_with(
         loop {
             let status = meta.raft().status();
             if status.is_leader {
+                // clock-exempt: leadership-tenure duration (monotonic), never a timestamp
                 let since = *leader_since.get_or_insert_with(tokio::time::Instant::now);
                 let alone = status.voters.len() + status.learners.len() <= 1;
                 if alone || since.elapsed() >= cfg.live_window {
