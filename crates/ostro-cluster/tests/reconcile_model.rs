@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ostro_cluster::membership::reconcile::{next, MemberObs, ReconcileInput, Step};
+use ostro_cluster::membership::reconcile::{MemberObs, ReconcileInput, Step, next};
 use ostro_meta::ext::{MEMBER_ACTIVE, MEMBER_DRAINING, MEMBER_JOINING, MEMBER_REMOVED};
 use proptest::prelude::*;
 
@@ -88,7 +88,11 @@ fn growth_waits_for_two_caught_up_learners() {
     let i = input(
         &[1],
         &[2, 3],
-        vec![active(1), active(2), m(3, MEMBER_ACTIVE, true, COMMIT - LAG - 1)],
+        vec![
+            active(1),
+            active(2),
+            m(3, MEMBER_ACTIVE, true, COMMIT - LAG - 1),
+        ],
     );
     assert_eq!(next(&i), Step::None);
 }
@@ -169,7 +173,11 @@ fn removing_self_transfers_leadership_first() {
             active(3),
         ],
     );
-    assert_eq!(next(&i), Step::TransferLeader(3), "best caught-up live voter");
+    assert_eq!(
+        next(&i),
+        Step::TransferLeader(3),
+        "best caught-up live voter"
+    );
     let i = input(
         &[1, 2, 3],
         &[],
@@ -229,11 +237,7 @@ fn replace_is_one_auto_joint_change() {
 
 #[test]
 fn removed_learner_is_removed() {
-    let i = input(
-        &[1],
-        &[2],
-        vec![active(1), m(2, MEMBER_REMOVED, false, 0)],
-    );
+    let i = input(&[1], &[2], vec![active(1), m(2, MEMBER_REMOVED, false, 0)]);
     assert_eq!(next(&i), Step::RemoveLearner(2));
 }
 
@@ -267,7 +271,11 @@ fn dead_voter_is_not_dropped_without_a_replacement() {
             active(4),
         ],
     );
-    assert_eq!(next(&i), joint(&[4], &[], &[3]), "replaced by a caught-up learner");
+    assert_eq!(
+        next(&i),
+        joint(&[4], &[], &[3]),
+        "replaced by a caught-up learner"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -333,6 +341,14 @@ fn action() -> impl Strategy<Value = Action> {
     ]
 }
 
+fn largest_odd(n: u64) -> u64 {
+    if n.is_multiple_of(2) {
+        n.saturating_sub(1)
+    } else {
+        n
+    }
+}
+
 fn majority(n: usize) -> usize {
     n / 2 + 1
 }
@@ -363,17 +379,49 @@ impl Model {
         }
     }
 
+    /// A grown cluster: members `1..=n` Active, live and caught up; voters the first `k`
+    /// (odd, ≤ max_voters), learners the next `l`.
+    fn grown(max_voters: u8, n: u64, k: u64, l: u64) -> Self {
+        let mut model = Model::new(max_voters);
+        let cap = largest_odd(n.min(u64::from(max_voters.max(1))));
+        let k = largest_odd(k.clamp(1, cap));
+        model.commit = 500;
+        for id in 1..=n {
+            model.members.insert(
+                id,
+                Mem {
+                    state: MEMBER_ACTIVE,
+                    live: true,
+                    matched: 500,
+                    snap: false,
+                },
+            );
+            if id <= k {
+                model.voters.insert(id);
+            } else if id <= k + l {
+                model.learners.insert(id);
+            }
+        }
+        model.next_id = n + 1;
+        model
+    }
+
     fn pick(&self, i: usize) -> u64 {
         let ids: Vec<u64> = self.members.keys().copied().collect();
         ids[i % ids.len()]
     }
 
     /// The driver-side precondition for Drain/Remove (13-09 `check_remove` shape): a voter
-    /// may leave only while another live Active voter stays and the remaining voters keep a
-    /// live quorum, so the last Active voter never leaves.
+    /// may leave only while no conf change is pending or joint, another live Active voter
+    /// stays and the remaining voters keep a live quorum, so the last Active voter never
+    /// leaves (the reconciler never demotes the leader itself, so a leader left as the
+    /// only voter with no Active voter to transfer to could not leave).
     fn may_leave(&self, id: u64) -> bool {
         if !self.voters.contains(&id) && !self.outgoing.contains(&id) {
             return true;
+        }
+        if self.pending.is_some() || !self.outgoing.is_empty() {
+            return false;
         }
         let rest: BTreeSet<u64> = self
             .voters
@@ -390,11 +438,12 @@ impl Model {
     /// A leader outside the incoming voters (only after leaving a joint config it entered
     /// under another leader) is replaced by a live incoming voter.
     fn reelect_if_not_voter(&mut self) {
-        if self.outgoing.is_empty() && !self.voters.contains(&self.me) {
-            if let Some(v) = self.voters.iter().copied().find(|v| self.live(*v)) {
-                self.me = v;
-                self.pending = None;
-            }
+        if self.outgoing.is_empty()
+            && !self.voters.contains(&self.me)
+            && let Some(v) = self.voters.iter().copied().find(|v| self.live(*v))
+        {
+            self.me = v;
+            self.pending = None;
         }
     }
 
@@ -415,7 +464,11 @@ impl Model {
                     id,
                     state: x.state,
                     live: x.live,
-                    matched: if id == self.me { self.commit } else { x.matched },
+                    matched: if id == self.me {
+                        self.commit
+                    } else {
+                        x.matched
+                    },
                     pending_snapshot: x.snap,
                 })
                 .collect(),
@@ -496,7 +549,7 @@ impl Model {
                 if new == self.voters {
                     return Err("empty joint change".into());
                 }
-                if new.len() % 2 == 0 || self.voters.len() % 2 == 0 {
+                if new.len().is_multiple_of(2) || self.voters.len().is_multiple_of(2) {
                     return Err(format!("even half: {:?} -> {new:?}", self.voters));
                 }
                 if new.len() > max {
@@ -518,10 +571,10 @@ impl Model {
     }
 
     fn check_config(&self) -> Result<(), String> {
-        if self.voters.len() % 2 == 0 {
+        if self.voters.len().is_multiple_of(2) {
             return Err(format!("even incoming voters {:?}", self.voters));
         }
-        if !self.outgoing.is_empty() && self.outgoing.len() % 2 == 0 {
+        if !self.outgoing.is_empty() && self.outgoing.len().is_multiple_of(2) {
             return Err(format!("even outgoing voters {:?}", self.outgoing));
         }
         if self.voters.len() > usize::from(self.max_voters.max(1)) && self.outgoing.is_empty() {
@@ -727,7 +780,10 @@ impl Model {
             ));
         }
         if !self.voters.is_subset(&active) {
-            return Err(format!("non-Active voter after settling: {:?}", self.voters));
+            return Err(format!(
+                "non-Active voter after settling: {:?}",
+                self.voters
+            ));
         }
         for (id, x) in &self.members {
             let wanted = x.state == MEMBER_JOINING || x.state == MEMBER_ACTIVE;
@@ -743,9 +799,11 @@ proptest! {
     #[test]
     fn membership_model(
         max_voters in prop_oneof![Just(1u8), Just(3), Just(4), Just(5), Just(7)],
+        shape in (1u64..=7, 1u64..=7, 0u64..=7),
         actions in proptest::collection::vec(action(), 1..120),
     ) {
-        let mut model = Model::new(max_voters);
+        let (n, k, l) = shape;
+        let mut model = Model::grown(max_voters, n, k, l);
         for a in &actions {
             if let Err(e) = model.act(a) {
                 prop_assert!(false, "after {a:?}: {e}\nmodel: {model:?}");
