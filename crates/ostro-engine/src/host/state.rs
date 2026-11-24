@@ -562,7 +562,14 @@ impl HasLimits for HostState {
     }
 }
 
-const JOURNAL_IFACE: &str = "ostro:runtime/journal@0.1.0";
+/// The journal interface name the fuel-aware overrides shadow: derived from
+/// [`WIT_0_1_LATEST`](crate::host::linker_set::WIT_0_1_LATEST) (13-07). It must be the
+/// exact name bindgen defines (the newest `0.1.N`): an older exact name would create a
+/// second journal instance holding only the two overrides, which Wasmtime prefers over
+/// the semver match, and every guest importing that version would fail to instantiate.
+pub fn journal_iface() -> String {
+    crate::host::linker_set::ostro_iface("journal", crate::host::linker_set::WIT_0_1_LATEST)
+}
 
 /// Apply a lazily pending outer-fuel restore (a budgeted step was dropped open).
 fn apply_fuel_restore(store: &mut StoreContextMut<'_, HostState>) -> wasmtime::Result<()> {
@@ -580,13 +587,31 @@ fn apply_fuel_restore(store: &mut StoreContextMut<'_, HostState>) -> wasmtime::R
 /// with `func_wrap` / `func_wrap_async` (shadowing the bindgen ones) and receive
 /// `StoreContextMut`.
 pub fn build_linker(engine: &Engine) -> wasmtime::Result<Linker<HostState>> {
+    build_line_linker(engine, &journal_iface(), |linker| {
+        Workflow::add_to_linker::<_, HasSelf<_>>(linker, |h| h)
+    })
+}
+
+/// Build one WIT line's linker (13-07): `add_bindings` defines that line's bindgen imports
+/// (only the newest version of the line), then the deterministic WASI shim, then the
+/// fuel-aware `begin-step` / `[method]step.complete` shadowing the bindgen ones in
+/// `journal_iface` (which must be the exact journal name `add_bindings` defined).
+///
+/// The overrides are typed with the 0.1 bindings; Wasmtime type-checks host functions
+/// structurally (and the `step` resource as the host type [`StepRep`]), so they also fit
+/// a line whose journal signatures are unchanged.
+pub(crate) fn build_line_linker(
+    engine: &Engine,
+    journal_iface: &str,
+    add_bindings: impl FnOnce(&mut Linker<HostState>) -> wasmtime::Result<()>,
+) -> wasmtime::Result<Linker<HostState>> {
     let mut linker: Linker<HostState> = Linker::new(engine);
-    Workflow::add_to_linker::<_, HasSelf<_>>(&mut linker, |h| h)?;
+    add_bindings(&mut linker)?;
     crate::host::wasi::add_to_linker(&mut linker)?;
 
     linker.allow_shadowing(true);
     {
-        let mut inst = linker.instance(JOURNAL_IFACE)?;
+        let mut inst = linker.instance(journal_iface)?;
         inst.func_wrap(
             "begin-step",
             |mut store: StoreContextMut<'_, HostState>,

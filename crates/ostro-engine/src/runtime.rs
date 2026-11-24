@@ -7,6 +7,11 @@
 //! cache ([`AotCache`], compile at deploy, ENG-07); every component loaded from L1 or
 //! compiled fresh is validated against the production linker before it is
 //! pre-instantiated. [`Runtime::prepare`] is the uncached path (tests/tools).
+//!
+//! WIT lines (13-07, ENG-10): the runtime holds a [`LinkerSet`]; a module is validated
+//! against its line's linker and both cache levels key on the line (the L1 AOT key via
+//! [`AotCache::component_for`], the L2 map by `(line, sha)`). Only the `0.1` line has an
+//! activation driver; the test-only `0.2` fixture line validates but is not executable.
 //! [`Runtime::activate`] runs one activation through [`crate::activation`];
 //! [`Runtime::live_activations`] counts the activations running right now (WF-04: a
 //! sleeping run holds no activation, so the gauge is 0 once every run has evicted).
@@ -50,7 +55,8 @@ use crate::engine::{OstroEngine, PoolMode, configure_store};
 use crate::env::{Clock, SystemClock};
 use crate::error::{EngineError, EvictReason};
 use crate::host::bindings::WorkflowPre;
-use crate::host::state::{HostInit, HostState, HotWait, build_linker};
+use crate::host::linker_set::{LinkerSet, WitLine, WitSelection, line_from_bytes};
+use crate::host::state::{HostInit, HostState, HotWait};
 use crate::limits::ParkedRegistry;
 use crate::sink::{Activate, ActivationOutcome, ActivationSink, RunRef};
 use crate::validate::{ValidatedComponent, reject_core_module, validate_loaded};
@@ -104,10 +110,10 @@ impl Default for RuntimeOptions {
     }
 }
 
-/// Engine + production linker + clock + token key.
+/// Engine + production linkers (one per WIT line) + clock + token key.
 pub struct Runtime {
     engine: OstroEngine,
-    linker: Linker<HostState>,
+    linkers: LinkerSet,
     parked: Arc<ParkedRegistry>,
     aot: Option<AotCache>,
     l2: Mutex<InstancePreLru>,
@@ -136,18 +142,21 @@ impl Drop for LiveGuard<'_> {
     }
 }
 
-/// L2 cache: prepared modules by SHA-256, evicting the least recently used.
+/// L2 key: the module's WIT line and SHA-256 (13-07).
+type L2Key = (WitLine, [u8; 32]);
+
+/// L2 cache: prepared modules by WIT line and SHA-256, evicting the least recently used.
 #[derive(Default)]
 struct InstancePreLru {
     tick: u64,
-    map: HashMap<[u8; 32], (Arc<Prepared>, u64)>,
+    map: HashMap<L2Key, (Arc<Prepared>, u64)>,
 }
 
 impl InstancePreLru {
-    fn get(&mut self, sha: &[u8; 32]) -> Option<Arc<Prepared>> {
+    fn get(&mut self, key: &L2Key) -> Option<Arc<Prepared>> {
         self.tick += 1;
         let tick = self.tick;
-        self.map.get_mut(sha).map(|(p, t)| {
+        self.map.get_mut(key).map(|(p, t)| {
             *t = tick;
             p.clone()
         })
@@ -157,7 +166,7 @@ impl InstancePreLru {
     fn insert(&mut self, p: Arc<Prepared>, capacity: usize) -> Arc<Prepared> {
         self.tick += 1;
         let tick = self.tick;
-        let entry = self.map.entry(p.sha).or_insert((p, tick));
+        let entry = self.map.entry((p.wit.line, p.sha)).or_insert((p, tick));
         entry.1 = tick;
         let out = entry.0.clone();
         while self.map.len() > capacity.max(1) {
@@ -200,6 +209,8 @@ pub struct Prepared {
     /// Largest initial linear memory any of its core modules declares, in bytes (the
     /// smallest `max_memory_size` it can start with).
     pub min_memory_bytes: u64,
+    /// The module's WIT line and minimum feature level (13-07).
+    pub wit: WitSelection,
     /// Calibrated weight, measured once (09-07).
     weight: tokio::sync::OnceCell<u32>,
     component: Component,
@@ -238,10 +249,26 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 impl Runtime {
-    /// Build the engine (pool, epoch ticker, memory budget) and the production linker.
+    /// Build the engine (pool, epoch ticker, memory budget) and the production linkers
+    /// ([`LinkerSet::new`]).
     pub fn new(cfg: EngineConfig, opts: RuntimeOptions) -> Result<Self, EngineError> {
+        Self::with_linkers(cfg, opts, LinkerSet::new)
+    }
+
+    /// [`Runtime::new`] with the linker set built by `linkers` (13-07: tests use
+    /// `LinkerSet::with_fixture_0_1_1` under `wit-next-fixture`). The set must link `0.1`.
+    pub fn with_linkers(
+        cfg: EngineConfig,
+        opts: RuntimeOptions,
+        linkers: impl FnOnce(&wasmtime::Engine) -> wasmtime::Result<LinkerSet>,
+    ) -> Result<Self, EngineError> {
         let engine = OstroEngine::new(cfg)?;
-        let linker = build_linker(engine.engine())?;
+        let linkers = linkers(engine.engine())?;
+        if linkers.linker(WitLine::V0_1).is_none() {
+            return Err(EngineError::Wasmtime(wasmtime::format_err!(
+                "the runtime's linker set has no 0.1 linker"
+            )));
+        }
         let parked = ParkedRegistry::new(engine.budget().clone());
         let aot = match &opts.cache_dir {
             Some(dir) => {
@@ -275,7 +302,7 @@ impl Runtime {
         });
         Ok(Self {
             engine,
-            linker,
+            linkers,
             parked,
             aot,
             l2: Mutex::new(InstancePreLru::default()),
@@ -430,23 +457,19 @@ impl Runtime {
     /// and pre-instantiated. Phase 4 calls this at deploy (ENG-07) and at activation.
     pub async fn prepare_cached(&self, wasm: &[u8]) -> Result<Arc<Prepared>, EngineError> {
         let sha = module_sha(wasm);
-        if let Some(p) = self.l2().get(&sha) {
+        // A sha has exactly one line and only 0.1 is executable: no parse on the hit path.
+        if let Some(p) = self.l2().get(&(WitLine::V0_1, sha)) {
             return Ok(p);
         }
         reject_core_module(wasm)?;
+        let line = Self::key_line(wasm);
         let component = match &self.aot {
-            Some(aot) => aot.component(sha, wasm).await?,
+            Some(aot) => aot.component_for(sha, wasm, line).await?,
             None => Component::from_binary(self.engine.engine(), wasm).map_err(|e| {
                 EngineError::Validation(vec![format!("not a valid Wasm component: {e:#}")])
             })?,
         };
-        let validated = validate_loaded(
-            self.engine.engine(),
-            &self.linker,
-            &component,
-            wasm,
-            self.max_core_instances(),
-        )?;
+        let validated = self.validate_for_line(line, &component, wasm)?;
         let prepared = Arc::new(self.pre_instantiate(sha, &validated)?);
         Ok(self.l2().insert(prepared, self.opts.instance_pre_capacity))
     }
@@ -455,7 +478,7 @@ impl Runtime {
     /// recency). Never reads, hashes or compiles module bytes and never touches the L1
     /// AOT cache: the executor's hot path for already-deployed modules.
     pub fn prepared(&self, sha: &[u8; 32]) -> Option<Arc<Prepared>> {
-        self.l2().get(sha)
+        self.l2().get(&(WitLine::V0_1, *sha))
     }
 
     /// AOT cache counters; `None` without a cache dir.
@@ -508,10 +531,17 @@ impl Runtime {
                 return Err(EngineError::Validation(violations));
             }
         }
-        let pre = WorkflowPre::new(self.linker.instantiate_pre(&validated.component)?)?;
+        if validated.selection.line != WitLine::V0_1 {
+            return Err(EngineError::Validation(vec![format!(
+                "WIT line {} links on this host but has no activation driver (only 0.1 runs)",
+                validated.selection.line
+            )]));
+        }
+        let pre = WorkflowPre::new(self.linker().instantiate_pre(&validated.component)?)?;
         Ok(Prepared {
             sha,
             module_hash_hex: hex(&sha),
+            wit: validated.selection.clone(),
             core_instances: validated.core_instances,
             memories,
             tables,
@@ -575,8 +605,47 @@ impl Runtime {
         &self.engine
     }
 
+    /// The `0.1` line's linker (the production linker every executable module uses).
     pub fn linker(&self) -> &Linker<HostState> {
-        &self.linker
+        self.linkers
+            .linker(WitLine::V0_1)
+            .expect("checked at construction: the linker set links 0.1")
+    }
+
+    /// Every WIT line's linker (13-07).
+    pub fn linkers(&self) -> &LinkerSet {
+        &self.linkers
+    }
+
+    /// The line a module's cache entries are keyed under, read from its import names before
+    /// compiling ([`line_from_bytes`]). A module whose line cannot be read is keyed under
+    /// `0.1`; validation then reports why it is rejected (with every other violation).
+    fn key_line(wasm: &[u8]) -> WitLine {
+        line_from_bytes(wasm).unwrap_or(WitLine::V0_1)
+    }
+
+    /// Validate `component` against `line`'s linker; the selection must agree with `line`.
+    fn validate_for_line(
+        &self,
+        line: WitLine,
+        component: &Component,
+        wasm: &[u8],
+    ) -> Result<ValidatedComponent, EngineError> {
+        let linker = self.linkers.linker(line).unwrap_or(self.linker());
+        let validated = validate_loaded(
+            self.engine.engine(),
+            linker,
+            component,
+            wasm,
+            self.max_core_instances(),
+        )?;
+        if validated.selection.line != line {
+            return Err(EngineError::Validation(vec![format!(
+                "WIT line mismatch: imports name line {line}, the component type selects {}",
+                validated.selection.line
+            )]));
+        }
+        Ok(validated)
     }
 
     pub fn clock(&self) -> &Arc<dyn Clock> {
@@ -590,13 +659,7 @@ impl Runtime {
         let component = Component::from_binary(self.engine.engine(), wasm).map_err(|e| {
             EngineError::Validation(vec![format!("not a valid Wasm component: {e:#}")])
         })?;
-        let validated = validate_loaded(
-            self.engine.engine(),
-            &self.linker,
-            &component,
-            wasm,
-            self.max_core_instances(),
-        )?;
+        let validated = self.validate_for_line(Self::key_line(wasm), &component, wasm)?;
         self.pre_instantiate(sha, &validated)
     }
 

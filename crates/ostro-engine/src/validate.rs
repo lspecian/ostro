@@ -1,11 +1,13 @@
 //! Component import/export validation at deploy time (ENG-02).
 //!
 //! A deployed module must be a Wasm component whose imports are limited to
-//! `ostro:runtime/*@0.1.*` plus the deterministic WASI shim interfaces
+//! `ostro:runtime/*` of **one** WIT line this build links (`@0.1.*` in production; 13-07,
+//! [`linker_set::select`]) plus the deterministic WASI shim interfaces
 //! ([`ALLOWED_WASI`], any `@0.2.*`), whose only export is
-//! `ostro:runtime/workflows@0.1.*` (plus componentize-py's `exports` export with its exact
-//! `init` shape, see [`COMPONENTIZE_PY_EXPORT`]), and which the host linker can
-//! pre-instantiate.
+//! `ostro:runtime/workflows` of that line (plus componentize-py's `exports` export with its
+//! exact `init` shape, see [`COMPONENTIZE_PY_EXPORT`]), and which the host linker can
+//! pre-instantiate. The line and the module's minimum feature level are returned in
+//! [`ValidatedComponent::selection`].
 //! Every violation is collected (not first-fail) and returned in
 //! [`EngineError::Validation`], each message naming the offending interface.
 
@@ -18,6 +20,52 @@ use wasmtime::component::types::{ComponentItem, Type};
 use wasmtime::component::{Component, Linker};
 
 use crate::error::EngineError;
+use crate::host::linker_set::{self, WitLine, WitSelection};
+
+/// WIT line selection errors (13-07, ENG-10). Every one is an upload error: it reaches
+/// callers as an [`EngineError::Validation`] message.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ValidateError {
+    /// The component imports `ostro:runtime` interfaces from more than one major line.
+    #[error(
+        "component mixes WIT lines {}: every ostro:runtime import and export must belong to \
+         one line",
+        .0.join(", ")
+    )]
+    MixedWitLines(Vec<String>),
+    /// The component's line is not linked by this build.
+    #[error(
+        "WIT line {0} is not supported by this host (supported: {supported})",
+        supported = linker_set::supported_lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )]
+    UnsupportedWitLine(String),
+    /// An `ostro:runtime` name without a parsable `@major.minor.patch` version.
+    #[error("{0} has no valid @major.minor.patch version")]
+    BadWitVersion(String),
+    /// The component neither imports nor exports anything from `ostro:runtime`.
+    #[error("component has no ostro:runtime import or export (no WIT line)")]
+    NoWitLine,
+    /// An imported function this build does not know on the selected line.
+    #[error("import {import} uses function {func}, unknown to WIT line {line} on this host")]
+    UnknownWitFunction {
+        line: String,
+        import: String,
+        func: String,
+    },
+    /// The binary could not be parsed while reading its import names.
+    #[error("not a valid Wasm component: {0}")]
+    Unparsable(String),
+}
+
+impl From<ValidateError> for EngineError {
+    fn from(e: ValidateError) -> Self {
+        EngineError::Validation(vec![e.to_string()])
+    }
+}
 
 /// `ostro:runtime` interfaces a guest may import (any `@0.1.*`).
 pub const ALLOWED_OSTRO: &[&str] = &[
@@ -206,6 +254,8 @@ pub struct ValidatedComponent {
     /// Core instances one instantiation creates ([`count_core_instances`]): the weight of
     /// the module in the core-instance admission budget (ENG-2).
     pub core_instances: u32,
+    /// The WIT line and minimum feature level ([`linker_set::select`], 13-07).
+    pub selection: WitSelection,
 }
 
 impl std::fmt::Debug for ValidatedComponent {
@@ -214,6 +264,7 @@ impl std::fmt::Debug for ValidatedComponent {
             .field("imports", &self.imports)
             .field("exports", &self.exports)
             .field("core_instances", &self.core_instances)
+            .field("selection", &self.selection)
             .finish_non_exhaustive()
     }
 }
@@ -235,9 +286,16 @@ fn version_matches(ver: Option<&str>, major_minor: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('.'))
 }
 
-fn import_allowed(name: &str) -> bool {
+/// `ver` is a version on WIT line `line`.
+fn on_line(ver: Option<&str>, line: WitLine) -> bool {
+    ver.and_then(WitLine::of_version) == Some(line)
+}
+
+/// `line` is the component's selected WIT line; `None` when selection failed (that error is
+/// reported once and `ostro:runtime` imports are then only checked by interface name).
+fn import_allowed(name: &str, line: Option<WitLine>) -> bool {
     let (base, ver) = split_version(name);
-    (ALLOWED_OSTRO.contains(&base) && version_matches(ver, "0.1"))
+    (ALLOWED_OSTRO.contains(&base) && line.is_none_or(|l| on_line(ver, l)))
         || (ALLOWED_WASI.contains(&base) && version_matches(ver, "0.2"))
 }
 
@@ -251,9 +309,9 @@ fn import_reason(name: &str) -> &'static str {
     }
 }
 
-fn is_required_export(name: &str) -> bool {
+fn is_required_export(name: &str, line: Option<WitLine>) -> bool {
     let (base, ver) = split_version(name);
-    base == REQUIRED_EXPORT && version_matches(ver, "0.1")
+    base == REQUIRED_EXPORT && on_line(ver, line.unwrap_or(WitLine::V0_1))
 }
 
 /// Core instances one instantiation of the component creates (plan 09-07, ENG-2).
@@ -373,10 +431,13 @@ pub fn count_core_instances(wasm: &[u8]) -> Result<u32, String> {
 
 /// Validate a deployed module against the Ostro WIT/WASI allow-list and `linker`.
 ///
-/// Steps: (1) must be a component, not a core module; (2) every import allowed;
-/// (3) exactly `ostro:runtime/workflows@0.1.*` exported; (4) only if (2) and (3) are
-/// clean, `linker.instantiate_pre` must succeed (catches missing functions inside
-/// allowed interfaces, e.g. a WASI function newer than the vendored WIT).
+/// Steps: (1) must be a component, not a core module; (2) one supported WIT line
+/// ([`linker_set::select`]: mixed lines, an unsupported line or an unknown function are
+/// violations) and every import allowed; (3) exactly `ostro:runtime/workflows` of that line
+/// exported; (4) only if (2) and (3) are clean, `linker.instantiate_pre` must succeed
+/// (catches missing functions inside allowed interfaces, e.g. a WASI function newer than
+/// the vendored WIT). `linker` must be the linker of the component's line
+/// ([`linker_set::LinkerSet::for_component`]).
 pub fn validate_component<T: 'static>(
     engine: &Engine,
     linker: &Linker<T>,
@@ -422,17 +483,22 @@ pub fn validate_loaded<T: 'static>(
     let exports: Vec<String> = ty.exports(engine).map(|(n, _)| n.to_string()).collect();
 
     let mut violations = Vec::new();
+    let (selection, selection_err) = match linker_set::select_lines(&component, engine) {
+        Ok(sel) => (Some(sel), None),
+        Err(e) => (None, Some(e)),
+    };
+    let line = selection.as_ref().map(|s| s.line);
     for name in &imports {
-        if !import_allowed(name) {
+        if !import_allowed(name, line) {
             violations.push(format!(
                 "import {name} is not allowed: {}",
                 import_reason(name)
             ));
         }
     }
-    let has_required = exports.iter().any(|n| is_required_export(n));
+    let has_required = exports.iter().any(|n| is_required_export(n, line));
     for (name, ext) in ty.exports(engine) {
-        if is_required_export(name) {
+        if is_required_export(name, line) {
             continue;
         }
         if name == COMPONENTIZE_PY_EXPORT && has_required {
@@ -454,7 +520,16 @@ pub fn validate_loaded<T: 'static>(
         ));
     }
     if !has_required {
-        violations.push(format!("missing required export {REQUIRED_EXPORT}@0.1.*"));
+        violations.push(format!(
+            "missing required export {REQUIRED_EXPORT}@{}.*",
+            line.unwrap_or(WitLine::V0_1)
+        ));
+    }
+    // Reported after the allow-list; "no WIT line" is implied by a missing export.
+    match selection_err {
+        Some(ValidateError::NoWitLine) if !has_required => {}
+        Some(e) => violations.push(e.to_string()),
+        None => {}
     }
     let core_instances = match count_core_instances(bytes) {
         Ok(n) => n,
@@ -479,15 +554,15 @@ pub fn validate_loaded<T: 'static>(
         violations.push(format!("instantiate_pre failed: {e:#}"));
     }
 
-    if violations.is_empty() {
-        Ok(ValidatedComponent {
+    match (violations.is_empty(), selection) {
+        (true, Some(selection)) => Ok(ValidatedComponent {
             component,
             imports,
             exports,
             core_instances,
-        })
-    } else {
-        Err(EngineError::Validation(violations))
+            selection,
+        }),
+        _ => Err(EngineError::Validation(violations)),
     }
 }
 
@@ -497,19 +572,29 @@ mod tests {
 
     #[test]
     fn version_matching() {
-        assert!(import_allowed("ostro:runtime/journal@0.1.0"));
-        assert!(import_allowed("ostro:runtime/journal@0.1.7"));
-        assert!(!import_allowed("ostro:runtime/journal@0.2.0"));
-        assert!(!import_allowed("ostro:runtime/journal@0.10.0"));
-        assert!(!import_allowed("ostro:runtime/journal"));
-        assert!(!import_allowed("ostro:runtime/workflows@0.1.0"));
-        assert!(import_allowed("wasi:io/poll@0.2.12"));
-        assert!(import_allowed("wasi:io/poll@0.2.0"));
-        assert!(!import_allowed("wasi:io/poll@0.3.0"));
-        assert!(!import_allowed("wasi:filesystem/types@0.2.12"));
-        assert!(is_required_export("ostro:runtime/workflows@0.1.0"));
-        assert!(!is_required_export("ostro:runtime/workflows@1.0.0"));
-        assert!(!is_required_export("wasi:cli/run@0.2.12"));
+        let l = Some(WitLine::V0_1);
+        assert!(import_allowed("ostro:runtime/journal@0.1.0", l));
+        assert!(import_allowed("ostro:runtime/journal@0.1.7", l));
+        assert!(!import_allowed("ostro:runtime/journal@0.2.0", l));
+        assert!(!import_allowed("ostro:runtime/journal@0.10.0", l));
+        assert!(!import_allowed("ostro:runtime/journal", l));
+        assert!(!import_allowed("ostro:runtime/workflows@0.1.0", l));
+        assert!(import_allowed("wasi:io/poll@0.2.12", l));
+        assert!(import_allowed("wasi:io/poll@0.2.0", l));
+        assert!(!import_allowed("wasi:io/poll@0.3.0", l));
+        assert!(!import_allowed("wasi:filesystem/types@0.2.12", l));
+        assert!(import_allowed(
+            "ostro:runtime/journal@0.2.0",
+            Some(WitLine::V0_2)
+        ));
+        assert!(import_allowed("ostro:runtime/journal@0.2.0", None));
+        assert!(is_required_export("ostro:runtime/workflows@0.1.0", l));
+        assert!(!is_required_export("ostro:runtime/workflows@1.0.0", l));
+        assert!(!is_required_export("wasi:cli/run@0.2.12", l));
+        assert!(is_required_export(
+            "ostro:runtime/workflows@0.2.0",
+            Some(WitLine::V0_2)
+        ));
     }
 
     #[test]

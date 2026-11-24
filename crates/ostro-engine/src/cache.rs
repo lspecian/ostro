@@ -2,7 +2,8 @@
 //!
 //! L1 is an on-disk cache of `Engine::precompile_component` artefacts keyed by
 //! `sha256(module)` plus a stable digest of the engine's compatibility hash, the
-//! Wasmtime version, the Ostro version and the target triple ([`cache_key`]).
+//! Wasmtime version, the Ostro version and the target triple, salted with the module's WIT
+//! line on lines other than `0.1` ([`cache_key_for`], 13-07: one artefact per line).
 //!
 //! `Component::deserialize` is `unsafe`: it trusts the bytes to be a valid artefact for
 //! this engine. Every artefact on disk therefore carries an HMAC-SHA256 trailer keyed
@@ -23,6 +24,7 @@ use sha2::{Digest, Sha256};
 use wasmtime::component::Component;
 
 use crate::error::EngineError;
+use crate::host::linker_set::WitLine;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -106,10 +108,28 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Cache key: `hex(sha) + "-" + first 16 hex chars of compat_digest(engine)`.
-pub fn cache_key(engine: &wasmtime::Engine, sha: &[u8; 32]) -> String {
-    let digest = hex(&compat_digest(engine));
+/// Cache key: `hex(sha) + "-" + first 16 hex chars of the line digest`, where the line
+/// digest is `compat_digest(engine)` on the `0.1` line (byte-identical to the key before
+/// 13-07, so existing artefacts stay valid) and `sha256(compat_digest ‖ "wit=" ‖ line)` on
+/// any other line (13-07: one artefact per line, never shared across lines).
+pub fn cache_key_for(engine: &wasmtime::Engine, sha: &[u8; 32], line: WitLine) -> String {
+    let compat = compat_digest(engine);
+    let digest = if line == WitLine::V0_1 {
+        hex(&compat)
+    } else {
+        let tag = format!("wit={line}");
+        let mut d = Sha256::new();
+        d.update(compat);
+        d.update((tag.len() as u64).to_le_bytes());
+        d.update(tag.as_bytes());
+        hex(&d.finalize())
+    };
     format!("{}-{}", hex(sha), &digest[..16])
+}
+
+/// [`cache_key_for`] on the `0.1` line (every module a production build executes).
+pub fn cache_key(engine: &wasmtime::Engine, sha: &[u8; 32]) -> String {
+    cache_key_for(engine, sha, WitLine::V0_1)
 }
 
 /// 32 random bytes for a fresh key.
@@ -417,12 +437,23 @@ impl AotCache {
         self.max_active.load(Ordering::Relaxed)
     }
 
-    /// The compiled component for the module `wasm` whose SHA-256 is `sha`.
+    /// [`AotCache::component_for`] on the `0.1` line.
+    pub async fn component(&self, sha: [u8; 32], wasm: &[u8]) -> Result<Component, EngineError> {
+        self.component_for(sha, wasm, WitLine::V0_1).await
+    }
+
+    /// The compiled component for the module `wasm` whose SHA-256 is `sha`, cached under
+    /// its WIT `line` ([`cache_key_for`]).
     ///
     /// Concurrent calls for the same cache key share one flight: one disk lookup and, on
     /// a miss, one compile. Compiles run on the blocking pool behind the semaphore.
-    pub async fn component(&self, sha: [u8; 32], wasm: &[u8]) -> Result<Component, EngineError> {
-        let key = cache_key(&self.engine, &sha);
+    pub async fn component_for(
+        &self,
+        sha: [u8; 32],
+        wasm: &[u8],
+        line: WitLine,
+    ) -> Result<Component, EngineError> {
+        let key = cache_key_for(&self.engine, &sha, line);
         let flight: Flight = {
             let mut map = self.inflight.lock().expect("inflight lock poisoned");
             map.entry(key.clone()).or_default().clone()
