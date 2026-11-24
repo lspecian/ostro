@@ -2,6 +2,11 @@
 //! ([`runner`], 12-03) with a hard deadline and a measured `cluster_formed` precondition;
 //! a scenario fails only with a [`ScenarioFailure`] (timeouts and panics are
 //! `HarnessError`s, D-P12-19). Each group module exports `pub fn scenarios() -> Vec<Scenario>`.
+//!
+//! A [`Scenario`] is generic over the harness it runs on (12-17): tier-B groups are
+//! `Scenario<InProcCluster>` (the default) and are listed by [`all`]; the tier-C `process`
+//! group is `Scenario<ProcCluster>`, listed by [`all_process`] and run by
+//! [`runner::run_on_cluster`] on a cluster the caller started (per-process failpoints).
 
 pub mod blobs;
 pub mod bootstrap;
@@ -26,6 +31,7 @@ use futures_util::future::BoxFuture;
 
 use crate::harness::ClusterSpec;
 use crate::harness::inproc::InProcCluster;
+use crate::harness::process::ProcCluster;
 
 /// Default per-scenario deadline.
 pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(120);
@@ -57,9 +63,8 @@ impl std::fmt::Display for ScenarioFailure {
 /// What a scenario body returns.
 pub type ScenarioResult = Result<(), ScenarioFailure>;
 
-/// One scenario.
-#[derive(Clone, Copy)]
-pub struct Scenario {
+/// One scenario on harness `C` (tier B: [`InProcCluster`], tier C: [`ProcCluster`]).
+pub struct Scenario<C = InProcCluster> {
     /// Unique name (pending lists and the mutant matrix refer to it).
     pub name: &'static str,
     /// Its group module's name.
@@ -71,10 +76,18 @@ pub struct Scenario {
     /// The cluster it needs.
     pub spec: fn() -> ClusterSpec,
     /// The body.
-    pub run: for<'a> fn(&'a mut InProcCluster) -> BoxFuture<'a, ScenarioResult>,
+    pub run: for<'a> fn(&'a mut C) -> BoxFuture<'a, ScenarioResult>,
 }
 
-impl std::fmt::Debug for Scenario {
+impl<C> Clone for Scenario<C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for Scenario<C> {}
+
+impl<C> std::fmt::Debug for Scenario<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Scenario")
             .field("name", &self.name)
@@ -85,7 +98,7 @@ impl std::fmt::Debug for Scenario {
     }
 }
 
-/// Every scenario of every group, in group order.
+/// Every tier-B scenario of every group, in group order.
 pub fn all() -> Vec<Scenario> {
     [
         placement::scenarios(),
@@ -102,9 +115,13 @@ pub fn all() -> Vec<Scenario> {
         one_path::scenarios(),
         zombie::scenarios(),
         object_storage::scenarios(),
-        process::scenarios(),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// Every tier-C scenario (the `process` group, 12-17).
+pub fn all_process() -> Vec<Scenario<ProcCluster>> {
+    process::scenarios()
 }

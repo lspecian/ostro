@@ -28,13 +28,12 @@
 //! [`ProcCluster::set_failpoints`] (effective at the next (re)start).
 //!
 //! **Lifecycle.** `kill(n)` is `SIGKILL` + `waitpid` (the wait status must say signal 9);
-//! `restart(n)` respawns from the same config and data dir and heals n's links. stdout and
+//! `restart(n)` heals n's links and respawns from the same config and data dir. stdout and
 //! stderr go to `<root>/node<i>.log` (appended across restarts). `stop()` kills every child
 //! and removes the root; a drop while panicking keeps the root and prints its path.
 //!
-//! Until 12-14 wires the cluster transport into the server, the processes of a multi-node
-//! spec run as independent single-node clusters, exactly like tier B, so formation fails
-//! with the same `cluster_formed` reason (`meta voters [n] != configured`).
+//! Since 12-14 the processes of a multi-node spec form one cluster (each node advertises its
+//! `127.r.r.i`, which its certificate names); a starting node waits for a metadata leader.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -46,7 +45,7 @@ use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use ostro_partition::roles::PartitionAssignmentView;
-use ostro_server::config::{FriendlyDuration, PeerConfig, ServerConfig};
+use ostro_server::config::{FriendlyDuration, PeerConfig, ReplicationSection, ServerConfig};
 use ostro_types::{Epoch, PartitionId};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -182,6 +181,9 @@ pub struct ProcOptions {
     pub node_failpoints: BTreeMap<u64, String>,
     /// Extra environment for every process (`OSTRO_<SECTION>__<KEY>` overrides).
     pub env: Vec<(String, String)>,
+    /// `[replication]` timings replacing the tier-C test timings (12-17: the failover
+    /// measurement runs the shipped defaults); `rf` / `min_insync` still come from the spec.
+    pub replication: Option<ReplicationSection>,
 }
 
 /// Outcome of [`ProcCluster::kill9`].
@@ -225,6 +227,7 @@ pub struct ProcCluster {
     proxy: ChaosProxy,
     nodes: BTreeMap<u64, ProcNode>,
     env: Vec<(String, String)>,
+    replication: Option<ReplicationSection>,
     http: reqwest::Client,
     timings: ProcTimings,
     root: Option<TempDir>,
@@ -362,6 +365,7 @@ impl ProcCluster {
             proxy,
             nodes: BTreeMap::new(),
             env: opts.env,
+            replication: opts.replication,
             http: reqwest::Client::new(),
             timings: ProcTimings::default(),
             root: Some(root),
@@ -420,6 +424,9 @@ impl ProcCluster {
         let mut cfg = ServerConfig::server_defaults();
         cfg.api.listen = SocketAddr::new(ip, 0);
         cfg.cluster.listen = SocketAddr::new(ip, CLUSTER_PORT);
+        // The node certificate's SANs are `[cluster] advertise` plus loopback (12-14): the
+        // proxied peers dial this node's own 127.r.r.i, so it must be advertised.
+        cfg.cluster.advertise = vec![ip.to_string()];
         cfg.node.data_dir = self.root().join(format!("node{id}"));
         cfg.node.partitions = spec.partitions;
         cfg.node.node_id = id;
@@ -437,10 +444,14 @@ impl ProcCluster {
             cfg.cluster.tls.ca_key_file = Some(ca.1.clone());
         }
         let r = &mut cfg.replication;
-        r.session_timeout = FriendlyDuration::from_millis(600);
-        r.replica_lag_max = FriendlyDuration::from_secs(2);
-        r.meta_election_tick = 6;
-        r.fetch_max_wait = FriendlyDuration::from_millis(100);
+        if let Some(timings) = &self.replication {
+            *r = timings.clone();
+        } else {
+            r.session_timeout = FriendlyDuration::from_millis(600);
+            r.replica_lag_max = FriendlyDuration::from_secs(2);
+            r.meta_election_tick = 6;
+            r.fetch_max_wait = FriendlyDuration::from_millis(100);
+        }
         r.rf = u8::try_from(spec.rf).ok();
         r.min_insync = u8::try_from(spec.min_insync).ok();
         if spec.objstore {
@@ -631,6 +642,11 @@ impl ProcCluster {
         self.timings
     }
 
+    /// Node `i`'s `FAILPOINTS` (the spec of its current / next start).
+    pub fn failpoints(&self, i: u64) -> Option<&str> {
+        self.node(i).failpoints.as_deref()
+    }
+
     /// Set node `i`'s `FAILPOINTS` (`None` = unset); effective at its next (re)start.
     pub fn set_failpoints(&mut self, i: u64, spec: Option<&str>) {
         self.nodes.get_mut(&i).expect("node").failpoints = spec.map(str::to_owned);
@@ -659,6 +675,29 @@ impl ProcCluster {
                 "node {i}: unexpected wait status {st} (signal {other:?})"
             ))),
         }
+    }
+
+    /// Restart several nodes at once: every process is spawned before any ready line is
+    /// awaited (a node's start waits for a metadata leader, so two nodes that together form
+    /// the quorum must boot concurrently). Heals each node's links like `restart`.
+    pub async fn restart_many(&mut self, ids: &[u64]) -> Result<(), HarnessError> {
+        for &n in ids {
+            if self.pid(n).is_some() {
+                self.kill9(n).await?;
+            }
+        }
+        let t0 = Instant::now();
+        let mut pending = Vec::new();
+        for &n in ids {
+            self.proxy.heal_node(n);
+            pending.push((n, self.spawn(n)?));
+        }
+        for (n, rx) in pending {
+            let api = self.await_ready(n, rx).await?;
+            self.nodes.get_mut(&n).expect("node").api = api;
+        }
+        self.timings.last_start = t0.elapsed();
+        Ok(())
     }
 
     fn kill_all(&mut self) {
@@ -760,12 +799,14 @@ impl ClusterHarness for ProcCluster {
         if self.pid(node).is_some() {
             self.kill9(node).await?;
         }
+        // Heal first: since 12-14 a starting node waits for a metadata leader before its
+        // ready line, so a node restarted behind cut links would never become ready.
+        self.proxy.heal_node(node);
         let t0 = Instant::now();
         let rx = self.spawn(node)?;
         let api = self.await_ready(node, rx).await?;
         self.timings.last_start = t0.elapsed();
         self.nodes.get_mut(&node).expect("node").api = api;
-        self.proxy.heal_node(node);
         Ok(())
     }
 

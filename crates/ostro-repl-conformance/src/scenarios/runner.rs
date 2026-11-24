@@ -91,17 +91,20 @@ pub async fn run_scenario_with(s: &Scenario, formation_deadline: Duration) -> Ou
         Ok(Err(e)) => return Outcome::Harness(e),
         Err(p) => return Outcome::Harness(HarnessError::Panic(panic_message(&*p))),
     };
-    let outcome = run_on(&mut cluster, s, &spec, formation_deadline).await;
+    let outcome = run_on_cluster(&mut cluster, s, formation_deadline).await;
     cluster.stop().await;
     outcome
 }
 
-async fn run_on(
-    cluster: &mut InProcCluster,
-    s: &Scenario,
-    spec: &crate::harness::ClusterSpec,
+/// Run scenario `s` on a cluster the caller started from `(s.spec)()` (either tier; tier C
+/// starts its processes with per-node failpoints, 12-17): the measured `cluster_formed`
+/// precondition, then the body under the scenario's deadline. The caller stops the cluster.
+pub async fn run_on_cluster<C: ClusterHarness>(
+    cluster: &mut C,
+    s: &Scenario<C>,
     formation_deadline: Duration,
 ) -> Outcome {
+    let spec = &(s.spec)();
     let formed = AssertUnwindSafe(cluster_formed::check_within(
         cluster,
         spec,

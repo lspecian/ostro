@@ -22,7 +22,7 @@ use ostro_types::{Cmd, PartitionId};
 
 use super::Report;
 use super::disk::scan_partition;
-use crate::harness::inproc::{InProcCluster, read_meta_log};
+use crate::harness::inproc::read_meta_log;
 use crate::harness::{ClusterHarness, ClusterSpec, DataDirView};
 
 /// Default formation deadline.
@@ -131,13 +131,14 @@ pub fn evaluate(spec: &ClusterSpec, views: &[DataDirView], measured: &[NodeMeasu
 }
 
 /// [`check_within`] with [`FORMATION_DEADLINE`].
-pub async fn check(cluster: &InProcCluster, spec: &ClusterSpec) -> Report {
+pub async fn check<C: ClusterHarness>(cluster: &C, spec: &ClusterSpec) -> Report {
     check_within(cluster, spec, FORMATION_DEADLINE).await
 }
 
-/// Poll the formation conditions until they hold or `deadline` passes.
-pub async fn check_within(
-    cluster: &InProcCluster,
+/// Poll the formation conditions until they hold or `deadline` passes. Works on either tier
+/// (12-17): it only reads the nodes' data dirs offline.
+pub async fn check_within<C: ClusterHarness>(
+    cluster: &C,
     spec: &ClusterSpec,
     deadline: Duration,
 ) -> Report {

@@ -6,8 +6,7 @@
 //! - RF=1, one process: 20 acknowledged runs, `kill -9`, restart from the same data dir,
 //!   every run completes and the acked-on-disk oracle confirms every ack.
 //! - `#[ignore]`: three processes start with peers pointing at the chaos proxy and answer
-//!   health; one is killed and restarted. Before 12-14 they run as independent single-node
-//!   clusters, so this checks process management only.
+//!   health, form one cluster (measured `cluster_formed`); one is killed and restarted.
 
 use std::time::{Duration, Instant};
 
@@ -129,7 +128,7 @@ async fn rf1_process_survives_kill9_and_every_ack_is_on_disk() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "tier C: three processes (~10 s); process management only before 12-14"]
+#[ignore = "tier C: three processes (~10 s)"]
 async fn three_processes_start_with_proxied_peers_and_answer_health() {
     if skip() {
         return;
@@ -159,20 +158,18 @@ async fn three_processes_start_with_proxied_peers_and_answer_health() {
             );
         }
         assert!(cfg.cluster.tls.ca_cert_file.is_some());
-        // Until 12-14 each process is its own single-voter meta group.
+        assert_eq!(cfg.cluster.advertise, vec![format!("127.{r}.{r}.{n}")]);
+        // Since 12-14 the processes form one three-voter meta group.
         let dump = read_meta_log(&c.node_disk(n).root.join("meta")).expect("meta log");
-        assert_eq!(dump.voters, vec![n], "node {n}");
+        let mut voters = dump.voters.clone();
+        voters.sort_unstable();
+        assert_eq!(voters, vec![1, 2, 3], "node {n}");
     }
     assert_eq!(c.proxy().links().len(), 6);
-    // Formation over real processes, measured like tier B. Before 12-14 this is red with
-    // the uniform reason; afterwards it is green. Either way it is printed, not asserted.
-    let views: Vec<_> = c.node_ids().into_iter().map(|n| c.node_disk(n)).collect();
-    let measured = cluster_formed::measure(&views).expect("measure");
-    let formed = cluster_formed::evaluate(c.spec(), &views, &measured);
-    assert!(
-        formed.is_ok() || formed.mentions("meta voters"),
-        "unexpected formation failure: {formed}"
-    );
+    // Formation over real processes, measured like tier B (12-17: green since 12-14).
+    let spec = c.spec().clone();
+    let formed = cluster_formed::check(&c, &spec).await;
+    assert!(formed.is_ok(), "tier-C formation: {formed}");
     println!("tier-C cluster_formed: {formed}");
 
     let pid = c.pid(2).expect("pid");
