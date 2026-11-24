@@ -23,25 +23,44 @@
 //! | [`status`] | 12-14 | `GET /v1/admin/replication` document |
 //! | [`config`] | 12-14 | cluster runtime config derived from `[cluster]` / `[replication]` |
 //! | [`identity`] | 12-14 | cluster-id resolution and meta voter checks |
+//!
+//! Phase 13 modules, declared once by 13-01 (this list is final after 13-01):
+//!
+//! | module | owner | contents |
+//! |--------|-------|----------|
+//! | [`contracts`] | 13-01 (final) | `LevelSource`, `HandoffClient`, `HandoffExecutor`, `ModuleRefsSource`, `ClusterStatusView` |
+//! | [`compat`] | 13-04 | boot / running fences, feature gate, NodeVersion advertiser |
+//! | [`upgrade`] | 13-04 | finalization decision, auto-finalizer, finalize / hold / release |
+//! | [`membership`] | 13-06 (`reconcile`), 13-09 (`service`, `remove`) | dynamic membership |
+//! | [`placement`] | 13-06 (`plan`, `reassign`, `leaders`), 13-10 (`controller`) | reassignment |
+//! | [`handoff`] | 13-11 | `LocalHandoff`, `NodeOpsHandoffClient` |
+//! | [`shutdown`] | 13-11 | controlled shutdown |
 
 pub mod address_book;
 pub mod authz;
 pub mod blob;
 pub mod bootstrap;
+pub mod compat;
 pub mod config;
+pub mod contracts;
 pub mod controller;
 pub mod fetch;
 pub mod fetcher;
+pub mod handoff;
 pub mod identity;
 pub mod install;
 pub mod isr_publisher;
 pub mod liveness;
 pub mod members;
+pub mod membership;
 pub mod meta_peer;
+pub mod placement;
 pub mod service;
+pub mod shutdown;
 pub mod snapshot;
 pub mod status;
 pub mod transport;
+pub mod upgrade;
 
 // Dependencies declared once by plan 12-01 for later Phase 12 plans (12-05 meta peer/authz,
 // 12-10 controller, 12-11 fetch, 12-12 install, 12-14 service). Anchored so cargo's

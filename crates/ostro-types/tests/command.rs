@@ -5,6 +5,7 @@
 //! change made before the Phase 5 freeze, with `OSTRO_BLESS=1 cargo test -p ostro-types --test command`.
 
 use bytes::Bytes;
+use ostro_types::command::RepinRun;
 use ostro_types::command::{
     self, AttemptGranted, AttemptTokenMsg, CancelEffect, CancelTimer, CancelWait, ChildCompleted,
     CompleteEffect, CompleteRun, CompleteToken, ConflictPolicy, CronStart, Derived, EnqueueReady,
@@ -460,7 +461,37 @@ fn all_golden() -> Vec<(&'static str, Command)> {
     v.extend(golden_appended_v6());
     v.extend(golden_appended_v7());
     v.extend(golden_appended_v11());
+    v.extend(golden_appended_v13());
     v
+}
+
+// ---- Plan 13-01: Phase 13 contract --------------------------------------------------------
+
+/// Vector appended by plan 13-01 (Phase 13 contract; CLUS-07, D-P13-21): `RepinRun` (tag 43).
+fn golden_appended_v13() -> Vec<(&'static str, Command)> {
+    vec![(
+        "repin_run",
+        Command::repin_run(RepinRun {
+            run_id: run(5, 0x11).as_bytes().to_vec(),
+            from_sha: vec![0xaa; 32],
+            to_sha: vec![0xbb; 32],
+            expected_next_seq: 17,
+            requested_at_ms: 9_700,
+        }),
+    )]
+}
+
+#[test]
+fn phase13_repin_run_tag_from_first_principles() {
+    // Cmd oneof key = 43 << 3 | 2 = 346 = varint 0xda 0x02; an empty message encodes as 00.
+    assert_eq!(
+        hex(&encode_command(&Command::repin_run(RepinRun::default()))),
+        "da0200"
+    );
+    let (name, c) = golden_appended_v13().remove(0);
+    let back = decode_command(&encode_command(&c)).expect("decode");
+    assert_eq!(back, c, "{name} round trip");
+    assert_eq!(back.kind_name(), "RepinRun");
 }
 
 // ---- Plan 11-02: Phase 11 contract --------------------------------------------------------
@@ -1874,7 +1905,7 @@ fn phase11_golden_lines_follow_phase7() {
         .collect();
     assert_eq!(names[29], "resume_run");
     assert_eq!(
-        &names[30..],
+        &names[30..35],
         [
             "dlq_update_hook_started",
             "dlq_update_dismissed",
@@ -1883,6 +1914,8 @@ fn phase11_golden_lines_follow_phase7() {
             "events_appended_attempt"
         ]
     );
+    // 13-01 appended its one line after the Phase 11 block.
+    assert_eq!(&names[35..], ["repin_run"]);
 }
 
 #[test]

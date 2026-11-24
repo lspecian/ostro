@@ -9,10 +9,15 @@ pub mod error;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod grpc;
+// Phase 13 (13-01 stub, 13-03 client): `GrpcControlPlane`.
+pub mod grpc_client;
 mod openapi;
 pub mod phase11;
+// Phase 13 (13-01): ClusterApi + ModuleLifecycleApi extension traits and domain types.
+pub mod phase13;
 pub mod phase7;
 pub mod phase8;
+pub mod request_meta;
 pub mod rest;
 
 pub use domain::ControlPlane;

@@ -24,12 +24,17 @@
 //! | `Rejected(RunCompleted)`             | 27   |
 //! | `Rejected(ReservedP6_12..14)`        | 28–30 (never emitted) |
 //! | `Rejected(RunPaused)`                | 31   |
+//! | `Rejected(ReservedP7_16..P9_22)`     | 32–38 (never emitted) |
+//! | `Rejected(ModuleMismatch)`           | 39   |
+//! | `Rejected(RunBusy)`                  | 40   |
 //!
 //! Indices come only from `.planning/RESERVATIONS.md` §7 (`RunCompleted` = 11, Phase 5;
 //! `RunPaused` = 15, Phase 7). `RejectReason` is declaration-indexed like [`InvalidCode`], so
 //! 07-03 declared the canonical `#[doc(hidden)]` placeholders `ReservedP6_12..14` for Phase 6's
 //! unused slots (P-15 rule); they are never emitted, so they never reach the state hash. A
-//! phase claiming one of them renames it in place.
+//! phase claiming one of them renames it in place. 13-01 declared `ReservedP7_16..17`,
+//! `ReservedP8_18..19` and `ReservedP9_20..22` the same way before Phase 13's
+//! `ModuleMismatch` (23) and `RunBusy` (24) (`RepinRun`, Cmd 43; emitted from 13-17).
 //!
 //! The [`InvalidCode`] detail is not part of the hash code (the command
 //! bytes are folded anyway, and they determine the detail). `InvalidCode`
@@ -102,6 +107,29 @@ pub enum RejectReason {
     /// index 15, outcome code 31.
     // RESERVATIONS.md: P7 = RejectReason 15..17
     RunPaused,
+    // RESERVATIONS.md §7: placeholders for the unused P7 (16..=17), P8 (18..=19) and P9
+    // (20..=22) slots below Phase 13's 23 (never emitted; declared by 13-01, P-15 convention).
+    #[doc(hidden)]
+    ReservedP7_16,
+    #[doc(hidden)]
+    ReservedP7_17,
+    #[doc(hidden)]
+    ReservedP8_18,
+    #[doc(hidden)]
+    ReservedP8_19,
+    #[doc(hidden)]
+    ReservedP9_20,
+    #[doc(hidden)]
+    ReservedP9_21,
+    #[doc(hidden)]
+    ReservedP9_22,
+    /// `RepinRun` names a `from_sha` that is not the run's current `module_sha`. Phase 13
+    /// (13-01; emitted from 13-17), index 23, outcome code 39.
+    // RESERVATIONS.md: P13 = RejectReason 23..24
+    ModuleMismatch,
+    /// `RepinRun` on a run that holds an active lease (an activation is in flight). Phase 13
+    /// (13-01; emitted from 13-17), index 24, outcome code 40.
+    RunBusy,
 }
 
 /// Detail of a `Rejected(Invalid)` outcome.
@@ -205,6 +233,15 @@ impl RejectReason {
             RejectReason::ReservedP6_13 => 13,
             RejectReason::ReservedP6_14 => 14,
             RejectReason::RunPaused => 15,
+            RejectReason::ReservedP7_16 => 16,
+            RejectReason::ReservedP7_17 => 17,
+            RejectReason::ReservedP8_18 => 18,
+            RejectReason::ReservedP8_19 => 19,
+            RejectReason::ReservedP9_20 => 20,
+            RejectReason::ReservedP9_21 => 21,
+            RejectReason::ReservedP9_22 => 22,
+            RejectReason::ModuleMismatch => 23,
+            RejectReason::RunBusy => 24,
         }
     }
 }
@@ -341,6 +378,15 @@ mod tests {
             (ApplyOutcome::Rejected(RejectReason::ReservedP6_13), 29),
             (ApplyOutcome::Rejected(RejectReason::ReservedP6_14), 30),
             (ApplyOutcome::Rejected(RejectReason::RunPaused), 31),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP7_16), 32),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP7_17), 33),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP8_18), 34),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP8_19), 35),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP9_20), 36),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP9_21), 37),
+            (ApplyOutcome::Rejected(RejectReason::ReservedP9_22), 38),
+            (ApplyOutcome::Rejected(RejectReason::ModuleMismatch), 39),
+            (ApplyOutcome::Rejected(RejectReason::RunBusy), 40),
         ];
         for (o, code) in cases {
             assert_eq!(o.code(), code, "{o:?}");

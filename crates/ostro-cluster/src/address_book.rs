@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-use ostro_meta::Member;
+use ostro_meta::{Member, MetaView};
 
 /// The addresses of one node.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +30,9 @@ pub struct PeerEntry {
     pub repl_addr: Option<String>,
 }
 
+/// One joiner seed (`<data>/cluster-seeds.toml`, D-P13-9/29): same shape as a static peer.
+pub type Seed = PeerEntry;
+
 /// Node id → addresses.
 #[derive(Debug, Default)]
 pub struct AddressBook {
@@ -49,6 +52,14 @@ impl AddressBook {
             book.upsert(p.id, p.addr, p.repl_addr);
         }
         book
+    }
+
+    /// Phase 13 (13-01 constructor stub; 13-09 fills it from the meta `Member` records): a
+    /// book seeded from `seeds` that will follow `view`. Until 13-09 it delegates to the
+    /// Phase 12 static book ([`AddressBook::from_peers`]) and ignores `view`.
+    pub fn from_meta(view: MetaView, seeds: Vec<Seed>) -> Self {
+        let _ = view;
+        Self::from_peers(seeds)
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<u64, PeerAddr>> {

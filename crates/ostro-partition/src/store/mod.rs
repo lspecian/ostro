@@ -156,6 +156,11 @@ pub enum StoreError {
     PartitionCountMismatch { expected: u16, found: u16 },
     #[error("injected failure at {0}")]
     Injected(&'static str),
+    /// The partition log holds a command written by a newer Ostro (unknown fields or an
+    /// unknown `Cmd` tag; D-P13-6). Fatal for the partition: "upgrade this binary". Declared by
+    /// 13-01; emitted by 13-04.
+    #[error("written by a newer Ostro; upgrade this binary: {0}")]
+    NewerFormat(String),
 }
 
 /// One partition's fjall-backed state. `Send + Sync`; the apply thread is

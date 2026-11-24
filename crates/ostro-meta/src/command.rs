@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ext::ElectionInfo;
+use crate::ext::{ElectionInfo, Reassignment};
 use crate::state::MetaState;
 
 use crate::records::{
@@ -489,6 +489,27 @@ pub enum MetaCommand {
         node: u64,
         info: ElectionInfo,
     },
+    /// Phase 13 placeholder (13-01, P-15 convention; RESERVATIONS §10a): holds postcard
+    /// index 7 (spare P12) so [`MetaCommand::AlterReplicas`] lands at index 8. Never
+    /// proposed; apply answers `Invalid("reserved")`.
+    #[doc(hidden)]
+    ReservedP12_7 {},
+    /// Phase 13 (D-P13-12; shape 13-01, apply 13-10): reassign a partition's replica set
+    /// (KIP-455 shape), CAS on `isr_version` (which therefore also covers replica-set
+    /// changes). Apply (13-10) requires `epoch == current` (epoch 0 is `Invalid`),
+    /// `isr_version == expected_isr_version`, `isr ⊆ replicas`, the leader in `replicas` and
+    /// `isr` (unless offline) and `1 <= min_insync <= |isr|`; it bumps `isr_version` and
+    /// writes ext tag 100 from `reassignment` verbatim (`None` clears it). Gated at feature
+    /// level 2 (`ostro_types::compat::Feature::AlterReplicas`) by the proposer.
+    AlterReplicas {
+        partition: u16,
+        epoch: u32,
+        expected_isr_version: u64,
+        replicas: Vec<u64>,
+        isr: Vec<u64>,
+        min_insync: u8,
+        reassignment: Option<Reassignment>,
+    },
 }
 
 /// The verdict of applying a [`MetaCommand`].
@@ -577,6 +598,81 @@ pub fn encode_result(result: &MetaResult) -> Vec<u8> {
 
 pub fn decode_result(bytes: &[u8]) -> Result<MetaResult, DecodeError> {
     decode(bytes)
+}
+
+#[cfg(test)]
+mod phase13_tests {
+    use super::*;
+
+    fn alter_replicas() -> MetaCommand {
+        MetaCommand::AlterReplicas {
+            partition: 3,
+            epoch: 8,
+            expected_isr_version: 11,
+            replicas: vec![1, 2, 3, 4],
+            isr: vec![1, 2, 3],
+            min_insync: 2,
+            reassignment: Some(Reassignment {
+                target: vec![2, 3, 4],
+                adding: vec![4],
+                removing: vec![1],
+                started_at_ms: 1_700_000_000_789,
+            }),
+        }
+    }
+
+    #[test]
+    fn alter_replicas_is_postcard_index_8_after_the_placeholder() {
+        let bytes = encode_command(&alter_replicas());
+        assert_eq!(bytes[0], META_FORMAT);
+        assert_eq!(bytes[1], 8, "AlterReplicas must be variant 8");
+        assert_eq!(decode_command(&bytes).unwrap(), alter_replicas());
+        let reserved = encode_command(&MetaCommand::ReservedP12_7 {});
+        assert_eq!(reserved, [META_FORMAT, 7]);
+        let none = MetaCommand::AlterReplicas {
+            partition: 0,
+            epoch: 1,
+            expected_isr_version: 0,
+            replicas: vec![1],
+            isr: vec![1],
+            min_insync: 1,
+            reassignment: None,
+        };
+        assert_eq!(
+            encode_command(&none),
+            [META_FORMAT, 8, 0, 1, 0, 1, 1, 1, 1, 1, 0]
+        );
+    }
+
+    #[test]
+    fn variants_0_to_6_encode_unchanged() {
+        // Byte pins identical to the golden lines of 12-05 (tests/golden/meta_commands.txt).
+        let spl = MetaCommand::SetPartitionLeader {
+            partition: 1,
+            epoch: 7,
+            leader: 2,
+            isr: vec![2, 3],
+        };
+        assert_eq!(encode_command(&spl), [META_FORMAT, 3, 1, 7, 2, 2, 2, 3]);
+        let alter = MetaCommand::AlterIsr {
+            partition: 3,
+            epoch: 8,
+            expected_isr_version: 10,
+            isr: vec![1, 2, 3],
+        };
+        assert_eq!(
+            encode_command(&alter),
+            [META_FORMAT, 5, 3, 8, 10, 3, 1, 2, 3]
+        );
+        let del = MetaCommand::Delete {
+            key: MetaKey::Queue("acme/default".into()),
+            expected_version: 5,
+        };
+        let mut want = vec![META_FORMAT, 2, 6, 12];
+        want.extend_from_slice(b"acme/default");
+        want.push(5);
+        assert_eq!(encode_command(&del), want);
+    }
 }
 
 #[cfg(test)]

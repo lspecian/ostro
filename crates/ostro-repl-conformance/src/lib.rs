@@ -23,6 +23,9 @@ pub mod scenarios;
 // 12-06, 12-07, 12-09). Anchored so cargo's unused-dependency lint stays quiet until the
 // owning modules consume them.
 mod dep_anchors {
+    // Phase 13 (13-01 declares; consumed by the 13-02 / 13-08 harness).
+    use ostro_api as _;
+    use ostro_client as _;
     use ostro_server as _;
     use ostro_testkit as _;
     use proptest as _;

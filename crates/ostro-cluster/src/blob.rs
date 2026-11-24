@@ -384,6 +384,8 @@ pub fn command_blob_refs(cmd: &Command) -> Vec<[u8; 32]> {
         | Cmd::PauseRun(_)
         | Cmd::ResumeRun(_)
         | Cmd::DlqUpdate(_) => {}
+        // Phase 13 (13-01): module shas only, no payload blobs (modules sync separately).
+        Cmd::RepinRun(_) => {}
         Cmd::StartRun(s) => push_start(Some(s), &mut out),
         Cmd::EventsAppended(e) => {
             for ev in &e.events {

@@ -282,3 +282,294 @@ mod election_info_tests {
         );
     }
 }
+
+// ---- Phase 13 (13-01, RESERVATIONS §10b tags 96–102; D-P13-3/12/17/20) ----------------------
+//
+// Value structs are positional postcard and frozen once shipped (a new field needs a new tag).
+// Readers ignore unknown tags and the typed `put_*` helpers keep every other entry byte for
+// byte, so an older node's read-modify-write never drops them. Apply never decodes these
+// values (05-20 rule 5): they are written verbatim from commands / records and checked only at
+// the proposer. Tags 96–99 are the compatibility machinery and are written at every feature
+// level (D-P13-3); 100–102 are gated at level 2 (`ostro_types::compat::Feature`).
+
+/// `Member` NodeVersion (tag 96): what the node's binary supports.
+pub const EXT_NODE_VERSION: u32 = 96;
+/// `Member` MemberState (tag 97): Joining / Active / Draining / Removed (tombstone).
+pub const EXT_MEMBER_STATE: u32 = 97;
+/// `ClusterInfo` ClusterVersion (tag 98): the finalized feature level (absent = `LEVEL_MIN`).
+pub const EXT_CLUSTER_VERSION: u32 = 98;
+/// `ClusterInfo` ReplicationPolicy (tag 99).
+pub const EXT_REPLICATION_POLICY: u32 = 99;
+/// `PartitionAssignment` Reassignment (tag 100, KIP-455 shape).
+pub const EXT_REASSIGNMENT: u32 = 100;
+/// `ModuleRecord` WitRequirement (tag 101).
+pub const EXT_WIT_REQUIREMENT: u32 = 101;
+/// `ModuleRecord` / `WorkflowVersion` Retired (tag 102).
+pub const EXT_RETIRED: u32 = 102;
+
+/// Every Phase 13 tag, ascending.
+pub const P13_EXT_TAGS: [u32; 7] = [
+    EXT_NODE_VERSION,
+    EXT_MEMBER_STATE,
+    EXT_CLUSTER_VERSION,
+    EXT_REPLICATION_POLICY,
+    EXT_REASSIGNMENT,
+    EXT_WIT_REQUIREMENT,
+    EXT_RETIRED,
+];
+
+/// [`MemberState::state`]: allocated, joining (learner or not yet in the conf).
+pub const MEMBER_JOINING: u8 = 0;
+/// [`MemberState::state`]: a full member.
+pub const MEMBER_ACTIVE: u8 = 1;
+/// [`MemberState::state`]: handing off its partitions before removal.
+pub const MEMBER_DRAINING: u8 = 2;
+/// [`MemberState::state`]: removed (tombstone kept forever; ids never reused).
+pub const MEMBER_REMOVED: u8 = 3;
+
+/// What a node's binary supports (tag 96), reported in its own `Member` record.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeVersion {
+    /// `CARGO_PKG_VERSION` of the binary.
+    pub ostro_version: String,
+    /// Lowest feature level the binary runs (`ostro_types::compat::LEVEL_MIN`).
+    pub level_min: u32,
+    /// Highest feature level the binary emits (`ostro_types::compat::level_max()`).
+    pub level_max: u32,
+    /// Wasmtime version string.
+    pub wasmtime: String,
+    /// Event codec version.
+    pub event_codec_ver: u32,
+    /// WIT lines the engine links (e.g. `"0.1"`).
+    pub wit_lines: Vec<String>,
+    /// Reporter's clock (Unix ms).
+    pub reported_at_ms: u64,
+}
+
+/// Membership state of a node (tag 97).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberState {
+    /// One of the `MEMBER_*` constants (unknown values are kept as-is).
+    pub state: u8,
+    /// Proposer's clock when the state changed (Unix ms).
+    pub changed_at_ms: u64,
+}
+
+/// The cluster's finalized feature level (tag 98). Absent = `LEVEL_MIN`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterVersion {
+    /// Finalized feature level.
+    pub finalized: u32,
+    /// Operator hold: auto-finalization stays at or below this level while set.
+    pub hold: Option<u32>,
+    /// When `finalized` was last raised (Unix ms).
+    pub finalized_at_ms: u64,
+}
+
+/// Cluster replication policy (tag 99). Effective RF = min(rf, members).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicationPolicy {
+    /// Target replication factor.
+    pub rf: u8,
+    /// Target minimum ISR size.
+    pub min_insync: u8,
+    /// Maximum metadata voters.
+    pub max_voters: u8,
+}
+
+/// An in-flight partition reassignment (tag 100, KIP-455 shape).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reassignment {
+    /// The target replica set.
+    pub target: Vec<u64>,
+    /// Replicas being added (`target \ old`).
+    pub adding: Vec<u64>,
+    /// Replicas being removed (`old \ target`).
+    pub removing: Vec<u64>,
+    /// When the reassignment started (Unix ms).
+    pub started_at_ms: u64,
+}
+
+/// A module's WIT line and minimum feature level (tag 101).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitRequirement {
+    /// WIT major line, e.g. `"0.1"`.
+    pub line: String,
+    /// Max over the imported functions' `introduced_in` levels.
+    pub min_level: u32,
+}
+
+/// A retired module or workflow version (tag 102).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retired {
+    /// When it was retired (Unix ms).
+    pub retired_at_ms: u64,
+}
+
+macro_rules! typed_ext {
+    ($get:ident, $put:ident, $tag:ident, $ty:ty) => {
+        #[doc = concat!("The [`", stringify!($ty), "`] stored in a record's `ext` (tag [`", stringify!($tag), "`]), if any.")]
+        pub fn $get(ext: &[u8]) -> Result<Option<$ty>, ExtError> {
+            ext_get_value(ext, $tag)
+        }
+
+        #[doc = concat!("`ext` with tag [`", stringify!($tag), "`] set; every other entry is kept byte for byte.")]
+        pub fn $put(ext: &[u8], value: &$ty) -> Result<Vec<u8>, ExtError> {
+            ext_put_value(ext, $tag, value)
+        }
+    };
+}
+
+typed_ext!(
+    get_node_version,
+    put_node_version,
+    EXT_NODE_VERSION,
+    NodeVersion
+);
+typed_ext!(
+    get_member_state,
+    put_member_state,
+    EXT_MEMBER_STATE,
+    MemberState
+);
+typed_ext!(
+    get_cluster_version,
+    put_cluster_version,
+    EXT_CLUSTER_VERSION,
+    ClusterVersion
+);
+typed_ext!(
+    get_replication_policy,
+    put_replication_policy,
+    EXT_REPLICATION_POLICY,
+    ReplicationPolicy
+);
+typed_ext!(
+    get_reassignment,
+    put_reassignment,
+    EXT_REASSIGNMENT,
+    Reassignment
+);
+typed_ext!(
+    get_wit_requirement,
+    put_wit_requirement,
+    EXT_WIT_REQUIREMENT,
+    WitRequirement
+);
+typed_ext!(get_retired, put_retired, EXT_RETIRED, Retired);
+
+#[cfg(test)]
+mod phase13_tests {
+    use super::*;
+
+    fn samples() -> (
+        NodeVersion,
+        MemberState,
+        ClusterVersion,
+        ReplicationPolicy,
+        Reassignment,
+        WitRequirement,
+        Retired,
+    ) {
+        (
+            NodeVersion {
+                ostro_version: "0.1.0".into(),
+                level_min: 1,
+                level_max: 2,
+                wasmtime: "50.0.2".into(),
+                event_codec_ver: 1,
+                wit_lines: vec!["0.1".into()],
+                reported_at_ms: 1_700_000_000_000,
+            },
+            MemberState {
+                state: MEMBER_DRAINING,
+                changed_at_ms: 7,
+            },
+            ClusterVersion {
+                finalized: 2,
+                hold: Some(1),
+                finalized_at_ms: 9,
+            },
+            ReplicationPolicy {
+                rf: 3,
+                min_insync: 2,
+                max_voters: 5,
+            },
+            Reassignment {
+                target: vec![2, 3, 4],
+                adding: vec![4],
+                removing: vec![1],
+                started_at_ms: 11,
+            },
+            WitRequirement {
+                line: "0.1".into(),
+                min_level: 1,
+            },
+            Retired { retired_at_ms: 13 },
+        )
+    }
+
+    #[test]
+    fn p13_tags_are_the_registered_block() {
+        assert_eq!(P13_EXT_TAGS, [96, 97, 98, 99, 100, 101, 102]);
+        assert_eq!(
+            [
+                MEMBER_JOINING,
+                MEMBER_ACTIVE,
+                MEMBER_DRAINING,
+                MEMBER_REMOVED
+            ],
+            [0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn every_p13_value_roundtrips_and_keeps_unknown_tags() {
+        let (nv, ms, cv, rp, ra, wr, rt) = samples();
+        // An "unknown" tag from a newer binary (111, the top of the P13 spare range) and
+        // the test tag must survive every typed write.
+        let mut ext = ext_put(&[], EXT_TAG_TEST, &[1, 2]).unwrap();
+        ext = ext_put(&ext, 111, &[0xde, 0xad]).unwrap();
+        ext = put_election_info(&ext, &ElectionInfo::default()).unwrap();
+        ext = put_node_version(&ext, &nv).unwrap();
+        ext = put_member_state(&ext, &ms).unwrap();
+        ext = put_cluster_version(&ext, &cv).unwrap();
+        ext = put_replication_policy(&ext, &rp).unwrap();
+        ext = put_reassignment(&ext, &ra).unwrap();
+        ext = put_wit_requirement(&ext, &wr).unwrap();
+        ext = put_retired(&ext, &rt).unwrap();
+        ext_validate(&ext).unwrap();
+        assert_eq!(get_node_version(&ext).unwrap(), Some(nv));
+        assert_eq!(get_member_state(&ext).unwrap(), Some(ms));
+        assert_eq!(get_cluster_version(&ext).unwrap(), Some(cv));
+        assert_eq!(get_replication_policy(&ext).unwrap(), Some(rp));
+        assert_eq!(get_reassignment(&ext).unwrap(), Some(ra));
+        assert_eq!(get_wit_requirement(&ext).unwrap(), Some(wr));
+        assert_eq!(get_retired(&ext).unwrap(), Some(rt));
+        assert_eq!(ext_get(&ext, 111), Some(&[0xde, 0xad][..]));
+        assert_eq!(ext_get(&ext, EXT_TAG_TEST), Some(&[1, 2][..]));
+        let tags: Vec<u32> = ext_entries(&ext).unwrap().iter().map(|e| e.tag).collect();
+        assert_eq!(tags, [15, 80, 96, 97, 98, 99, 100, 101, 102, 111]);
+        // Removing one tag keeps the others byte for byte.
+        let without = ext_remove(&ext, EXT_REASSIGNMENT).unwrap();
+        assert_eq!(get_reassignment(&without).unwrap(), None);
+        assert_eq!(ext_get(&without, 111), Some(&[0xde, 0xad][..]));
+        // Absent = None (ClusterInfo without tag 98 means finalized = LEVEL_MIN).
+        assert_eq!(get_cluster_version(&[]).unwrap(), None);
+    }
+
+    /// Rule 5 (05-20): apply never validates ext values, so record validation must keep
+    /// treating ext as opaque TLV (shape only). A source scan keeps typed decoding out of
+    /// `validate.rs`.
+    #[test]
+    fn validate_never_decodes_ext_values() {
+        let src = include_str!("validate.rs");
+        for forbidden in ["ext_get_value", "ext_get(", "postcard::from_bytes", "get_"] {
+            assert!(
+                !src.contains(forbidden),
+                "validate.rs must not decode ext values ({forbidden})"
+            );
+        }
+        assert!(src.contains("ext_validate"), "shape check stays");
+    }
+}

@@ -7,10 +7,10 @@
 //!   fields, new oneof variants, new enum values.
 //! - Field numbers and oneof tags are never reused or renumbered. A removed field's number is
 //!   retired forever.
-//! - Reserved for future use: `Cmd` tags `14..=19`, `22..=26`, `28..=44` and `46..=63` (blocks
-//!   per phase in `.planning/RESERVATIONS.md`; 13 is Phase 6's `CompleteEffect`, 20/21 are
-//!   Phase 7's `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`, 45 is Phase 11's
-//!   `DlqUpdate`).
+//! - Reserved for future use: `Cmd` tags `14..=19`, `22..=26`, `28..=42`, `44` and `46..=63`
+//!   (blocks per phase in `.planning/RESERVATIONS.md`; 13 is Phase 6's `CompleteEffect`, 20/21
+//!   are Phase 7's `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`, 43 is Phase 13's
+//!   `RepinRun`, 45 is Phase 11's `DlqUpdate`).
 //!   Unknown fields are skipped on decode, so an
 //!   older binary can read a log that carries newer optional fields.
 //! - The bytes are pinned by `tests/golden/commands.txt`.
@@ -114,6 +114,15 @@
 //!   unknown). Set by the submitter; apply stores it verbatim and never stamps it.
 //! - All three default-omit in proto3, so every older command re-encodes to the same bytes.
 //!   Golden vectors appended (`dlq_update_*`, `start_run_rerun`, `events_appended_attempt`).
+//!
+//! # Phase 13 additions (plan 13-01, post-freeze, additive)
+//!
+//! - [`Cmd::RepinRun`] at tag 43 (P13 block 43..=44; CLUS-07, D-P13-21): move a non-terminal
+//!   run from `from_sha` to `to_sha` after `ostro migrate-runs` replayed its journal against
+//!   the target (`expected_next_seq` = replayed journal length). Gated at feature level 2
+//!   ([`crate::compat::Feature::RepinRun`]). Apply: `apply/repin.rs` (stub rejects with
+//!   `Invalid(NotImplemented)` until 13-17); RejectReason 23 `ModuleMismatch` / 24 `RunBusy`.
+//!   Golden vector appended (`repin_run`); every older line is byte-identical.
 
 use bytes::Bytes;
 use prost::Message;
@@ -172,15 +181,17 @@ pub const fn is_reserved_op(op: u64) -> bool {
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Command {
     /// The command variant. `None` only for malformed/empty input (apply rejects it as invalid).
-    /// Tags 14..=19, 22..=26, 28..=44 and 46..=63 are reserved for future variants
+    /// Tags 14..=19, 22..=26, 28..=42, 44 and 46..=63 are reserved for future variants
     /// (`.planning/RESERVATIONS.md` §1; 13 is Phase 6's `CompleteEffect`, 20/21 are Phase 7's
-    /// `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`, 45 is Phase 11's `DlqUpdate`).
+    /// `PauseRun`/`ResumeRun`, 27 is Phase 8's `ScheduleFire`, 43 is Phase 13's `RepinRun`, 45
+    /// is Phase 11's `DlqUpdate`).
     // RESERVATIONS.md: P6 = Cmd 13..19, Intent 9..12
     // RESERVATIONS.md: P7 = 20..26
     // RESERVATIONS.md: P11 = 45..49
+    // RESERVATIONS.md: P13 = 43..44
     #[prost(
         oneof = "Cmd",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 27, 45"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 27, 43, 45"
     )]
     pub cmd: Option<Cmd>,
 }
@@ -251,6 +262,10 @@ pub enum Cmd {
     // RESERVATIONS.md: P11 = 45..49
     #[prost(message, tag = "45")]
     DlqUpdate(DlqUpdate),
+    /// Repin a non-terminal run to another module (Phase 13, CLUS-07; `ostro migrate-runs`).
+    // RESERVATIONS.md: P13 = 43..44
+    #[prost(message, tag = "43")]
+    RepinRun(RepinRun),
 }
 
 /// A new leader epoch.
@@ -1191,6 +1206,31 @@ pub struct DlqUpdate {
     pub episode_completed_at_ms: u64,
 }
 
+/// Repin a run to another module (Phase 13, `Cmd` tag 43; CLUS-07, D-P13-21).
+///
+/// Submitted by `ostro migrate-runs` only for runs whose journal replayed cleanly against the
+/// target module. Apply (13-17) rejects: run missing / terminal (existing reasons),
+/// `module_sha != from_sha` → `ModuleMismatch`, `next_seq != expected_next_seq` →
+/// `SeqMismatch`, leased run → `RunBusy`; otherwise it sets `RunRecord.module_sha = to_sha`.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct RepinRun {
+    /// Target run id (18 bytes).
+    #[prost(bytes = "vec", tag = "1")]
+    pub run_id: Vec<u8>,
+    /// The module the run is expected to be pinned to (sha256, 32 bytes).
+    #[prost(bytes = "vec", tag = "2")]
+    pub from_sha: Vec<u8>,
+    /// The module to pin the run to (sha256, 32 bytes).
+    #[prost(bytes = "vec", tag = "3")]
+    pub to_sha: Vec<u8>,
+    /// The run's next journal sequence number seen by the replay check (its journal length).
+    #[prost(uint64, tag = "4")]
+    pub expected_next_seq: u64,
+    /// Request time (ms), set by the submitter.
+    #[prost(uint64, tag = "5")]
+    pub requested_at_ms: u64,
+}
+
 /// [`DlqUpdate`] marks (Phase 11).
 pub mod dlq_update {
     /// The mark of a [`super::DlqUpdate`].
@@ -1353,6 +1393,11 @@ impl Command {
         Self::of(Cmd::DlqUpdate(d))
     }
 
+    /// `RepinRun` (Phase 13).
+    pub fn repin_run(r: RepinRun) -> Self {
+        Self::of(Cmd::RepinRun(r))
+    }
+
     /// Variant name (for logs and metrics); `"None"` for an empty command.
     pub fn kind_name(&self) -> &'static str {
         match &self.cmd {
@@ -1374,6 +1419,7 @@ impl Command {
             Some(Cmd::PauseRun(_)) => "PauseRun",
             Some(Cmd::ResumeRun(_)) => "ResumeRun",
             Some(Cmd::DlqUpdate(_)) => "DlqUpdate",
+            Some(Cmd::RepinRun(_)) => "RepinRun",
         }
     }
 }

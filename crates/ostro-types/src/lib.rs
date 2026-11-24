@@ -4,6 +4,8 @@
 //! lands in Phase 2; `journal::Event` payload semantics land in Phase 3.
 
 pub mod command;
+// Phase 13 (13-01): feature levels, the Feature registry and the P13 mutant names.
+pub mod compat;
 pub mod envelope;
 pub mod ids;
 pub mod journal;

@@ -7,7 +7,9 @@
 //! `OSTRO_BLESS=1 cargo test -p ostro-meta --test meta_commands_golden`, which refuses to
 //! rewrite an existing line). A drifted line means a frozen command encoding changed.
 
-use ostro_meta::ext::{ELECTION_REASON_FAILOVER, ELECTION_REASON_RESIGN, ElectionInfo};
+use ostro_meta::ext::{
+    ELECTION_REASON_FAILOVER, ELECTION_REASON_RESIGN, ElectionInfo, Reassignment,
+};
 use ostro_meta::{
     META_FORMAT, Member, MetaCommand, MetaKey, MetaRecord, decode_command, encode_command,
 };
@@ -115,6 +117,25 @@ fn golden_commands() -> Vec<(u8, &'static str, MetaCommand)> {
                 },
             },
         ),
+        // 13-01: index 7 is the never-proposed `ReservedP12_7` placeholder (no golden line).
+        (
+            8,
+            "AlterReplicas",
+            MetaCommand::AlterReplicas {
+                partition: 3,
+                epoch: 8,
+                expected_isr_version: 11,
+                replicas: vec![1, 2, 3, 4],
+                isr: vec![1, 2, 3],
+                min_insync: 2,
+                reassignment: Some(Reassignment {
+                    target: vec![2, 3, 4],
+                    adding: vec![4],
+                    removing: vec![1],
+                    started_at_ms: 1_700_000_000_789,
+                }),
+            },
+        ),
     ]
 }
 
@@ -204,5 +225,14 @@ fn phase12_variants_are_4_5_6() {
         );
     }
     let ordinals: Vec<u8> = vectors.iter().map(|v| v.0).collect();
-    assert_eq!(ordinals, (0..=6).collect::<Vec<u8>>());
+    assert_eq!(ordinals[..7], (0..=6).collect::<Vec<u8>>());
+}
+
+#[test]
+fn phase13_appends_alter_replicas_at_8() {
+    let vectors = file_vectors();
+    let ordinals: Vec<u8> = vectors.iter().map(|v| v.0).collect();
+    // Append-only: 0..=6 (12-05), then 8 AlterReplicas (13-01); 7 is the placeholder.
+    assert_eq!(ordinals, [0, 1, 2, 3, 4, 5, 6, 8]);
+    assert_eq!(vectors[7].1, "AlterReplicas");
 }

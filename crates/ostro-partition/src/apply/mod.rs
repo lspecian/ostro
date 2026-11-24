@@ -41,6 +41,8 @@ mod outbox;
 pub mod outcome;
 mod pause;
 mod rerun;
+// Phase 13 (13-01 stub, 13-17 semantics): `Cmd::RepinRun` (43).
+mod repin;
 mod retention;
 pub(crate) mod run;
 mod schedule;
@@ -160,6 +162,8 @@ fn dispatch(
         Cmd::ResumeRun(r) => pause::apply_resume_run(b, cur, r, actions),
         // Phase 11 (11-02 contract, 11-08 semantics): dead-letter marks (`dlq.rs`).
         Cmd::DlqUpdate(d) => dlq::apply_dlq_update(b, cur, d, actions),
+        // Phase 13 (13-01 contract, 13-17 semantics): repin a run (`repin.rs`).
+        Cmd::RepinRun(r) => repin::apply_repin_run(b, cur, r, actions),
     }
 }
 

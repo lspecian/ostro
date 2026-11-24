@@ -125,6 +125,12 @@ impl MetaState {
                 node,
                 info,
             } => self.resign_leader(index, partition, epoch, node, &info),
+            // Phase 13 placeholder (13-01, P-15): never proposed.
+            MetaCommand::ReservedP12_7 {} => MetaResult::Invalid("reserved".into()),
+            // Phase 13 (D-P13-12): shape 13-01, apply 13-10.
+            MetaCommand::AlterReplicas { .. } => {
+                MetaResult::Invalid("Phase 13: implemented in 13-10".into())
+            }
         }
     }
 

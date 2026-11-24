@@ -762,6 +762,10 @@ pub struct ApiExtensions {
     pub ops: Option<Arc<dyn crate::phase11::OpsApi>>,
     /// Phase 11 inventory views (11-04 slot; routes from 11-09).
     pub inventory: Option<Arc<dyn crate::phase11::InventoryApi>>,
+    /// Phase 13 cluster membership / upgrades (13-01 slot; routes from 13-03).
+    pub cluster: Option<Arc<dyn crate::phase13::ClusterApi>>,
+    /// Phase 13 module retire / GC / migrate-runs (13-01 slot; routes from 13-03).
+    pub module_lifecycle: Option<Arc<dyn crate::phase13::ModuleLifecycleApi>>,
 }
 
 impl Default for ApiExtensions {
@@ -776,6 +780,8 @@ impl Default for ApiExtensions {
             hook_body_limit: DEFAULT_HOOK_BODY_LIMIT,
             ops: None,
             inventory: None,
+            cluster: None,
+            module_lifecycle: None,
         }
     }
 }
@@ -791,6 +797,8 @@ impl std::fmt::Debug for ApiExtensions {
             .field("hook_body_limit", &self.hook_body_limit)
             .field("ops", &self.ops.is_some())
             .field("inventory", &self.inventory.is_some())
+            .field("cluster", &self.cluster.is_some())
+            .field("module_lifecycle", &self.module_lifecycle.is_some())
             .finish()
     }
 }

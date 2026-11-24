@@ -15,11 +15,14 @@
 //! - [`roles`]: Phase 12 role contracts (assignment source, follower driver, install control)
 //!   and the per-partition role lifecycle (12-13).
 //! - [`replica_services`]: snapshots + retention in every role (12-13).
+//! - [`handoff`]: Phase 13 graceful-handoff control contract ([`HandoffControl`], 13-11).
 
 pub mod acks;
 pub mod apply;
 pub mod clock;
 pub mod handle;
+// Phase 13 (13-01 contract, 13-11 implementation): graceful leader handoff control.
+pub mod handoff;
 pub mod leader;
 pub mod leadership;
 pub mod machine;
@@ -36,6 +39,7 @@ pub use store::{PartitionStore, StoreConfig, StoreError, StoreMeta, TABLES, Tabl
 
 pub use acks::{ACK_RETAIN, PendingAcks};
 pub use handle::{PartitionError, PartitionHandle};
+pub use handoff::{HandoffControl, HandoffGuard, HandoffRelease};
 pub use machine::{MachineConfig, MachineHandle, PartitionHealth};
 
 pub use clock::{Clock, ManualClock, SystemClock}; // clock-exempt: re-export of the default clock
