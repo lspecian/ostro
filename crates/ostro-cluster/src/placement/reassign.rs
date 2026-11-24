@@ -52,3 +52,26 @@ pub fn next_step(p: &PartitionObs, target: &[u64], policy_min_insync: u8) -> Rea
     let _ = (p, target, policy_min_insync);
     ReassignStep::None
 }
+
+/// [`next_step`] stamping `started_at_ms = now_ms` on a new reassignment. Stub: `None`.
+pub fn next_step_at(
+    p: &PartitionObs,
+    target: &[u64],
+    policy_min_insync: u8,
+    now_ms: u64,
+) -> ReassignStep {
+    let _ = (p, target, policy_min_insync, now_ms);
+    ReassignStep::None
+}
+
+/// The replica set a cancel restores. Stub: `None`.
+pub fn cancel_target(p: &PartitionObs) -> Option<Vec<u64>> {
+    let _ = p;
+    None
+}
+
+/// The Shrink `min_insync` (plan check W5). Stub: 0.
+pub fn shrink_min_insync(current: u8, policy: u8, target_len: usize) -> u8 {
+    let _ = (current, policy, target_len);
+    0
+}
