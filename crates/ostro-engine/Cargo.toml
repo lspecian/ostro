@@ -34,6 +34,9 @@ testkit = []
 # Fault injection (plan 05-18): the `aot::write` failpoint in the AOT disk cache
 # (tests/aot_failpoints.rs, `--test-threads=1`).
 failpoints = ["dep:fail", "fail/failpoints"]
+# Phase 13 (13-01 declares, 13-07 uses; D-P13-17): the test-only `ostro:runtime@0.2.0`
+# fixture package (outside wit/) that proves a second WIT major line links side by side.
+wit-next-fixture = []
 
 [dev-dependencies]
 ostro-engine = { path = ".", features = ["testkit"] }

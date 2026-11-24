@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Phase 13 (13-01, D-P13-7): level emulation for mixed-version tests. With it,
+# `OSTRO_TEST_LEVEL_MAX=k` (read once) makes `compat::level_max()` return k clamped to
+# [LEVEL_MIN, LEVEL]. Enabled only through the failpoints chains of ostro-server, ostro and
+# ostro-repl-conformance; never in a release build.
+level-emulation = []
+
 [dependencies]
 serde.workspace = true
 postcard.workspace = true

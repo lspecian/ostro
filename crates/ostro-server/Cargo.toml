@@ -89,6 +89,8 @@ failpoints = [
     "ostro-backup/failpoints",
     "ostro-bridge/failpoints",
     "ostro-cluster/failpoints",
+    # Phase 13 (13-01, D-P13-7): OSTRO_TEST_LEVEL_MAX level emulation
+    "ostro-types/level-emulation",
 ]
 
 [dev-dependencies]

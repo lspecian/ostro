@@ -21,6 +21,8 @@ failpoints = [
     "ostro-log/failpoints",
     "ostro-backup/failpoints",
     "ostro-meta/failpoints",
+    # Phase 13 (13-01, D-P13-7): OSTRO_TEST_LEVEL_MAX level emulation in tier-B/C nodes
+    "ostro-types/level-emulation",
 ]
 
 [dependencies]
@@ -58,6 +60,10 @@ rand.workspace = true
 libc.workspace = true
 proptest.workspace = true
 fail = { workspace = true, optional = true }
+# Phase 13 (13-01 declares every Phase 13 dependency): the harness drives the Phase 13
+# extension traits (ostro_api::phase13) and the client/CLI surface (ostro-client) (13-02/13-08)
+ostro-api = { path = "../ostro-api" }
+ostro-client = { path = "../ostro-client" }
 
 [lints]
 workspace = true
