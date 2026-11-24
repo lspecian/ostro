@@ -442,6 +442,24 @@ async fn zero_to_n_to_zero() {
                 open.iter().filter(|id| !long_ids.contains(*id)).collect();
             if !short_open.is_empty() || on_workers > 0 {
                 print_timeline(&timeline);
+                // Where each stuck run is: its record, history and every log line naming it.
+                for id in &short_open {
+                    eprintln!("run {id}: {:?}", c.api.run(id).await);
+                    eprintln!("history {id}: {:?}", c.api.history(id).await);
+                    for l in c
+                        .server()
+                        .output()
+                        .lines()
+                        .filter(|l| l.contains(id.as_str()))
+                    {
+                        eprintln!("server: {l}");
+                    }
+                    for w in pool.live.iter().chain(pool.draining.iter()) {
+                        for l in w.output().lines().filter(|l| l.contains(id.as_str())) {
+                            eprintln!("{}: {l}", w.id);
+                        }
+                    }
+                }
                 panic!(
                     "pool at 0 with {} open runs, {} of them short cpu-burn runs \
                      (demand {demand}, on workers {on_workers}): {short_open:?}",
