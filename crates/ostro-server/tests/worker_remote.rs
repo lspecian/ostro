@@ -367,6 +367,55 @@ async fn worker_loss_regrants_without_failure() {
     s.shutdown().await;
 }
 
+/// ci-fix7: a worker `Fenced` that the leader never caused (the lease is not revoked and no
+/// append of the job was answered `fenced`) re-grants `n + 1`. Before, the dispatcher took
+/// it for a newer lease owning the run and dropped its lease without re-granting: the run
+/// stayed `Running` with nothing queued or leased (a pre-ci-fix7 worker fenced its own
+/// final flush on a drain, keda_sim's pool at 0 with a short run open).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unprovoked_worker_fence_regrants() {
+    let s = server().await;
+    let sha = deploy(&s, "cpu-burn").await;
+    workers_queue(&s, "wq", &[]).await;
+    let ws = ServerWorkers::new(Arc::clone(s.h().p7())).await;
+    let mut w = ws.raw("raw-fence", 1).await;
+    let run = start(&s, "cpu-burn", br#"{"ms": 1}"#, &sha, "wq").await;
+    let act = |m: v1::server_msg::Msg| match m {
+        v1::server_msg::Msg::Activate(a) => a,
+        _ => unreachable!(),
+    };
+    let first = act(next_msg(&mut w, "Activate", |m| {
+        matches!(m, v1::server_msg::Msg::Activate(_))
+    })
+    .await);
+    w.send(v1::worker_msg::Msg::Done(v1::Done {
+        run: first.run.clone(),
+        token: first.token,
+        outcome: ostro_worker_proto::WireOutcome::Fenced.encode(),
+        engine_end_seq: first.journal_len,
+    }));
+    let second = act(next_msg(&mut w, "the re-grant's Activate", |m| {
+        matches!(m, v1::server_msg::Msg::Activate(_))
+    })
+    .await);
+    let n = |a: &v1::Activate| a.token.expect("token").n;
+    assert!(
+        n(&second) > n(&first),
+        "re-granted n+1: {first:?} then {second:?}"
+    );
+    let js = remote_jobs(&s, &run);
+    assert!(
+        js.iter().any(|j| j.outcome == ExecOutcome::Abandoned),
+        "the fenced attempt is abandoned, not dropped: {js:?}"
+    );
+    let rec = s
+        .wait_record(&run, LIMIT, |r| r.status == RunStatus::Running)
+        .await;
+    assert_eq!(rec.attempt_failures, 0, "{rec:?}");
+    let mut s = s;
+    s.shutdown().await;
+}
+
 // ------------------------------------------------------------------- StartEffect checks
 
 /// A request-counting HTTP mock (quiet thread).

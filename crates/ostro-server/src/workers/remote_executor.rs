@@ -58,7 +58,11 @@
 //!    the leader saw the worker's appends. A `Reactivate` becomes `Abandoned` (re-grant
 //!    `n + 1` now, no failure counted): re-sending `Activate` with the same token could be
 //!    swallowed by the worker's duplicate-lease check while the previous activation is
-//!    still unregistering.
+//!    still unregistering. A worker `Fenced` that the leader never caused (no revoke, no
+//!    append of this job answered `fenced`) is `Abandoned` too, not `Fenced`: the dispatcher
+//!    drops a `Fenced` lease without re-granting (a newer lease is assumed to own the run),
+//!    which here would leave the run open with nothing queued or leased (ci-fix7: a worker
+//!    before ci-fix7 fenced its own final flush on a drain).
 //!
 //! Stream loss (`RemoteEvent::Abandoned`) is `ExecOutcome::Abandoned`, never an attempt
 //! failure (Pitfall 3). A revoked lease sends `Cancel{run, token}` and waits for `Done` (at
@@ -204,6 +208,9 @@ struct Live {
     /// Highest `Input.up_to_seq` sent.
     input_up_to: u64,
     revoked: bool,
+    /// The leader answered an append of this job `fenced` (revoked, or apply fenced the
+    /// token). A worker `Fenced` without this is the worker's own fence (ci-fix7).
+    fenced: bool,
 }
 
 fn ms(d: Duration) -> u64 {
@@ -510,6 +517,7 @@ impl RemoteRunner {
             engine_end: journal_len,
             input_up_to: journal_len,
             revoked: false,
+            fenced: false,
         };
         let (mut seqs_open, mut sink_open) = (true, true);
         // A relative bound on the wait for `Done` after `Cancel` (a pinned tokio sleep; no
@@ -590,6 +598,12 @@ impl RemoteRunner {
         let exec = match exec {
             // Module docs, step 9: never re-send the same token.
             ExecOutcome::Reactivate => ExecOutcome::Abandoned,
+            // Module docs, step 9: nothing on the leader fenced this job, so no newer lease
+            // owns the run; dropping the lease would leave it open with nothing queued.
+            ExecOutcome::Fenced if matches!(outcome, ActivationOutcome::Fenced) && !st.fenced => {
+                warn!(%run, attempt = token.n, "worker reported Fenced for a lease the leader holds; re-granting");
+                ExecOutcome::Abandoned
+            }
             other => other,
         };
         (Some(outcome), exec, false)
@@ -678,6 +692,7 @@ impl RemoteRunner {
             Ok(v1::AppendResult { result: Some(r) })
         };
         if st.revoked {
+            st.fenced = true;
             return reply(R::Fenced(true));
         }
         if batch.events.is_empty() {
@@ -729,7 +744,10 @@ impl RemoteRunner {
                     R::Next(next)
                 }
             }
-            Err(AppendError::Fenced) => R::Fenced(true),
+            Err(AppendError::Fenced) => {
+                st.fenced = true;
+                R::Fenced(true)
+            }
             Err(AppendError::Conflict { expected }) => R::ConflictExpected(expected),
             Err(AppendError::Unavailable(e)) => R::Rejected(e),
         };
