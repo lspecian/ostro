@@ -10,11 +10,18 @@
 //!   peer; `send` never blocks the driver thread. A failed stream reports
 //!   `report_unreachable` (and `report_snapshot_failed` when it carried a snapshot) and
 //!   reconnects with exponential backoff; a full queue drops its oldest non-snapshot
-//!   message (Raft retransmits).
+//!   message (Raft retransmits). Since 13-05 a message to a node that is not yet a peer
+//!   (a learner added after start) opens a queue for it on the fly.
 //! - [`GrpcForwarder`]: the `ProposeForwarder` over `MetaPeer.Propose`.
 //!
 //! A single node has zero peers: the outbox sends nothing, and the service is still
 //! servable (D-P12-13: the cluster transport is live in every mode).
+//!
+//! Phase 13 (13-05): the encode/decode limit defaults to 256 MiB (`[cluster]
+//! meta_max_message_bytes`, Pitfall 4) so a whole metadata snapshot reaches a new learner in
+//! one `MsgSnapshot`; callers are authorized as the static voters **or** any member of the
+//! current Raft configuration (voters, learners, outgoing voters); and
+//! [`RaftSlot::meta_lease_anchor`] exposes the metadata lease anchor (D-P13-15).
 //!
 //! The driver's [`RaftHandle`] exists only once the metadata group started, while the
 //! service must already be serving (peers' messages elect the leader), so both reach it
@@ -49,8 +56,12 @@ use crate::transport::ClusterTransport;
 use crate::transport::tcp::PeerIdentity;
 
 /// Default encode/decode limit of MetaPeer messages on both client and server: a Raft
-/// batch may carry a whole metadata snapshot (`MsgSnapshot`).
-pub const DEFAULT_META_MAX_MESSAGE: usize = 64 * 1024 * 1024;
+/// batch may carry a whole metadata snapshot (`MsgSnapshot`). 256 MiB since 13-05
+/// (`[cluster] meta_max_message_bytes`, D-P13-26; was 64 MiB).
+pub const DEFAULT_META_MAX_MESSAGE: usize = 256 * 1024 * 1024;
+
+/// Gauge: bytes of the last metadata snapshot handed to a peer stream.
+pub const META_SNAPSHOT_BYTES_GAUGE: &str = "ostro_cluster_meta_snapshot_bytes";
 
 /// `ProposeResponse.error_kind`: this node is not the leader (`leader_hint` = the leader,
 /// 0 = unknown). Nothing was applied.
@@ -88,6 +99,16 @@ impl RaftSlot {
     /// The handle, once bound.
     pub fn get(&self) -> Option<&RaftHandle> {
         self.0.get()
+    }
+
+    /// The metadata lease anchor (13-05, D-P13-15) of this node:
+    /// `RaftHandle::lease_anchor` (the send instant of the newest lease round confirmed
+    /// through a quorum-acknowledged leader; `now` on a one-voter leader; `None` before the
+    /// group started, without a leader, or right after a leader change). On the meta leader
+    /// it is the leader's own quorum-acked heartbeat round, on any other node a round trip
+    /// through the leader. clock-exempt: monotonic lease anchor, never wall time.
+    pub fn meta_lease_anchor(&self) -> Option<std::time::Instant> {
+        self.0.get().and_then(RaftHandle::lease_anchor)
     }
 }
 
@@ -149,10 +170,18 @@ impl MetaPeerService {
         )
     }
 
-    /// The calling node, which must be a metadata voter.
+    /// The calling node, which must be a metadata voter, or (13-05) a member of the current
+    /// Raft configuration (a learner added after start, an outgoing voter).
     fn voter<T>(&self, req: &Request<T>) -> Result<u64, Status> {
         let peer = require_node(req)?;
-        if !self.voters.contains(&peer) {
+        let member = self.raft.get().is_some_and(|raft| {
+            let s = raft.status();
+            s.voters.contains(&peer)
+                || s.learners.contains(&peer)
+                || s.voters_outgoing.contains(&peer)
+                || s.learners_next.contains(&peer)
+        });
+        if !self.voters.contains(&peer) && !member {
             return Err(Status::permission_denied(format!(
                 "node {peer} is not a metadata peer of node {} (voters {:?})",
                 self.node_id, self.voters
@@ -255,7 +284,7 @@ impl MetaPeer for MetaPeerService {
             Err(e) => ProposeResponse {
                 error_kind: match e {
                     ProposeError::Dropped => ERROR_DROPPED,
-                    ProposeError::Stopped => ERROR_STOPPED,
+                    ProposeError::Stopped | ProposeError::Fatal(_) => ERROR_STOPPED,
                     _ => ERROR_OUTCOME_UNKNOWN,
                 }
                 .into(),
@@ -364,6 +393,9 @@ struct Shared {
     closed: AtomicBool,
     transport: Arc<dyn ClusterTransport>,
     cfg: OutboxConfig,
+    /// Runtime for the sender tasks of peers added on the fly (13-05); `send` runs on the
+    /// driver thread, outside any runtime.
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl Shared {
@@ -412,6 +444,7 @@ impl PeerOutbox {
             closed: AtomicBool::new(false),
             transport,
             cfg,
+            runtime: tokio::runtime::Handle::try_current().ok(),
         });
         let mut map = HashMap::new();
         let mut tasks = Vec::new();
@@ -442,10 +475,31 @@ impl PeerOutbox {
     }
 }
 
+impl PeerOutbox {
+    /// A queue and sender task for `peer`, a node that joined the configuration after this
+    /// outbox was built (13-05: a new learner). `None` for this node, node 0, or without a
+    /// runtime.
+    fn add_peer(&mut self, peer: u64) -> Option<Arc<PeerQueue>> {
+        if peer == self.shared.node_id || peer == 0 {
+            return None;
+        }
+        let rt = self.shared.runtime.as_ref()?;
+        let q = Arc::new(PeerQueue::default());
+        self.tasks
+            .push(rt.spawn(run_peer(Arc::clone(&self.shared), peer, Arc::clone(&q))));
+        self.peers.insert(peer, Arc::clone(&q));
+        tracing::info!(peer, "meta raft peer added to the outbox");
+        Some(q)
+    }
+}
+
 impl Outbox for PeerOutbox {
     fn send(&mut self, messages: Vec<Message>) {
         for m in messages {
             let to = m.to;
+            if !self.peers.contains_key(&to) {
+                self.add_peer(to);
+            }
             match self.peers.get(&to) {
                 Some(q) => {
                     if let Some(lost) = q.push(m, self.shared.cfg.queue_cap)
@@ -538,7 +592,11 @@ async fn pump(
                 r = &mut *call => return ended(r),
             }
         }
-        *snapshot_sent |= batch.iter().any(is_snapshot);
+        if let Some(snap) = batch.iter().find(|m| is_snapshot(m)) {
+            *snapshot_sent = true;
+            let bytes = snap.snapshot.as_ref().map_or(0, |s| s.data.len());
+            metrics::gauge!(META_SNAPSHOT_BYTES_GAUGE).set(bytes as f64);
+        }
         let rb = RaftBatch {
             from: shared.node_id,
             messages: batch.iter().map(|m| m.encode_to_vec()).collect(),
@@ -669,6 +727,38 @@ mod tests {
         );
         assert_eq!(q.drain(10).iter().map(|m| m.index).collect::<Vec<_>>(), [3]);
         assert_eq!(q.drain(10).len(), 0);
+    }
+
+    /// `ostro_meta::sm::required_level` mirrors the compat registry (ostro-meta cannot
+    /// depend on ostro-types).
+    #[test]
+    fn meta_required_level_matches_the_compat_registry() {
+        use ostro_types::compat::{Feature, feature_for_meta_variant};
+        let alter = ostro_meta::MetaCommand::AlterReplicas {
+            partition: 0,
+            epoch: 1,
+            expected_isr_version: 0,
+            replicas: vec![1],
+            isr: vec![1],
+            min_insync: 1,
+            reassignment: None,
+        };
+        let bytes = ostro_meta::encode_command(&alter);
+        // `[META_FORMAT] ‖ varint(variant)`: AlterReplicas is variant 8.
+        assert_eq!(bytes[1], 8);
+        assert_eq!(feature_for_meta_variant(8), Some(Feature::AlterReplicas));
+        assert_eq!(
+            ostro_meta::sm::required_level(&alter),
+            Feature::AlterReplicas.introduced_at()
+        );
+        for v in 0..8 {
+            assert_eq!(feature_for_meta_variant(v), None, "variant {v}");
+        }
+        let put = ostro_meta::MetaCommand::Delete {
+            key: ostro_meta::MetaKey::Queue("q".into()),
+            expected_version: 1,
+        };
+        assert_eq!(ostro_meta::sm::required_level(&put), 1);
     }
 
     #[test]

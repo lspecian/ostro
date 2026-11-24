@@ -899,6 +899,10 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
 
     fn process_ready(&mut self) -> Result<(), Fatal> {
         if !self.node.has_ready() {
+            // Ostro (13-05): `snapshot_now` without anything else to do.
+            if self.force_snapshot {
+                self.maybe_snapshot()?;
+            }
             return Ok(());
         }
         let mut ready = self.node.ready();

@@ -409,3 +409,20 @@ async fn lease_cut_off_leader_stops_and_steps_down() {
     assert!(c.h(leader).leader_lease_anchor().is_none());
     c.router.heal();
 }
+
+/// `snapshot_now` compacts the leader's log at once (`snapshot_every` is 10,000 here): a
+/// voter that was down catches up from that snapshot instead of replaying every entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_now_compacts_and_a_lagging_voter_installs_it() {
+    let mut c = Cluster::new(&[1, 2, 3], config);
+    let leader = c.leader().await;
+    let down = *c.ids.iter().find(|&&i| i != leader).unwrap();
+    c.stop(down);
+    let last = write_n(&c, "s", 50).await;
+    c.h(leader).snapshot_now();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    c.start(down);
+    c.settle(last).await;
+    assert_eq!(c.sms[&down].set().len(), 50);
+    assert!(c.sms[&down].applied_log().len() < 50, "{} replayed", c.sms[&down].applied_log().len());
+}
