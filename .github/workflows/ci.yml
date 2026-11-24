@@ -66,6 +66,10 @@ jobs:
       - name: No chronik / tokio-uring / prometheus in the tree
         # shared with ci-local.sh (P8-D17): anchored match, self-tested
         run: bash scripts/forbidden-crates.sh --self-test && bash scripts/forbidden-crates.sh
+      - name: Phase 12 grep gates
+        # shared with ci-local.sh (12-08, 12-18): one log path, no SetPartitionLeader,
+        # no legacy path, clock gate, no bincode/object_store in Cargo.lock
+        run: bash scripts/p12-grep-gates.sh
 
   test:
     name: test (${{ matrix.name }})
@@ -282,6 +286,9 @@ jobs:
         name: Failpoint suites
         # keep in sync with FAILPOINT_CRATES in scripts/ci-local.sh (same commands, same
         # order; ci-local's "failpoint list sync" step checks it)
+        env:
+          # 12-18: a pending (skipped) replication mutant fails the suites (CLUS-01)
+          OSTRO_REPL_REQUIRE_ALL: "1"
         run: |
           cargo test -p ostro-wal --features failpoints --locked -- --test-threads=1
           cargo test -p ostro-blob --features failpoints --locked -- --test-threads=1
@@ -303,6 +310,16 @@ jobs:
           cargo test -p ostro-server --features failpoints --test dlq_api --locked -- --test-threads=1
           cargo test -p ostro-server --features failpoints --test bulk_ops --locked -- --test-threads=1
           cargo test -p ostro --features failpoints --test ops_kill --locked -- --test-threads=1
+      - if: matrix.name == 'linux-x86_64-gnu'
+        name: Replication mutant matrix
+        # keep in sync with check_repl_mutants in scripts/ci-local.sh (12-18): every
+        # tier-B mutant must bite (>= 11) and none may be skipped as pending
+        run: |
+          out="$(OSTRO_REPL_REQUIRE_ALL=1 cargo test -p ostro-repl-conformance --features failpoints --locked --test mutants -- --test-threads=1 --nocapture 2>&1)" || { echo "$out"; exit 1; }
+          grep -E 'MUTANT |test result' <<<"$out" || true
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<<"$out"
+          test "$(grep -c 'FAILED as expected' <<<"$out")" -ge 11
+          ! grep -q 'SKIP (pending)' <<<"$out"
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Phase 7 failpoint legs + manifests
         # keep in sync with check_phase7 in scripts/ci-local.sh (07-22): the SIGSTOP zombie
