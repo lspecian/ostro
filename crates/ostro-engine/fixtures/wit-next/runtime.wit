@@ -1,0 +1,142 @@
+// TEST FIXTURE (13-07, ENG-10, D-P13-17). Never shipped, never under wit/.
+//
+// A second WIT major line, `ostro:runtime@0.2.0`, used only to prove that the host links
+// two major lines side by side (feature `wit-next-fixture`). It is the 0.1 surface with
+// one changed signature (`run-info` gains a `region` field, so `context.info` changes
+// type), one removed function (`context.continue-as-new-suggested`), and the `effects`
+// interface left out to keep the test-only host small.
+package ostro:runtime@0.2.0;
+
+interface types {
+    record payload {
+        content-type: string,
+        data: list<u8>,
+    }
+
+    type op-id = u64;
+
+    record datetime {
+        seconds: u64,
+        nanoseconds: u32,
+    }
+
+    record error-info {
+        kind: string,
+        message: string,
+        details: option<payload>,
+    }
+
+    variant failure {
+        retryable(error-info),
+        non-retryable(error-info),
+        timeout,
+        cancelled,
+    }
+
+    record retry-policy {
+        max-attempts: u32,
+        initial-interval-ms: u64,
+        max-interval-ms: u64,
+        backoff-coefficient: f64,
+        non-retryable-kinds: list<string>,
+    }
+
+    record step-options {
+        retry: option<retry-policy>,
+        timeout-ms: option<u64>,
+        fuel: option<u64>,
+    }
+
+    /// Changed in 0.2 (the fixture's one incompatible signature): `region` added.
+    record run-info {
+        run-id: string,
+        workflow: string,
+        workflow-version: u32,
+        attempt: u32,
+        module-hash: string,
+        tenant: option<string>,
+        parent-run-id: option<string>,
+        deadline: option<datetime>,
+        continued-from: option<string>,
+        region: option<string>,
+    }
+}
+
+interface context {
+    use types.{run-info, datetime};
+
+    info: func() -> run-info;
+    now: func() -> datetime;
+    random-u64: func() -> u64;
+    random-bytes: func(len: u32) -> list<u8>;
+    uuid-v7: func() -> string;
+    is-replaying: func() -> bool;
+    patched: func(change-id: string) -> bool;
+    set-status: func(json: string);
+}
+
+interface journal {
+    use types.{payload, step-options, failure};
+
+    variant completion-ack {
+        recorded,
+        retry-now,
+    }
+
+    resource step {
+        seq: func() -> u64;
+        complete: func(outcome: result<payload, failure>) -> completion-ack;
+    }
+
+    variant step-start {
+        replayed(result<payload, failure>),
+        execute(step),
+    }
+
+    begin-step: func(name: string, opts: step-options) -> step-start;
+}
+
+interface log {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    emit: func(level: level, message: string, fields: list<tuple<string, string>>);
+}
+
+interface workflows {
+    use types.{payload, failure};
+
+    record workflow-meta {
+        name: string,
+        version: u32,
+        default-queue: option<string>,
+        run-timeout-ms: option<u64>,
+    }
+
+    record continuation {
+        input: payload,
+        workflow: option<string>,
+        version: option<u32>,
+    }
+
+    variant run-result {
+        completed(payload),
+        continue-as-new(continuation),
+    }
+
+    describe: func() -> list<workflow-meta>;
+    run: func(name: string, input: payload) -> result<run-result, failure>;
+}
+
+world workflow {
+    import context;
+    import journal;
+    import log;
+
+    export workflows;
+}

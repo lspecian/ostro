@@ -1,0 +1,10 @@
+// 13-07 (ENG-10) fixture: a world importing ostro:runtime interfaces from two major lines
+// (0.1 and the test-only 0.2). The host must reject it at upload (mixed WIT lines).
+package p13:mixed;
+
+world mixed {
+    import ostro:runtime/log@0.1.0;
+    import ostro:runtime/log@0.2.0;
+
+    export ostro:runtime/workflows@0.1.0;
+}

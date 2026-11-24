@@ -1,0 +1,494 @@
+// Ostro runtime contract, WIT 0.1.
+//
+// WIT 0.1 is frozen at the end of Phase 5 (WIT-07). Records, variants and enums
+// can never gain fields/cases after that; additive = new functions/interfaces/types only.
+//
+// After the freeze this file is byte-pinned, comments included (wit/FROZEN.toml). New
+// surface ships as a new `ostro:runtime@0.1.N` package that ostro-witcheck proves additive.
+// The pre-freeze review (D14) is docs/wit-0.1-freeze-review.md.
+
+package ostro:runtime@0.1.1;
+
+/// Shared value types used by every other interface.
+///
+/// Strings: every `string` in this package is UTF-8 and holds Unicode scalar values only.
+/// Guest toolchains differ on lone surrogates (StarlingMonkey silently replaces them with
+/// U+FFFD, QuickJS traps), so SDKs reject such strings before calling the host, with a
+/// non-retryable `invalid_string` failure.
+interface types {
+    /// An opaque, content-typed blob (workflow inputs/outputs, step results, signals).
+    ///
+    /// Interop convention: `application/json` payloads are UTF-8 JSON without a BOM, and
+    /// an empty `data` means JSON `null`. Other content types pass through untouched.
+    record payload {
+        content-type: string,
+        data: list<u8>,
+    }
+
+    /// Handle to a durable operation started through `effects`. Completed via `effects.wait`.
+    ///
+    /// Op ids are opaque u64 values (today: the journal seq of the scheduling event). The
+    /// `effects.cancellation` op is 2^64-1, and the range `u64::MAX-15..=u64::MAX` is
+    /// host-reserved. JS bindings deliver op ids as `bigint`; SDKs must never round-trip
+    /// an op id through `Number` (2^64-1 is not representable).
+    type op-id = u64;
+
+    /// Wall-clock time as seconds + nanoseconds since the Unix epoch.
+    record datetime {
+        seconds: u64,
+        nanoseconds: u32,
+    }
+
+    /// Structured error description. `kind` is matched against `retry-policy.non-retryable-kinds`.
+    ///
+    /// Reserved kinds, produced by the host or the SDKs (guests should not reuse them):
+    /// - Phase 5 (in use): `timeout`, `cancelled`, `unsupported`.
+    /// - Effects bridge (Phase 6): `effect_outcome_unknown`, `egress_denied`,
+    ///   `secret_not_granted`, `secret_not_found`, `rate_limited`, `response_too_large`,
+    ///   `connection_unknown`, `sql_not_transactional`, `sql_exactly_once_violated`,
+    ///   `unsupported_op`, `http_transport`.
+    /// - Children and SDKs (Phase 9): `child_terminated`, `sdk_protocol`, `invalid_string`.
+    /// - Run operations (Phase 11): `limit_exceeded`, `payload_too_large`.
+    record error-info {
+        kind: string,
+        message: string,
+        details: option<payload>,
+    }
+
+    /// Why an operation, step or run failed.
+    variant failure {
+        /// Eligible for retry under the applicable retry policy.
+        retryable(error-info),
+        /// Never retried; fails the step/run immediately.
+        non-retryable(error-info),
+        /// A timeout elapsed (step, effect or run timeout).
+        timeout,
+        /// The operation or run was cancelled.
+        cancelled,
+    }
+
+    /// Exponential backoff retry policy.
+    ///
+    /// `max-attempts` counts the first attempt, so 0 and 1 both mean no retry. A NaN,
+    /// infinite or < 1 `backoff-coefficient` is treated as 1, and delays saturate instead of
+    /// overflowing. Failures whose `kind` is in `non-retryable-kinds` are never retried.
+    record retry-policy {
+        max-attempts: u32,
+        initial-interval-ms: u64,
+        max-interval-ms: u64,
+        backoff-coefficient: f64,
+        non-retryable-kinds: list<string>,
+    }
+
+    /// Options for `journal.begin-step`.
+    ///
+    /// `retry: none` means no host retries. SDK-level defaults (such as the Rust SDK
+    /// macro's) are SDK conveniences and must be identical across SDKs.
+    record step-options {
+        retry: option<retry-policy>,
+        timeout-ms: option<u64>,
+        /// Fuel budget for the step body (deterministic CPU accounting).
+        ///
+        /// Fuel counts the Wasm instructions of the guest runtime, so budgets are not
+        /// portable across languages: an interpreted (Python/JS) step burns far more fuel
+        /// than the same Rust step.
+        fuel: option<u64>,
+    }
+
+    /// Identity and metadata of the current run. Every field except `attempt` is fixed for
+    /// the run and identical on every replay.
+    record run-info {
+        run-id: string,
+        /// Unqualified, module-local workflow name (`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`;
+        /// `/`, `:` and a leading `__` are reserved). It never carries a tenant prefix.
+        workflow: string,
+        workflow-version: u32,
+        /// The current activation attempt. It increases on every re-dispatch (failover,
+        /// lease expiry, worker loss, restart) and is not stable across replays. Use it only
+        /// for logging and metrics, never for control flow.
+        attempt: u32,
+        /// Hash of the module executing this activation. May change between activations
+        /// when an operator re-pins the run (`ostro migrate-runs`, Phase 13); use for logging
+        /// and metrics, never for control flow.
+        module-hash: string,
+        /// The run's tenant; `none` for the default tenant. Immutable for the run and
+        /// inherited by children, continue-as-new successors and retries.
+        tenant: option<string>,
+        /// Parent run of an attached child; `none` for top-level runs and detached children.
+        parent-run-id: option<string>,
+        /// Run deadline: the run's creation time + its run timeout, if it has one. Reaching
+        /// it is a hard stop (`TimedOut`) with no guest cleanup (D2).
+        deadline: option<datetime>,
+        /// Run id this run was continued from via continue-as-new, if any.
+        continued-from: option<string>,
+    }
+}
+
+/// Deterministic run context. Every value returned here is journaled or derived
+/// from journaled data, so it is identical on every replay.
+///
+/// Randomness: `random-u64` and `random-bytes` share one stream; `uuid-v7` uses its own.
+/// Inside a live step (see `journal`) every draw comes from step-local streams instead
+/// (D7, see `random-bytes`).
+interface context {
+    use types.{run-info, datetime};
+
+    /// Metadata of the current run.
+    info: func() -> run-info;
+    /// Deterministic workflow time (the journaled time of the current activation point).
+    now: func() -> datetime;
+    /// Deterministic random u64 from the run's journaled RNG seed (shares the stream of
+    /// `random-bytes`).
+    random-u64: func() -> u64;
+    /// Deterministic random bytes from the run's journaled RNG seed.
+    ///
+    /// `len` must be at most 65536; a larger value is a protocol violation that fails the
+    /// activation.
+    ///
+    /// Step-local RNG (D7): while a live step is open (between `begin-step` returning
+    /// `execute` and `complete`), randomness comes from a stream keyed on the step's journal
+    /// seq, `sha256("ostro/step-rng/v1" || run seed || seq)`, and the run-level streams are
+    /// untouched. Each attempt of a step gets a fresh stream, and values drawn outside steps
+    /// are the same whether earlier steps ran live or were replayed.
+    random-bytes: func(len: u32) -> list<u8>;
+    /// Deterministic UUIDv7 (time from `now`, randomness from the run seed), returned as
+    /// lowercase canonical 8-4-4-4-12 text. Draws from its own stream, separate from
+    /// `random-u64`/`random-bytes`.
+    uuid-v7: func() -> string;
+    /// True while the guest is re-executing journaled history.
+    is-replaying: func() -> bool;
+    /// Versioning gate: true if `change-id` is active for this run (journals a patch marker
+    /// on first evaluation in new code paths).
+    ///
+    /// Memoised per change-id within a run: later calls with the same id return the first
+    /// answer. Patch markers in the journal that the code never queries are ignored on
+    /// replay, so a `patched` call can be removed once no old run needs it.
+    patched: func(change-id: string) -> bool;
+    /// Publish a JSON status document visible to clients (journaled; at most 65536 bytes).
+    set-status: func(json: string);
+    /// True when the journal has grown large enough that the guest should continue-as-new.
+    continue-as-new-suggested: func() -> bool;
+}
+
+/// Durable steps. A step body runs at most once to a recorded completion; on replay the
+/// recorded outcome is returned instead of re-executing.
+///
+/// Open-step rule: between `begin-step` returning `execute` and the step's `complete` (or
+/// drop), every journaled call (`begin-step`, every `effects` function including `wait`,
+/// `context.patched`, `context.set-status`) is a protocol violation that fails the
+/// activation. `context` reads (`info`, `now`, `random-u64`, `random-bytes`, `uuid-v7`,
+/// `is-replaying`, `continue-as-new-suggested`) and `log.emit` are allowed, and randomness
+/// then comes from the step-local stream (see `context.random-bytes`).
+interface journal {
+    use types.{payload, step-options, failure};
+
+    /// Host acknowledgement of a step completion.
+    variant completion-ack {
+        /// The outcome was journaled.
+        recorded,
+        /// The step failed retryably and the host wants the body re-run now (in-activation retry).
+        retry-now,
+    }
+
+    /// A step being executed for the first time.
+    ///
+    /// Dropping a step without calling `complete` is an observability signal only;
+    /// the host never relies on drop (guest toolchains may not drop completed steps).
+    /// While the step is open the open-step rule applies (see the `journal` interface).
+    resource step {
+        /// Journal sequence number assigned to this step.
+        seq: func() -> u64;
+        /// Record the step outcome.
+        ///
+        /// A step retry is a cancellation point: while a graceful cancel the guest has not
+        /// yet observed is journaled, a failed step is not retried but resolves
+        /// `err(cancelled)` (the activation may be evicted inside `complete`; replay then
+        /// returns the recorded outcome).
+        complete: func(outcome: result<payload, failure>) -> completion-ack;
+    }
+
+    /// Result of `begin-step`.
+    variant step-start {
+        /// The step already completed in history; this is its recorded outcome.
+        replayed(result<payload, failure>),
+        /// The step must be executed; complete it through the handle.
+        execute(step),
+    }
+
+    /// Begin (or replay) the named step.
+    begin-step: func(name: string, opts: step-options) -> step-start;
+
+    /// Test fixture (13-07, never shipped): the one function 0.1.1 adds over 0.1.0.
+    /// Level 2 in the engine's test-only `introduced_in` entry. The host ignores the hint.
+    note-hint: func(hint: string);
+}
+
+/// Durable side effects and waits. Every call allocates an `op-id` deterministically;
+/// results arrive through `wait`.
+interface effects {
+    use types.{payload, op-id, datetime, failure, retry-policy};
+
+    /// An HTTP header. `value` may contain `{{secret:name}}` placeholders, which are
+    /// resolved by the host only and never visible to the guest or the journal.
+    ///
+    /// Secret templating (frozen semantics; the effects bridge implements them):
+    /// - Placeholders are resolved only in header values, and in the request body only
+    ///   when the secret's grant allows body templating. They are never resolved in the
+    ///   URL, the method or header names. Secret names resolve inside the run's tenant.
+    /// - A request that contains a placeholder never follows redirects: a 3xx is returned
+    ///   as the response.
+    /// - Each secret is usable only towards the origins its grant lists.
+    /// - Any resolved secret value (raw, base64, hex, percent-encoded or JSON-escaped) is
+    ///   replaced with `[REDACTED]` in the response before the journal or the guest sees it.
+    record header {
+        name: string,
+        value: string,
+    }
+
+    /// An outbound HTTP request executed by the host (secret templating: see `header`).
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<header>,
+        body: option<list<u8>>,
+        /// Timeout of one attempt (not of all retries together).
+        timeout-ms: option<u64>,
+        /// If absent, the host derives `ostro-<32 hex>` from (run id, op id) and sends it as
+        /// the `Idempotency-Key` header (the header name is configurable per destination).
+        /// The key is stable across attempts and resumes. A retry-as-new run or a
+        /// continue-as-new run gets new keys.
+        idempotency-key: option<string>,
+        /// Host retries happen only for retryable conditions (connect failure,
+        /// 408/425/429/5xx, transport loss) and reuse the same idempotency key. A re-drive
+        /// after a crash past the destination's idempotency window completes with
+        /// `failure::non-retryable{kind: "effect_outcome_unknown"}` and is never re-sent.
+        retry: option<retry-policy>,
+        /// Header names whose values are redacted: request header values are replaced in
+        /// the journal and logs, and response headers with these names are returned to the
+        /// guest redacted, so live and replay are identical.
+        redact: list<string>,
+    }
+
+    /// HTTP response returned to the guest.
+    ///
+    /// Any final status is a successful completion; the guest inspects `status`. A body
+    /// over the host cap fails the op with `non-retryable{kind: "response_too_large"}`.
+    record http-response {
+        status: u16,
+        headers: list<header>,
+        body: list<u8>,
+    }
+
+    /// A SQL parameter or column value.
+    variant sql-value {
+        null,
+        boolean(bool),
+        int8(s64),
+        float8(f64),
+        numeric(string),
+        text(string),
+        bytea(list<u8>),
+        json(string),
+        timestamptz(datetime),
+    }
+
+    /// A SQL statement executed by the host against a named connection (the connection
+    /// name resolves inside the run's tenant).
+    record sql-request {
+        connection: string,
+        statement: string,
+        params: list<sql-value>,
+        /// Exactly-once: the host runs the one statement in a transaction together with an
+        /// `ostro_effects` token row in the same database, and a re-drive returns the stored
+        /// result. Statements that commit implicitly or control transactions are rejected
+        /// with `non-retryable{kind: "sql_not_transactional"}`. `false` means at-least-once
+        /// on re-drive.
+        exactly-once: bool,
+    }
+
+    /// SQL statement result.
+    record sql-result {
+        columns: list<string>,
+        rows: list<list<sql-value>>,
+        rows-affected: u64,
+    }
+
+    /// An object-store operation against a named connection (the connection name resolves
+    /// inside the run's tenant).
+    record object-request {
+        connection: string,
+        /// One of `get` | `put` | `delete` | `head` | `presign-get` | `presign-put`; any other
+        /// value fails with `non-retryable{kind: "unsupported_op"}`. Output (`op-output.object`):
+        /// `get` returns the object bytes; `put`, `head` and `delete` return UTF-8 JSON
+        /// metadata (empty for `delete`); `presign-*` returns a UTF-8 URL whose expiry comes
+        /// from the connection config until a 0.1.N `object-presign` function exists.
+        op: string,
+        key: string,
+        body: option<list<u8>>,
+    }
+
+    /// Options for `start-child` (see `start-child` for the child contract).
+    record child-options {
+        queue: option<string>,
+        version: option<u32>,
+        /// Detached children outlive the parent and do not report completion.
+        ///
+        /// A detached child has no parent linkage: its `run-info.parent-run-id` is `none`,
+        /// it is not cancelled with the parent, and the op completes as soon as the start is
+        /// accepted, with `child(payload{application/json, {"run_id": "<id>"}})`.
+        detached: bool,
+        run-timeout-ms: option<u64>,
+    }
+
+    /// An await token: external systems complete `op` by presenting `token`.
+    ///
+    /// The token completes the op once; later completions are rejected.
+    record await-token {
+        op: op-id,
+        token: string,
+    }
+
+    /// Successful output of a completed operation.
+    variant op-output {
+        http(http-response),
+        sql(sql-result),
+        object(list<u8>),
+        timer,
+        signal(payload),
+        child(payload),
+        token(payload),
+        cancel-requested,
+    }
+
+    /// A completed operation.
+    record completion {
+        op: op-id,
+        outcome: result<op-output, failure>,
+    }
+
+    /// How `wait` decides it is satisfied.
+    enum wait-mode {
+        all,
+        any,
+    }
+
+    http-fetch: func(req: http-request) -> op-id;
+    sql-query: func(req: sql-request) -> op-id;
+    object-store: func(req: object-request) -> op-id;
+    sleep: func(duration-ms: u64) -> op-id;
+    sleep-until: func(at: datetime) -> op-id;
+    /// Wait for one signal named `name`. Signals are FIFO: one signal satisfies one wait.
+    /// Signals sent before any wait are buffered per name in arrival order, and several
+    /// waits on one name are satisfied oldest op first. The timeout completes the op with
+    /// `failure::timeout`. Signal waits always evict the activation and are never
+    /// hot-parked, whatever the timeout.
+    wait-signal: func(name: string, timeout-ms: option<u64>) -> op-id;
+    /// Start a child workflow. `workflow` is an unqualified name resolved inside the run's
+    /// tenant. Child run ids are derived deterministically from (parent run, op), so
+    /// re-delivery never duplicates a child.
+    ///
+    /// Outcome of an attached child's op: Completed -> `ok(child(output))`; Failed ->
+    /// `err(<the child's failure>)`; Cancelled -> `err(cancelled)`; TimedOut ->
+    /// `err(timeout)`; Terminated -> `err(non-retryable{kind: "child_terminated"})`. A child
+    /// that continues-as-new is followed to the last run of the chain.
+    ///
+    /// `cancel-op` on a child op completes it with `err(cancelled)` and requests graceful
+    /// cancellation of the child run and its descendants. Attached children receive a
+    /// graceful cancel when the parent reaches any terminal status. Detached children: see
+    /// `child-options.detached`.
+    start-child: func(workflow: string, input: payload, opts: child-options) -> op-id;
+    /// Create an await token. The token completes the op once; later completions are
+    /// rejected. The timeout completes the op with `failure::timeout`. Waits on token ops
+    /// always evict the activation and are never hot-parked, whatever the timeout.
+    create-await-token: func(timeout-ms: option<u64>) -> await-token;
+    /// Reserved op that completes with `cancel-requested` once a graceful cancel is
+    /// journaled. Terminate is host-only and never guest-visible (WIT-02).
+    ///
+    /// Its op id is the reserved value 2^64-1 (see `types.op-id`). How an SDK surfaces it
+    /// (D11: SDK waits observe it by default, shielded code does not) is SDK policy.
+    cancellation: func() -> op-id;
+    /// Cancel a pending operation; it completes with `failure::cancelled`, unless it already
+    /// completed earlier in journal order (the first completion wins). On a child op it also
+    /// requests graceful cancellation of the child (see `start-child`).
+    cancel-op: func(op: op-id);
+    /// Block until the given ops satisfy `mode`. Completions are returned in journaled
+    /// order, identical on every replay.
+    ///
+    /// - `any` returns every op in `ops` that has completed (at least one), ordered by the
+    ///   journal seq of each completion; `all` returns all of them.
+    /// - Re-waiting an op that an earlier `wait` already returned returns it again, and
+    ///   duplicates in `ops` count once.
+    /// - `any` with an empty list is a protocol violation.
+    /// - An unsatisfied wait appends nothing and may suspend the activation (it evicts, or
+    ///   hot-parks only on timers and in-flight effects).
+    /// - Each satisfied wait journals one `WaitResolved` event, which consumes a seq.
+    wait: func(ops: list<op-id>, mode: wait-mode) -> list<completion>;
+}
+
+/// Structured logging. Log lines are not journaled; they are suppressed during replay.
+/// `emit` is allowed inside an open step.
+interface log {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    emit: func(level: level, message: string, fields: list<tuple<string, string>>);
+}
+
+/// Exported by every workflow component.
+///
+/// Lifecycle: `run` is called once per activation on a fresh instance. The host may end an
+/// activation by trapping inside any import (eviction, fencing, cancel), so guest `finally`
+/// blocks and finalizers do not run then, and guests must not depend on them. Imports trap
+/// during component initialisation (pre-init/Wizer snapshot), so module-level code must not
+/// touch `context` or `effects`.
+interface workflows {
+    use types.{payload, failure};
+
+    /// Static description of a workflow the component provides.
+    record workflow-meta {
+        /// Unqualified, module-local name (`[A-Za-z0-9][A-Za-z0-9._-]{0,127}`; `/`, `:` and a
+        /// leading `__` are reserved).
+        name: string,
+        version: u32,
+        default-queue: option<string>,
+        run-timeout-ms: option<u64>,
+    }
+
+    /// Continue-as-new request: start a fresh run (same or different workflow) with `input`.
+    /// `workflow` is an unqualified name resolved inside the run's tenant.
+    record continuation {
+        input: payload,
+        workflow: option<string>,
+        version: option<u32>,
+    }
+
+    /// Terminal result of a successful `run`.
+    variant run-result {
+        completed(payload),
+        continue-as-new(continuation),
+    }
+
+    /// List the workflows this component provides. Must be pure and return unique names.
+    describe: func() -> list<workflow-meta>;
+    /// Run the named workflow from the beginning (replaying history as needed).
+    run: func(name: string, input: payload) -> result<run-result, failure>;
+}
+
+/// The world every Ostro workflow component targets.
+///
+/// Tenancy: workflow names seen here (`describe`, `run(name, ...)`, `start-child`,
+/// `continuation.workflow`) are unqualified. Child, continuation, connection and secret
+/// names resolve inside the run's tenant; a guest can never address another tenant. Tenant
+/// quotas delay work (dispatch and throttling) and never fail guest calls.
+world workflow {
+    import context;
+    import journal;
+    import effects;
+    import log;
+    export workflows;
+}
