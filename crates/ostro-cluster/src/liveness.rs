@@ -92,6 +92,8 @@ struct Node {
     suspect_at_ms: Option<u64>,
     /// Absent from a confirming sample; cleared when it is seen again.
     confirmed_dead: bool,
+    /// When `confirmed_dead` was set.
+    dead_at_ms: u64,
 }
 
 /// The liveness accumulator. Not thread-safe on its own; [`LivenessHandle`] shares it.
@@ -141,6 +143,7 @@ impl Liveness {
             last_seen_ms: None,
             suspect_at_ms: None,
             confirmed_dead: false,
+            dead_at_ms: 0,
         }
     }
 
@@ -167,8 +170,13 @@ impl Liveness {
     pub fn observe(&mut self, sample: &[u64]) {
         let now = self.clock.now_ms();
         self.track(sample.iter().copied());
+        // A node confirmed dead at D was unheard in [D - confirm_window, D]; this sample's
+        // `sample_window` only proves contact after D once it starts at or after that.
+        let stale = ms(self.cfg.sample_window).saturating_sub(ms(self.cfg.confirm_window));
         for id in sample {
-            if let Some(n) = self.nodes.get_mut(id) {
+            if let Some(n) = self.nodes.get_mut(id)
+                && !(n.confirmed_dead && now < n.dead_at_ms.saturating_add(stale))
+            {
                 n.last_seen_ms = Some(now);
                 n.suspect_at_ms = None;
                 n.confirmed_dead = false;
@@ -234,6 +242,7 @@ impl Liveness {
             } else {
                 tracing::info!(node = id, "liveness: suspect confirmed dead");
                 n.confirmed_dead = true;
+                n.dead_at_ms = now;
             }
         }
     }

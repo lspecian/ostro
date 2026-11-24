@@ -100,6 +100,36 @@ fn suspect_absent_from_the_confirming_sample_is_dead_within_one_tick() {
     assert_eq!(l.state(3), NodeState::Live);
 }
 
+/// 12-18: the controller's poll takes the confirming sample (`within = confirm_window`) and
+/// then a regular one (`within = sample_window`, wider). A node killed just before the
+/// suspect report was still heard inside the wider window, so the regular sample used to
+/// revive it at once and detection waited for a later report (about 2.3 s instead of
+/// `confirm_window` plus a tick on the failover runs).
+#[test]
+fn a_wider_sample_right_after_the_confirmation_does_not_revive() {
+    let (clock, mut l) = setup();
+    l.observe(&[1, 2, 3]);
+    l.report_suspect(1, 3);
+    clock.advance(ms(l.config().confirm_window));
+    l.confirm(&[1, 2]);
+    assert_eq!(l.state(3), NodeState::Dead);
+    // Same poll: node 3's last contact predates the report but lies inside sample_window.
+    l.observe(&[1, 2, 3]);
+    assert_eq!(
+        l.state(3),
+        NodeState::Dead,
+        "revived by contact older than the report"
+    );
+    let stale = ms(l.config().sample_window) - ms(l.config().confirm_window);
+    clock.advance(stale - 1);
+    l.observe(&[1, 2, 3]);
+    assert_eq!(l.state(3), NodeState::Dead);
+    // From then on the regular window starts after the confirmation: presence is new contact.
+    clock.advance(1);
+    l.observe(&[1, 2, 3]);
+    assert_eq!(l.state(3), NodeState::Live);
+}
+
 #[test]
 fn suspect_present_in_the_confirming_sample_is_cleared() {
     let (clock, mut l) = setup();
