@@ -23,6 +23,9 @@ pub mod rest;
 pub use domain::ControlPlane;
 pub use error::{ApiError, ErrorCode};
 pub use openapi::openapi;
+/// The generated gRPC types (13-03): re-exported so `ostro-server` names the Phase 13
+/// `ostro.cluster.v1` messages (`p13/node_ops.rs`) without a manifest change.
+pub use ostro_proto as proto;
 pub use phase8::ApiExtensions;
 
 use ostro_proto::api::v1::{

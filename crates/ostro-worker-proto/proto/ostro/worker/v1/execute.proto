@@ -78,6 +78,9 @@ message Hello {
   map<string, string> labels = 7;
   uint32 slots = 8;
   uint64 memory_bytes = 9;
+  // Phase 13 (13-03, D-P13-18): the worker binary's feature level. 0 (absent, an
+  // older worker) means: parse the level from ostro_version.
+  uint32 feature_level = 10;
 }
 
 // The engine configuration a worker must adopt so embedded and remote runs behave the same

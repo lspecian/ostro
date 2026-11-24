@@ -574,6 +574,8 @@ pub fn hello(worker_id: &str, slots: u32) -> v1::Hello {
         labels: [("zone".to_owned(), "a".to_owned())].into_iter().collect(),
         slots,
         memory_bytes: 1 << 30,
+        // Phase 13: 0 = derive from ostro_version (13-14 sends the real level).
+        feature_level: 0,
     }
 }
 

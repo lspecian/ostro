@@ -109,6 +109,8 @@ pub fn hello(shared_cfg: &crate::WorkerConfig, worker_id: &str) -> v1::Hello {
             .collect(),
         slots: shared_cfg.slots,
         memory_bytes: shared_cfg.memory_bytes,
+        // Phase 13: 0 = derive from ostro_version (13-14 sends the real level).
+        feature_level: 0,
     }
 }
 

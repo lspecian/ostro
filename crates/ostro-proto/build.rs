@@ -20,6 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/ostro/api/v1/ops.proto",
         // Phase 12 (12-02): node-to-node Replication + MetaPeer (cluster listener only).
         "proto/ostro/cluster/v1/cluster.proto",
+        // Phase 13 (13-03): Cluster + ModuleLifecycle (public), Membership + NodeOps
+        // (cluster listener only).
+        "proto/ostro/api/v1/cluster.proto",
+        "proto/ostro/cluster/v1/membership.proto",
     ];
     for proto in PROTOS {
         println!("cargo:rerun-if-changed={proto}");
@@ -32,6 +36,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip_debug([
             ".ostro.api.v1.WorkerTokenCreated",
             ".ostro.api.v1.JoinWorkerRequest",
+            // Phase 13 (13-03): node join tokens.
+            ".ostro.api.v1.JoinClusterRequest",
+            ".ostro.api.v1.NodeTokenCreated",
         ])
         .compile_fds(fds)?;
     Ok(())

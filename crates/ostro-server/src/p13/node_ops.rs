@@ -2,10 +2,9 @@
 //! (13-11's [`HandoffExecutor`]) and `ModuleRefs` (13-15's [`ModuleRefsSource`]), node
 //! identities only (`authz::require_node`).
 //!
-//! 13-02 writes the delegation over local message shapes; the generated types arrive with
-//! the proto in 13-03, whose Task 1 swaps the shapes for them (a pure type-path change) and
-//! makes [`NodeOpsService::routes`] return the tonic server. Until then the service is not
-//! mounted (`routes()` is `None`) and nothing calls it remotely.
+//! 13-02 wrote the delegation; 13-03 swapped its stand-in message shapes for the generated
+//! `ostro.cluster.v1` types (`ostro/cluster/v1/membership.proto`) and mounts the tonic
+//! server ([`NodeOpsService::routes`], attached through `cluster_listener_services`).
 
 use std::sync::Arc;
 
@@ -15,56 +14,10 @@ use ostro_types::{Epoch, PartitionId};
 use tonic::service::Routes;
 use tonic::{Request, Response, Status};
 
-/// `HandOffRequest` (stand-in for the 13-03 generated message).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HandOffRequest {
-    /// Partition to hand off.
-    pub partition: u32,
-    /// Target node (must be in the published ISR).
-    pub to: u64,
-    /// The leader epoch the caller saw.
-    pub epoch: u32,
-}
-
-/// `HandOffResponse` (stand-in for the 13-03 generated message).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct HandOffResponse {
-    /// Leadership moved.
-    pub moved: bool,
-    /// The new epoch when moved.
-    pub new_epoch: u32,
-    /// Why the handoff was abandoned (empty when moved).
-    pub reason: String,
-}
-
-/// One `(partition, epoch)` pair of a `ModuleRefs` request.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PartitionEpoch {
-    /// Partition.
-    pub partition: u32,
-    /// Epoch the caller saw.
-    pub epoch: u32,
-}
-
-/// `ModuleRefsRequest` (stand-in for the 13-03 generated message).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ModuleRefsRequest {
-    /// Module shas (32 bytes each).
-    pub shas: Vec<Vec<u8>>,
-    /// Partitions to cover.
-    pub partitions: Vec<PartitionEpoch>,
-    /// Also protect modules of retryable terminal runs.
-    pub protect_resumable: bool,
-}
-
-/// `ModuleRefsResponse` (stand-in for the 13-03 generated message).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ModuleRefsResponse {
-    /// The referenced shas.
-    pub referenced: Vec<Vec<u8>>,
-    /// Requested partitions this node does not lead at that epoch.
-    pub uncovered: Vec<PartitionEpoch>,
-}
+use ostro_api::proto::cluster::v1::node_ops_server::{NodeOps, NodeOpsServer};
+pub use ostro_api::proto::cluster::v1::{
+    HandOffRequest, HandOffResponse, ModuleRefsRequest, ModuleRefsResponse, PartitionEpoch,
+};
 
 fn partition(p: u32) -> Result<PartitionId, Status> {
     u16::try_from(p)
@@ -100,9 +53,9 @@ impl NodeOpsService {
         Self { handoff, refs }
     }
 
-    /// The tonic routes. `None` until 13-03 generates the `NodeOps` server.
+    /// The tonic routes of the `NodeOps` server.
     pub fn routes(self) -> Option<Routes> {
-        None
+        Some(Routes::new(NodeOpsServer::new(self)))
     }
 
     /// `NodeOps.HandOff`: this node (the partition leader) hands `partition` to `to`.
@@ -121,12 +74,12 @@ impl NodeOpsService {
             HandoffOutcome::Moved { new_epoch } => HandOffResponse {
                 moved: true,
                 new_epoch: new_epoch.0,
-                reason: String::new(),
+                abort_reason: String::new(),
             },
             HandoffOutcome::Aborted { reason } => HandOffResponse {
                 moved: false,
                 new_epoch: 0,
-                reason,
+                abort_reason: reason,
             },
         }))
     }
@@ -167,6 +120,23 @@ impl NodeOpsService {
                 })
                 .collect(),
         }))
+    }
+}
+
+#[tonic::async_trait]
+impl NodeOps for NodeOpsService {
+    async fn hand_off(
+        &self,
+        req: Request<HandOffRequest>,
+    ) -> Result<Response<HandOffResponse>, Status> {
+        NodeOpsService::hand_off(self, req).await
+    }
+
+    async fn module_refs(
+        &self,
+        req: Request<ModuleRefsRequest>,
+    ) -> Result<Response<ModuleRefsResponse>, Status> {
+        NodeOpsService::module_refs(self, req).await
     }
 }
 
@@ -239,7 +209,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(e.code(), tonic::Code::Unauthenticated);
-        assert!(svc().routes().is_none(), "mounted only once 13-03 lands");
+        assert!(svc().routes().is_some(), "mounted since 13-03");
     }
 
     #[tokio::test]

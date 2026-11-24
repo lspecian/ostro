@@ -227,3 +227,38 @@ fn execute_service_client_and_server_exist() {
     let _ = std::mem::size_of::<v1::StartEffectResponse>();
     let _ = v1::execute_server::SERVICE_NAME;
 }
+
+/// Phase 13 (13-03, D-P13-18): `Hello.feature_level` is the additive field 10; bytes from a
+/// pre-Phase-13 worker (no field 10) still decode, with `feature_level = 0`.
+#[test]
+fn hello_feature_level_is_additive() {
+    let full = v1::Hello {
+        worker_id: "w1".into(),
+        proto_version: PROTO_VERSION,
+        ostro_version: "0.2.0".into(),
+        wasmtime_version: "50.0.2".into(),
+        event_codec_ver: 1,
+        wit_packages: vec!["ostro:runtime@0.1.0".into()],
+        labels: [("zone".to_owned(), "a".to_owned())].into_iter().collect(),
+        slots: 4,
+        memory_bytes: 1 << 30,
+        feature_level: 2,
+    };
+    let back = v1::Hello::decode(full.encode_to_vec().as_slice()).expect("decode");
+    assert_eq!(back, full);
+    // Field 10, varint: tag byte (10 << 3) | 0 = 0x50, value 2.
+    let bytes = full.encode_to_vec();
+    assert!(bytes.ends_with(&[0x50, 0x02]), "{bytes:?}");
+
+    // An old worker's Hello: everything up to field 9.
+    let old = v1::Hello {
+        feature_level: 0,
+        ..full.clone()
+    };
+    let old_bytes = old.encode_to_vec();
+    assert_eq!(&bytes[..bytes.len() - 2], old_bytes.as_slice());
+    let decoded = v1::Hello::decode(old_bytes.as_slice()).expect("old hello decodes");
+    assert_eq!(decoded.feature_level, 0);
+    assert_eq!(decoded.worker_id, "w1");
+    assert_eq!(decoded.memory_bytes, 1 << 30);
+}

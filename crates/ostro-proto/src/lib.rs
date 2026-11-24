@@ -15,7 +15,8 @@ pub mod health {
 /// services `Schedules`, `RunLogs` (`schedules.proto`) and `Webhooks` (`webhooks.proto`)
 /// and the Phase 6 services `Secrets` and `Connectors` (`bridge.proto`), and the Phase 7
 /// services `Queues` (`queues.proto`) and `Workers` (`workers.proto`), and the Phase 11
-/// services `RunOps` and `Inventory` (`ops.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
+/// services `RunOps` and `Inventory` (`ops.proto`), and the Phase 13 services `Cluster` and
+/// `ModuleLifecycle` (`cluster.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
 /// `*_json`; timestamps are Unix milliseconds in `*_at_ms` fields.
 pub mod api {
     /// Version 1 of the control-plane API.
@@ -44,13 +45,38 @@ pub mod api {
                     .finish()
             }
         }
+
+        // Phase 13 (13-03): node join-token secrets never reach `Debug` output.
+        impl std::fmt::Debug for JoinClusterRequest {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("JoinClusterRequest")
+                    .field("token", &"<redacted>")
+                    .field("csr_pem", &self.csr_pem)
+                    .field("advertise", &self.advertise)
+                    .field("node_version", &self.node_version)
+                    .field("resume_node_id", &self.resume_node_id)
+                    .finish()
+            }
+        }
+
+        impl std::fmt::Debug for NodeTokenCreated {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("NodeTokenCreated")
+                    .field("id", &self.id)
+                    .field("token", &"<redacted>")
+                    .field("expires_at_ms", &self.expires_at_ms)
+                    .field("ca_hash", &self.ca_hash)
+                    .finish()
+            }
+        }
     }
 }
 
 /// `ostro.cluster.v1` node-to-node protocol (Phase 12, 12-02).
 ///
 /// `Replication` {Fetch, FetchSnapshot, FetchBlob, PushBlob} and `MetaPeer`
-/// {Raft, Propose, ReportSuspect}, served only on the mTLS cluster listener.
+/// {Raft, Propose, ReportSuspect}, and the Phase 13 (13-03) `Membership` {Removed} and
+/// `NodeOps` {HandOff, ModuleRefs}, served only on the mTLS cluster listener.
 pub mod cluster {
     /// Version 1 of the cluster protocol.
     pub mod v1 {

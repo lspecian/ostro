@@ -1,0 +1,70 @@
+// Node-to-node membership notices and node operations (Phase 13, 13-03;
+// CLUS-05..07, D-P13-23).
+//
+// Served only on the mTLS cluster listener (node identities, `PeerNode`), like
+// Replication and MetaPeer; never part of the public API (no REST mirror, no
+// parity check).
+//
+// This file is fixed by 13-03; a later change needs a STOP + re-plan note.
+syntax = "proto3";
+
+package ostro.cluster.v1;
+
+// Membership notices (13-09).
+service Membership {
+  // The meta leader tells a removed node that it was removed (it stops).
+  rpc Removed(RemovedNotice) returns (RemovedAck);
+}
+
+message RemovedNotice {
+  uint64 node_id = 1;
+  string cluster_id = 2;
+  string reason = 3;
+}
+
+message RemovedAck {}
+
+// Operations a node runs on behalf of the placement controller / module GC.
+service NodeOps {
+  // The partition leader hands leadership to an ISR member (13-11).
+  rpc HandOff(HandOffRequest) returns (HandOffResponse);
+  // Which module shas the partitions this node leads still reference (13-15).
+  rpc ModuleRefs(ModuleRefsRequest) returns (ModuleRefsResponse);
+}
+
+message HandOffRequest {
+  uint32 partition = 1;
+  // Target node (must be in the published ISR).
+  uint64 to = 2;
+  // The leader epoch the caller saw.
+  uint32 epoch = 3;
+}
+
+message HandOffResponse {
+  bool moved = 1;
+  // The new leader epoch when moved.
+  uint32 new_epoch = 2;
+  // Why the handoff was abandoned (empty when moved).
+  string abort_reason = 3;
+}
+
+message PartitionEpoch {
+  uint32 partition = 1;
+  uint32 epoch = 2;
+}
+
+message ModuleRefsRequest {
+  // Module sha256s (32 bytes each).
+  repeated bytes shas = 1;
+  // Also protect modules of retryable terminal runs.
+  bool protect_resumable = 2;
+  // Partitions to cover, with the epoch the caller saw.
+  repeated PartitionEpoch partitions = 3;
+}
+
+message ModuleRefsResponse {
+  // The referenced shas.
+  repeated bytes referenced = 1;
+  // Asked partitions this node does not lead at that epoch.
+  repeated PartitionEpoch uncovered = 2;
+}
