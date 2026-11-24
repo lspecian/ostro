@@ -8,18 +8,22 @@
 //! first record that does not verify, and that point is the node's measured durable end. On
 //! a running node a record still being written stops the scan the same way (best effort).
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use ostro_log::ostro_wal::WalRecord;
 use ostro_log::ostro_wal::truncate::{RECORD_HEADER_LEN, declared_record_size};
 use ostro_log::recovery::{list_segments, segment_dir};
 use ostro_log::verify_record;
+use ostro_partition::query::run_record;
+use ostro_partition::store::{PartitionStore, StoreConfig, state_dir};
 use ostro_types::command::decode_command;
-use ostro_types::{Cmd, Epoch, Offset, PartitionId, RunId};
+use ostro_types::{Cmd, Epoch, Offset, PartitionCount, PartitionId, RunId};
+use tempfile::TempDir;
 
-use super::Report;
+use super::{Report, copy_dir};
 use crate::harness::DataDirView;
 use crate::harness::inproc::Ack;
 
@@ -269,6 +273,93 @@ pub fn acked_on_scans(
                 holders.len()
             ));
         }
+    }
+    report
+}
+
+/// An opened copy of one store (the store is dropped before its temp dir).
+type StoreCopy = (PartitionStore, TempDir);
+
+/// The state-store probe [`acked_on_disk_with`] takes, for data dirs of nodes that may be
+/// running (tier C: the trimmed-log rule applied to the cluster campaign and the tier-C final
+/// checks, user-approved 2026-11-24, D-P12-28). The first time a `(node, partition)` is asked
+/// about, that node's `<data>/state/pNNNN` is copied to a temp dir and opened there (as
+/// [`super::standby::measure`] does): the node's own store is never opened, written or
+/// locked. A store that does not exist or cannot be copied or opened holds nothing (the run
+/// then needs evidence elsewhere) and is listed by [`StateStoreCopies::errors`]. The probe
+/// is consulted only for trimmed copies ([`acked_on_scans`]); it does not change the rule.
+pub struct StateStoreCopies {
+    roots: BTreeMap<u64, PathBuf>,
+    count: PartitionCount,
+    opened: RefCell<BTreeMap<(u64, u16), Result<StoreCopy, String>>>,
+}
+
+impl StateStoreCopies {
+    /// A probe over `views` (stores of a cluster with `count` partitions).
+    pub fn new(views: &[DataDirView], count: PartitionCount) -> Self {
+        Self {
+            roots: views.iter().map(|v| (v.node, v.root.clone())).collect(),
+            count,
+            opened: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    fn open_copy(&self, node: u64, p: PartitionId) -> Result<StoreCopy, String> {
+        let root = self
+            .roots
+            .get(&node)
+            .ok_or_else(|| format!("node {node}: no data dir"))?;
+        let src = state_dir(root, p);
+        if !src.is_dir() {
+            return Err(format!("{} does not exist", src.display()));
+        }
+        let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+        copy_dir(&src, &state_dir(tmp.path(), p))
+            .map_err(|e| format!("copy {}: {e}", src.display()))?;
+        let (store, _) = PartitionStore::open(tmp.path(), p, self.count, &StoreConfig::default())
+            .map_err(|e| format!("open copy of {}: {e}", src.display()))?;
+        Ok((store, tmp))
+    }
+
+    /// Whether `node`'s state store of `p` holds `run`'s record (decoded, as
+    /// `PartitionHandle::read_run` reads it in tier B).
+    pub fn has_run(&self, node: u64, p: PartitionId, run: &RunId) -> bool {
+        let mut opened = self.opened.borrow_mut();
+        let entry = opened
+            .entry((node, p.0))
+            .or_insert_with(|| self.open_copy(node, p));
+        match entry {
+            Ok((store, _)) => matches!(run_record(&store.reader(), run), Ok(Some(_))),
+            Err(_) => false,
+        }
+    }
+
+    /// The stores that could not be probed (`node N partition P: why`).
+    pub fn errors(&self) -> Vec<String> {
+        self.opened
+            .borrow()
+            .iter()
+            .filter_map(|((n, p), r)| {
+                r.as_ref()
+                    .err()
+                    .map(|e| format!("node {n} partition {p}: state probe: {e}"))
+            })
+            .collect()
+    }
+}
+
+/// [`acked_on_disk_with`] with a [`StateStoreCopies`] probe over `views` (tier C). When the
+/// report fails, stores that could not be probed are appended to it as context.
+pub fn acked_on_disk_copies(
+    views: &[DataDirView],
+    acks: &[Ack],
+    min_insync: usize,
+    count: PartitionCount,
+) -> Report {
+    let probe = StateStoreCopies::new(views, count);
+    let mut report = acked_on_disk_with(views, acks, min_insync, |n, p, r| probe.has_run(n, p, r));
+    if !report.is_ok() {
+        report.violations.extend(probe.errors());
     }
     report
 }

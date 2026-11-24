@@ -652,3 +652,119 @@ fn disk_untrimmed_copy_never_consults_the_state_store() {
         "{bad}"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// disk: trimmed-log rule over real data dirs (tier C, D-P12-28, user-approved 2026-11-24)
+// ---------------------------------------------------------------------------------------
+
+/// [`write_log`] whose first record starts at `floor` (a copy trimmed below `floor`).
+async fn write_log_from(dir: &Path, p: PartitionId, floor: u64, batches: Vec<(u32, Vec<Bytes>)>) {
+    let (node, log) = open_partition_log_for_tests(&dir.join("wal"), p, 1, Offset(floor))
+        .await
+        .expect("open log");
+    let first = batches.first().map_or(1, |(e, _)| *e);
+    log.become_leader(Epoch(first), ostro_log::ReplicaSet::solo(1))
+        .expect("become leader");
+    for (e, cmds) in batches {
+        let r = log.append(Epoch(e), cmds).await.expect("append");
+        log.wait_committed(r.last).await.expect("committed");
+    }
+    node.shutdown().await;
+}
+
+/// A checkpointed state store under `dir` holding a run record for each of `runs`.
+fn store_with_runs(dir: &Path, p: PartitionId, runs: &[&RunId]) {
+    use ostro_partition::store::keys::run_key;
+    use ostro_partition::store::values::{RunRecord, encode};
+    let count = PartitionCount::new(4).expect("count");
+    let (store, meta) = PartitionStore::open(dir, p, count, &StoreConfig::default()).expect("open");
+    let mut b = store.batch();
+    for r in runs {
+        b.insert(Table::Runs, run_key(r), encode(&RunRecord::default()));
+    }
+    b.commit(&MetaUpdate {
+        applied: Offset(3),
+        state_hash: [7; 32],
+        cursor: meta.cursor.clone(),
+        inbound_seen_changed: Vec::new(),
+    })
+    .expect("commit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_tier_c_probe_reads_state_store_copies_of_trimmed_copies_only() {
+    let p = PartitionId(1);
+    let count = PartitionCount::new(4).expect("count");
+    let (r1, r2) = (RunId::new_v7(p), RunId::new_v7(p));
+    // Node 1: untrimmed, holds both runs in its WAL.
+    let n1 = tempfile::tempdir().expect("n1");
+    write_log(
+        n1.path(),
+        p,
+        vec![
+            (1, vec![la(1, 1), start_run(&r1)]),
+            (1, vec![start_run(&r2)]),
+        ],
+    )
+    .await;
+    // Node 2: WAL trimmed below 2 (r1 lived below it), r1 in its checkpointed state store.
+    let n2 = tempfile::tempdir().expect("n2");
+    write_log_from(n2.path(), p, 2, vec![(1, vec![start_run(&r2)])]).await;
+    store_with_runs(n2.path(), p, &[&r1, &r2]);
+    // Node 3: trimmed the same way, but r1 is missing from its state store (lost).
+    let n3 = tempfile::tempdir().expect("n3");
+    write_log_from(n3.path(), p, 2, vec![(1, vec![start_run(&r2)])]).await;
+    store_with_runs(n3.path(), p, &[&r2]);
+    // Node 4: untrimmed, r2 missing from its WAL but present in its state store.
+    let n4 = tempfile::tempdir().expect("n4");
+    write_log(n4.path(), p, vec![(1, vec![la(1, 1), start_run(&r1)])]).await;
+    store_with_runs(n4.path(), p, &[&r1, &r2]);
+    // Node 5: trimmed, no state store at all.
+    let n5 = tempfile::tempdir().expect("n5");
+    write_log_from(n5.path(), p, 2, vec![(1, vec![start_run(&r2)])]).await;
+
+    for (v, trimmed) in [(view(2, &n2), true), (view(4, &n4), false)] {
+        let s = disk::scan_partition(&v, p).expect("scan");
+        assert_eq!(
+            s.is_trimmed(),
+            trimmed,
+            "node {}: {:?}",
+            v.node,
+            s.log_start()
+        );
+    }
+    let acks = [ack(&r1), ack(&r2)];
+
+    let ok = disk::acked_on_disk_copies(&[view(1, &n1), view(2, &n2)], &acks, 2, count);
+    assert!(ok.is_ok(), "{ok}");
+    // The WAL-only oracle flags the same data (the 12-18 fault-1030 shape).
+    let wal_only = disk::acked_on_disk(&[view(1, &n1), view(2, &n2)], &acks, 2);
+    assert!(wal_only.mentions(&r1.to_string()), "{wal_only}");
+
+    let bad = disk::acked_on_disk_copies(&[view(1, &n1), view(3, &n3)], &acks, 2, count);
+    assert_eq!(bad.violations.len(), 1, "{bad}");
+    assert!(
+        bad.mentions(&r1.to_string()) && bad.mentions("[1]") && !bad.mentions(&r2.to_string()),
+        "{bad}"
+    );
+
+    // An untrimmed copy is strict: node 4's state store holding r2 does not count.
+    let bad = disk::acked_on_disk_copies(&[view(1, &n1), view(4, &n4)], &acks, 2, count);
+    assert_eq!(bad.violations.len(), 1, "{bad}");
+    assert!(
+        bad.mentions(&r2.to_string()) && bad.mentions("[1]"),
+        "{bad}"
+    );
+
+    // A trimmed copy without a state store evidences nothing; the probe error is reported.
+    let bad = disk::acked_on_disk_copies(&[view(1, &n1), view(5, &n5)], &acks, 2, count);
+    assert!(bad.mentions(&r1.to_string()), "{bad}");
+    assert!(bad.mentions("node 5 partition 1: state probe:"), "{bad}");
+    assert!(
+        !n5.path().join("state").exists(),
+        "the probe never creates a store"
+    );
+
+    // The nodes' own stores were only read through copies: they still open here.
+    drop(PartitionStore::open(n2.path(), p, count, &StoreConfig::default()).expect("reopen"));
+}

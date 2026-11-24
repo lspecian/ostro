@@ -333,7 +333,7 @@ pub mod tools {
     use crate::harness::inproc::{Ack, MetaLogDump, guest_wasm, read_meta_log};
     use crate::harness::process::ProcCluster;
     use crate::harness::{ApiClient, ClusterHarness, DataDirView};
-    use crate::oracle::disk::{LogScan, acked_on_disk, scan_partition};
+    use crate::oracle::disk::{LogScan, acked_on_disk_copies, scan_partition};
     use crate::oracle::{election, la_rule, replica};
     use crate::scenarios::{ScenarioFailure, ScenarioResult};
 
@@ -1010,9 +1010,12 @@ pub mod tools {
     }
 
     /// The end-of-scenario oracles: replica identity below the HW over each partition's
-    /// live ISR, acknowledged ⇒ on disk on `min_insync` nodes (the tier-C logs are never
-    /// trimmed: 250 MB segments), the LA rule on every node's log and the ISR-only election
-    /// audit of the committed meta log.
+    /// live ISR, acknowledged ⇒ on disk on `min_insync` nodes, the LA rule on every node's
+    /// log and the ISR-only election audit of the committed meta log. A copy whose WAL was
+    /// trimmed (a follower snapshot install or a retention pass, which long campaigns reach)
+    /// may evidence a run by its checkpointed state store, probed on a copy (disk oracle
+    /// trimmed-log rule, D-P12-27; applied to tier C by D-P12-28, user-approved
+    /// 2026-11-24); an untrimmed copy needs the WAL record.
     pub async fn final_checks(c: &ProcCluster, acks: &[Ack]) -> ScenarioResult {
         wait_meta_leader(c).await?;
         for p in 0..c.spec().partitions {
@@ -1022,7 +1025,8 @@ pub mod tools {
             }
         }
         let views: Vec<DataDirView> = c.node_ids().iter().map(|n| c.node_disk(*n)).collect();
-        acked_on_disk(&views, acks, c.spec().min_insync).into_result()?;
+        let count = PartitionCount::new(c.spec().partitions).expect("partitions > 0");
+        acked_on_disk_copies(&views, acks, c.spec().min_insync, count).into_result()?;
         let dump = best_dump(c);
         for v in &views {
             for p in 0..c.spec().partitions {

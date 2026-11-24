@@ -245,8 +245,18 @@ impl std::fmt::Debug for ProcCluster {
     }
 }
 
-/// A fresh test directory on `/dev/shm` when writable, else the OS temp dir.
+/// A fresh test directory under `OSTRO_PROC_ROOT` when set (e.g. a disk-backed dir for a
+/// long campaign), else on `/dev/shm` when writable, else the OS temp dir.
 fn test_root() -> Result<TempDir, HarnessError> {
+    if let Some(dir) = std::env::var_os("OSTRO_PROC_ROOT") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| start_err(format!("create {}: {e}", dir.display())))?;
+        return tempfile::Builder::new()
+            .prefix("ostro-proc-")
+            .tempdir_in(&dir)
+            .map_err(|e| start_err(format!("tempdir in {}: {e}", dir.display())));
+    }
     let shm = Path::new("/dev/shm");
     if shm.is_dir()
         && let Ok(d) = tempfile::Builder::new()

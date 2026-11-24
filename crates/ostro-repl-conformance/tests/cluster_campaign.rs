@@ -5,6 +5,9 @@
 //!   -- --ignored --nocapture --test-threads=1
 //! ```
 //!
+//! The cluster lives on `/dev/shm` unless `OSTRO_PROC_ROOT` names another dir (a 10,000-fault
+//! run needs ~13 KB per acknowledged run: put it on disk).
+//!
 //! Three `ostro server` processes (RF 3, min_insync 2, the tier-C test timings) under a
 //! continuous workload (4 closed-loop clients, 100 ms apart, starting 3-step `trivial-steps`
 //! runs through the API, following leader hints, with an ack log: the 05-19 pattern). A seeded schedule injects
@@ -18,7 +21,8 @@
 //!   writer fails every write before writing), runs 0.5-1.5 s under load, is `kill -9`'d and
 //!   restarts clean.
 //!
-//! After every batch of 10 faults: acknowledged ⇒ on disk on `min_insync` nodes. At the end:
+//! After every batch of 10 faults: acknowledged ⇒ on disk on `min_insync` nodes (a trimmed
+//! copy may evidence a run by its state store: D-P12-27, applied here by D-P12-28). At the end:
 //! every acknowledged run completes (0 lost acked runs), no run's journal holds a duplicate
 //! entry (history seqs strictly increasing, exactly 3 `step_completed` with distinct names,
 //! read from the leader after convergence), replica identity below the HW, the LA rule and
@@ -35,7 +39,7 @@ use std::time::{Duration, Instant};
 use ostro_repl_conformance::harness::inproc::Ack;
 use ostro_repl_conformance::harness::process::{ProcCluster, ProcOptions};
 use ostro_repl_conformance::harness::{ApiClient, ClusterHarness, ClusterSpec, DataDirView};
-use ostro_repl_conformance::oracle::disk::acked_on_disk;
+use ostro_repl_conformance::oracle::disk::acked_on_disk_copies;
 use ostro_repl_conformance::scenarios::process::tools::{
     HintClient, Start, deploy, final_checks, meta_leader, published, published_all,
 };
@@ -236,9 +240,14 @@ async fn inject(c: &mut ProcCluster, kind: Fault, rng: &mut StdRng) -> String {
     }
 }
 
+/// Acknowledged ⇒ on disk on `min_insync` nodes. A copy whose WAL was trimmed (follower
+/// snapshot install, retention) may evidence a run by its checkpointed state store, probed
+/// on a copy of the running node's store (trimmed-log rule D-P12-27, applied to the
+/// campaign by D-P12-28, user-approved 2026-11-24); an untrimmed copy needs the WAL record.
 fn disk_check(c: &ProcCluster, acks: &[Ack]) -> Result<(), String> {
     let views: Vec<DataDirView> = c.node_ids().iter().map(|n| c.node_disk(*n)).collect();
-    let r = acked_on_disk(&views, acks, c.spec().min_insync);
+    let count = PartitionCount::new(c.spec().partitions).expect("partitions > 0");
+    let r = acked_on_disk_copies(&views, acks, c.spec().min_insync, count);
     if r.is_ok() {
         Ok(())
     } else {
