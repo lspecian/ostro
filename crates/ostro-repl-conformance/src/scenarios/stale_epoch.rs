@@ -11,12 +11,13 @@ use ostro_proto::cluster::v1::replication_client::ReplicationClient;
 use ostro_proto::cluster::v1::{FetchError, FetchRequest};
 
 use super::placement::support::{
-    CHANGE_T, durable_end, fail, final_checks, pick, wait_assignment, wait_meta_leader, within,
+    CHANGE_T, fail, final_checks, pick, scan, wait_assignment, wait_meta_leader, within,
 };
 use super::placement::{LONG_DEADLINE, Run};
 use super::{Scenario, ScenarioResult, Tier};
 use crate::harness::inproc::InProcCluster;
 use crate::harness::{ClusterHarness, ClusterSpec};
+use crate::oracle::disk::LogScan;
 
 /// The `stale_epoch` scenarios.
 pub fn scenarios() -> Vec<Scenario> {
@@ -50,6 +51,28 @@ fn rf3() -> ClusterSpec {
 /// Bound on one raw fetch answer (`max_wait_ms` is 0: no long poll).
 const FETCH_T: Duration = Duration::from_secs(5);
 
+/// The Fetch a real follower holding `log` sends at `leader_epoch`: from its measured
+/// durable end, with `last_fetched_epoch` = the epoch of its last record (0 when empty),
+/// as the fetcher does. 12-18: this used to claim `last_fetched_epoch = leader_epoch`. A
+/// new leader leads (role `Leader{e}`) before its `LeaderAnnounced{e}` is in its log, and
+/// in that window it rightly answers a claim of having fetched epoch `e` with
+/// `SNAPSHOT_REQUIRED` (UNDEFINED end offset, KIP-101), which failed the "current epoch is
+/// still served" leg on slow hosts (macOS CI).
+pub fn raw_fetch_request(log: &LogScan, leader_epoch: u32) -> FetchRequest {
+    let end = log.durable_end().unwrap_or_default();
+    FetchRequest {
+        partition: u32::from(log.partition.0),
+        replica_id: log.node,
+        leader_epoch,
+        fetch_offset: end.0,
+        last_fetched_epoch: log.records.last().map_or(0, |r| r.epoch.0),
+        durable_leo: end.0,
+        max_bytes: 1 << 20,
+        max_wait_ms: 0,
+        min_bytes: 0,
+    }
+}
+
 /// Send one raw Fetch from `from` (as that node) to `to` for `p` at `leader_epoch`, and
 /// require the answer `want`.
 async fn fetch_expect(
@@ -60,18 +83,7 @@ async fn fetch_expect(
     leader_epoch: u32,
     want: FetchError,
 ) -> ScenarioResult {
-    let end = durable_end(c, from, p)?;
-    let req = FetchRequest {
-        partition: u32::from(p),
-        replica_id: from,
-        leader_epoch,
-        fetch_offset: end.0,
-        last_fetched_epoch: leader_epoch,
-        durable_leo: end.0,
-        max_bytes: 1 << 20,
-        max_wait_ms: 0,
-        min_bytes: 0,
-    };
+    let req = raw_fetch_request(&scan(c, from, p)?, leader_epoch);
     let mut client = ReplicationClient::new(c.channel_as(from, to));
     let at = format!("partition {p}: Fetch from node {from} to node {to} at epoch {leader_epoch}");
     match within(FETCH_T, client.fetch(req)).await {
