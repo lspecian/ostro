@@ -444,7 +444,7 @@ Plans:
 - [x] 12-15-PLAN.md — Bottomless in cluster mode: leader-only per-partition uploads, epoch-fenced p/<pppp>/head, takeover repair + gap re-chain from a remote snapshot, restore refuses cluster buckets (CLUS-02) (W6)
 - [x] 12-16-PLAN.md — Tier-B conformance suite 100% green with every tier-B mutant biting (>= 11 bites, REQUIRE_ALL) (CLUS-01..04) (W7)
 - [x] 12-17-PLAN.md — Multi-process: SC2 kill path, follower power-loss + tier-C mutant, failover p99 (>= 200 iterations incl. controller faults and no-RST blackholes) + meta election tick tuning, RF=3 bytes-on-disk benchmark, crash-campaign smoke (CLUS-02, CLUS-04) (W8)
-- [ ] 12-18-PLAN.md — PHASE GATE: mutant matrix required in CI, grep gates, full ci-local, p99 + 10,000-fault campaign recorded, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (all CLUS) (W9)
+- [x] 12-18-PLAN.md — PHASE GATE: mutant matrix required in CI, grep gates, full ci-local, p99 + 10,000-fault campaign recorded, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (all CLUS) (W9)
 **Research flag**: Snapshot install; failover liveness detection
 
 ### Phase 13: Cluster Membership, Routing & Upgrades
