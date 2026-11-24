@@ -24,6 +24,18 @@ pub mod runner;
 pub mod stale_epoch;
 pub mod standby;
 pub mod zombie;
+// Phase 13 topic modules (13-02 declares; each feature plan fills its own file).
+pub mod handoff;
+pub mod integration_p13;
+pub mod membership;
+pub mod migrate;
+pub mod module_gc;
+pub mod process_p13;
+pub mod promotion;
+pub mod reassign;
+pub mod routing;
+pub mod ryw;
+pub mod version_gate;
 
 use std::time::Duration;
 
@@ -115,6 +127,17 @@ pub fn all() -> Vec<Scenario> {
         one_path::scenarios(),
         zombie::scenarios(),
         object_storage::scenarios(),
+        // Phase 13 (13-02).
+        membership::all(),
+        reassign::all(),
+        handoff::all(),
+        routing::all(),
+        ryw::all(),
+        version_gate::all(),
+        module_gc::all(),
+        promotion::all(),
+        migrate::all(),
+        integration_p13::all(),
     ]
     .into_iter()
     .flatten()
@@ -123,5 +146,8 @@ pub fn all() -> Vec<Scenario> {
 
 /// Every tier-C scenario (the `process` group, 12-17).
 pub fn all_process() -> Vec<Scenario<ProcCluster>> {
-    process::scenarios()
+    let mut all = process::scenarios();
+    // Phase 13 (13-02; 13-19 fills).
+    all.extend(process_p13::all());
+    all
 }

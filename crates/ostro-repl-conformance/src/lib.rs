@@ -12,9 +12,15 @@
 //! | [`scenarios`] | 12-02 (registry) | [`scenarios::Scenario`], [`scenarios::all`]; groups by 12-06 / 12-07 / 12-17; `runner` by 12-03 |
 //! | [`pending`] | 12-02 (lists by 12-06 / 12-07 / 12-17) | scenarios not integrated yet ([`pending::is_pending`]) |
 //! | [`mutants`] | 12-07 | mutant → scenarios matrix |
+//! | [`harness::p13`] | 13-02 (API), 13-08 (impls) | [`harness::p13::P13Harness`], [`harness::p13::NodeOpts`] |
+//! | `oracle::p13_*` | 13-02 (stubs), 13-08 | read-your-writes, membership, upgrade, module GC oracles |
+//! | Phase 13 `scenarios::*` topic modules | 13-02 (list), 13-09..13-19 (one file each) | `membership`, `reassign`, `handoff`, `routing`, `ryw`, `version_gate`, `module_gc`, `promotion`, `migrate`, `integration_p13`, `process_p13` |
+//! | [`mutants_p13`] | 13-02 (stub), 13-18 | Phase 13 mutant → scenarios matrix |
 
 pub mod harness;
 pub mod mutants;
+// Phase 13 (13-02 stub; 13-18 fills): the P13 mutant → scenarios matrix.
+pub mod mutants_p13;
 pub mod oracle;
 pub mod pending;
 pub mod scenarios;

@@ -7,6 +7,8 @@ pub mod certs;
 pub mod chaos_proxy;
 pub mod fault;
 pub mod inproc;
+// Phase 13 (13-02): the P13Harness API (implemented by 13-08).
+pub mod p13;
 pub mod process;
 
 use std::future::Future;

@@ -26,6 +26,11 @@ pub mod disk;
 pub mod election;
 pub mod la_rule;
 pub mod objstore;
+// Phase 13 oracles (13-02 stubs; 13-08 implements, 13-18 fixes).
+pub mod p13_gc;
+pub mod p13_membership;
+pub mod p13_ryw;
+pub mod p13_upgrade;
 pub mod replica;
 pub mod standby;
 pub mod status;
