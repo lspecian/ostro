@@ -248,7 +248,26 @@ disk-backed cluster dir).
   - Red run: 29/29. `no_pending_left` ok. `oracle_selftest` green.
   - Tier C, `OSTRO_PROC_ITERS=5`: `process_divergence` 5/5, `process_power_loss` 5/5.
   - Clippy `-D warnings` (with and without failpoints), fmt, `scripts/p12-grep-gates.sh`.
-- 10k re-run: Gate Evidence row 6c (result below once finished).
+- 10k re-run at 1bb395b (seed 1741, on disk, started 13:46Z, nice 10): **FAILED at fault
+  ~871-880 on availability, no acked run reported lost**.
+  - 87 batch disk checks were green (870 faults, 109,910 acks, 4,206 s). The previous run
+    stopped at ~641.
+  - The wedge did not recur. Node 2 hit StaleEpoch 48 times, requested fresh terms each time, and
+    meta granted e304.
+  - The takeovers kept being cut off because the metadata Raft leader's (node 2's) driver thread
+    stalled for 5-11 s at a time. All 3 nodes lost and regained contact at the same instants, the
+    leader included, whose driver touches its own contact on every loop iteration. Its tokio
+    runtime kept answering HTTP. A term request sent at 14:56:29 was applied at 14:57:28.
+  - At the time the host load was 9-13 and concurrent builds wrote ~50 GB in 5 minutes (ext4
+    data=ordered). The meta store is 476 KB. Most likely an fsync stall: environmental, not shown
+    to be a server bug, so no fix and no automatic re-run.
+  - Final checks (lost / duplicates) were not reached.
+  - Evidence: `target/campaign-p12-10k-r2/POSTMORTEM.txt`, the log, the kept cluster
+    `procs/ostro-proc-RE9UZX/` and the binaries.
+  - Options for the user:
+    1. Re-run with no concurrent builds, or on native Linux.
+    2. Re-run on `/dev/shm` (~16 GB needed, 17 GB free).
+    3. First add a Raft persist-latency metric to prove the stall attribution.
 
 **Side observation checked (p12-wedge): not the wedge's cause, not fixed.** In the
 `campaign-p12-gate` cluster at 08:58:12:
