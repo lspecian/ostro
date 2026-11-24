@@ -99,14 +99,17 @@ async fn skip_by(s: &TestServer, ms: u64) -> u64 {
         0,
         "lease before the skip"
     );
-    dev.skip_guarded(|now| {
+    // `By`, not `To(now + ms)`: an absolute target re-reads the base clock, and a wall
+    // tick between the two reads shaved 1 ms off the skip (CI linux-x86_64-musl,
+    // 259199999 for 3 days; the REST path was fixed the same way in ci-fix6).
+    dev.skip_guarded_with(|_now| {
         assert_eq!(stats.leases.load(Ordering::SeqCst), 0, "lease at the skip");
         assert_eq!(
             stats.granting.load(Ordering::SeqCst),
             0,
             "grant at the skip"
         );
-        Some(now + ms)
+        Some(ostro_server::devclock::GuardedSkip::By(ms))
     })
     .await
 }
