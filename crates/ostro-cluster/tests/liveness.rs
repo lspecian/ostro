@@ -139,11 +139,43 @@ fn suspect_present_in_the_confirming_sample_is_cleared() {
     l.confirm(&[1, 2, 3]);
     assert_eq!(l.state(3), NodeState::Live);
     assert_eq!(l.confirm_due(), None);
-    // A regular sample showing the suspect also clears it.
+    // A regular sample showing the suspect clears it once the sample's window starts after
+    // the report (12-18: an older window cannot tell whether the node was heard after it).
     l.report_suspect(2, 1);
+    l.observe(&[1, 2, 3]);
+    assert_eq!(l.state(1), NodeState::Suspect);
+    clock.advance(ms(l.config().sample_window));
     l.observe(&[1, 2, 3]);
     assert_eq!(l.state(1), NodeState::Live);
     assert_eq!(l.next_confirm_ms(), None);
+}
+
+/// 12-18: the controller polls every 100 ms with `within = sample_window` (1 s). A node
+/// killed just before the suspect report is still in those samples for up to a second; they
+/// used to clear the suspicion at once, so it only stuck once the node had been silent for a
+/// whole sample window (detection about 2.3 s on the failover runs instead of
+/// `confirm_window` plus a tick).
+#[test]
+fn regular_samples_older_than_the_report_keep_the_suspicion() {
+    let (clock, mut l) = setup();
+    l.observe(&[1, 2, 3]);
+    l.report_suspect(1, 3);
+    let w = ms(l.config().confirm_window);
+    let mut t = 0;
+    while t + 100 < w {
+        clock.advance(100);
+        t += 100;
+        l.observe(&[1, 2, 3]);
+        assert_eq!(
+            l.state(3),
+            NodeState::Suspect,
+            "suspicion cleared {t} ms after the report"
+        );
+    }
+    clock.advance(w - t);
+    assert!(l.confirm_due().is_some());
+    l.confirm(&[1, 2]);
+    assert_eq!(l.state(3), NodeState::Dead);
 }
 
 #[test]

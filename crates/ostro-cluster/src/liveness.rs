@@ -170,15 +170,18 @@ impl Liveness {
     pub fn observe(&mut self, sample: &[u64]) {
         let now = self.clock.now_ms();
         self.track(sample.iter().copied());
-        // A node confirmed dead at D was unheard in [D - confirm_window, D]; this sample's
-        // `sample_window` only proves contact after D once it starts at or after that.
-        let stale = ms(self.cfg.sample_window).saturating_sub(ms(self.cfg.confirm_window));
+        // Presence only proves contact since `from`, the start of this sample's window. It
+        // revives a node confirmed dead at D (unheard in [D - confirm_window, D]) only when
+        // `from` is past D - confirm_window, and settles a suspicion reported at R only when
+        // `from` is past R (otherwise the confirming sample decides).
+        let from = now.saturating_sub(ms(self.cfg.sample_window));
+        let cw = ms(self.cfg.confirm_window);
         for id in sample {
             if let Some(n) = self.nodes.get_mut(id)
-                && !(n.confirmed_dead && now < n.dead_at_ms.saturating_add(stale))
+                && !(n.confirmed_dead && from < n.dead_at_ms.saturating_sub(cw))
             {
                 n.last_seen_ms = Some(now);
-                n.suspect_at_ms = None;
+                n.suspect_at_ms = n.suspect_at_ms.filter(|r| from < *r);
                 n.confirmed_dead = false;
             }
         }
