@@ -9,7 +9,9 @@
 pub mod driver;
 pub mod log_store;
 
-pub use driver::{Applied, DriverConfig, Outbox, ProposeError, RaftDriver, RaftHandle, RaftStatus, StateMachine};
+pub use driver::{
+    Applied, DriverConfig, FatalApply, Outbox, PeerProgress, ProposeError, RaftDriver, RaftHandle, RaftStatus, StateMachine,
+};
 pub use log_store::{LogStoreOptions, RaftLogStore};
 /// Re-exported so consumers can name `raft::eraftpb::Message` without a direct dependency.
 pub use raft;

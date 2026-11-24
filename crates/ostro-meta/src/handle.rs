@@ -6,6 +6,12 @@
 //! carries Raft messages to the peers and a [`ProposeForwarder`] that runs a proposal on
 //! the current leader (ostro-cluster implements both over `MetaPeer`; ostro-meta stays
 //! transport-free).
+//!
+//! Phase 13 (13-05) adds the membership and consistency surface: [`MetaHandle::read_index_barrier`]
+//! (linearizable meta reads), [`MetaHandle::transfer_leader`], [`MetaHandle::propose_conf_change`],
+//! [`MetaHandle::conf_state`], [`MetaHandle::raft_detail`] (the full driver status with
+//! per-peer progress), [`MetaHandle::lease_anchor`], [`MetaHandle::start_joiner`] (a blank node
+//! that joins as a learner) and [`MetaHandle::start_with_options`] (level emulation).
 
 use std::future::Future;
 use std::path::Path;
@@ -13,13 +19,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ostro_raft_driver::raft::eraftpb::Message;
+use ostro_raft_driver::raft::eraftpb::{ConfChangeV2, ConfState, Message};
 use tokio::time::Instant;
 
 use crate::command::{self, DecodeError, MetaCommand, MetaResult, decode_result, encode_command};
 use crate::records::ClusterInfo;
 use crate::sm::{MetaSm, MetaView};
-use crate::{Applied, DriverConfig, NullOutbox, Outbox, ProposeError, RaftDriver, RaftHandle};
+use crate::{
+    Applied, DriverConfig, NullOutbox, Outbox, ProposeError, RaftDriver, RaftHandle, RaftStatus,
+};
 
 /// How long `start` waits for this node to become leader and catch up. A hang guard, not a
 /// latency target (a lone voter campaigns at once and normally leads in tens of ms): 5 s
@@ -37,6 +45,30 @@ const STOPPED_REASON_WAIT: Duration = Duration::from_secs(1);
 const PROPOSE_DEADLINE: Duration = Duration::from_secs(30);
 /// Multi-voter: pause between retries while no leader is known / the leader moved.
 const LEADER_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+/// Default bound of [`MetaHandle::read_index_barrier`] (an election plus a heartbeat round).
+const READ_BARRIER_DEADLINE: Duration = Duration::from_secs(10);
+/// How long [`MetaHandle::transfer_leader`] waits for the target to lead.
+const TRANSFER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Extra start options ([`MetaHandle::start_with_options`], 13-05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetaOptions {
+    /// fsync the Raft log store (only tests turn this off).
+    pub sync: bool,
+    /// Level emulation (`ostro_types::compat::level_max()` under the `level-emulation`
+    /// feature): a committed command needing a higher feature level halts this voter.
+    /// `None`: no limit (the real binary supports every command it can decode).
+    pub level_max: Option<u32>,
+}
+
+impl Default for MetaOptions {
+    fn default() -> Self {
+        MetaOptions {
+            sync: true,
+            level_max: None,
+        }
+    }
+}
 
 /// The future returned by [`ProposeForwarder::forward`].
 pub type ForwardFuture<'a> =
@@ -127,6 +159,24 @@ pub enum MetaError {
     Timeout,
     #[error("metadata command rejected: {0}")]
     Rejected(String),
+    /// 13-05: the metadata (an entry, a snapshot or a result) is in a newer meta format:
+    /// a newer Ostro finalized this cluster.
+    #[error(
+        "metadata written by a newer Ostro (meta format {found}, this build reads {supported}): this cluster was finalized by a newer Ostro; upgrade this binary"
+    )]
+    NewerFormat { found: u8, supported: u8 },
+    /// 13-05: a leader-only operation ran on a follower; `hint` is the leader it knows.
+    #[error("not the metadata leader (leader hint {hint:?})")]
+    NotLeader { hint: Option<u64> },
+}
+
+fn decode_err(e: DecodeError) -> MetaError {
+    match e {
+        DecodeError::NewerFormat { found, supported } => {
+            MetaError::NewerFormat { found, supported }
+        }
+        e => MetaError::Decode(e.to_string()),
+    }
 }
 
 /// A point-in-time view of the metadata Raft group, for the `ostro_raft_*` gauges
@@ -210,7 +260,31 @@ impl MetaHandle {
     ///
     /// The pre-Phase-5 format check of [`MetaHandle::start`] applies to both.
     pub async fn start_with(dir: &Path, start: MetaStart) -> Result<MetaHandle, MetaError> {
-        Self::start_with_store(dir, start, true).await
+        Self::start_inner(dir, start, MetaOptions::default(), false).await
+    }
+
+    /// [`MetaHandle::start_with`] with [`MetaOptions`] (13-05: level emulation).
+    pub async fn start_with_options(
+        dir: &Path,
+        start: MetaStart,
+        options: MetaOptions,
+    ) -> Result<MetaHandle, MetaError> {
+        Self::start_inner(dir, start, options, false).await
+    }
+
+    /// Start a node that **joins** an existing metadata group (13-05, for 13-09): a blank
+    /// `dir` starts with no configuration at all (no bootstrap snapshot) and waits for the
+    /// leader to add it as a learner and send it a snapshot. `start.voters` are the known
+    /// members (the outbox / forwarder targets) and need not contain `start.node_id`. A
+    /// `dir` that already holds a log (a restarted learner or voter) starts from its own
+    /// persisted configuration, as [`MetaHandle::start_with`] does. Returns without waiting
+    /// for a leader; [`MetaHandle::wait_ready`] waits for one.
+    pub async fn start_joiner(
+        dir: &Path,
+        start: MetaStart,
+        options: MetaOptions,
+    ) -> Result<MetaHandle, MetaError> {
+        Self::start_inner(dir, start, options, true).await
     }
 
     /// [`MetaHandle::start_with`] over a Raft log store that does not fsync (the vendored
@@ -226,14 +300,20 @@ impl MetaHandle {
         dir: &Path,
         start: MetaStart,
     ) -> Result<MetaHandle, MetaError> {
-        Self::start_with_store(dir, start, false).await
+        let options = MetaOptions {
+            sync: false,
+            ..MetaOptions::default()
+        };
+        Self::start_inner(dir, start, options, false).await
     }
 
-    async fn start_with_store(
+    async fn start_inner(
         dir: &Path,
         start: MetaStart,
-        sync: bool,
+        options: MetaOptions,
+        joiner: bool,
     ) -> Result<MetaHandle, MetaError> {
+        let MetaOptions { sync, level_max } = options;
         let MetaStart {
             node_id,
             voters,
@@ -244,7 +324,7 @@ impl MetaHandle {
         if node_id == 0 || voters.contains(&0) {
             return Err(MetaError::Start("node id 0 is reserved".into()));
         }
-        if !voters.contains(&node_id) {
+        if !joiner && !voters.contains(&node_id) {
             return Err(MetaError::Start(format!(
                 "node {node_id} is not one of the metadata voters {voters:?}"
             )));
@@ -256,7 +336,7 @@ impl MetaHandle {
                 )));
             }
         }
-        let multi = voters.len() > 1;
+        let multi = joiner || voters.len() > 1;
         let config = DriverConfig {
             tick_interval: tick.interval,
             election_tick: tick.election_tick,
@@ -267,9 +347,18 @@ impl MetaHandle {
             },
             ..DriverConfig::new(node_id)
         };
-        let (sm, view) = MetaSm::new();
-        let driver = RaftDriver::start(dir, config, &voters, sm, DynOutbox(outbox))
-            .map_err(|e| MetaError::Start(e.to_string()))?;
+        let (sm, view) = MetaSm::with_level_max(level_max.unwrap_or(u32::MAX));
+        let newer = view.clone();
+        let initial: &[u64] = if joiner { &[] } else { &voters };
+        let driver = RaftDriver::start(dir, config, initial, sm, DynOutbox(outbox)).map_err(
+            |e| match newer.newer_format() {
+                Some(found) => MetaError::NewerFormat {
+                    found,
+                    supported: crate::META_FORMAT,
+                },
+                None => MetaError::Start(e.to_string()),
+            },
+        )?;
         let raft = driver.handle();
         if !multi {
             raft.campaign();
@@ -301,8 +390,15 @@ impl MetaHandle {
                 None => Ok(handle),
             },
             Ok(Err(e)) => {
+                let newer = handle.view.newer_format();
                 handle.stop().await;
-                Err(e)
+                match newer {
+                    Some(found) => Err(MetaError::NewerFormat {
+                        found,
+                        supported: crate::META_FORMAT,
+                    }),
+                    None => Err(e),
+                }
             }
             Err(_) => {
                 handle.stop().await;
@@ -432,8 +528,7 @@ impl MetaHandle {
                     if forwarded {
                         self.wait_applied_until(applied.index, deadline).await?;
                     }
-                    return decode_result(&applied.result)
-                        .map_err(|e| MetaError::Decode(e.to_string()));
+                    return decode_result(&applied.result).map_err(decode_err);
                 }
                 // Multi-voter: a failover (or a forwarded call that lost its leader) can take
                 // an election timeout, so retries run until the deadline instead of a count.
@@ -457,24 +552,186 @@ impl MetaHandle {
                     tokio::time::sleep(LEADER_RETRY_BACKOFF).await;
                 }
                 Err(ProposeError::Stopped) => {
-                    return Err(MetaError::Propose(self.stopped_reason().await));
+                    return Err(self.stopped_err().await);
                 }
-                Err(e) => return Err(MetaError::Propose(e.to_string())),
+                Err(e) => return Err(self.halted_or(e)),
             }
         }
+    }
+
+    /// A stopped driver: [`MetaError::NewerFormat`] after a newer-format halt, else
+    /// `Propose` with the published failure.
+    async fn stopped_err(&self) -> MetaError {
+        match self.view.newer_format() {
+            Some(found) => MetaError::NewerFormat {
+                found,
+                supported: crate::META_FORMAT,
+            },
+            None => MetaError::Propose(self.stopped_reason().await),
+        }
+    }
+
+    /// A newer-format halt as [`MetaError::NewerFormat`], anything else as `Propose`.
+    fn halted_or(&self, e: ProposeError) -> MetaError {
+        match self.view.newer_format() {
+            Some(found) => MetaError::NewerFormat {
+                found,
+                supported: crate::META_FORMAT,
+            },
+            None => MetaError::Propose(e.to_string()),
+        }
+    }
+
+    // ---- Phase 13 (13-05): membership + consistency surface ---------------------------
+
+    /// A linearizable read barrier (D-P13-15): a raft `ReadIndex` on the local driver (the
+    /// leader confirms leadership with a quorum heartbeat round; a follower asks the
+    /// leader), then wait until this node applied that index. Afterwards [`MetaView::read`]
+    /// observes every write acknowledged before the call, on any node. Returns the index.
+    /// Bounded by 10 s ([`MetaHandle::read_index_barrier_until`] takes a caller deadline);
+    /// retries across elections until then.
+    ///
+    /// A lone voter in a one-voter configuration answers from its own commit index without
+    /// a round (it is the quorum). A cut-off old leader cannot pass the barrier: it never
+    /// gets the quorum acknowledgement (unlike a plain local read, which it serves until
+    /// check-quorum steps it down).
+    pub async fn read_index_barrier(&self) -> Result<u64, MetaError> {
+        self.read_index_barrier_until(Instant::now() + READ_BARRIER_DEADLINE)
+            .await
+    }
+
+    /// [`MetaHandle::read_index_barrier`] bounded by `deadline` ([`MetaError::Timeout`]).
+    pub async fn read_index_barrier_until(&self, deadline: Instant) -> Result<u64, MetaError> {
+        let index = loop {
+            let s = self.raft.status();
+            if s.is_leader && s.voters == [self.node_id] && s.voters_outgoing.is_empty() {
+                break s.commit;
+            }
+            match tokio::time::timeout_at(deadline, self.raft.read_index()).await {
+                Err(_) => return Err(MetaError::Timeout),
+                Ok(Ok(index)) => break index,
+                Ok(Err(ProposeError::NotLeader { .. } | ProposeError::Dropped)) => {
+                    if Instant::now() >= deadline {
+                        return Err(MetaError::Timeout);
+                    }
+                    tokio::time::sleep(
+                        LEADER_RETRY_BACKOFF
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    )
+                    .await;
+                }
+                Ok(Err(ProposeError::Stopped)) => {
+                    return Err(self.stopped_err().await);
+                }
+                Ok(Err(e)) => return Err(self.halted_or(e)),
+            }
+        };
+        self.wait_applied_until(index, deadline).await?;
+        Ok(index)
+    }
+
+    /// Hand metadata leadership to voter `to` and wait (up to 10 s) until it leads.
+    /// Leader only ([`MetaError::NotLeader`] elsewhere); `to` must be a voter
+    /// ([`MetaError::Rejected`]). [`MetaError::Timeout`] when leadership did not move
+    /// (raft aborts a transfer after an election timeout; proposals resume).
+    pub async fn transfer_leader(&self, to: u64) -> Result<(), MetaError> {
+        match self.raft.transfer_leader(to).await {
+            Ok(()) => {}
+            Err(ProposeError::NotLeader { leader }) => {
+                return Err(MetaError::NotLeader { hint: leader });
+            }
+            Err(ProposeError::Dropped) => {
+                return Err(MetaError::Rejected(format!(
+                    "node {to} is not a metadata voter"
+                )));
+            }
+            Err(e) => return Err(self.halted_or(e)),
+        }
+        let deadline = Instant::now() + TRANSFER_DEADLINE;
+        let mut rx = self.raft.subscribe();
+        let moved = async {
+            loop {
+                {
+                    let s = rx.borrow_and_update();
+                    if s.leader_id == Some(to) && (to != self.node_id || s.is_leader) {
+                        return Ok(());
+                    }
+                    if let Some(f) = &s.failed {
+                        return Err(MetaError::Propose(f.clone()));
+                    }
+                }
+                if rx.changed().await.is_err() {
+                    return Err(MetaError::Propose(ProposeError::Stopped.to_string()));
+                }
+            }
+        };
+        tokio::time::timeout_at(deadline, moved)
+            .await
+            .map_err(|_| MetaError::Timeout)?
+    }
+
+    /// Propose a membership change (learner add, promotion, joint consensus, or an empty
+    /// `ConfChangeV2` to leave a joint configuration). Leader only: on a follower
+    /// [`MetaError::NotLeader`] with the leader hint. Resolves once applied locally; the
+    /// result carries the encoded new `ConfState`, and [`MetaHandle::conf_state`] already
+    /// shows it. A change raft refuses (e.g. one while
+    /// another is pending, or leaving a non-joint configuration) is [`MetaError::Rejected`].
+    pub async fn propose_conf_change(&self, cc: ConfChangeV2) -> Result<Applied, MetaError> {
+        match self.raft.propose_conf_change(cc).await {
+            Ok(applied) if applied.result.is_empty() => Err(MetaError::Rejected(
+                "membership change refused by raft".into(),
+            )),
+            Ok(applied) => {
+                // The driver publishes its status after the cycle that answered; wait
+                // for it so `conf_state` / `raft_detail` show the new membership.
+                self.wait_applied_until(applied.index, Instant::now() + PROPOSE_DEADLINE)
+                    .await?;
+                Ok(applied)
+            }
+            Err(ProposeError::NotLeader { leader }) => Err(MetaError::NotLeader { hint: leader }),
+            Err(ProposeError::Stopped) => Err(self.stopped_err().await),
+            Err(e) => Err(self.halted_or(e)),
+        }
+    }
+
+    /// The membership this node applied: voters, learners, the outgoing voters of a joint
+    /// configuration, the learners-to-be and `auto_leave`.
+    pub fn conf_state(&self) -> ConfState {
+        let s = self.raft.status();
+        ConfState {
+            voters: s.voters,
+            learners: s.learners,
+            voters_outgoing: s.voters_outgoing,
+            learners_next: s.learners_next,
+            auto_leave: s.auto_leave,
+        }
+    }
+
+    /// The driver's full status (13-05): term, leader, commit / applied, membership incl.
+    /// joint state and `pending_conf`, per-peer progress on the leader, failures. The
+    /// existing [`MetaHandle::raft_status`] keeps its small `Copy` view for the gauges.
+    pub fn raft_detail(&self) -> RaftStatus {
+        self.raft.status()
+    }
+
+    /// The metadata lease anchor (`RaftHandle::lease_anchor`, D-P13-15; monotonic, never
+    /// wall time): the send instant of this node's newest quorum-confirmed lease round,
+    /// `now` on a one-voter leader, `None` without a confirmed leader.
+    pub fn lease_anchor(&self) -> Option<std::time::Instant> {
+        self.raft.lease_anchor()
     }
 
     /// Read-your-writes after a forwarded proposal: wait until `index` is applied here.
     async fn wait_applied_until(&self, index: u64, deadline: Instant) -> Result<(), MetaError> {
         match tokio::time::timeout_at(deadline, self.raft.wait_applied(index)).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(ProposeError::Stopped)) => Err(MetaError::Propose(self.stopped_reason().await)),
+            Ok(Err(ProposeError::Stopped)) => Err(self.stopped_err().await),
             Ok(Err(e)) => Err(MetaError::Propose(e.to_string())),
             Err(_) => Err(MetaError::Timeout),
         }
     }
 
-    /// The driver's storage failure, if it stopped on one (`RaftStatus::failed`, e.g.
+    /// The driver's storage failure (or a `FatalApply` halt, 13-05), if it stopped on one (`RaftStatus::failed`, e.g.
     /// `raft storage: No space left on device (os error 28)`). A stopped metadata group
     /// never recovers in place: the node must restart, which re-opens the log.
     pub fn failure(&self) -> Option<String> {

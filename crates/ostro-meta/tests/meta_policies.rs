@@ -359,7 +359,8 @@ fn snapshot_round_trips_with_every_kind_populated() {
                 created_at_ms: 1,
                 token_key: [1; 32],
             }),
-        );
+        )
+        .expect("applies");
         for kind in MetaKind::ALL {
             if kind == MetaKind::Cluster {
                 continue;
@@ -369,7 +370,8 @@ fn snapshot_round_trips_with_every_kind_populated() {
                 i,
                 1,
                 &ostro_meta::encode_command(&put(MetaRecord::sample(kind, 9, 1), None)),
-            );
+            )
+            .expect("applies");
         }
         src.snapshot()
     };

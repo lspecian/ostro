@@ -18,7 +18,7 @@
 //! the entry may still commit under the next leader. Commands are validated at
 //! apply time, so retrying one is safe.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,12 +34,32 @@ use tokio::sync::{oneshot, watch};
 
 use crate::log_store::{LogStoreOptions, RaftLogStore};
 
+/// Ostro (Phase 13, 13-05): a committed entry this state machine must not apply, e.g.
+/// one written by a newer binary. The driver stops before `applied` advances: the entry
+/// is neither applied nor counted, every pending proposal fails with
+/// [`ProposeError::Fatal`], and the message is published in [`RaftStatus::fatal`] (and
+/// [`RaftStatus::failed`]). A restart replays the same entry and halts again until the
+/// binary is upgraded. See VENDORED.md.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FatalApply(pub String);
+
+impl std::fmt::Display for FatalApply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FatalApply {}
+
 /// The replicated state machine. Every method runs on the driver thread.
 pub trait StateMachine: Send + 'static {
     /// Apply a committed command. Must be deterministic: every node applies
     /// the same commands in the same order and must reach the same state.
     /// The returned bytes are delivered to the proposer.
-    fn apply(&mut self, index: u64, term: u64, command: &[u8]) -> Vec<u8>;
+    ///
+    /// Ostro: `Err(FatalApply)` halts the driver before `applied` advances
+    /// (see [`FatalApply`]).
+    fn apply(&mut self, index: u64, term: u64, command: &[u8]) -> Result<Vec<u8>, FatalApply>;
 
     /// Serialize the applied state.
     fn snapshot(&self) -> Vec<u8>;
@@ -91,6 +111,8 @@ pub enum ProposeError {
     OutcomeUnknown,
     /// The driver has stopped.
     Stopped,
+    /// Ostro: the driver halted on a [`FatalApply`] (the entry was not applied).
+    Fatal(String),
 }
 
 impl std::fmt::Display for ProposeError {
@@ -101,6 +123,7 @@ impl std::fmt::Display for ProposeError {
             ProposeError::Dropped => write!(f, "proposal dropped by raft"),
             ProposeError::OutcomeUnknown => write!(f, "leadership lost before the proposal was applied"),
             ProposeError::Stopped => write!(f, "raft driver stopped"),
+            ProposeError::Fatal(m) => write!(f, "raft driver halted: {}", m),
         }
     }
 }
@@ -117,6 +140,20 @@ pub struct Applied {
     pub result: Vec<u8>,
 }
 
+/// Ostro (13-05): the leader's replication progress of one peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerProgress {
+    pub id: u64,
+    /// Highest log index known replicated on the peer.
+    pub matched: u64,
+    /// Next log index the leader sends.
+    pub next_idx: u64,
+    /// Index of a snapshot in flight to the peer (0 = none).
+    pub pending_snapshot: u64,
+    /// The peer answered within the last election timeout (check-quorum window).
+    pub recent_active: bool,
+}
+
 /// A snapshot of the driver's view, published after every cycle.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RaftStatus {
@@ -126,13 +163,27 @@ pub struct RaftStatus {
     pub is_leader: bool,
     pub commit: u64,
     pub applied: u64,
+    /// Voters of the (incoming) configuration.
     pub voters: Vec<u64>,
     pub learners: Vec<u64>,
-    /// Set when the driver stopped on a storage failure.
+    /// Set when the driver stopped on a storage failure (or a [`FatalApply`]).
     pub failed: Option<String>,
+    /// Ostro (13-05): voters of the outgoing configuration; non-empty in joint consensus.
+    pub voters_outgoing: Vec<u64>,
+    /// Ostro (13-05): voters that become learners when the joint configuration is left.
+    pub learners_next: Vec<u64>,
+    /// Ostro (13-05): raft leaves the joint configuration by itself once it applied.
+    pub auto_leave: bool,
+    /// Ostro (13-05): a membership change was proposed and is not applied yet.
+    pub pending_conf: bool,
+    /// Ostro (13-05): per-peer progress, on the leader only (empty elsewhere).
+    pub progress: Vec<PeerProgress>,
+    /// Ostro (13-05): set when the driver halted on a [`FatalApply`].
+    pub fatal: Option<String>,
 }
 
 type Reply = oneshot::Sender<Result<Applied, ProposeError>>;
+type ReadReply = oneshot::Sender<Result<u64, ProposeError>>;
 
 enum Event {
     Propose { data: Vec<u8>, reply: Reply },
@@ -142,8 +193,20 @@ enum Event {
     SnapshotFailed(u64),
     Campaign,
     SampleLive { within: Duration, reply: oneshot::Sender<Option<Vec<u64>>> },
+    // Ostro (13-05): leadership transfer, linearizable reads, snapshot on demand.
+    TransferLeader { to: u64, reply: oneshot::Sender<Result<(), ProposeError>> },
+    ReadIndex { reply: ReadReply },
+    SnapshotNow,
     Stop,
 }
+
+/// Ostro (13-05): `ReadIndex` request contexts. A user read and an internal lease round
+/// are told apart by the first byte; the rest is a per-driver sequence.
+const CTX_READ: u8 = 1;
+const CTX_LEASE: u8 = 2;
+/// Ostro (13-05): a follower keeps running lease rounds while its anchor was asked for
+/// within this window (the first ask starts them).
+const LEASE_DEMAND_WINDOW: Duration = Duration::from_secs(10);
 
 /// Handle to a running driver. Cheap to clone.
 #[derive(Clone)]
@@ -153,6 +216,10 @@ pub struct RaftHandle {
     /// Milliseconds since `epoch` when this node last heard from (or was) the leader; 0 = never.
     leader_contact: Arc<AtomicU64>,
     epoch: Instant,
+    /// Ostro (13-05): the lease anchor, microseconds since `epoch` + 1; 0 = none.
+    lease_anchor: Arc<AtomicU64>,
+    /// Ostro (13-05): milliseconds since `epoch` + 1 when the anchor was last asked for.
+    lease_wanted: Arc<AtomicU64>,
 }
 
 impl RaftHandle {
@@ -213,6 +280,67 @@ impl RaftHandle {
         self.status.borrow().clone()
     }
 
+    /// Ostro (13-05): ask the leader to hand leadership to `to` (raft `MsgTransferLeader`:
+    /// the leader brings `to` up to date and sends it `MsgTimeoutNow`). Resolves once the
+    /// transfer started; watch [`RaftHandle::status`] for the new leader. `NotLeader` on a
+    /// follower. Proposals are dropped while a transfer is in progress.
+    pub async fn transfer_leader(&self, to: u64) -> Result<(), ProposeError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Event::TransferLeader { to, reply }).map_err(|_| ProposeError::Stopped)?;
+        rx.await.unwrap_or(Err(ProposeError::Stopped))
+    }
+
+    /// Ostro (13-05): a linearizable read index (raft `ReadIndex`, `ReadOnlyOption::Safe`).
+    /// The leader confirms its leadership with a heartbeat round acknowledged by a quorum
+    /// and answers its commit index at the time of the call; once this node applied that
+    /// index, every write acknowledged before the call is visible locally. Works on
+    /// followers (forwarded to the leader). Fails with `NotLeader { leader: None }` while no
+    /// leader is known and `Dropped` when the leader changes, the request is lost, or it is
+    /// not answered within two election timeouts, so callers never hang.
+    pub async fn read_index(&self) -> Result<u64, ProposeError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Event::ReadIndex { reply }).map_err(|_| ProposeError::Stopped)?;
+        rx.await.unwrap_or(Err(ProposeError::Stopped))
+    }
+
+    /// Ostro (13-05): the metadata lease anchor (monotonic, never wall time): the send
+    /// instant of the newest `ReadIndex` lease round this node issued that came back
+    /// resolved. On the leader that is a heartbeat round acknowledged by a quorum of
+    /// voters; on a follower it is a round trip through the leader, which itself confirmed
+    /// a quorum, so the leader heard from this node no earlier than the anchor. A one-voter
+    /// leader returns now. `None` without a leader, right after a leader or term change,
+    /// and after a check-quorum step-down; it stops advancing as soon as the rounds stop
+    /// resolving (cut off). A follower runs lease rounds only while asked for its anchor
+    /// (within the last 10 s; the first ask starts them and may return `None`).
+    pub fn lease_anchor(&self) -> Option<Instant> {
+        let now_ms = self.epoch.elapsed().as_millis() as u64 + 1;
+        self.lease_wanted.store(now_ms, Ordering::Relaxed);
+        {
+            let s = self.status.borrow();
+            if s.is_leader && s.voters.len() == 1 && s.voters_outgoing.is_empty() && s.fatal.is_none() && s.failed.is_none() {
+                return Some(Instant::now());
+            }
+        }
+        match self.lease_anchor.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(self.epoch + Duration::from_micros(us - 1)),
+        }
+    }
+
+    /// Ostro (13-05): [`RaftHandle::lease_anchor`] on the leader, `None` on any other node.
+    pub fn leader_lease_anchor(&self) -> Option<Instant> {
+        if !self.status.borrow().is_leader {
+            return None;
+        }
+        self.lease_anchor()
+    }
+
+    /// Ostro (13-05): take a snapshot of the applied state now and compact the log behind
+    /// it (tests and operators; normally every `snapshot_every` entries).
+    pub fn snapshot_now(&self) {
+        let _ = self.tx.send(Event::SnapshotNow);
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<RaftStatus> {
         self.status.clone()
     }
@@ -225,6 +353,9 @@ impl RaftHandle {
                 let s = rx.borrow_and_update();
                 if s.applied >= index {
                     return Ok(());
+                }
+                if let Some(f) = &s.fatal {
+                    return Err(ProposeError::Fatal(f.clone()));
                 }
                 if s.failed.is_some() {
                     return Err(ProposeError::Stopped);
@@ -310,7 +441,11 @@ impl RaftDriver {
         let (tx, rx) = mpsc::channel();
         let (status_tx, status_rx) = watch::channel(RaftStatus { id: config.id, applied: snap_index, ..Default::default() });
         let leader_contact = Arc::new(AtomicU64::new(0));
+        let lease_anchor = Arc::new(AtomicU64::new(0));
+        let lease_wanted = Arc::new(AtomicU64::new(0));
         let epoch = Instant::now();
+        let heartbeat_every = config.tick_interval * config.heartbeat_tick.max(1) as u32;
+        let read_timeout = config.tick_interval * (config.election_tick.max(1) as u32) * 2;
         let mut core = DriverCore {
             id: config.id,
             node,
@@ -326,13 +461,28 @@ impl RaftDriver {
             last_heard: HashMap::new(),
             fatal: None,
             epoch,
+            read_waiters: HashMap::new(),
+            deferred_reads: VecDeque::new(),
+            next_read: 1,
+            seen_leader: (0, 0, false),
+            lease_anchor: lease_anchor.clone(),
+            lease_wanted: lease_wanted.clone(),
+            lease_inflight: None,
+            lease_last_issue: None,
+            heartbeat_every,
+            read_timeout,
+            force_snapshot: false,
+            halted: None,
         };
         core.publish_status(None);
         let tick = config.tick_interval;
         let thread = std::thread::Builder::new()
             .name(format!("raft-{}", config.id))
             .spawn(move || core.run(rx, tick))?;
-        Ok(Self { handle: RaftHandle { tx, status: status_rx, leader_contact, epoch }, thread: Some(thread) })
+        Ok(Self {
+            handle: RaftHandle { tx, status: status_rx, leader_contact, epoch, lease_anchor, lease_wanted },
+            thread: Some(thread),
+        })
     }
 
     pub fn handle(&self) -> RaftHandle {
@@ -379,6 +529,25 @@ struct DriverCore<S: StateMachine, O: Outbox> {
     /// Set when this node must stop: storage it cannot trust, or a log it lost.
     fatal: Option<String>,
     epoch: Instant,
+    // ---- Ostro (13-05) ----
+    /// Outstanding user `ReadIndex` requests by context, with their deadline.
+    read_waiters: HashMap<Vec<u8>, (ReadReply, Instant)>,
+    /// Reads waiting for this new leader's first commit in its term (raft drops a
+    /// `ReadIndex` before that).
+    deferred_reads: VecDeque<(ReadReply, Instant)>,
+    next_read: u64,
+    /// (term, leader id, is leader) seen at the end of the last cycle.
+    seen_leader: (u64, u64, bool),
+    lease_anchor: Arc<AtomicU64>,
+    lease_wanted: Arc<AtomicU64>,
+    /// The lease round in flight: (context sequence, send instant).
+    lease_inflight: Option<(u64, Instant)>,
+    lease_last_issue: Option<Instant>,
+    heartbeat_every: Duration,
+    read_timeout: Duration,
+    force_snapshot: bool,
+    /// Set by a `FatalApply`: the cycle stops with this message.
+    halted: Option<String>,
 }
 
 /// Fails the driver: raft must not continue on storage it cannot trust.
@@ -423,18 +592,160 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
             if self.node.raft.state == StateRole::Leader {
                 self.touch_leader_contact();
             }
+            self.track_leader_change();
+            self.issue_reads();
             let result = match self.fatal.take() {
                 Some(msg) => Err(Fatal(msg)),
                 None => self.process_ready(),
             };
             if let Err(Fatal(msg)) = result {
                 tracing::error!("Raft node {} stopping: {}", self.id, msg);
-                self.fail_pending(ProposeError::Stopped);
-                self.publish_status(Some(msg));
+                match self.halted.take() {
+                    // Ostro (13-05): a FatalApply; `applied` did not advance past the entry.
+                    Some(h) => {
+                        self.fail_pending(ProposeError::Fatal(h.clone()));
+                        self.fail_reads(ProposeError::Fatal(h.clone()));
+                        self.lease_anchor.store(0, Ordering::Relaxed);
+                        self.publish_status_full(Some(msg), Some(h));
+                    }
+                    None => {
+                        self.fail_pending(ProposeError::Stopped);
+                        self.fail_reads(ProposeError::Stopped);
+                        self.lease_anchor.store(0, Ordering::Relaxed);
+                        self.publish_status(Some(msg));
+                    }
+                }
+                return;
+            }
+            self.track_leader_change();
+        }
+        self.fail_pending(ProposeError::Stopped);
+        self.fail_reads(ProposeError::Stopped);
+    }
+
+    /// Ostro (13-05): on a term or leader change, drop every outstanding read (its answer
+    /// may never come) and the lease: a new leader must earn it again.
+    fn track_leader_change(&mut self) {
+        let now = (self.node.raft.term, self.node.raft.leader_id, self.node.raft.state == StateRole::Leader);
+        if now != self.seen_leader {
+            self.seen_leader = now;
+            self.lease_anchor.store(0, Ordering::Relaxed);
+            self.lease_inflight = None;
+            self.lease_last_issue = None;
+            for (_, (reply, _)) in self.read_waiters.drain() {
+                let _ = reply.send(Err(ProposeError::Dropped));
+            }
+            if !now.2 {
+                for (reply, _) in self.deferred_reads.drain(..) {
+                    let _ = reply.send(Err(ProposeError::Dropped));
+                }
+            }
+        }
+    }
+
+    /// Ostro (13-05): whether raft accepts a `ReadIndex` here now. A leader must have
+    /// committed an entry in its term first; a follower needs a known leader.
+    fn reads_accepted(&self) -> bool {
+        let r = &self.node.raft;
+        if r.state == StateRole::Leader {
+            r.raft_log.term(r.raft_log.committed).map(|t| t == r.term).unwrap_or(false)
+        } else {
+            r.leader_id != 0
+        }
+    }
+
+    fn read_ctx(&mut self, kind: u8) -> (u64, Vec<u8>) {
+        let seq = self.next_read;
+        self.next_read += 1;
+        let mut ctx = Vec::with_capacity(9);
+        ctx.push(kind);
+        ctx.extend_from_slice(&seq.to_le_bytes());
+        (seq, ctx)
+    }
+
+    /// Ostro (13-05): expire overdue reads, issue deferred ones, and run the lease round.
+    fn issue_reads(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<Vec<u8>> =
+            self.read_waiters.iter().filter(|(_, (_, deadline))| *deadline <= now).map(|(k, _)| k.clone()).collect();
+        for k in expired {
+            if let Some((reply, _)) = self.read_waiters.remove(&k) {
+                let _ = reply.send(Err(ProposeError::Dropped));
+            }
+        }
+        while let Some((_, deadline)) = self.deferred_reads.front() {
+            if *deadline > now {
+                break;
+            }
+            let (reply, _) = self.deferred_reads.pop_front().unwrap();
+            let _ = reply.send(Err(ProposeError::Dropped));
+        }
+        if !self.reads_accepted() {
+            return;
+        }
+        while let Some((reply, deadline)) = self.deferred_reads.pop_front() {
+            let (_, ctx) = self.read_ctx(CTX_READ);
+            self.node.read_index(ctx.clone());
+            self.read_waiters.insert(ctx, (reply, deadline));
+        }
+        // Lease rounds: always on a multi-voter leader, on a follower while asked for.
+        let leader = self.node.raft.state == StateRole::Leader;
+        if leader && self.node.raft.prs().is_singleton() {
+            return;
+        }
+        if !leader {
+            let wanted = self.lease_wanted.load(Ordering::Relaxed);
+            let age_ms = (self.epoch.elapsed().as_millis() as u64 + 1).saturating_sub(wanted);
+            if wanted == 0 || Duration::from_millis(age_ms) > LEASE_DEMAND_WINDOW {
                 return;
             }
         }
-        self.fail_pending(ProposeError::Stopped);
+        if let Some((_, sent)) = self.lease_inflight {
+            if now.duration_since(sent) < self.read_timeout {
+                return;
+            }
+            self.lease_inflight = None;
+        }
+        if self.lease_last_issue.map(|t| now.duration_since(t) < self.heartbeat_every).unwrap_or(false) {
+            return;
+        }
+        let (seq, ctx) = self.read_ctx(CTX_LEASE);
+        self.node.read_index(ctx);
+        self.lease_inflight = Some((seq, now));
+        self.lease_last_issue = Some(now);
+    }
+
+    fn fail_reads(&mut self, err: ProposeError) {
+        for (_, (reply, _)) in self.read_waiters.drain() {
+            let _ = reply.send(Err(err.clone()));
+        }
+        for (reply, _) in self.deferred_reads.drain(..) {
+            let _ = reply.send(Err(err.clone()));
+        }
+    }
+
+    /// Ostro (13-05): answer the `ReadState`s of a `Ready`.
+    fn resolve_reads(&mut self, states: Vec<raft::ReadState>) {
+        for rs in states {
+            let ctx = rs.request_ctx;
+            match ctx.first() {
+                Some(&CTX_LEASE) if ctx.len() == 9 => {
+                    let seq = u64::from_le_bytes(ctx[1..].try_into().unwrap());
+                    if let Some((want, sent)) = self.lease_inflight {
+                        if want == seq {
+                            self.lease_inflight = None;
+                            let us = sent.saturating_duration_since(self.epoch).as_micros() as u64 + 1;
+                            self.lease_anchor.fetch_max(us, Ordering::Relaxed);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some((reply, _)) = self.read_waiters.remove(&ctx) {
+                        let _ = reply.send(Ok(rs.index));
+                    }
+                }
+            }
+        }
     }
 
     /// Returns true to stop.
@@ -479,8 +790,9 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
                         "leader {} has committed through {} but this node's catalog log ends at {}: \
                          this node lost raft state it had acknowledged (data wiped or restored). \
                          Node {}'s metadata Raft log is missing or blank while it is a configured voter: \
-                         restore the meta dir from backup, or wipe the whole data dir. Node removal and \
-                         rejoin arrive with `ostro cluster remove` / `ostro cluster join` in Phase 13.",
+                         restore the meta dir from backup, or wipe the whole data dir. Remove it with \
+                         `ostro cluster remove <id> --force`, wipe its data dir, and add it back with \
+                         `ostro cluster join` (it gets a new node id).",
                         msg.from, msg.commit, self.node.raft.raft_log.last_index(), self.id
                     ));
                     return false; // the loop reports `fatal` and stops
@@ -521,6 +833,34 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
             Event::Campaign => {
                 let _ = self.node.campaign();
             }
+            Event::TransferLeader { to, reply } => {
+                if self.node.raft.state != StateRole::Leader {
+                    let leader = Some(self.node.raft.leader_id).filter(|&l| l != 0);
+                    let _ = reply.send(Err(ProposeError::NotLeader { leader }));
+                } else if to == self.id {
+                    let _ = reply.send(Ok(()));
+                } else if !self.node.raft.prs().conf().voters().contains(to) {
+                    // raft ignores a transfer to a learner or a stranger.
+                    let _ = reply.send(Err(ProposeError::Dropped));
+                } else {
+                    self.node.transfer_leader(to);
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            Event::ReadIndex { reply } => {
+                let deadline = Instant::now() + self.read_timeout;
+                let r = &self.node.raft;
+                if r.state != StateRole::Leader && r.leader_id == 0 {
+                    let _ = reply.send(Err(ProposeError::NotLeader { leader: None }));
+                } else if self.reads_accepted() {
+                    let (_, ctx) = self.read_ctx(CTX_READ);
+                    self.node.read_index(ctx.clone());
+                    self.read_waiters.insert(ctx, (reply, deadline));
+                } else {
+                    self.deferred_reads.push_back((reply, deadline));
+                }
+            }
+            Event::SnapshotNow => self.force_snapshot = true,
         }
         false
     }
@@ -562,6 +902,12 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
             return Ok(());
         }
         let mut ready = self.node.ready();
+
+        // Ostro (13-05): ReadIndex answers.
+        let states = ready.take_read_states();
+        if !states.is_empty() {
+            self.resolve_reads(states);
+        }
 
         // A leader may send before persisting (raft thesis §10.2.1).
         if !ready.messages().is_empty() {
@@ -626,7 +972,17 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
                     if entry.data.is_empty() {
                         None
                     } else {
-                        Some(self.sm.apply(entry.index, entry.term, &entry.data))
+                        match self.sm.apply(entry.index, entry.term, &entry.data) {
+                            Ok(r) => Some(r),
+                            // Ostro (13-05): halt before `applied` advances (FatalApply).
+                            Err(FatalApply(m)) => {
+                                self.halted = Some(m.clone());
+                                return Err(Fatal(format!(
+                                    "state machine refused entry {} (term {}): {}",
+                                    entry.index, entry.term, m
+                                )));
+                            }
+                        }
                     }
                 }
                 EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => Some(self.apply_conf_change(&entry)?),
@@ -676,7 +1032,8 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
     fn maybe_snapshot(&mut self) -> Result<(), Fatal> {
         let (snap_index, _) = self.store.snapshot_index_term();
         let due = self.applied >= snap_index + self.snapshot_every;
-        let asked = self.store.snapshot_requested() && self.applied > snap_index;
+        let asked = (self.store.snapshot_requested() || self.force_snapshot) && self.applied > snap_index;
+        self.force_snapshot = false;
         if !(due || asked) || self.applied <= snap_index {
             return Ok(());
         }
@@ -698,17 +1055,54 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
     }
 
     fn publish_status(&self, failed: Option<String>) {
+        self.publish_status_full(failed, None)
+    }
+
+    fn publish_status_full(&self, failed: Option<String>, fatal: Option<String>) {
         let cs = self.node.raft.prs().conf().to_conf_state();
+        let is_leader = self.node.raft.state == StateRole::Leader;
+        // Ostro (13-05): per-peer progress on the leader.
+        let mut progress: Vec<PeerProgress> = if is_leader {
+            self.node
+                .raft
+                .prs()
+                .iter()
+                .map(|(&id, pr)| PeerProgress {
+                    id,
+                    matched: pr.matched,
+                    next_idx: pr.next_idx,
+                    pending_snapshot: pr.pending_snapshot,
+                    recent_active: pr.recent_active,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        progress.sort_by_key(|p| p.id);
+        let mut voters = cs.voters;
+        voters.sort_unstable();
+        let mut learners = cs.learners;
+        learners.sort_unstable();
+        let mut voters_outgoing = cs.voters_outgoing;
+        voters_outgoing.sort_unstable();
+        let mut learners_next = cs.learners_next;
+        learners_next.sort_unstable();
         let status = RaftStatus {
             id: self.id,
             term: self.node.raft.term,
             leader_id: Some(self.node.raft.leader_id).filter(|&l| l != 0),
-            is_leader: self.node.raft.state == StateRole::Leader,
+            is_leader,
             commit: self.node.raft.raft_log.committed,
             applied: self.applied,
-            voters: cs.voters,
-            learners: cs.learners,
+            voters,
+            learners,
             failed,
+            voters_outgoing,
+            learners_next,
+            auto_leave: cs.auto_leave,
+            pending_conf: self.node.raft.pending_conf_index > self.applied,
+            progress,
+            fatal,
         };
         self.status.send_if_modified(|cur| {
             if *cur != status {
@@ -730,6 +1124,12 @@ impl Outbox for ChannelOutbox {
     }
 }
 
+// Ostro (13-05): membership, ReadIndex, transfer, lease and FatalApply tests; they reuse
+// the `tests` harness below (its items are `pub(super)` for this).
+#[cfg(test)]
+#[path = "membership_tests.rs"]
+mod membership_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -739,24 +1139,28 @@ mod tests {
 
     /// `create:<name>` succeeds once per name; the state is shared so tests can read it.
     #[derive(Default, Clone)]
-    struct Names(Arc<Mutex<(BTreeSet<String>, Vec<String>)>>);
+    pub(super) struct Names(Arc<Mutex<(BTreeSet<String>, Vec<String>)>>);
 
     impl Names {
-        fn set(&self) -> BTreeSet<String> {
+        pub(super) fn set(&self) -> BTreeSet<String> {
             self.0.lock().unwrap().0.clone()
         }
-        fn applied_log(&self) -> Vec<String> {
+        pub(super) fn applied_log(&self) -> Vec<String> {
             self.0.lock().unwrap().1.clone()
         }
     }
 
     impl StateMachine for Names {
-        fn apply(&mut self, _index: u64, _term: u64, command: &[u8]) -> Vec<u8> {
+        fn apply(&mut self, _index: u64, _term: u64, command: &[u8]) -> Result<Vec<u8>, FatalApply> {
             let cmd = String::from_utf8(command.to_vec()).unwrap();
+            // Ostro (13-05): `halt:<x>` is an entry this state machine refuses.
+            if let Some(why) = cmd.strip_prefix("halt:") {
+                return Err(FatalApply(why.to_string()));
+            }
             let mut st = self.0.lock().unwrap();
             st.1.push(cmd.clone());
             let name = cmd.strip_prefix("create:").expect("create command").to_string();
-            if st.0.insert(name) { b"created".to_vec() } else { b"exists".to_vec() }
+            if st.0.insert(name) { Ok(b"created".to_vec()) } else { Ok(b"exists".to_vec()) }
         }
         fn snapshot(&self) -> Vec<u8> {
             serde_json::to_vec(&self.0.lock().unwrap().0).unwrap()
@@ -771,37 +1175,39 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Net {
+    pub(super) struct Net {
         handles: HashMap<u64, RaftHandle>,
         cut: HashSet<(u64, u64)>,
+        // Ostro (13-05): one-way delay of every message (lease tests).
+        pub(super) delay: Duration,
     }
 
     #[derive(Clone, Default)]
-    struct Router(Arc<Mutex<Net>>);
+    pub(super) struct Router(pub(super) Arc<Mutex<Net>>);
 
     impl Router {
-        fn outbox(&self, from: u64) -> RouterOutbox {
+        pub(super) fn outbox(&self, from: u64) -> RouterOutbox {
             RouterOutbox { router: self.clone(), from }
         }
-        fn register(&self, id: u64, h: RaftHandle) {
+        pub(super) fn register(&self, id: u64, h: RaftHandle) {
             self.0.lock().unwrap().handles.insert(id, h);
         }
-        fn unregister(&self, id: u64) {
+        pub(super) fn unregister(&self, id: u64) {
             self.0.lock().unwrap().handles.remove(&id);
         }
-        fn isolate(&self, id: u64, peers: &[u64]) {
+        pub(super) fn isolate(&self, id: u64, peers: &[u64]) {
             let mut n = self.0.lock().unwrap();
             for &p in peers {
                 n.cut.insert((id, p));
                 n.cut.insert((p, id));
             }
         }
-        fn heal(&self) {
+        pub(super) fn heal(&self) {
             self.0.lock().unwrap().cut.clear();
         }
     }
 
-    struct RouterOutbox {
+    pub(super) struct RouterOutbox {
         router: Router,
         from: u64,
     }
@@ -809,12 +1215,21 @@ mod tests {
     impl Outbox for RouterOutbox {
         fn send(&mut self, messages: Vec<Message>) {
             let n = self.router.0.lock().unwrap();
+            let delay = n.delay;
             for m in messages {
                 if n.cut.contains(&(self.from, m.to)) {
                     continue;
                 }
                 if let Some(h) = n.handles.get(&m.to) {
-                    h.step(m);
+                    if delay.is_zero() {
+                        h.step(m);
+                    } else {
+                        let h = h.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(delay);
+                            h.step(m);
+                        });
+                    }
                 }
             }
         }
@@ -824,7 +1239,7 @@ mod tests {
     // heavy machine load a driver thread stalled on fsync for >200 ms let followers depose
     // a healthy leader mid-test, failing an `unwrap()` with OutcomeUnknown. Heartbeats
     // stay at 20 ms. Test-only timeout; see VENDORED.md.
-    fn config(id: u64) -> DriverConfig {
+    pub(super) fn config(id: u64) -> DriverConfig {
         DriverConfig {
             id,
             tick_interval: Duration::from_millis(10),
@@ -835,17 +1250,17 @@ mod tests {
         }
     }
 
-    struct Cluster {
-        router: Router,
-        dirs: HashMap<u64, TempDir>,
-        drivers: HashMap<u64, RaftDriver>,
-        sms: HashMap<u64, Names>,
-        ids: Vec<u64>,
-        cfg: fn(u64) -> DriverConfig,
+    pub(super) struct Cluster {
+        pub(super) router: Router,
+        pub(super) dirs: HashMap<u64, TempDir>,
+        pub(super) drivers: HashMap<u64, RaftDriver>,
+        pub(super) sms: HashMap<u64, Names>,
+        pub(super) ids: Vec<u64>,
+        pub(super) cfg: fn(u64) -> DriverConfig,
     }
 
     impl Cluster {
-        fn new(ids: &[u64], cfg: fn(u64) -> DriverConfig) -> Self {
+        pub(super) fn new(ids: &[u64], cfg: fn(u64) -> DriverConfig) -> Self {
             let mut c = Cluster {
                 router: Router::default(),
                 dirs: ids.iter().map(|&i| (i, TempDir::new().unwrap())).collect(),
@@ -860,7 +1275,7 @@ mod tests {
             c
         }
 
-        fn start(&mut self, id: u64) {
+        pub(super) fn start(&mut self, id: u64) {
             let sm = Names::default();
             let d = RaftDriver::start(
                 self.dirs[&id].path(),
@@ -875,18 +1290,18 @@ mod tests {
             self.drivers.insert(id, d);
         }
 
-        fn stop(&mut self, id: u64) {
+        pub(super) fn stop(&mut self, id: u64) {
             self.router.unregister(id);
             if let Some(d) = self.drivers.remove(&id) {
                 d.stop();
             }
         }
 
-        fn h(&self, id: u64) -> RaftHandle {
+        pub(super) fn h(&self, id: u64) -> RaftHandle {
             self.drivers[&id].handle()
         }
 
-        async fn leader(&self) -> u64 {
+        pub(super) async fn leader(&self) -> u64 {
             // Ostro: 10 s -> 30 s hang guard (slower elections, loaded machines).
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
@@ -901,7 +1316,7 @@ mod tests {
         }
 
         /// Wait until every running node has applied `index`.
-        async fn settle(&self, index: u64) {
+        pub(super) async fn settle(&self, index: u64) {
             for d in self.drivers.values() {
                 // Ostro: 10 s -> 30 s hang guard (loaded machines).
                 tokio::time::timeout(Duration::from_secs(30), d.handle().wait_applied(index))
@@ -912,7 +1327,7 @@ mod tests {
         }
     }
 
-    async fn create(h: &RaftHandle, name: &str) -> Result<Applied, ProposeError> {
+    pub(super) async fn create(h: &RaftHandle, name: &str) -> Result<Applied, ProposeError> {
         h.propose(format!("create:{}", name).into_bytes()).await
     }
 
@@ -1223,6 +1638,16 @@ mod tests {
         assert!(failed.contains("metadata Raft log is missing or blank while it is a configured voter"), "{}", failed);
         assert!(failed.contains("restore the meta dir from backup, or wipe the whole data dir"), "{}", failed);
         assert!(failed.contains("ostro cluster remove"), "{}", failed);
+        // Ostro (13-05): the real procedure, now that `ostro cluster join` exists.
+        assert!(
+            failed.contains(
+                "Remove it with `ostro cluster remove <id> --force`, wipe its data dir, and add it back with \
+                 `ostro cluster join` (it gets a new node id)."
+            ),
+            "{}",
+            failed
+        );
+        assert!(!failed.contains("in Phase 13"), "{}", failed);
         assert!(!failed.contains("CHRONIK") && !failed.contains(concat!("remove", "-node")), "{}", failed);
         // The rest of the cluster keeps working.
         create(&c.h(leader), "after-wipe").await.unwrap();

@@ -296,9 +296,16 @@ fn encoding_round_trips_and_rejects_unknown_format() {
     bad[0] = ostro_meta::META_FORMAT + 1;
     assert_eq!(
         decode_command(&bad),
-        Err(ostro_meta::DecodeError::UnknownFormat(
-            ostro_meta::META_FORMAT + 1
-        ))
+        // 13-05 (D-P13-6): a format byte above META_FORMAT is a newer Ostro's.
+        Err(ostro_meta::DecodeError::NewerFormat {
+            found: ostro_meta::META_FORMAT + 1,
+            supported: ostro_meta::META_FORMAT,
+        })
+    );
+    bad[0] = 0;
+    assert_eq!(
+        decode_command(&bad),
+        Err(ostro_meta::DecodeError::UnknownFormat(0))
     );
     bad[0] = ostro_meta::PRE_FREEZE_META_FORMAT;
     assert_eq!(

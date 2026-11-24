@@ -38,7 +38,8 @@ pub use state::MetaState;
 pub use validate::{is_qualified_name, is_resource_name, is_tenant_id};
 
 pub use ostro_raft_driver::{
-    Applied, DriverConfig, Outbox, ProposeError, RaftDriver, RaftHandle, RaftStatus, StateMachine,
+    Applied, DriverConfig, FatalApply, Outbox, PeerProgress, ProposeError, RaftDriver, RaftHandle,
+    RaftStatus, StateMachine,
 };
 
 use ostro_raft_driver::raft::eraftpb::Message;

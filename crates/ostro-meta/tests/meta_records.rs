@@ -8,7 +8,8 @@ use ostro_meta::{
 use proptest::prelude::*;
 
 fn apply(sm: &mut MetaSm, index: u64, cmd: &MetaCommand) -> MetaResult {
-    decode_result(&sm.apply(index, 1, &encode_command(cmd))).expect("result decodes")
+    decode_result(&sm.apply(index, 1, &encode_command(cmd)).expect("applies"))
+        .expect("result decodes")
 }
 
 fn put(record: MetaRecord, expected_version: Option<u64>) -> MetaCommand {
@@ -87,12 +88,16 @@ fn every_kind_round_trips_through_snapshot() {
 }
 
 #[test]
-fn undecodable_command_is_invalid_and_bad_snapshot_is_rejected() {
+fn undecodable_command_halts_and_bad_snapshot_is_rejected() {
     let (mut sm, view) = MetaSm::new();
-    for bytes in [&[][..], &[2, 0, 0][..], &[1, 0xff, 0xff, 0xff][..]] {
-        let r = decode_result(&sm.apply(1, 1, bytes)).unwrap();
+    // Empty bytes and the pre-freeze format byte keep their Invalid answer (D20).
+    for bytes in [&[][..], &[1, 0xff, 0xff, 0xff][..]] {
+        let r = decode_result(&sm.apply(1, 1, bytes).expect("not fatal")).unwrap();
         assert!(matches!(r, MetaResult::Invalid(_)), "{r:?}");
     }
+    // 13-05 (D-P13-6): undecodable non-empty bytes halt the voter instead (FatalApply).
+    let fatal = sm.apply(1, 1, &[2, 0, 0]).unwrap_err();
+    assert!(fatal.0.contains("written by a newer Ostro"), "{fatal}");
     assert_eq!(view.read(|s| s.clone()), MetaState::default());
     assert!(sm.restore(1, &[]).is_err());
     assert!(sm.restore(1, &[9, 1, 2]).is_err());

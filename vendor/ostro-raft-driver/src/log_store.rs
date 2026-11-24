@@ -539,8 +539,21 @@ impl Storage for RaftLogStore {
         Ok(self.rl().last_index())
     }
 
-    fn snapshot(&self, request_index: u64, _to: u64) -> raft::Result<Snapshot> {
-        let result = self.rl().snapshot_for(request_index);
+    fn snapshot(&self, request_index: u64, to: u64) -> raft::Result<Snapshot> {
+        let mut result = self.rl().snapshot_for(request_index);
+        // Ostro (13-05): a peer added after the stored snapshot (a new learner) refuses a
+        // snapshot whose configuration does not contain it (raft-rs `restore`), so it would
+        // never catch up. Ask the driver for a fresh snapshot instead. See VENDORED.md.
+        if let Ok(snap) = &result {
+            let cs = snap.get_metadata().get_conf_state();
+            let member = cs.voters.contains(&to)
+                || cs.learners.contains(&to)
+                || cs.voters_outgoing.contains(&to)
+                || cs.learners_next.contains(&to);
+            if to != 0 && !member {
+                result = Err(RaftError::Store(StorageError::SnapshotTemporarilyUnavailable));
+            }
+        }
         if result.is_err() {
             self.snapshot_requested.store(true, Ordering::Relaxed);
         }

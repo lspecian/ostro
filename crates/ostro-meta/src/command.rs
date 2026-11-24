@@ -537,6 +537,12 @@ pub enum DecodeError {
     Empty,
     #[error("unknown metadata format byte {0} (expected {META_FORMAT})")]
     UnknownFormat(u8),
+    /// The payload's format byte is above [`META_FORMAT`]: a newer Ostro wrote it (13-05,
+    /// D-P13-6). Never decoded as something else.
+    #[error(
+        "metadata written by a newer Ostro (meta format {found}, this build reads {supported}): this cluster was finalized by a newer Ostro; upgrade this binary"
+    )]
+    NewerFormat { found: u8, supported: u8 },
     /// The payload was written by a pre-freeze dev build (Phase 4). Its
     /// records have a different positional shape; there is no decoder.
     #[error(
@@ -558,6 +564,12 @@ pub(crate) fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, De
     let (&format, body) = bytes.split_first().ok_or(DecodeError::Empty)?;
     if format == PRE_FREEZE_META_FORMAT {
         return Err(DecodeError::PreFreezeFormat { found: format });
+    }
+    if format > META_FORMAT {
+        return Err(DecodeError::NewerFormat {
+            found: format,
+            supported: META_FORMAT,
+        });
     }
     if format != META_FORMAT {
         return Err(DecodeError::UnknownFormat(format));

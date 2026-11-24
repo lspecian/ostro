@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use ostro_meta::NullOutbox;
+use ostro_raft_driver::driver::FatalApply;
 use ostro_raft_driver::{DriverConfig, RaftDriver, StateMachine};
 
 /// Appends every command; `apply` returns the new count as little-endian u64.
@@ -13,9 +14,9 @@ struct CounterSm {
 }
 
 impl StateMachine for CounterSm {
-    fn apply(&mut self, _index: u64, _term: u64, command: &[u8]) -> Vec<u8> {
+    fn apply(&mut self, _index: u64, _term: u64, command: &[u8]) -> Result<Vec<u8>, FatalApply> {
         self.commands.push(command.to_vec());
-        (self.commands.len() as u64).to_le_bytes().to_vec()
+        Ok((self.commands.len() as u64).to_le_bytes().to_vec())
     }
     fn snapshot(&self) -> Vec<u8> {
         (self.commands.len() as u64).to_le_bytes().to_vec()

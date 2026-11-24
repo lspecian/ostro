@@ -659,7 +659,7 @@ fn pre_freeze_raft_entry_fails_to_decode() {
     // Applying it is Invalid, changes nothing, and flags the data dir.
     let (mut sm, view) = MetaSm::new();
     assert_eq!(view.pre_freeze_format(), None);
-    let r = ostro_meta::decode_result(&sm.apply(1, 1, &old)).unwrap();
+    let r = ostro_meta::decode_result(&sm.apply(1, 1, &old).unwrap()).unwrap();
     assert!(
         matches!(&r, MetaResult::Invalid(m) if m.contains("delete the dev data dir")),
         "{r:?}"
