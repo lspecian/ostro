@@ -103,7 +103,7 @@ use ostro_meta::{MetaError, MetaHandle};
 use ostro_partition::{
     Clock, DispatcherStats, Executor, Node, NodeConfig, NodeError, PartitionRole, PartitionSlot,
 };
-use ostro_types::PartitionCount;
+use ostro_types::{PartitionCount, PartitionId};
 use tempfile::TempDir;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -860,9 +860,27 @@ const FIRST_TERMS_SINGLE_WAIT: Duration = Duration::from_secs(60);
 
 /// After `Node::open`: a single node waits until it leads every started partition (or the
 /// partition failed); a cluster node waits, bounded, until each started partition leads,
-/// takes over or follows. The server serves either way (`/readyz`, 503 not-leader answers).
+/// takes over or follows, or is one this node holds no replica of. The server serves
+/// either way (`/readyz`, 503 not-leader answers).
+///
+/// "Single" is the Phase 12 RF=1 node (12-14: it must lead every partition when `start`
+/// returns): this node is the sole metadata voter **and** the only non-removed member.
+/// p13-bugs2: a one-voter group alone is not enough: a joiner's voters are the group's
+/// (`{seed}`), and it waited the whole single-node bound for leaderships it never gets.
 async fn wait_first_terms(node: &Node, cluster: &ClusterServices, count: PartitionCount) {
-    let single = cluster.voters().len() == 1;
+    let me = cluster.node_id();
+    let view = cluster.meta().view();
+    let single = cluster.voters() == [me]
+        && view.read(|s| {
+            s.members()
+                .all(|m| m.value.node_id == me || ostro_cluster::members::is_removed(&m.value))
+        });
+    let replica_here = |p: PartitionId| {
+        view.read(|s| {
+            s.partition(p.0)
+                .is_some_and(|a| a.value.replicas.contains(&me))
+        })
+    };
     let wait = async {
         for p in count.ids() {
             let (Some(mut role), Some(h)) = (node.role(p), node.handle(p)) else {
@@ -874,7 +892,7 @@ async fn wait_first_terms(node: &Node, cluster: &ClusterServices, count: Partiti
                 let settled = match &*role.borrow_and_update() {
                     PartitionRole::Leader { .. } => true,
                     PartitionRole::Follower { .. } | PartitionRole::Announcing { .. } => !single,
-                    PartitionRole::Offline => false,
+                    PartitionRole::Offline => !single && !replica_here(p),
                 };
                 if settled
                     || matches!(

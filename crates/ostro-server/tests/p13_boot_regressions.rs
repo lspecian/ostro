@@ -2,6 +2,7 @@
 //!
 //! | test | fix | found by |
 //! |------|-----|----------|
+//! | `join_into_a_one_voter_cluster_is_fast` | `server::wait_first_terms` calls a node single only when it is the sole metadata voter and the only member, not whenever the group has one voter (a joiner waited the 60 s single-node bound to lead partitions it never leads); a cluster node also settles on partitions it holds no replica of | 13-19 `process_promotion` ("join: node 2 ready after 60.59 s") |
 //! | `static_node_restarts_under_a_joined_meta_leader` | the TCP address book is seeded from the replayed metadata (and follows it) before the boot proposals; InitCluster / the own Member record retry while no leader is reachable (`cluster::boot_propose`) | 13-19 `cluster_campaign_p13` (SIGTERM restart of node 1 exited 1, "not the raft leader (no leader known)") |
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
@@ -13,7 +14,7 @@ mod p13;
 use std::time::Duration;
 
 use ostro_server::ServerHandle;
-use p12::{START_T, start_all, static_cluster, stop_all, tmp};
+use p12::{START_T, start, start_all, static_cluster, stop_all, tmp};
 use p13::*;
 
 async fn start_joined(j: &Joiner, id: u64) -> ServerHandle {
@@ -94,4 +95,44 @@ async fn static_node_restarts_under_a_joined_meta_leader() {
     n5.shutdown().await.unwrap();
     n4.shutdown().await.unwrap();
     stop_all(hs).await;
+}
+
+/// Bug: `wait_first_terms` treated `voters().len() == 1` as a single node, and a joiner's
+/// voters are the group's ({seed}), so every join into a one-voter cluster waited the full
+/// 60 s single-node bound (`FIRST_TERMS_SINGLE_WAIT`) for leaderships it never gets. The
+/// joined node must now be up in seconds; the seed itself is still single at its first
+/// boot (it leads every partition when `start` returns).
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn join_into_a_one_voter_cluster_is_fast() {
+    let root = tmp();
+    let seed = start(seed_cfg(root.path())).await.expect("seed");
+    for p in 0..PARTS {
+        let a = seed
+            .meta()
+            .view()
+            .read(|s| s.partition(p).map(|v| v.value.leader));
+        assert_eq!(a, Some(1), "the single seed leads p{p} when start returns");
+    }
+    let j = joiner(root.path(), 2);
+    let prepared = join(&seed, &j).await.expect("join");
+    let started = std::time::Instant::now(); // clock-exempt: test timing
+    let joined = tokio::time::timeout(
+        Duration::from_secs(30),
+        ostro_server::Server::start(joined_cfg(&j, prepared.node_id)),
+    )
+    .await
+    .expect("the join into a one-voter cluster took more than 30 s (the 60 s single wait)")
+    .expect("joined node starts");
+    let took = started.elapsed();
+    println!("joined node start: {took:?}");
+    assert!(
+        took < Duration::from_secs(20),
+        "joined node start took {took:?}"
+    );
+    status_until(&seed, Duration::from_secs(60), |st| {
+        member(st, 2).is_some_and(|m| m["state"] == "active")
+    })
+    .await;
+    joined.shutdown().await.expect("joined shutdown");
+    seed.shutdown().await.expect("seed shutdown");
 }
