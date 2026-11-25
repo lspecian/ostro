@@ -401,7 +401,9 @@ async fn indexed(ctx: &P11Ctx, req: &DlqListRequest, budget: usize) -> Result<Dl
     };
     let mut streams = Vec::new();
     for prefix in dlq_prefixes() {
-        for p in count.ids() {
+        // Phase 13 (13-12): a fan-out leg scans only its `ostro-partitions` (from node
+        // identities); everything else scans every partition.
+        for p in crate::route::table::listed_partitions(count) {
             let reader = cp.partition(p).map_err(api_as_index)?.reader();
             streams.push(Stream {
                 after: resume_after(&prefix, p.0, cursor.as_ref()),

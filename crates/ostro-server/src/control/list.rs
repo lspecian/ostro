@@ -191,7 +191,9 @@ pub(crate) async fn list_runs_scan(
         .transpose()?;
 
     let mut streams = Vec::with_capacity(usize::from(count.get()));
-    for p in count.ids() {
+    // Phase 13 (13-12): a fan-out leg scans only its `ostro-partitions` (from node
+    // identities); everything else scans every partition.
+    for p in crate::route::table::listed_partitions(count) {
         streams.push(Stream {
             reader: cp.partition(p)?.reader(),
             after: resume_after(p.0, cursor),

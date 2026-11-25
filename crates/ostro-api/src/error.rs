@@ -328,8 +328,12 @@ pub struct ErrorDetail {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // D-W21: a rate-limited answer says when to come back (whole seconds, rounded up).
+        // Phase 13 (13-12): a routing 503 (`unavailable` with `retry_after_ms`, e.g. an
+        // offline partition or a leader that did not answer after one re-route) says it too.
         let retry_after = match self.code {
-            ErrorCode::RateLimited => self.retry_after_ms().map(|ms| ms.div_ceil(1000)),
+            ErrorCode::RateLimited | ErrorCode::Unavailable => {
+                self.retry_after_ms().map(|ms| ms.div_ceil(1000))
+            }
             _ => None,
         };
         let mut res = (self.http_status(), axum::Json(self.to_body())).into_response();
@@ -481,6 +485,16 @@ mod tests {
         let res = ApiError::rate_limited("x", 1_000).into_response();
         assert_eq!(res.headers()[axum::http::header::RETRY_AFTER], "1");
         let res = ApiError::payload_too_large("x").into_response();
+        assert!(res.headers().get(axum::http::header::RETRY_AFTER).is_none());
+        // 13-12: a routing 503 with `retry_after_ms` carries the header; a plain 503 does not.
+        let res = ApiError::unavailable("x")
+            .with_details(
+                serde_json::json!({ "reason": "partition_offline", RETRY_AFTER_MS: 1_000 }),
+            )
+            .into_response();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(res.headers()[axum::http::header::RETRY_AFTER], "1");
+        let res = ApiError::unavailable("x").into_response();
         assert!(res.headers().get(axum::http::header::RETRY_AFTER).is_none());
     }
 }

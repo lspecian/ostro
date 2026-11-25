@@ -92,11 +92,14 @@ async fn not_leader_503_module_push_status_and_self_demotion() {
     assert!(has_blob(&hs[0], &sha) && has_blob(&hs[1], &sha));
 
     // Runs started on node 1 land on random partitions: led ones are accepted, the others
-    // answer 503 not_leader naming node 2.
+    // answer 503 not_leader naming node 2. Phase 13 (13-12, D-P13-14) forwards a client's
+    // call to the leader; a call that already took its one hop (`ostro-hop: 1`) is served
+    // here whatever this node leads, so it still shows the D-P12-21 answer.
     let (mut ok, mut not_leader) = (0, 0);
     for i in 0..40 {
         let r = http
             .post(url(&hs[0], "/v1/workflows/smoke/runs"))
+            .header("ostro-hop", "1")
             .json(&json!({ "input": { "i": i } }))
             .send()
             .await
