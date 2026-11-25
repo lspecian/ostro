@@ -5,9 +5,12 @@
 //!   check), tokens (format, parsing, malformed → 400, covered → no barrier), the meta
 //!   barrier and its timeout, and the `serve_without_lease` mutant (failpoints build).
 //! - Through the routed instance (plan check B4): `routed_hooks_effective`.
-//! - Over real metadata groups (plan check NB2): `single_node_reads_served` (one voter,
-//!   anchor = now, no barrier, micro-benchmark), `lease_on_meta_leader_node` (3 voters,
-//!   the partition leader is the meta leader) and `isolated_meta_leader_stops_serving_reads`.
+//! - Over a real one-voter metadata group (plan check NB2): `single_node_reads_served`
+//!   (anchor = now, no barrier, micro-benchmark). The 3-voter lease tests
+//!   (`lease_on_meta_leader_node`, `isolated_meta_leader_stops_serving_reads`) live in
+//!   `ostro-cluster/tests/controller_lease_wait.rs`: an in-process 3-voter group needs the raft
+//!   message type (`ostro-raft-driver`), which is not a dependency of this crate, and
+//!   manifests are 13-01-only.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::collections::{BTreeSet, HashMap};
@@ -18,8 +21,8 @@ use std::time::{Duration, Instant};
 use ostro_api::domain::*;
 use ostro_api::request_meta::{self, RequestMeta};
 use ostro_api::{ApiError, ApiExtensions, ControlPlane, ErrorCode};
+use ostro_meta::MetaHandle;
 use ostro_meta::handle::{MetaStart, TickConfig};
-use ostro_meta::{MetaHandle, RaftHandle};
 use ostro_server::route::consistency::{
     self, ReadEnv, Token, check_meta_read, check_partition_read, lease_holds, lease_limit,
     meta_token, parse_token, partition_token,
@@ -883,206 +886,4 @@ async fn single_node_reads_served() {
         "hook {hook:?} per read exceeds 5% of a single-node read"
     );
     Arc::try_unwrap(env.meta).ok().unwrap().stop().await;
-}
-
-/// Three in-process voters with a cuttable network (the 13-05 router pattern).
-struct Group {
-    nodes: HashMap<u64, Arc<MetaHandle>>,
-    cut: Arc<Mutex<BTreeSet<u64>>>,
-    _dirs: Vec<tempfile::TempDir>,
-}
-
-#[derive(Clone, Default)]
-struct Net(Arc<Mutex<HashMap<u64, RaftHandle>>>);
-
-impl Group {
-    async fn new() -> Group {
-        let net = Net::default();
-        let cut: Arc<Mutex<BTreeSet<u64>>> = Arc::default();
-        let mut nodes = HashMap::new();
-        let mut dirs = Vec::new();
-        for id in [1u64, 2, 3] {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
-                Vec<ostro_raft_driver::raft::eraftpb::Message>,
-            >();
-            let dir = tempfile::tempdir().unwrap();
-            let h = MetaHandle::start_with(
-                dir.path(),
-                MetaStart {
-                    node_id: id,
-                    voters: vec![1, 2, 3],
-                    outbox: Box::new(ostro_raft_driver::driver::ChannelOutbox(tx)),
-                    forwarder: None,
-                    tick: ticks(),
-                },
-            )
-            .await
-            .expect("start");
-            net.0.lock().unwrap().insert(id, h.raft().clone());
-            let (net2, cut2) = (net.clone(), Arc::clone(&cut));
-            tokio::spawn(async move {
-                while let Some(batch) = rx.recv().await {
-                    for m in batch {
-                        let dropped = {
-                            let c = cut2.lock().unwrap();
-                            c.contains(&m.from) || c.contains(&m.to)
-                        };
-                        if dropped {
-                            continue;
-                        }
-                        let to = net2.0.lock().unwrap().get(&m.to).cloned();
-                        if let Some(to) = to {
-                            to.step(m);
-                        }
-                    }
-                }
-            });
-            nodes.insert(id, Arc::new(h));
-            dirs.push(dir);
-        }
-        let g = Group {
-            nodes,
-            cut,
-            _dirs: dirs,
-        };
-        g.leader().await;
-        g
-    }
-
-    async fn leader(&self) -> u64 {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let l: Vec<u64> = self
-                .nodes
-                .iter()
-                .filter(|(_, m)| m.is_leader())
-                .map(|(i, _)| *i)
-                .collect();
-            if let [l] = l[..] {
-                return l;
-            }
-            assert!(Instant::now() < deadline, "no leader");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    fn others_leader(&self, not: u64) -> Option<u64> {
-        self.nodes
-            .iter()
-            .find(|(i, m)| **i != not && m.is_leader())
-            .map(|(i, _)| *i)
-    }
-
-    async fn stop(self) {
-        self.cut.lock().unwrap().clear();
-        for (_, m) in self.nodes {
-            if let Ok(m) = Arc::try_unwrap(m) {
-                m.stop().await;
-            }
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn lease_on_meta_leader_node() {
-    let g = Group::new().await;
-    let l = g.leader().await;
-    let env = OnMeta {
-        me: l,
-        meta: Arc::clone(&g.nodes[&l]),
-        st: Duration::from_millis(600),
-        leading: AtomicBool::new(true),
-    };
-    // The partition leader is the meta leader: its anchor is its own quorum-acked heartbeat
-    // round; it keeps advancing, and reads are served continuously for well over a lease.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut first = None;
-    let mut last = None;
-    let mut served = 0u32;
-    while Instant::now() < deadline {
-        check_partition_read(&env, p(0), &RequestMeta::default())
-            .await
-            .expect("lease on the meta leader");
-        served += 1;
-        let a = env.meta.lease_anchor().expect("leader anchor");
-        assert!(
-            a.elapsed() < Duration::from_millis(480),
-            "anchor {:?} old",
-            a.elapsed()
-        );
-        first.get_or_insert(a);
-        last = Some(a);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        last.unwrap() > first.unwrap() + Duration::from_millis(500),
-        "the anchor follows heartbeat rounds"
-    );
-    eprintln!("meta-leader node served {served} reads over 2 s");
-    // A follower node's anchor holds too (ReadIndex rounds through the leader).
-    let f = *g.nodes.keys().find(|i| **i != l).unwrap();
-    let fe = OnMeta {
-        me: f,
-        meta: Arc::clone(&g.nodes[&f]),
-        st: Duration::from_millis(600),
-        leading: AtomicBool::new(true),
-    };
-    check_partition_read(&fe, p(0), &RequestMeta::default())
-        .await
-        .expect("lease on a meta follower");
-    drop((env, fe));
-    g.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn isolated_meta_leader_stops_serving_reads() {
-    let g = Group::new().await;
-    let l = g.leader().await;
-    // session_timeout 400 ms, margin 0.2 → lease 320 ms; the meta election timeout is
-    // 500-1000 ms, so a successor cannot exist before the lease ends.
-    let st = Duration::from_millis(400);
-    let env = OnMeta {
-        me: l,
-        meta: Arc::clone(&g.nodes[&l]),
-        st,
-        leading: AtomicBool::new(true),
-    };
-    check_partition_read(&env, p(0), &RequestMeta::default())
-        .await
-        .expect("served before the cut");
-    g.cut.lock().unwrap().insert(l);
-    let cut_at = Instant::now();
-    let refused_at = loop {
-        match check_partition_read(&env, p(0), &RequestMeta::default()).await {
-            Ok(()) => {
-                assert!(
-                    g.others_leader(l).is_none(),
-                    "served while another node already leads meta"
-                );
-                assert!(cut_at.elapsed() < Duration::from_secs(5), "never refused");
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(e) => {
-                assert_eq!(e.reason(), Some("not_leader"));
-                break Instant::now();
-            }
-        }
-    };
-    let took = refused_at - cut_at;
-    let other = g.others_leader(l);
-    eprintln!(
-        "isolated meta leader refused reads {took:?} after the cut (lease {:?}); successor at refusal: {other:?}",
-        lease_limit(st, MARGIN)
-    );
-    // Within the lease (+ the bounded anchor wait), before any successor exists.
-    assert!(
-        took <= lease_limit(st, MARGIN) + lease_limit(st, MARGIN) / 4 + Duration::from_millis(50),
-        "{took:?}"
-    );
-    assert!(
-        other.is_none(),
-        "a successor existed before the refusal: {other:?}"
-    );
-    drop(env);
-    g.stop().await;
 }

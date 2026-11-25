@@ -3857,7 +3857,6 @@ dependencies = [
  "ostro-objstore",
  "ostro-partition",
  "ostro-proto",
- "ostro-raft-driver",
  "ostro-testkit",
  "ostro-triggers",
  "ostro-types",

@@ -6,6 +6,13 @@
 //! - `new_meta_leader_waits_a_full_session_timeout`: a controller that just became meta
 //!   leader proposes no failover for `lease_wait`, even for a leader it never heard from.
 //! - `resignation_does_not_wait`: a resigned leader gave the partition up itself.
+//! - `lease_on_meta_leader_node` / `isolated_meta_leader_stops_serving_reads` (plan check
+//!   NB2): the read lease of `ostro_server::route::consistency` (anchor younger than
+//!   `session_timeout × (1 − lease_margin)`, rule mirrored in [`lease_holds`]) over the real
+//!   13-05 anchor of a 3-voter group: on the meta leader it follows quorum-acked heartbeat
+//!   rounds; cut off, the meta leader's lease ends within the lease bound, before any
+//!   successor exists. (Here, not in ostro-server's unit tests: an in-process 3-voter group
+//!   needs `ostro-raft-driver`, a dependency of this crate only.)
 
 mod support_controller;
 
@@ -294,4 +301,105 @@ async fn resignation_does_not_wait() {
     })
     .await;
     ctl.stop().await;
+}
+
+/// `ostro_server::route::consistency::lease_limit` / `lease_holds` (default margin 0.2).
+fn lease_holds(anchor: Option<std::time::Instant>, st: Duration) -> bool {
+    anchor.is_some_and(|a| a.elapsed() < st.mul_f64(0.8))
+}
+
+/// Wait until `meta` holds a lease (a fresh leader's first rounds resolve within a
+/// heartbeat or two).
+async fn until_lease(meta: &MetaHandle, st: Duration) {
+    let t = std::time::Instant::now();
+    while !lease_holds(meta.lease_anchor(), st) {
+        assert!(t.elapsed() < Duration::from_secs(5), "no lease");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lease_on_meta_leader_node() {
+    let mut g = Group::new(3).await;
+    let l = g.leader().await;
+    let st = Duration::from_millis(600);
+    let meta = g.meta_arc(l);
+    until_lease(&meta, st).await;
+    let t0 = std::time::Instant::now();
+    let (mut first, mut last, mut checks) = (None, None, 0u32);
+    while t0.elapsed() < Duration::from_secs(2) {
+        let a = meta.lease_anchor();
+        assert!(lease_holds(a, st), "meta leader lost its lease: {a:?}");
+        first.get_or_insert(a.unwrap());
+        last = a;
+        checks += 1;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        last.unwrap() > first.unwrap() + Duration::from_millis(500),
+        "the anchor follows quorum-acked heartbeat rounds"
+    );
+    // A follower's anchor (ReadIndex round trips through the leader; the first ask starts
+    // the rounds and may answer None).
+    let f = *g.running().iter().find(|n| **n != l).unwrap();
+    let fm = g.meta_arc(f);
+    let t1 = std::time::Instant::now();
+    while !lease_holds(fm.lease_anchor(), st) {
+        assert!(
+            t1.elapsed() < Duration::from_secs(2),
+            "follower never got a lease"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    eprintln!(
+        "meta leader held its lease over {checks} checks in 2 s; follower lease after {:?}",
+        t1.elapsed()
+    );
+    drop((meta, fm));
+    g.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn isolated_meta_leader_stops_serving_reads() {
+    let mut g = Group::new(3).await;
+    let l = g.leader().await;
+    // session_timeout 400 ms -> lease 320 ms; the meta election timeout is 500-1000 ms.
+    let st = Duration::from_millis(400);
+    let meta = g.meta_arc(l);
+    until_lease(&meta, st).await;
+    g.cut(l);
+    let cut = std::time::Instant::now();
+    let refused = loop {
+        if !lease_holds(meta.lease_anchor(), st) {
+            break cut.elapsed();
+        }
+        let others = g
+            .running()
+            .into_iter()
+            .filter(|n| *n != l)
+            .any(|n| g.meta(n).is_leader());
+        assert!(
+            !others,
+            "a successor leads while the cut-off leader holds its lease"
+        );
+        assert!(cut.elapsed() < Duration::from_secs(5), "never refused");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    };
+    let successor = g
+        .running()
+        .into_iter()
+        .filter(|n| *n != l)
+        .find(|n| g.meta(*n).is_leader());
+    eprintln!(
+        "cut-off meta leader lost its lease {refused:?} after the cut (bound {:?}); successor then: {successor:?}",
+        st.mul_f64(0.8)
+    );
+    assert!(
+        refused <= st.mul_f64(0.8) + Duration::from_millis(20),
+        "{refused:?}"
+    );
+    assert!(successor.is_none());
+    g.heal(l);
+    drop(meta);
+    g.stop_all().await;
 }
