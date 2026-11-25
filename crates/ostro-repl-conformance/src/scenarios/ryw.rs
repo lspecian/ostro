@@ -257,6 +257,9 @@ struct LoadReport {
     writes_acked: usize,
     reads_recorded: usize,
     unavailable: usize,
+    /// `500 internal "transport error"`: a forwarded call whose peer died mid-call (13-12's
+    /// peer client maps it to `internal`, not `unavailable`; reported, not a RYW finding).
+    transport_500: usize,
     unexpected: Vec<String>,
     read_lat: Vec<Duration>,
     write_lat: Vec<Duration>,
@@ -268,6 +271,7 @@ impl LoadReport {
         self.writes_acked += o.writes_acked;
         self.reads_recorded += o.reads_recorded;
         self.unavailable += o.unavailable;
+        self.transport_500 += o.transport_500;
         self.unexpected.extend(o.unexpected);
         self.read_lat.extend(o.read_lat);
         self.write_lat.extend(o.write_lat);
@@ -277,11 +281,12 @@ impl LoadReport {
         self.read_lat.sort_unstable();
         self.write_lat.sort_unstable();
         format!(
-            "{} ops, {} writes acked, {} reads recorded, {} unavailable, {} unexpected; read p50 {:?} p99 {:?}, write p50 {:?} p99 {:?}",
+            "{} ops, {} writes acked, {} reads recorded, {} unavailable, {} transport 500s, {} unexpected; read p50 {:?} p99 {:?}, write p50 {:?} p99 {:?}",
             self.ops,
             self.writes_acked,
             self.reads_recorded,
             self.unavailable,
+            self.transport_500,
             self.unexpected.len(),
             pct(&self.read_lat, 0.5),
             pct(&self.read_lat, 0.99),
@@ -398,6 +403,14 @@ fn other_answer(rep: &mut LoadReport, what: &str, r: &Option<Resp>) {
     match r {
         None => rep.unavailable += 1,
         Some(r) if r.st == 503 || r.st == 504 => rep.unavailable += 1,
+        Some(r)
+            if r.st == 500
+                && r.body["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("transport error")) =>
+        {
+            rep.transport_500 += 1;
+        }
         Some(r) => rep
             .unexpected
             .push(format!("{what}: HTTP {}: {}", r.st, r.body)),
