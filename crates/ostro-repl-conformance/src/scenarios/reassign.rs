@@ -128,6 +128,7 @@ pub fn all() -> Vec<Scenario> {
 }
 
 // ------------------------------------------------------------------------- helpers
+// (13-16: the `pub(super)` helpers and [`Load`] are shared with `promotion`.)
 
 fn sorted(v: &[u64]) -> Vec<u64> {
     let mut v = v.to_vec();
@@ -135,11 +136,11 @@ fn sorted(v: &[u64]) -> Vec<u64> {
     v
 }
 
-fn no_ext(a: &PartitionAssignment) -> bool {
+pub(super) fn no_ext(a: &PartitionAssignment) -> bool {
     matches!(get_reassignment(&a.ext), Ok(None))
 }
 
-fn running(c: &InProcCluster) -> Vec<u64> {
+pub(super) fn running(c: &InProcCluster) -> Vec<u64> {
     c.node_ids()
         .into_iter()
         .filter(|n| c.handle(*n).is_some())
@@ -148,7 +149,7 @@ fn running(c: &InProcCluster) -> Vec<u64> {
 
 /// Wait until every running node sees the cluster finalized at level 2 (the auto-finalizer
 /// raises a fresh cluster once every member advertised its NodeVersion; 13-04).
-async fn wait_level2(c: &InProcCluster) -> ScenarioResult {
+pub(super) async fn wait_level2(c: &InProcCluster) -> ScenarioResult {
     let t0 = Instant::now(); // clock-exempt: test timeout
     loop {
         let levels: Vec<Option<u32>> = running(c)
@@ -169,7 +170,7 @@ async fn wait_level2(c: &InProcCluster) -> ScenarioResult {
 }
 
 /// Poll the published assignments until `f` holds (bounded by `limit`); how long it took.
-async fn wait_parts(
+pub(super) async fn wait_parts(
     c: &InProcCluster,
     what: &str,
     limit: Duration,
@@ -304,7 +305,7 @@ fn pick_node(c: &InProcCluster, avoid: &[u64]) -> Option<u64> {
 }
 
 /// The Phase 12 oracles that hold across reassignments (module docs).
-async fn reassign_oracles(c: &InProcCluster, acks: &[Ack]) -> ScenarioResult {
+pub(super) async fn reassign_oracles(c: &InProcCluster, acks: &[Ack]) -> ScenarioResult {
     wait_meta_leader(c).await?;
     for p in 0..c.spec().partitions {
         if let Some((_, hw, members)) = settle(c, p).await? {
@@ -341,7 +342,7 @@ async fn reassign_oracles(c: &InProcCluster, acks: &[Ack]) -> ScenarioResult {
 }
 
 /// Acknowledged runs on every led partition (feeds the on-disk oracle).
-async fn acked_everywhere(c: &InProcCluster, acks: &mut Vec<Ack>) -> ScenarioResult {
+pub(super) async fn acked_everywhere(c: &InProcCluster, acks: &mut Vec<Ack>) -> ScenarioResult {
     for p in 0..c.spec().partitions {
         if published(c, p).leader != 0 {
             acks.extend(append_acked(c, p, 2, ACK_T).await?);
@@ -353,7 +354,7 @@ async fn acked_everywhere(c: &InProcCluster, acks: &mut Vec<Ack>) -> ScenarioRes
 // ------------------------------------------------------------------------- workload
 
 /// Runs started round robin on the given nodes every 100 ms (module docs).
-struct Load {
+pub(super) struct Load {
     clients: Arc<Mutex<Vec<ApiClient>>>,
     acked: Arc<Mutex<Vec<(Instant, String)>>>,
     stop: Arc<AtomicBool>,
@@ -362,7 +363,7 @@ struct Load {
 }
 
 impl Load {
-    fn start(c: &InProcCluster) -> Self {
+    pub(super) fn start(c: &InProcCluster) -> Self {
         let clients = Arc::new(Mutex::new(Self::clients_of(c, &[])));
         let acked = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -410,11 +411,11 @@ impl Load {
     }
 
     /// Point the workload at the running nodes except `exclude`.
-    fn refresh(&self, c: &InProcCluster, exclude: &[u64]) {
+    pub(super) fn refresh(&self, c: &InProcCluster, exclude: &[u64]) {
         *self.clients.lock().expect("clients") = Self::clients_of(c, exclude);
     }
 
-    async fn wait_acked(&self, k: usize) -> ScenarioResult {
+    pub(super) async fn wait_acked(&self, k: usize) -> ScenarioResult {
         let base = self.acked.lock().expect("acked").len();
         let t0 = Instant::now(); // clock-exempt: test timeout
         while self.acked.lock().expect("acked").len() < base + k {
@@ -428,7 +429,10 @@ impl Load {
 
     /// Stop; every acked run must complete. Returns (acked runs, longest gap between two
     /// acknowledged starts, incl. the start of the workload).
-    async fn finish(self, c: &InProcCluster) -> Result<(usize, Duration), ScenarioFailure> {
+    pub(super) async fn finish(
+        self,
+        c: &InProcCluster,
+    ) -> Result<(usize, Duration), ScenarioFailure> {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.task.await;
         let acked = std::mem::take(&mut *self.acked.lock().expect("acked"));
@@ -481,7 +485,7 @@ impl Load {
     }
 }
 
-fn no_stall(gap: Duration) -> ScenarioResult {
+pub(super) fn no_stall(gap: Duration) -> ScenarioResult {
     if gap > STALL_MAX {
         Err(fail(
             "availability",
