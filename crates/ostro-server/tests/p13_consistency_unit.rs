@@ -24,8 +24,8 @@ use ostro_api::{ApiError, ApiExtensions, ControlPlane, ErrorCode};
 use ostro_meta::MetaHandle;
 use ostro_meta::handle::{MetaStart, TickConfig};
 use ostro_server::route::consistency::{
-    self, ReadEnv, Token, check_meta_read, check_partition_read, lease_holds, lease_limit,
-    meta_token, parse_token, partition_token,
+    self, ReadEnv, Token, check_meta_read, check_partition_read, check_partition_write,
+    lease_holds, lease_limit, meta_token, parse_token, partition_token,
 };
 use ostro_server::route::peer::PeerApi;
 use ostro_server::route::table::Target;
@@ -327,6 +327,54 @@ async fn not_leading_or_announce_not_applied_is_refused() {
         .unwrap_err();
     assert_eq!(reason(&e), Some("not_leader"));
     assert!(e.message.contains("handoff"), "{}", e.message);
+}
+
+#[tokio::test]
+async fn partition_writes_need_leading_and_the_lease_only() {
+    // p13-fixes: a write's inner call reads the run record before it proposes, so a
+    // leader without the lease (a zombie that never learnt of its successor) refuses with
+    // the same retryable not_leader before that read.
+    let f = Fake::new(1);
+    f.hint.lock().unwrap().insert(0, 2);
+    let e = check_partition_write(&*f, p(0), &RequestMeta::default())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+    assert_eq!(reason(&e), Some("not_leader"));
+    assert!(e.message.contains("writes"), "{}", e.message);
+    f.lead(0, 3);
+    check_partition_write(&*f, p(0), &RequestMeta::default())
+        .await
+        .expect("leader with a fresh lease");
+    // Lease gone: refused, with the leader hint.
+    f.anchor_age(Duration::from_millis(801));
+    let e = check_partition_write(&*f, p(0), &RequestMeta::default())
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&e), Some("not_leader"));
+    assert_eq!(e.details.clone().unwrap()["leader"], 2);
+    *f.anchor_us.lock().unwrap() = None;
+    assert!(
+        check_partition_write(&*f, p(0), &RequestMeta::default())
+            .await
+            .is_err()
+    );
+    // Barrier, handoff freeze and tokens stay read-only: strict mode, a handoff in
+    // progress and an uncovered token neither take a barrier nor refuse a write (the
+    // proposal is fenced by the partition log).
+    f.anchor_age(Duration::ZERO);
+    f.strict.store(true, Ordering::SeqCst);
+    f.handoff.lock().unwrap().insert(0);
+    let t = f.now();
+    check_partition_write(&*f, p(0), &with_token("p0:9:100000"))
+        .await
+        .expect("write rules: leading + lease only");
+    assert_eq!(f.barriers(), 0, "a write takes no barrier");
+    assert_eq!(f.now(), t, "a write does not wait for a token");
+    // A malformed read-after is not a write's business either.
+    check_partition_write(&*f, p(0), &with_token("garbage"))
+        .await
+        .expect("tokens are ignored on writes");
 }
 
 #[tokio::test]
@@ -662,6 +710,10 @@ impl RouteEnv for Env {
         let meta = RequestMeta::current().unwrap_or_default();
         Box::pin(async move { check_partition_read(&*self.read, p, &meta).await })
     }
+    fn before_partition_write(&self, p: PartitionId) -> BoxFuture<'_, Result<(), ApiError>> {
+        let meta = RequestMeta::current().unwrap_or_default();
+        Box::pin(async move { check_partition_write(&*self.read, p, &meta).await })
+    }
     fn before_meta_read(&self) -> BoxFuture<'_, Result<(), ApiError>> {
         let meta = RequestMeta::current().unwrap_or_default();
         Box::pin(async move { check_meta_read(&*self.read, &meta).await })
@@ -717,6 +769,24 @@ async fn routed_hooks_effective() {
             inner.calls.lock().unwrap().len(),
             1,
             "{label}: inner not called"
+        );
+        // The same zombie refuses a write before the inner call (p13-fixes: its run
+        // record may be stale, so a pre-read would answer not_found).
+        let (r, _) = request_meta::scope_with_consistency(
+            meta.clone(),
+            cp.cancel_run(CancelRequest {
+                run_id: run.clone(),
+                reason: None,
+                dry_run: false,
+            }),
+        )
+        .await;
+        let e = r.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unavailable, "{label}: {e:?}");
+        assert_eq!(
+            inner.calls.lock().unwrap().len(),
+            1,
+            "{label}: inner not called for the write"
         );
         read.anchor_age(Duration::ZERO);
 

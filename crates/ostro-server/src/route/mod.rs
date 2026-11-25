@@ -17,7 +17,8 @@
 //! # Rules ([`RouteCore`])
 //!
 //! - **Local** (this node leads, or the call was forwarded in): partition reads call
-//!   `before_partition_read(p)` and meta reads `before_meta_read()` before the inner call;
+//!   `before_partition_read(p)`, partition writes `before_partition_write(p)` (p13-fixes)
+//!   and meta reads `before_meta_read()` before the inner call;
 //!   partition writes publish `token_after_partition_write(p)` and meta writes
 //!   `token_after_meta_write()` after a successful inner call (plan check B4).
 //! - **Forward** (another node leads and `RequestMeta.hop == 0`): the call goes to that
@@ -111,6 +112,8 @@ pub trait RouteEnv: Send + Sync + 'static {
     fn forget_peer(&self, node: u64);
     /// 13-13: before a partition read on this node.
     fn before_partition_read(&self, p: PartitionId) -> BoxFuture<'_, Result<(), ApiError>>;
+    /// p13-fixes: before a partition write on this node (leading + the lease).
+    fn before_partition_write(&self, p: PartitionId) -> BoxFuture<'_, Result<(), ApiError>>;
     /// 13-13: before a meta read on this node.
     fn before_meta_read(&self) -> BoxFuture<'_, Result<(), ApiError>>;
     /// 13-13: the token after a partition write on this node.
@@ -148,7 +151,8 @@ impl RouteStats {
 pub enum Access {
     /// A partition read: `before_partition_read(p)` first.
     PartitionRead(PartitionId),
-    /// A partition write: `token_after_partition_write(p)` after success.
+    /// A partition write: `before_partition_write(p)` first (leading + the lease), and
+    /// `token_after_partition_write(p)` after success.
     PartitionWrite(PartitionId),
     /// A meta read: `before_meta_read()` first.
     MetaRead,
@@ -322,6 +326,7 @@ impl RouteCore {
     {
         match access {
             Access::PartitionRead(p) => self.env.before_partition_read(p).await?,
+            Access::PartitionWrite(p) => self.env.before_partition_write(p).await?,
             Access::MetaRead => self.env.before_meta_read().await?,
             _ => {}
         }
@@ -1067,6 +1072,10 @@ impl RouteEnv for NodeEnv {
 
     fn before_partition_read(&self, p: PartitionId) -> BoxFuture<'_, Result<(), ApiError>> {
         Box::pin(consistency::before_partition_read(&self.ctx, p))
+    }
+
+    fn before_partition_write(&self, p: PartitionId) -> BoxFuture<'_, Result<(), ApiError>> {
+        Box::pin(consistency::before_partition_write(&self.ctx, p))
     }
 
     fn before_meta_read(&self) -> BoxFuture<'_, Result<(), ApiError>> {

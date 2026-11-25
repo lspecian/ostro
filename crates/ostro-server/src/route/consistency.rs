@@ -2,7 +2,7 @@
 //! reads under a leader lease (plus a full barrier with `[api] strict_reads`), metadata
 //! reads behind a raft ReadIndex barrier, and the `ostro-consistency` tokens.
 //!
-//! The four hooks have fixed signatures and fixed call sites (the 13-12 router's local
+//! The hooks have fixed signatures and fixed call sites (the 13-12 router's local
 //! branch, for direct and forwarded-in calls). Their rules live in the testable core
 //! ([`check_partition_read`], [`check_meta_read`], [`partition_token`], [`meta_token`]) over a
 //! [`ReadEnv`]; the hooks run the core over the node ([`NodeReadEnv`]).
@@ -35,6 +35,15 @@
 //! lease holder has always stopped serving before a successor exists. Zombie safety still
 //! rests on the Phase 12 fencing too (epochs, ISR, the log); the lease only closes the read
 //! window.
+//!
+//! # Partition writes (p13-fixes)
+//!
+//! A partition write (start, signal, cancel, terminate, retry, ...) passes conditions 1 and 3
+//! before its inner call (`before_partition_write`), else it answers the same `not_leader`
+//! refusal, which the router re-routes once (then 503 + `Retry-After`). Writes read the run
+//! record before they propose; on a zombie leader (cut off, never told of its successor) that
+//! record is stale and answered `404` for runs started through the successor. The
+//! `serve_without_lease` mutant only affects reads.
 //!
 //! # Metadata reads (the barrier)
 //!
@@ -255,12 +264,16 @@ fn serve_without_lease() -> bool {
 }
 
 fn not_leader(env: &dyn ReadEnv, p: PartitionId, why: &str) -> ApiError {
+    refusal(env, p, "serve reads", why)
+}
+
+fn refusal(env: &dyn ReadEnv, p: PartitionId, what: &str, why: &str) -> ApiError {
     LEASE_REFUSALS.fetch_add(1, Ordering::Relaxed);
     metrics::counter!(LEASE_REJECTIONS_TOTAL).increment(1);
     let hint = env
         .leader_hint(p)
         .filter(|l| *l != 0 && *l != env.node_id());
-    ApiError::unavailable(format!("partition {} cannot serve reads here: {why}", p.0)).with_details(
+    ApiError::unavailable(format!("partition {} cannot {what} here: {why}", p.0)).with_details(
         serde_json::json!({
             "reason": "not_leader",
             "partition": p.0,
@@ -394,6 +407,27 @@ pub async fn check_partition_read(
             }
             env.sleep(ANCHOR_POLL).await;
         }
+    }
+    Ok(())
+}
+
+/// The partition-write rules (see the module docs): conditions 1 (leading, with the
+/// takeover wait) and 3 (the lease). A write's inner call reads the run record before it
+/// proposes (signal, cancel, terminate, retry, ...); a leader without the lease may have
+/// been replaced, and its stale record would answer `not_found` for a run started through
+/// the successor. The proposal itself is fenced by the partition log (epochs, ISR), so the
+/// handoff freeze and the barrier / token rules stay read-only.
+pub async fn check_partition_write(
+    env: &dyn ReadEnv,
+    p: PartitionId,
+    meta: &RequestMeta,
+) -> Result<(), ApiError> {
+    let write_refusal = |why: &str| refusal(env, p, "accept writes", why);
+    if leading_or_takeover(env, p, meta).await.is_none() {
+        return Err(write_refusal("this node does not lead it"));
+    }
+    if !lease(env, meta).await {
+        return Err(write_refusal("no metadata lease (meta contact lost)"));
     }
     Ok(())
 }
@@ -580,6 +614,12 @@ fn current_meta() -> RequestMeta {
 pub async fn before_partition_read(ctx: &P13Ctx, p: PartitionId) -> Result<(), ApiError> {
     ensure_keeper(&ctx.meta);
     check_partition_read(&NodeReadEnv(ctx), p, &current_meta()).await
+}
+
+/// Before a partition write on this node: leading + the lease (no barrier, no token wait).
+pub async fn before_partition_write(ctx: &P13Ctx, p: PartitionId) -> Result<(), ApiError> {
+    ensure_keeper(&ctx.meta);
+    check_partition_write(&NodeReadEnv(ctx), p, &current_meta()).await
 }
 
 /// Before a meta read on this node: the ReadIndex barrier (skipped for a covered token).

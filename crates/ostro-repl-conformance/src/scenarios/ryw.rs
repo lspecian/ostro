@@ -33,6 +33,10 @@
 //! - `zombie_asymmetric`: the partition leader can still send to the meta leader but every
 //!   metadata message to it is dropped: its lease expires from its last confirmed round and
 //!   it stops serving before any successor exists (0 violations).
+//! - `zombie_writes_are_retryable` (p13-fixes): runs started through the successor of a
+//!   probe-paused zombie; signal, cancel, retry and terminate sent to the zombie answer a
+//!   retryable `503` (its write hook refuses without the lease), never `404` from its stale
+//!   run record.
 //! - `strict_reads_mode`: the steady workload with `[api] strict_reads = true` on every
 //!   node (latency recorded for the D-P13-15 review).
 
@@ -98,6 +102,7 @@ pub fn all() -> Vec<Scenario> {
         s("await_across_leader_change", await_across_leader_change),
         s("zombie_asymmetric", zombie_asymmetric),
         s("strict_reads_mode", strict_reads_mode),
+        s("zombie_writes_are_retryable", zombie_writes_are_retryable),
     ];
     #[cfg(feature = "failpoints")]
     v.push(s(
@@ -1218,6 +1223,139 @@ async fn zombie_body(c: &mut InProcCluster, mutant: bool) -> ScenarioResult {
         return Err(fail("lease", "the zombie never refused a read"));
     }
     verdict("zombie_leader_never_serves_stale", &checker, &mut rep)
+}
+
+/// An idempotency key whose `signals` start lands on `p` (the start path's own rule).
+fn signals_key_for(c: &InProcCluster, p: u16, tag: &str) -> String {
+    let n = count(c);
+    (0u64..)
+        .map(|i| format!("{tag}-{}-{i}", c.cluster_id()))
+        .find(|k| {
+            ostro_server::route::table::key_partition("signals", None, k, n)
+                .is_some_and(|q| q.0 == p)
+        })
+        .expect("some key lands on every partition")
+}
+
+/// Runs started through the successor, written to through the zombie (p13-fixes): the
+/// zombie's run record does not have them, and a write that read it before proposing
+/// answered `404 not_found` for the client's own acknowledged run. With the write hook
+/// (leading + lease) the zombie refuses, the router re-routes once (the zombie's view never
+/// moves) and answers `503` + `Retry-After`.
+async fn zombie_writes_body(c: &mut InProcCluster) -> ScenarioResult {
+    use reqwest::Method;
+    prepare(c).await?;
+    let meta = wait_meta_leader(c).await?;
+    let a = published_all(c)
+        .into_iter()
+        .find(|a| a.leader != 0 && a.leader != meta && a.isr.len() == 3)
+        .ok_or_else(|| fail("placement", "no partition led off the meta leader"))?;
+    let (p, zombie) = (a.partition, a.leader);
+    let others: Vec<u64> = c.node_ids().into_iter().filter(|n| *n != zombie).collect();
+    let zapi = c.client(zombie);
+    make_zombie(c, zombie).await;
+    let moved = wait_assignment(c, p, "successor elected", CHANGE_T, |x| {
+        x.leader != 0 && x.leader != zombie && x.epoch > a.epoch
+    })
+    .await;
+    let out = async {
+        let moved = moved?;
+        // Waiting runs on p, started (and acknowledged) through the other nodes.
+        let mut runs = Vec::new();
+        for i in 0..4 {
+            let key = signals_key_for(c, p, &format!("zwrite{i}"));
+            let started = poll_async(CHANGE_T, || {
+                let (api, key) = (c.client(others[i % others.len()]), key.clone());
+                async move {
+                    let r = call(
+                        &api,
+                        Method::POST,
+                        "/v1/workflows/signals/runs",
+                        Some(json!({ "input": { "mode": "long_wait" }, "idempotency_key": key })),
+                        None,
+                        REQ_T,
+                    )
+                    .await?;
+                    ((200..300).contains(&r.st))
+                        .then(|| r.body["run_id"].as_str().unwrap_or_default().to_owned())
+                }
+            })
+            .await
+            .ok_or_else(|| fail("availability", "start through the successor"))?;
+            if run_partition(&started) != p {
+                return Err(fail("harness", format!("{started} is not on p{p}")));
+            }
+            runs.push(started);
+        }
+        let (mut refused, mut answered) = (0usize, Vec::new());
+        for (i, id) in runs.iter().enumerate() {
+            let writes = [
+                (
+                    "signal",
+                    format!("/v1/runs/{id}/signals/ryw"),
+                    json!({ "payload": { "rid": i }, "request_id": format!("zw-{i}") }),
+                ),
+                ("cancel", format!("/v1/runs/{id}/cancel"), json!({})),
+                ("retry", format!("/v1/runs/{id}/retry"), json!({})),
+                (
+                    "terminate",
+                    format!("/v1/runs/{id}/terminate"),
+                    json!({ "reason": "zombie" }),
+                ),
+            ];
+            for (what, path, body) in writes {
+                let r = call(&zapi, Method::POST, &path, Some(body), None, REQ_T).await;
+                match r {
+                    Some(x) if x.st == 503 => {
+                        refused += 1;
+                        if x.body["error"]["details"]["retry_after_ms"].as_u64().is_none() {
+                            return Err(fail(
+                                "availability",
+                                format!("{what} via the zombie: 503 without retry_after_ms: {}", x.body),
+                            ));
+                        }
+                    }
+                    Some(x) if x.st == 404 => {
+                        return Err(fail(
+                            "zombie_write",
+                            format!(
+                                "{what} of {id} via the zombie answered 404 for a run acknowledged through node {} (epoch {}): {}",
+                                moved.leader, moved.epoch, x.body
+                            ),
+                        ));
+                    }
+                    Some(x) => answered.push(format!("{what}: {} {}", x.st, x.body)),
+                    None => answered.push(format!("{what}: no answer")),
+                }
+            }
+        }
+        println!(
+            "zombie writes: p{p} leader {zombie} -> {} (epoch {} -> {}); {refused} of {} writes via the zombie refused with 503; other answers {answered:?}",
+            moved.leader,
+            a.epoch,
+            moved.epoch,
+            runs.len() * 4
+        );
+        if refused == 0 {
+            return Err(fail(
+                "harness",
+                format!("the zombie never refused a write (no zombie window?): {answered:?}"),
+            ));
+        }
+        // Every other answer is from a write that reached the successor (the zombie's view
+        // caught up): never a 5xx other than 503.
+        if let Some(bad) = answered.iter().find(|a| a.contains(": 5")) {
+            return Err(fail("availability", format!("unexpected answer: {bad}")));
+        }
+        Ok(())
+    }
+    .await;
+    c.net().faults().heal(zombie);
+    out
+}
+
+fn zombie_writes_are_retryable(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult> {
+    Box::pin(zombie_writes_body(c))
 }
 
 fn zombie_leader_never_serves_stale(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult> {

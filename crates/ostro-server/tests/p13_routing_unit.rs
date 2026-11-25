@@ -558,6 +558,10 @@ impl RouteEnv for FakeEnv {
         push(&self.log, format!("hook before_partition_read({})", p.0));
         Box::pin(async { Ok(()) })
     }
+    fn before_partition_write(&self, p: PartitionId) -> BoxFuture<'_, Result<(), ApiError>> {
+        push(&self.log, format!("hook before_partition_write({})", p.0));
+        Box::pin(async { Ok(()) })
+    }
     fn before_meta_read(&self) -> BoxFuture<'_, Result<(), ApiError>> {
         push(&self.log, "hook before_meta_read".into());
         Box::pin(async { Ok(()) })
@@ -644,7 +648,8 @@ async fn local_branch_calls_consistency_hooks() {
         );
         assert!(l[1].starts_with("call node=1 get_run"), "{label}: {l:?}");
 
-        // Partition write: the token after a successful inner call.
+        // Partition write: the write hook (leading + lease, p13-fixes) before the inner
+        // call, the token after a successful inner call.
         log.lock().unwrap().clear();
         let run = run_of(p);
         let (r, token) =
@@ -656,9 +661,14 @@ async fn local_branch_calls_consistency_hooks() {
             "{label}"
         );
         let l = snapshot(&log);
-        assert!(l[0].starts_with("call node=1 cancel_run"), "{label}: {l:?}");
         assert_eq!(
-            l[1],
+            l[0],
+            format!("hook before_partition_write({p})"),
+            "{label}: {l:?}"
+        );
+        assert!(l[1].starts_with("call node=1 cancel_run"), "{label}: {l:?}");
+        assert_eq!(
+            l[2],
             format!("hook token_after_partition_write({p})"),
             "{label}"
         );

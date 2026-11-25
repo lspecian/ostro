@@ -66,6 +66,11 @@ async fn strict_reads_mode() {
     run("strict_reads_mode").await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn zombie_writes_are_retryable() {
+    run("zombie_writes_are_retryable").await;
+}
+
 #[cfg(feature = "failpoints")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn zombie_serve_without_lease_mutant_bites() {
