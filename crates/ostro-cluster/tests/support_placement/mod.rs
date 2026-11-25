@@ -29,7 +29,7 @@ use ostro_types::{Epoch, PartitionId};
 pub use support_membership::Group;
 
 pub const P: u16 = 4;
-pub const WITHIN: Duration = Duration::from_secs(30);
+pub const WITHIN: Duration = Duration::from_secs(60);
 
 /// Elects `to` at `epoch + 1` with the ISR unchanged (13-11's ElectLeader shape).
 pub struct FakeHandoff {

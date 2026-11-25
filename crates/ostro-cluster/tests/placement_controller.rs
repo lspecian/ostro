@@ -358,8 +358,14 @@ async fn balancer_moves_one_preferred_leader_per_pass() {
         assert_eq!(alter_replicas_in(&r), 0, "balanced: no replica move {r:?}");
         let m = balance_moves(&r);
         assert_eq!(m.len(), 1, "one move per pass: {r:?}");
+        let (p, to) = m[0];
         moved.extend(m);
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Wait until the handoff applied before the next pass (the balancer never starts a
+        // second handoff for a partition whose handoff is still running).
+        bed.drive_until("the balancer's handoff applied", |parts| {
+            parts[usize::from(p)].leader == to
+        })
+        .await;
     }
     moved.sort_unstable();
     assert_eq!(
