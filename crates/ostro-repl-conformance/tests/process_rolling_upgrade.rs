@@ -333,7 +333,11 @@ async fn iteration(
 
     let load = Load::start(c, &[], true);
     load.wait_acked(10, RUN_T).await?;
-    // Baseline: the same timing before any restart (every module already activated).
+    for l in c.proxy().links() {
+        c.proxy().delay(l.from, l.to, 20);
+    }
+    // Baseline: the same timing before any restart, under the same 20 ms link delay
+    // (every module already activated).
     let mut base = Vec::new();
     for n in &ids {
         for p in 0..c.spec().partitions {
@@ -344,13 +348,10 @@ async fn iteration(
     }
     let _ = writeln!(
         out,
-        "  baseline (before any restart, through every node, one run per partition): {}",
+        "  baseline (before any restart, same link delay, through every node, one run per partition): {}",
         dist(&mut base.clone())
     );
     m.baseline.extend(base);
-    for l in c.proxy().links() {
-        c.proxy().delay(l.from, l.to, 20);
-    }
     for (i, n) in ids.iter().copied().enumerate() {
         if i == 1 {
             // One short partition per iteration (between the two nodes not upgraded next).
@@ -543,7 +544,7 @@ async fn emulated_rolling_upgrade_under_load_and_faults() {
     );
     let _ = writeln!(
         out,
-        "the same timing before any restart (baseline, every node): {}",
+        "the same timing before any restart under the same link delay (baseline, every node): {}",
         dist(&mut m.baseline)
     );
     let _ = writeln!(
