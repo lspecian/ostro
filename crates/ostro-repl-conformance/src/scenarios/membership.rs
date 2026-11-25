@@ -295,6 +295,19 @@ fn force_remove_dead_node(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult
             .into_iter()
             .find(|n| *n != leader)
             .expect("a follower");
+        // It holds replicas when it dies (13-10's controller evacuates them once it is
+        // Removed, so this is measured before the removal).
+        let holds = (0..c.spec().partitions).any(|p| {
+            super::placement::support::published(c, p)
+                .replicas
+                .contains(&dead)
+        });
+        if !holds {
+            return Err(fail(
+                "membership",
+                format!("node {dead} holds no replicas; the scenario lost its point"),
+            ));
+        }
         c.kill(dead).await;
         s.skip.push(dead);
         c.remove(dead, true)
@@ -307,18 +320,6 @@ fn force_remove_dead_node(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult
                 && !st.voters.contains(&dead)
         })
         .await?;
-        // Removed while it still holds replicas (evacuation is 13-10's).
-        let holds = (0..c.spec().partitions).any(|p| {
-            super::placement::support::published(c, p)
-                .replicas
-                .contains(&dead)
-        });
-        if !holds {
-            return Err(fail(
-                "membership",
-                format!("node {dead} no longer holds replicas; the scenario lost its point"),
-            ));
-        }
         // Kill a second voter: removing a third would leave no live quorum and is refused
         // by the meta leader (with --force too). Pick them from a settled configuration
         // (the same voters and leader in two samples a second apart, leader a voter).
