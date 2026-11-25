@@ -34,11 +34,11 @@
 pub mod cluster_api;
 pub mod join;
 pub mod joiner;
+pub mod keyed_start;
 pub mod membership;
 pub mod module_gc;
 pub mod module_lifecycle;
 pub mod module_refs;
-pub mod keyed_start;
 pub mod node_ops;
 pub mod prewarm;
 pub mod promote;

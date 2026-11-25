@@ -135,7 +135,9 @@ impl NodeOpsService {
     ) -> Result<Response<StartRestartResponse>, Status> {
         authz::require_node(&req)?;
         let Some(r) = &self.restarts else {
-            return Err(Status::unimplemented("StartRestart is not served by this node"));
+            return Err(Status::unimplemented(
+                "StartRestart is not served by this node",
+            ));
         };
         r.start_restart(req.into_inner())
             .await
@@ -291,8 +293,12 @@ mod tests {
         ) -> BoxFuture<'_, Result<StartRestartResponse, ostro_api::ApiError>> {
             Box::pin(async move {
                 if req.partition == 7 {
-                    return Err(ostro_api::ApiError::unavailable("partition 7: not the leader")
-                        .with_details(serde_json::json!({ "reason": "not_leader", "partition": 7 })));
+                    return Err(
+                        ostro_api::ApiError::unavailable("partition 7: not the leader")
+                            .with_details(
+                                serde_json::json!({ "reason": "not_leader", "partition": 7 }),
+                            ),
+                    );
                 }
                 Ok(StartRestartResponse {
                     run_id: vec![u8::try_from(req.partition).unwrap_or(0)],

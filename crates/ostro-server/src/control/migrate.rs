@@ -453,10 +453,10 @@ pub async fn migrate_runs(
     let mut started_on_source = std::collections::BTreeMap::new();
     for (run, version) in on_target {
         let source = *started_on_source.entry(version).or_insert_with(|| {
-            ctx.meta
-                .view()
-                .read(|s| s.workflow(&r.workflow, version).map(|w| w.value.module_sha256))
-                == Some(from)
+            ctx.meta.view().read(|s| {
+                s.workflow(&r.workflow, version)
+                    .map(|w| w.value.module_sha256)
+            }) == Some(from)
         });
         if source {
             let id = run.to_string();

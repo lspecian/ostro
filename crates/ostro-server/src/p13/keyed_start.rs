@@ -297,7 +297,10 @@ pub async fn submit_local(
             .input
             .clone()
             .unwrap_or_else(|| PayloadRef::inline(Bytes::from_static(b"null")));
-        let input_bytes = handle.fetch_payload(&input).await.map_err(partition_error)?;
+        let input_bytes = handle
+            .fetch_payload(&input)
+            .await
+            .map_err(partition_error)?;
         start = attach_run_started(handle, start, &input_bytes).await?;
     }
     if let Some(bound) = prefix_bound {
@@ -360,7 +363,11 @@ pub async fn serve(
         .cmd
     {
         Some(Cmd::StartRun(s)) => s,
-        _ => return Err(ApiError::invalid_argument("start_run: not a StartRun command")),
+        _ => {
+            return Err(ApiError::invalid_argument(
+                "start_run: not a StartRun command",
+            ));
+        }
     };
     localize_payloads(&handle, &mut start).await?;
     let ks = KeyedStart {

@@ -1098,7 +1098,8 @@ fn keyed_restart_on_another_leader(c: &mut InProcCluster) -> BoxFuture<'_, Scena
     Box::pin(async move {
         deploy(c, 1, "p11-rerun").await;
         let count = PartitionCount::new(c.spec().partitions).expect("partitions");
-        let part_of = |key: &str| ostro_types::routing::partition_for_key(WF, key.as_bytes(), count).0;
+        let part_of =
+            |key: &str| ostro_types::routing::partition_for_key(WF, key.as_bytes(), count).0;
         let parse = |s: &str| -> Result<ostro_types::RunId, ScenarioFailure> {
             s.parse()
                 .map_err(|e| fail("routing", format!("run id {s:?}: {e}")))
@@ -1128,7 +1129,10 @@ fn keyed_restart_on_another_leader(c: &mut InProcCluster) -> BoxFuture<'_, Scena
         )
         .await;
         if !st.is_success() {
-            return Err(fail("harness", format!("enable the DLQ on {queue}: {st} {v}")));
+            return Err(fail(
+                "harness",
+                format!("enable the DLQ on {queue}: {st} {v}"),
+            ));
         }
         super::module_gc::barrier_all(c).await;
 
@@ -1174,7 +1178,10 @@ fn keyed_restart_on_another_leader(c: &mut InProcCluster) -> BoxFuture<'_, Scena
             }
             if attempt == 0 {
                 if v["existing"] == true {
-                    return Err(fail("routing", format!("first keyed rerun reported existing: {v}")));
+                    return Err(fail(
+                        "routing",
+                        format!("first keyed rerun reported existing: {v}"),
+                    ));
                 }
                 first = new;
             } else if new != first || v["existing"] != true {
@@ -1217,7 +1224,9 @@ fn keyed_restart_on_another_leader(c: &mut InProcCluster) -> BoxFuture<'_, Scena
         if !st.is_success() {
             return Err(fail(
                 "routing",
-                format!("DLQ restart of {run} via its leader {l} (target p{p} led by {owner}): {st} {v}"),
+                format!(
+                    "DLQ restart of {run} via its leader {l} (target p{p} led by {owner}): {st} {v}"
+                ),
             ));
         }
         let new = v["new_run_id"].as_str().unwrap_or_default().to_owned();
@@ -1228,7 +1237,10 @@ fn keyed_restart_on_another_leader(c: &mut InProcCluster) -> BoxFuture<'_, Scena
             ));
         }
         if get_run(c, &new).await["run_id"] != new.as_str() {
-            return Err(fail("routing", format!("DLQ restart {new} is not readable")));
+            return Err(fail(
+                "routing",
+                format!("DLQ restart {new} is not readable"),
+            ));
         }
         println!(
             "keyed_restart_on_another_leader: rerun {src}@{leader} -> {first}@{target}/{}; DLQ restart {run}@{l} -> {new}@{p}/{owner}",

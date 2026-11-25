@@ -1202,9 +1202,9 @@ async fn restart_with_key(
     };
     match crate::p13::keyed_start::submit(cp, old_handle, ks).await? {
         crate::p13::keyed_start::Started::Run { run, .. } => Ok(run),
-        crate::p13::keyed_start::Started::Rejected(e) => Err(ApiError::invalid_argument(
-            format!("restart rejected: {e}"),
-        )),
+        crate::p13::keyed_start::Started::Rejected(e) => {
+            Err(ApiError::invalid_argument(format!("restart rejected: {e}")))
+        }
     }
 }
 

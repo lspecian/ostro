@@ -81,9 +81,7 @@ use super::list;
 use super::p11_rerun;
 use super::p11_search::{decode_token, encode_token};
 use super::policy::policy_key;
-use super::runs::{
-    not_found, parse_run_id, partition_error, status, store_error, task_error,
-};
+use super::runs::{not_found, parse_run_id, partition_error, status, store_error, task_error};
 use crate::onfailure::{self, DlqPolicy, OnFailure};
 use crate::p11::{P11Ctx, P11Feature, p11_feature_enabled};
 
@@ -804,9 +802,9 @@ async fn restart_with_key(
     };
     match crate::p13::keyed_start::submit(cp, old_handle, ks).await? {
         crate::p13::keyed_start::Started::Run { run, .. } => Ok(run),
-        crate::p13::keyed_start::Started::Rejected(e) => Err(ApiError::invalid_argument(
-            format!("restart rejected: {e}"),
-        )),
+        crate::p13::keyed_start::Started::Rejected(e) => {
+            Err(ApiError::invalid_argument(format!("restart rejected: {e}")))
+        }
     }
 }
 

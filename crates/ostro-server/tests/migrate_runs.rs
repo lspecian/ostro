@@ -305,7 +305,11 @@ async fn retried_migrate_reports_runs_already_on_the_target() {
     // A moved run outside the filter is not listed.
     let only_first = migrate_ok(&s, filtered).await;
     assert_eq!(ids(&only_first, "repinned"), set(&first), "{only_first}");
-    assert_eq!(ids(&only_first, "already_on_target"), set(&first), "{only_first}");
+    assert_eq!(
+        ids(&only_first, "already_on_target"),
+        set(&first),
+        "{only_first}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
