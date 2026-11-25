@@ -578,7 +578,7 @@ pub async fn list_dlq(
     merge_dlq_pages(&req, pages)
 }
 
-/// `migrate_runs`: one leg per leader node, reports concatenated.
+/// `migrate_runs`: one leg per leader node, reports concatenated and sorted by run id.
 pub async fn migrate_runs(
     core: &RouteCore,
     inner: &Arc<dyn ostro_api::phase13::ModuleLifecycleApi>,
@@ -607,6 +607,9 @@ pub async fn migrate_runs(
         out.busy.extend(r.busy);
         out.seq_mismatch.extend(r.seq_mismatch);
     }
+    // 13-17: sorted by run id, so the report does not depend on the leg order (which
+    // depends on the receiving node).
+    crate::control::migrate::sort_report(&mut out);
     Ok(out)
 }
 

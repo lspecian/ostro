@@ -508,6 +508,19 @@ pub trait ModuleResolver: Send + Sync {
     fn default_queue(&self, _workflow: &str, _version: u32) -> Option<String> {
         None
     }
+
+    /// Whether module `sha` has a metadata record (13-17, the executor's `module_gone`
+    /// check): `Some(false)` = the record is gone (module GC deleted it), `None` = unknown
+    /// (no metadata wired; the check is skipped).
+    fn module_known(&self, _sha: &[u8; 32]) -> Option<bool> {
+        None
+    }
+
+    /// A receiver that changes whenever the metadata view applies an entry (`None` = no
+    /// metadata): the `module_gone` check re-reads on it before failing a run.
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
 }
 
 /// Resolves a new run's `(retention_ms, schedule_to_start_ms)` for `(workflow, queue)`, both
@@ -683,6 +696,14 @@ impl ModuleResolver for MetaModules {
             s.workflow(workflow, version)
                 .and_then(|w| w.value.default_queue.clone())
         })
+    }
+
+    fn module_known(&self, sha: &[u8; 32]) -> Option<bool> {
+        Some(self.0.read(|s| s.module(sha).is_some()))
+    }
+
+    fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.0.subscribe())
     }
 }
 

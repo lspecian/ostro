@@ -93,7 +93,9 @@ use tonic::Status;
 use tracing::{debug, info, warn};
 
 use crate::bridge_services::BridgeServices;
-use crate::executor::{EngineExecutor, JobRecord, REASON_MODULE_NOT_FOUND, REASON_NO_MODULE};
+use crate::executor::{
+    EngineExecutor, JobRecord, REASON_MODULE_GONE, REASON_MODULE_NOT_FOUND, REASON_NO_MODULE,
+};
 use crate::journal_io;
 use crate::p7::{P7Ctx, P7Shared};
 use crate::sink::{PartitionSink, RenewFn};
@@ -446,6 +448,13 @@ impl RemoteRunner {
                 .await;
             return (None, out, false);
         };
+        // 13-17: a module deleted by module GC fails loudly (same rule as the embedded path).
+        if let Some(msg) = engine.module_gone(&sha).await {
+            let out = engine
+                .fail_run(&sink, REASON_MODULE_GONE, REASON_MODULE_GONE, &msg, false)
+                .await;
+            return (None, out, false);
+        }
         let blobs = Arc::clone(handle.blobs());
         let probe = ostro_blob::BlobRef {
             sha256: sha,

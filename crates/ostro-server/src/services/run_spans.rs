@@ -25,7 +25,8 @@
 //! - `ostro_dlq_total{reason}` for a **dead-lettered** run: one the executor failed for an
 //!   attempt-level or module-level reason (`nondeterminism`, `protocol_violation`,
 //!   `fuel_exhausted`, `timeout`, `memory_exceeded`, `stack_overflow`, `guest_exit`,
-//!   `trap`, `no_module`, `module_not_found`, `module_invalid`, `bad_run_record`), kept
+//!   `trap`, `no_module`, `module_not_found`, `module_invalid`, `bad_run_record`, and since
+//!   13-17 `module_gone`), kept
 //!   for `RetryRun`. The reason is the `reason_code` of the stored failure JSON; any other
 //!   code is `other`, so the label set is bounded. A workflow's own `RunFailed` (code
 //!   `workflow_failed`) is not dead-lettered. No DLQ row exists yet (Phase 11 adds the
@@ -160,6 +161,8 @@ pub const DLQ_REASONS: &[&str] = &[
     "module_not_found",
     "module_invalid",
     "bad_run_record",
+    // 13-17: the module record was deleted by module GC.
+    "module_gone",
 ];
 
 /// The `ostro_dlq_total` label of a failed run's stored failure JSON, `None` when the run

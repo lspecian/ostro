@@ -10,6 +10,16 @@
 //!    runtime's L2 cache ([`Runtime::prepared`]) or from the blob store +
 //!    [`Runtime::prepare_cached`]. No pin, a missing blob or an invalid component fails the
 //!    run (`CompleteRun{Failed}`, JSON reason) because no retry can fix it.
+//!    **13-17 `module_gone`:** before that, when metadata is wired
+//!    ([`ModuleResolver::module_known`]), a pinned module whose `Module` record no longer
+//!    exists (deleted by module GC, CLUS-07) fails the run with the non-retryable reason
+//!    [`REASON_MODULE_GONE`], even when the blob is still on disk (Phase 8 blob GC sweeps it
+//!    later). The record is re-read on every metadata change for up to
+//!    [`MODULE_GONE_CONFIRM`] first, so a node whose metadata view trails the leader does
+//!    not fail a run for a module uploaded a moment ago. Both the embedded path and the
+//!    remote runner (07-12) check it ([`EngineExecutor::module_gone`]). Never silent: the
+//!    failure JSON is `{"reason_code": "module_gone", "kind": "module_gone", "message"}`
+//!    and the run stays `resumable: false`.
 //! 2. **Sink:** one [`PartitionSink`] holding the job's token; every accepted append renews
 //!    the lease.
 //! 3. **First activation:** when the journal is empty (`next_seq == 0`) the executor
@@ -171,6 +181,12 @@ pub const REASON_NO_MODULE: &str = "no_module";
 pub const REASON_MODULE_NOT_FOUND: &str = "module_not_found";
 pub const REASON_MODULE_INVALID: &str = "module_invalid";
 pub const REASON_BAD_RECORD: &str = "bad_run_record";
+/// 13-17 (CLUS-07, D-P13-20/21): the run's module has no metadata record any more (module
+/// GC deleted it after its retirement), so no retry can run it. Non-retryable, loud.
+pub const REASON_MODULE_GONE: &str = "module_gone";
+/// How long a missing module record is re-read on metadata changes before the run fails
+/// `module_gone` (a node whose metadata view trails the leader catches up well within it).
+pub const MODULE_GONE_CONFIRM: Duration = Duration::from_secs(2);
 
 /// Executor tuning.
 #[derive(Clone, Debug)]
@@ -464,6 +480,39 @@ impl EngineExecutor {
 
     pub fn config(&self) -> &ExecutorConfig {
         &self.cfg
+    }
+
+    /// 13-17: `Some(message)` when module `sha` has no metadata record (module GC deleted
+    /// it) after re-reading on metadata changes for [`MODULE_GONE_CONFIRM`]; `None` when it
+    /// exists or no metadata is wired.
+    pub(crate) async fn module_gone(&self, sha: &[u8; 32]) -> Option<String> {
+        if self.modules.module_known(sha)? {
+            return None;
+        }
+        if let Some(mut rx) = self.modules.changes() {
+            let appeared = async {
+                loop {
+                    if self.modules.module_known(sha) == Some(true) {
+                        return true;
+                    }
+                    if rx.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            };
+            if tokio::time::timeout(MODULE_GONE_CONFIRM, appeared)
+                .await
+                .unwrap_or(false)
+                || self.modules.module_known(sha) == Some(true)
+            {
+                return None;
+            }
+        }
+        Some(format!(
+            "module {} is gone: its metadata record no longer exists (module GC deleted it \
+             after it was retired); the run cannot continue on it",
+            ostro_blob::hex(sha)
+        ))
     }
 }
 
@@ -1219,9 +1268,15 @@ impl EngineExecutor {
         record: &ostro_partition::store::values::RunRecord,
         sink: &PartitionSink,
     ) -> Prep {
-        let Some(sha) = self.hooks.module_override.get(&run).or(record.module_sha) else {
+        let overridden = self.hooks.module_override.get(&run);
+        let Some(sha) = overridden.or(record.module_sha) else {
             return Prep::Fail(REASON_NO_MODULE, "no module pinned".to_string());
         };
+        if overridden.is_none()
+            && let Some(msg) = self.module_gone(&sha).await
+        {
+            return Prep::Fail(REASON_MODULE_GONE, msg);
+        }
         if let Some(p) = self.runtime.prepared(&sha) {
             return Prep::Ready(p, sha);
         }
