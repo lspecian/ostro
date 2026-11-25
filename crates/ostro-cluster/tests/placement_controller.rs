@@ -12,6 +12,7 @@ mod support_placement;
 
 use ostro_cluster::placement::controller::{
     Action, PlacementError, blocked_partitions, effective_policy, observe, request_reassign,
+    request_rebalance,
 };
 use ostro_meta::ext::{MEMBER_DRAINING, MEMBER_REMOVED, ReplicationPolicy, get_reassignment};
 use ostro_meta::{MetaCommand, PartitionAssignment};
@@ -406,5 +407,30 @@ async fn blocked_partition_reported_until_isr_recovers() {
         .await
         .unwrap();
     assert!(matches!(r, ostro_meta::MetaResult::Invalid(_)), "{r:?}");
+    bed.stop().await;
+}
+
+/// 13-18 (13-16 handover): `request_rebalance` stamps the moves it starts with the caller's
+/// injected clock, never the system clock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebalance_moves_carry_the_injected_clock() {
+    let bed = Bed::new(&[11, 12, 13], rf1_on(11), Some(2), policy(3, 2)).await;
+    let via = bed.follower().await;
+    let trigger = ostro_cluster::placement::controller::PlacementTrigger::new();
+    request_rebalance(&via, &trigger, ostro_types::compat::LEVEL, 4242)
+        .await
+        .expect("rebalance");
+    let started: Vec<u64> = bed
+        .partitions()
+        .await
+        .iter()
+        .filter_map(|a| get_reassignment(&a.ext).ok().flatten())
+        .map(|r| r.started_at_ms)
+        .collect();
+    assert!(!started.is_empty(), "the rebalance started no move");
+    assert!(
+        started.iter().all(|t| *t == 4242),
+        "started_at_ms not from the injected clock: {started:?}"
+    );
     bed.stop().await;
 }

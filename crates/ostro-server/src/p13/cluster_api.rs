@@ -111,9 +111,14 @@ async fn reassign(ctx: &P13Ctx, r: ReassignRequest) -> Result<ClusterStatus, Api
 }
 
 async fn rebalance(ctx: &P13Ctx) -> Result<ClusterStatus, ApiError> {
-    controller::request_rebalance(&ctx.meta, &ctx.placement_trigger, ctx.level_max)
-        .await
-        .map_err(|e| placement_error("rebalance", e))?;
+    controller::request_rebalance(
+        &ctx.meta,
+        &ctx.placement_trigger,
+        ctx.level_max,
+        ctx.clock.now_ms(),
+    )
+    .await
+    .map_err(|e| placement_error("rebalance", e))?;
     super::status::status(ctx).await
 }
 

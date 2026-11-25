@@ -934,10 +934,14 @@ fn validate_target(obs: &ClusterObs, target: &[u64]) -> Result<(), PlacementErro
 /// controller through `trigger`; when this node is not the meta leader it also starts the
 /// planned replica moves itself (bounded by the default `max_concurrent_moves`), which the
 /// meta leader's controller then drives. The leader balancer runs on the meta leader only.
+///
+/// `now_ms` (the node's injected clock, as [`request_reassign`]) stamps `started_at_ms` of
+/// the moves it starts (13-18: it used `SystemClock`).
 pub async fn request_rebalance(
     meta: &MetaHandle,
     trigger: &PlacementTrigger,
     level_max: u32,
+    now_ms: u64,
 ) -> Result<(), PlacementError> {
     compat::require(meta.view(), Feature::AlterReplicas, level_max)?;
     compat::require(meta.view(), Feature::ReassignmentExt, level_max)?;
@@ -956,9 +960,7 @@ pub async fn request_rebalance(
         .filter(|p| p.reassignment.is_some())
         .count();
     let max = PlacementConfig::default().max_concurrent_moves;
-    // clock-exempt: `started_at_ms` is informational (status only); the 13-02 API signature
-    // carries no clock for this path.
-    let now = ostro_partition::SystemClock.now_ms(); // clock-exempt: informational started_at_ms
+    let now = now_ms;
     for (part, target) in planned_moves(&obs, true) {
         if in_flight >= max {
             break;
