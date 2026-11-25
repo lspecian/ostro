@@ -181,8 +181,8 @@ strip = "debuginfo"
 # is on the invocation/apply hot path (wasmtime/cranelift, ostro-engine, ostro-partition,
 # ostro-log, ostro-wal, fjall, tokio, hyper/h2, prost and rustls keep opt-level 3).
 # Fat LTO keeps the per-function optsize attribute, so the saving survives the merge.
-# ostro-api and ostro-cli use "z" (musl-size, 2026-11-25: -0.61 MB; REST latency A/B in
-# docs/binary-size.md).
+# All of these use "z" since musl-size (2026-11-25; "s" before): ostro-api / ostro-cli -0.72 MB,
+# the rest -0.54 MB. REST latency A/B and dev startup in docs/binary-size.md.
 [profile.release.package.ostro-api]
 opt-level = "z"
 
@@ -190,40 +190,40 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.ostro-client]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.ostro-ui]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.ostro-build]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.clap]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.clap_builder]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.utoipa]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.utoipa-axum]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.kube]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.kube-client]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.kube-core]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.k8s-openapi]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.serde-saphyr]
-opt-level = "s"
+opt-level = "z"
 
 # More cold dependencies (musl-size, 2026-11-25; docs/binary-size.md): kube's YAML and
 # JSONPath stack, configuration loading (config, toml), the CLI's completions and file
@@ -231,67 +231,67 @@ opt-level = "s"
 # demangling and wasm printer (trap backtraces / debug output only), the Vault client
 # (vaultrs, rustify) and the bridge's DNS resolver (hickory, I/O bound).
 [profile.release.package.granit-parser]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.annotate-snippets]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.jsonpath-rust]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.pest]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.config]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.toml]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.toml_parser]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.clap_complete]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.notify]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.notify-debouncer-full]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.instant-acme]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.rcgen]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.yasna]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.cpp_demangle]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.rustc-demangle]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.wasmprinter]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.vaultrs]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.rustify]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.hickory-proto]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.hickory-resolver]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.hickory-net]
-opt-level = "s"
+opt-level = "z"
 
 # Debug info trimmed to keep target dirs small (they filled the disk, 2026-11-22).
 # Backtraces still have file:line. To debug with variables in gdb/lldb, set

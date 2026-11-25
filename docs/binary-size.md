@@ -18,7 +18,9 @@ see "Applied: option 1" for the result. The breakdown tables are from before tha
 | 2026-11-25, `a735563` (before the Phase 13 wave below) | 57.05 MB (57,046,192 bytes) |
 | 2026-11-25, `54364b8` (13-04/09/11/12/14/15 landed) | 60.16 MB (60,163,760 bytes): **gate failed** |
 | 2026-11-25, `b2d5848` + musl-size code fix only | 59.32 MB (59,316,336 bytes) |
-| **2026-11-25, `b2d5848` + musl-size (code + profile)** | **57.87 MB (57,865,264 bytes): 2.13 MB of headroom** |
+| 2026-11-25, `b2d5848` + musl-size (code + profile) | 57.87 MB (57,865,264 bytes): 2.13 MB of headroom |
+| 2026-11-25, `7f60ead` (musl-size landed; + 13-16, p13-fixes) | 58.02 MB (58,017,968 bytes) |
+| **2026-11-25, `7f60ead` + every cold crate at "z"** | **57.48 MB (57,482,608 bytes): 2.52 MB of headroom** |
 
 The binary grew by 2.9 MB since the Phase 10 gate. The new code since then is Phase 11 and
 Phase 12 (bulk/DLQ/UI routes, replication); no per-commit bisection was done. **The next feature of a few hundred kB may trip the gate.**
@@ -149,6 +151,10 @@ Fix, in order of size:
    DNS resolver (`hickory-*`, I/O bound).
 3. **Profile, opt-level "z" for `ostro-api` and `ostro-cli` (-0.72 MB, 58.58 -> 57.87 MB).**
    Both were already "s" (size1). REST latency A/B with the musl binary, see below.
+4. **Profile, every other cold crate "s" -> "z" (-0.54 MB at `7f60ead`, 58.02 -> 57.48 MB):**
+   `ostro-client`, `ostro-ui`, `ostro-build`, clap, utoipa, kube and the crates of step 2.
+   None runs per request except utoipa's route / schema registration, which runs once when
+   the routers are built.
 
 The hot path (wasmtime/cranelift, `ostro-engine`, `ostro-partition`, `ostro-log`, `ostro-wal`,
 `ostro-server`, `ostro-cluster`, fjall, tokio, hyper/h2, tonic, prost, rustls/aws-lc) keeps
@@ -167,8 +173,10 @@ The listing call's median is ~50 us slower (13%); tails are within 3-6%, about t
 round-to-round noise. These are admin calls well under a millisecond; a start or signal
 commits through Raft and `fsync`, which `ostro-api` does not touch. With the musl "z" binary,
 `dev_startup` including the ignored `cold_first_run_measurement` passes (cold first run
-median 252 ms, `--ephemeral` 116 ms, warm restart 74 ms) and `e2e_dev` passes 3/3. If a
-future API endpoint turns out CPU-bound, move `ostro-api` back to "s" (+0.6 MB) first.
+median 252 ms, `--ephemeral` 116 ms, warm restart 74 ms) and `e2e_dev` passes 3/3. An A/A run of two identical binaries
+in the same harness (later, same node) differed by 2-8% per percentile, so most of the gap is
+noise. With the all-"z" binary of step 4, `dev_startup` (5/5) and `e2e_dev` (3/3) pass again.
+If a future API endpoint turns out CPU-bound, move `ostro-api` back to "s" (+0.6 MB) first.
 
 ## Reduction options
 
