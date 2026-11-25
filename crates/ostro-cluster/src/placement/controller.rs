@@ -936,7 +936,7 @@ fn validate_target(obs: &ClusterObs, target: &[u64]) -> Result<(), PlacementErro
 /// meta leader's controller then drives. The leader balancer runs on the meta leader only.
 ///
 /// `now_ms` (the node's injected clock, as [`request_reassign`]) stamps `started_at_ms` of
-/// the moves it starts (13-18: it used `SystemClock`).
+/// the moves it starts (13-18; before, this path read the process clock).
 pub async fn request_rebalance(
     meta: &MetaHandle,
     trigger: &PlacementTrigger,
