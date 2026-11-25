@@ -14,7 +14,11 @@ see "Applied: option 1" for the result. The breakdown tables are from before tha
 | Phase 10 gate (10-19 / 10-20) | 56.2 MB |
 | 2026-11-23, `3b5b785` | 59.09 MB (59,092,784 bytes): 0.9 MB of headroom |
 | 2026-11-23, `73e53a7` (size1 baseline) | 59.09 MB (59,093,232 bytes) |
-| **2026-11-23, size1 (option 1 applied)** | **56.02 MB (56,023,344 bytes): 3.98 MB of headroom** |
+| 2026-11-23, size1 (option 1 applied) | 56.02 MB (56,023,344 bytes): 3.98 MB of headroom |
+| 2026-11-25, `a735563` (before the Phase 13 wave below) | 57.05 MB (57,046,192 bytes) |
+| 2026-11-25, `54364b8` (13-04/09/11/12/14/15 landed) | 60.16 MB (60,163,760 bytes): **gate failed** |
+| 2026-11-25, `b2d5848` + musl-size code fix only | 59.32 MB (59,316,336 bytes) |
+| **2026-11-25, `b2d5848` + musl-size (code + profile)** | **57.87 MB (57,865,264 bytes): 2.13 MB of headroom** |
 
 The binary grew by 2.9 MB since the Phase 10 gate. The new code since then is Phase 11 and
 Phase 12 (bulk/DLQ/UI routes, replication); no per-commit bisection was done. **The next feature of a few hundred kB may trip the gate.**
@@ -107,6 +111,64 @@ Checks with the musl release binary (`OSTRO_BIN`):
   OpenAPI snapshot, so every route is still registered.
 
 Option 2 was not needed for the 3 MB headroom target and is still open.
+
+## Applied: musl-size (2026-11-25)
+
+Between `a735563` and `54364b8` the binary grew by 3.12 MB (57.05 -> 60.16 MB) without a single
+new dependency or feature. Attribution (same method as above, old vs new symbol tables):
+`ostro_server` +0.92 MB (13-12 routing, 13-09 join/joiner, 13-14 pre-warm, 13-15 module GC),
+`ostro_api` +0.86 MB, drop glue +0.21 MB, `ostro_cluster` +0.13 MB, tonic/http-body generics
++0.2 MB. Two Phase 13 patterns were the bulk of it:
+
+- **`GrpcControlPlane` (13-03), linked for the first time by 13-12's `PeerApi::grpc`.** Each of
+  its 91 methods called a generated tonic client method, i.e. one
+  `tonic::client::Grpc::unary::<Req, Resp, ProstCodec<..>>` instantiation (ready + encode +
+  transport + decode futures) per method: ~10 kB each, ~0.9 MB.
+- **13-12's `RouteCore::partition` / `meta_leader` / `unkeyed_start` / fan-out**, generic over the
+  local and forwarding closures and the result type, monomorphised and inlined into every
+  routed `ControlPlane` / extension method (~170 call sites, 10-20 kB each).
+
+Fix, in order of size:
+
+1. **Code (-1.04 MB at `54364b8`, 60.16 -> 59.13 MB).** `GrpcControlPlane` now encodes the
+   request with prost, sends it through one non-generic `unary_raw` (a pass-through `Bytes`
+   codec, the same path and `GrpcMethod` as the generated client, so the bytes on the wire are
+   unchanged) and decodes the reply. The router's core functions are thin generic shims that
+   box the two branches and erase the result type (`Box<dyn Any + Send>`) around one
+   non-generic body each (`partition_dyn`, `meta_leader_dyn`, `unkeyed_start_dyn`,
+   `fanout_partitions_dyn`, `all_nodes_dyn`, `first_hit_dyn`). Cost per routed call: two small
+   boxes and a downcast, on a path that already boxes every `async_trait` future.
+   `grpc_client_parity` (every client method against the in-process server) and the tier-B
+   routing / handoff / version-gate / module-GC / membership scenarios pass unchanged.
+2. **Profile, more cold dependencies (-0.45 MB).** opt-level "s" for kube's YAML / JSONPath
+   stack (`granit-parser`, `annotate-snippets`, `jsonpath-rust`, `pest`), configuration loading
+   (`config`, `toml`, `toml_parser`), the CLI's `clap_complete` and file watcher (`notify`,
+   `notify-debouncer-full`), certificate issuance (`instant-acme`, `rcgen`, `yasna`), wasmtime's
+   symbol demangling and wasm printer (`cpp_demangle`, `rustc-demangle`, `wasmprinter`: trap
+   backtraces and debug output only), the Vault client (`vaultrs`, `rustify`) and the bridge's
+   DNS resolver (`hickory-*`, I/O bound).
+3. **Profile, opt-level "z" for `ostro-api` and `ostro-cli` (-0.72 MB, 58.58 -> 57.87 MB).**
+   Both were already "s" (size1). REST latency A/B with the musl binary, see below.
+
+The hot path (wasmtime/cranelift, `ostro-engine`, `ostro-partition`, `ostro-log`, `ostro-wal`,
+`ostro-server`, `ostro-cluster`, fjall, tokio, hyper/h2, tonic, prost, rustls/aws-lc) keeps
+opt-level 3.
+
+A/B (`ostro dev --ephemeral`, one keep-alive client, 4 alternating rounds x 3000 requests per
+endpoint, same pod, `ostro-api`/`ostro-cli` "s" vs "z"):
+
+| Endpoint | "s" median / p90 / p99 (us) | "z" median / p90 / p99 (us) |
+|---|---:|---:|
+| `GET /v1/workflows` (200) | 153 / 197 / 247 | 155 / 185 / 235 |
+| `GET /v1/runs?limit=20` (200) | 377 / 521 / 618 | 428 / 537 / 658 |
+| `POST /v1/runs` (405 path) | 177 / 439 / 646 | 186 / 480 / 676 |
+
+The listing call's median is ~50 us slower (13%); tails are within 3-6%, about the
+round-to-round noise. These are admin calls well under a millisecond; a start or signal
+commits through Raft and `fsync`, which `ostro-api` does not touch. With the musl "z" binary,
+`dev_startup` including the ignored `cold_first_run_measurement` passes (cold first run
+median 252 ms, `--ephemeral` 116 ms, warm restart 74 ms) and `e2e_dev` passes 3/3. If a
+future API endpoint turns out CPU-bound, move `ostro-api` back to "s" (+0.6 MB) first.
 
 ## Reduction options
 

@@ -1,5 +1,9 @@
 //! ostro-proto: generated gRPC types (codegen via protox, no protoc).
 
+/// The `prost` the generated messages implement (for hand-written encode / decode, e.g.
+/// `ostro_api::grpc_client`).
+pub use prost;
+
 /// `ostro.health.v1` protocol.
 pub mod health {
     /// Version 1 of the health service.

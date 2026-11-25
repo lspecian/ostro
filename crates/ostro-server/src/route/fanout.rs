@@ -41,7 +41,10 @@ use ostro_types::{PartitionId, RunId};
 
 use super::peer::PeerApi;
 use super::table::{RouteClass, Target};
-use super::{Access, BoxFuture, RouteCore, current_meta, join_all, record, retryable};
+use super::{
+    Access, AnyOut, BoxFuture, LocalFn, RemoteFn, RouteCore, current_meta, erase, join_all, record,
+    retryable, unerase,
+};
 
 /// One fan-out leg: `None` = this node, else the leader node.
 type Leg = (Option<u64>, Vec<u16>);
@@ -87,136 +90,156 @@ impl RouteCore {
         remote: R,
     ) -> Result<Vec<T>, ApiError>
     where
-        T: Send,
-        L: Fn() -> LF + Sync,
+        T: Send + 'static,
+        L: Fn() -> LF + Send + Sync,
         LF: std::future::Future<Output = Result<T, ApiError>> + Send,
-        R: Fn(PeerApi) -> RF + Sync,
+        R: Fn(PeerApi) -> RF + Send + Sync,
         RF: std::future::Future<Output = Result<T, ApiError>> + Send,
     {
-        let meta = current_meta();
-        if meta.hop >= 1 {
-            self.stats
-                .forwarded_in
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let parts = super::table::listed_partitions(self.count());
-            for p in &parts {
-                self.env.before_partition_read(*p).await?;
-            }
-            let r = self.local(Access::None, local()).await;
-            record(class, "local", r.is_ok());
-            return r.map(|v| vec![v]);
-        }
-        let mut replanned = false;
-        loop {
-            let legs = match self.plan_partitions() {
-                Ok(l) => l,
-                Err(e) => {
-                    self.stats
-                        .offline
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    record(class, "offline", false);
-                    return Err(e);
-                }
-            };
-            if let [(None, _)] = legs.as_slice() {
-                // Every partition is led here: the single-node path, unchanged.
-                for p in self.count().ids() {
-                    self.env.before_partition_read(p).await?;
+        let local = || erase(local());
+        let remote = |peer: PeerApi| erase(remote(peer));
+        self.fanout_partitions_dyn(class, &local, &remote)
+            .await?
+            .into_iter()
+            .map(|v| unerase(Ok(v)))
+            .collect()
+    }
+
+    /// [`Self::fanout_partitions`] over type-erased calls (compiled once; binary size).
+    fn fanout_partitions_dyn<'s, 'f: 's>(
+        &'s self,
+        class: RouteClass,
+        local: &'s LocalFn<'s, 'f>,
+        remote: &'s RemoteFn<'s, 'f>,
+    ) -> BoxFuture<'s, Result<Vec<AnyOut>, ApiError>> {
+        Box::pin(async move {
+            let meta = current_meta();
+            if meta.hop >= 1 {
+                self.stats
+                    .forwarded_in
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let parts = super::table::listed_partitions(self.count());
+                for p in &parts {
+                    self.env.before_partition_read(*p).await?;
                 }
                 let r = self.local(Access::None, local()).await;
                 record(class, "local", r.is_ok());
                 return r.map(|v| vec![v]);
             }
-            let me = self.env.local_node();
-            let futs: Vec<BoxFuture<'_, LegResult<T>>> = legs
-                .iter()
-                .cloned()
-                .map(|(node, parts)| {
-                    let meta = meta.clone();
-                    let local = &local;
-                    let remote = &remote;
-                    let f: BoxFuture<'_, _> = Box::pin(async move {
-                        let r = match node {
-                            None => {
-                                let scoped = RequestMeta {
-                                    partitions: Some(parts.clone()),
-                                    from_node: Some(me),
-                                    ..meta.clone()
-                                };
-                                let ps = parts.clone();
-                                let (r, token) =
-                                    request_meta::scope_with_consistency(scoped, async move {
-                                        for p in &ps {
-                                            self.env.before_partition_read(PartitionId(*p)).await?;
-                                        }
-                                        self.local(Access::None, local()).await
-                                    })
-                                    .await;
-                                if let Some(t) = token {
-                                    request_meta::set_consistency(t);
-                                }
-                                r
-                            }
-                            Some(n) => {
-                                let ps = parts.clone();
-                                self.forward(n, &meta, move |m| m.partitions = Some(ps), remote)
-                                    .await
-                            }
-                        };
-                        (node, parts, r)
-                    });
-                    f
-                })
-                .collect();
-            let results = join_all(futs).await;
-            let mut out = Vec::with_capacity(results.len());
-            let mut refused: Option<(ApiError, PartitionId, Option<u64>)> = None;
-            let mut failed: Option<ApiError> = None;
-            for (node, parts, r) in results {
-                match r {
-                    Ok(v) => out.push(v),
-                    Err(e) if refused.is_none() && retryable(&e, node.is_some()) => {
-                        let p = e
-                            .details
-                            .as_ref()
-                            .and_then(|d| d.get("partition"))
-                            .and_then(serde_json::Value::as_u64)
-                            .and_then(|p| u16::try_from(p).ok())
-                            .unwrap_or(parts[0]);
-                        refused = Some((e, PartitionId(p), node));
-                    }
+            let mut replanned = false;
+            loop {
+                let legs = match self.plan_partitions() {
+                    Ok(l) => l,
                     Err(e) => {
-                        failed.get_or_insert(e);
+                        self.stats
+                            .offline
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        record(class, "offline", false);
+                        return Err(e);
+                    }
+                };
+                if let [(None, _)] = legs.as_slice() {
+                    // Every partition is led here: the single-node path, unchanged.
+                    for p in self.count().ids() {
+                        self.env.before_partition_read(p).await?;
+                    }
+                    let r = self.local(Access::None, local()).await;
+                    record(class, "local", r.is_ok());
+                    return r.map(|v| vec![v]);
+                }
+                let me = self.env.local_node();
+                let futs: Vec<BoxFuture<'_, LegResult<AnyOut>>> = legs
+                    .iter()
+                    .cloned()
+                    .map(|(node, parts)| {
+                        let meta = meta.clone();
+                        let local = &local;
+                        let remote = &remote;
+                        let f: BoxFuture<'_, _> = Box::pin(async move {
+                            let r = match node {
+                                None => {
+                                    let scoped = RequestMeta {
+                                        partitions: Some(parts.clone()),
+                                        from_node: Some(me),
+                                        ..meta.clone()
+                                    };
+                                    let ps = parts.clone();
+                                    let (r, token) =
+                                        request_meta::scope_with_consistency(scoped, async move {
+                                            for p in &ps {
+                                                self.env
+                                                    .before_partition_read(PartitionId(*p))
+                                                    .await?;
+                                            }
+                                            self.local(Access::None, local()).await
+                                        })
+                                        .await;
+                                    if let Some(t) = token {
+                                        request_meta::set_consistency(t);
+                                    }
+                                    r
+                                }
+                                Some(n) => {
+                                    let ps = parts.clone();
+                                    self.forward(n, &meta, move |m| m.partitions = Some(ps), remote)
+                                        .await
+                                }
+                            };
+                            (node, parts, r)
+                        });
+                        f
+                    })
+                    .collect();
+                let results = join_all(futs).await;
+                let mut out = Vec::with_capacity(results.len());
+                let mut refused: Option<(ApiError, PartitionId, Option<u64>)> = None;
+                let mut failed: Option<ApiError> = None;
+                for (node, parts, r) in results {
+                    match r {
+                        Ok(v) => out.push(v),
+                        Err(e) if refused.is_none() && retryable(&e, node.is_some()) => {
+                            let p = e
+                                .details
+                                .as_ref()
+                                .and_then(|d| d.get("partition"))
+                                .and_then(serde_json::Value::as_u64)
+                                .and_then(|p| u16::try_from(p).ok())
+                                .unwrap_or(parts[0]);
+                            refused = Some((e, PartitionId(p), node));
+                        }
+                        Err(e) => {
+                            failed.get_or_insert(e);
+                        }
                     }
                 }
-            }
-            if let Some(e) = failed {
+                if let Some(e) = failed {
+                    record(class, "forwarded", false);
+                    return Err(e);
+                }
+                let Some((e, p, _)) = refused else {
+                    record(class, "forwarded", true);
+                    return Ok(out);
+                };
                 record(class, "forwarded", false);
-                return Err(e);
-            }
-            let Some((e, p, _)) = refused else {
-                record(class, "forwarded", true);
-                return Ok(out);
-            };
-            record(class, "forwarded", false);
-            if replanned {
+                if replanned {
+                    self.stats
+                        .exhausted
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Err(super::exhausted_error(p, e));
+                }
+                replanned = true;
                 self.stats
-                    .exhausted
+                    .rerouted
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return Err(super::exhausted_error(p, e));
+                let seen = self.env.owner(p);
+                let budget = match super::remaining(&meta) {
+                    Some(r) if r.is_zero() => return Err(super::deadline_error()),
+                    Some(r) => r.min(self.env.retry_wait()),
+                    None => self.env.retry_wait(),
+                };
+                self.env.wait_change(p, seen, budget).await;
             }
-            replanned = true;
-            self.stats
-                .rerouted
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let seen = self.env.owner(p);
-            let budget = match super::remaining(&meta) {
-                Some(r) if r.is_zero() => return Err(super::deadline_error()),
-                Some(r) => r.min(self.env.retry_wait()),
-                None => self.env.retry_wait(),
-            };
-            self.env.wait_change(p, seen, budget).await;
-        }
+        })
     }
 
     /// Every member's answer (this node first, then the members in id order); any failure
@@ -228,42 +251,60 @@ impl RouteCore {
         remote: R,
     ) -> Result<Vec<T>, ApiError>
     where
-        T: Send,
-        L: Fn() -> LF + Sync,
+        T: Send + 'static,
+        L: Fn() -> LF + Send + Sync,
         LF: std::future::Future<Output = Result<T, ApiError>> + Send,
-        R: Fn(PeerApi) -> RF + Sync,
+        R: Fn(PeerApi) -> RF + Send + Sync,
         RF: std::future::Future<Output = Result<T, ApiError>> + Send,
     {
-        let meta = current_meta();
-        if meta.hop >= 1 {
-            let r = self.local(Access::None, local()).await;
-            record(class, "local", r.is_ok());
-            return r.map(|v| vec![v]);
-        }
-        let mut members = self.env.members();
-        members.sort_unstable();
-        members.dedup();
-        let mut futs: Vec<BoxFuture<'_, Result<T, ApiError>>> = Vec::new();
-        futs.push(Box::pin(self.local(Access::None, local())));
-        for n in members {
-            let meta = meta.clone();
-            let remote = &remote;
-            futs.push(Box::pin(async move {
-                self.forward(n, &meta, |_| {}, remote).await
-            }));
-        }
-        let mut out = Vec::new();
-        for r in join_all(futs).await {
-            match r {
-                Ok(v) => out.push(v),
-                Err(e) => {
-                    record(class, "forwarded", false);
-                    return Err(e);
+        let local = || erase(local());
+        let remote = |peer: PeerApi| erase(remote(peer));
+        self.all_nodes_dyn(class, &local, &remote)
+            .await?
+            .into_iter()
+            .map(|v| unerase(Ok(v)))
+            .collect()
+    }
+
+    /// [`Self::all_nodes`] over type-erased calls (compiled once; binary size).
+    fn all_nodes_dyn<'s, 'f: 's>(
+        &'s self,
+        class: RouteClass,
+        local: &'s LocalFn<'s, 'f>,
+        remote: &'s RemoteFn<'s, 'f>,
+    ) -> BoxFuture<'s, Result<Vec<AnyOut>, ApiError>> {
+        Box::pin(async move {
+            let meta = current_meta();
+            if meta.hop >= 1 {
+                let r = self.local(Access::None, local()).await;
+                record(class, "local", r.is_ok());
+                return r.map(|v| vec![v]);
+            }
+            let mut members = self.env.members();
+            members.sort_unstable();
+            members.dedup();
+            let mut futs: Vec<BoxFuture<'_, Result<AnyOut, ApiError>>> = Vec::new();
+            futs.push(Box::pin(self.local(Access::None, local())));
+            for n in members {
+                let meta = meta.clone();
+                let remote = &remote;
+                futs.push(Box::pin(async move {
+                    self.forward(n, &meta, |_| {}, remote).await
+                }));
+            }
+            let mut out = Vec::new();
+            for r in join_all(futs).await {
+                match r {
+                    Ok(v) => out.push(v),
+                    Err(e) => {
+                        record(class, "forwarded", false);
+                        return Err(e);
+                    }
                 }
             }
-        }
-        record(class, "forwarded", true);
-        Ok(out)
+            record(class, "forwarded", true);
+            Ok(out)
+        })
     }
 
     /// A lookup in a node-local registry: this node first, then every member in id order
@@ -276,38 +317,53 @@ impl RouteCore {
         remote: R,
     ) -> Result<T, ApiError>
     where
-        L: Fn() -> LF,
-        LF: std::future::Future<Output = Result<T, ApiError>>,
-        R: Fn(PeerApi) -> RF,
-        RF: std::future::Future<Output = Result<T, ApiError>>,
+        T: Send + 'static,
+        L: Fn() -> LF + Send + Sync,
+        LF: std::future::Future<Output = Result<T, ApiError>> + Send,
+        R: Fn(PeerApi) -> RF + Send + Sync,
+        RF: std::future::Future<Output = Result<T, ApiError>> + Send,
     {
-        let meta = current_meta();
-        let first = self.local(Access::None, local()).await;
-        let miss = match first {
-            Err(e) if e.code == ErrorCode::NotFound && meta.hop == 0 => e,
-            r => {
-                record(class, "local", r.is_ok());
-                return r;
-            }
-        };
-        let mut members = self.env.members();
-        members.sort_unstable();
-        members.dedup();
-        let mut unreachable: Option<ApiError> = None;
-        for n in members {
-            match self.forward(n, &meta, |_| {}, &remote).await {
-                Err(e) if e.code == ErrorCode::NotFound => {}
-                Err(e) if e.code == ErrorCode::Unavailable => {
-                    unreachable.get_or_insert(e);
-                }
+        let local = || erase(local());
+        let remote = |peer: PeerApi| erase(remote(peer));
+        unerase(self.first_hit_dyn(class, &local, &remote).await)
+    }
+
+    /// [`Self::first_hit`] over type-erased calls (compiled once; binary size).
+    fn first_hit_dyn<'s, 'f: 's>(
+        &'s self,
+        class: RouteClass,
+        local: &'s LocalFn<'s, 'f>,
+        remote: &'s RemoteFn<'s, 'f>,
+    ) -> BoxFuture<'s, Result<AnyOut, ApiError>> {
+        Box::pin(async move {
+            let meta = current_meta();
+            let first = self.local(Access::None, local()).await;
+            let miss = match first {
+                Err(e) if e.code == ErrorCode::NotFound && meta.hop == 0 => e,
                 r => {
-                    record(class, "forwarded", r.is_ok());
+                    record(class, "local", r.is_ok());
                     return r;
                 }
+            };
+            let mut members = self.env.members();
+            members.sort_unstable();
+            members.dedup();
+            let mut unreachable: Option<ApiError> = None;
+            for n in members {
+                match self.forward(n, &meta, |_| {}, &remote).await {
+                    Err(e) if e.code == ErrorCode::NotFound => {}
+                    Err(e) if e.code == ErrorCode::Unavailable => {
+                        unreachable.get_or_insert(e);
+                    }
+                    r => {
+                        record(class, "forwarded", r.is_ok());
+                        return r;
+                    }
+                }
             }
-        }
-        record(class, "forwarded", false);
-        Err(unreachable.unwrap_or(miss))
+            record(class, "forwarded", false);
+            Err(unreachable.unwrap_or(miss))
+        })
     }
 }
 

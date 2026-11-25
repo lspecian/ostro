@@ -68,6 +68,37 @@ use table::{RouteClass, Target};
 /// `BoxFuture` without a `futures` dependency in this crate.
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// A routed call's result with its type erased: the routing logic ([`RouteCore`]) is
+/// compiled once instead of once per routed method (binary size, docs/binary-size.md).
+type AnyOut = Box<dyn std::any::Any + Send>;
+
+/// A type-erased routed call.
+type AnyFut<'a> = BoxFuture<'a, Result<AnyOut, ApiError>>;
+
+/// The local branch of a type-erased routed call.
+/// (`'s`: the borrow of the branch itself, `'f`: what its futures borrow.)
+type LocalFn<'s, 'f> = dyn Fn() -> AnyFut<'f> + Send + Sync + 's;
+
+/// The forwarding branch of a type-erased routed call.
+type RemoteFn<'s, 'f> = dyn Fn(PeerApi) -> AnyFut<'f> + Send + Sync + 's;
+
+/// Erase a routed call's result type.
+fn erase<'a, T, F>(fut: F) -> AnyFut<'a>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T, ApiError>> + Send + 'a,
+{
+    Box::pin(async move { fut.await.map(|v| Box::new(v) as AnyOut) })
+}
+
+/// Restore the result type [`erase`] removed (the same call, so it always matches).
+fn unerase<T: 'static>(r: Result<AnyOut, ApiError>) -> Result<T, ApiError> {
+    match r?.downcast::<T>() {
+        Ok(v) => Ok(*v),
+        Err(_) => Err(ApiError::internal("route: result type mismatch")),
+    }
+}
+
 /// How long a refused call waits for the view to move, as a multiple of
 /// `[replication] session_timeout` (the remaining deadline bounds it too).
 pub const RETRY_WAIT_SESSIONS: u32 = 2;
@@ -353,7 +384,7 @@ impl RouteCore {
         remote: &R,
     ) -> Result<T, ApiError>
     where
-        R: Fn(PeerApi) -> RF,
+        R: Fn(PeerApi) -> RF + ?Sized,
         RF: Future<Output = Result<T, ApiError>>,
     {
         let peer = match self.env.peer(node) {
@@ -389,6 +420,9 @@ impl RouteCore {
     /// A partition-scoped call (run id, key, token, pinned unkeyed start). `p = None`
     /// (malformed id) runs locally so the inner call answers. `pin` forwards `p` as
     /// `ostro-partition`.
+    ///
+    /// Generic shim over [`Self::partition_dyn`]: the routing logic is compiled once, not
+    /// once per call site (binary size, docs/binary-size.md).
     pub async fn partition<T, L, LF, R, RF>(
         &self,
         class: RouteClass,
@@ -399,83 +433,104 @@ impl RouteCore {
         remote: R,
     ) -> Result<T, ApiError>
     where
-        L: Fn() -> LF,
-        LF: Future<Output = Result<T, ApiError>>,
-        R: Fn(PeerApi) -> RF,
-        RF: Future<Output = Result<T, ApiError>>,
+        T: Send + 'static,
+        L: Fn() -> LF + Send + Sync,
+        LF: Future<Output = Result<T, ApiError>> + Send,
+        R: Fn(PeerApi) -> RF + Send + Sync,
+        RF: Future<Output = Result<T, ApiError>> + Send,
     {
-        let meta = current_meta();
-        let Some(p) = p else {
-            let r = self.local(Access::None, local()).await;
-            record(class, "local", r.is_ok());
-            return r;
-        };
-        let access = if write {
-            Access::PartitionWrite(p)
-        } else {
-            Access::PartitionRead(p)
-        };
-        if meta.hop >= 1 {
-            // Forwarded in: served here whatever the view says (one hop at most).
-            self.stats.forwarded_in.fetch_add(1, Ordering::Relaxed);
-            let r = self.local(access, local()).await;
-            record(class, "local", r.is_ok());
-            return r;
-        }
-        let mut rerouted = false;
-        loop {
-            let (target, epoch) = self.env.owner(p);
-            let res = match target {
-                Target::Local => self.local(access, local()).await,
-                Target::Node(n) => {
-                    self.forward(
-                        n,
-                        &meta,
-                        |m| {
-                            if pin {
-                                m.partition_pin = Some(p.0);
-                            }
-                        },
-                        &remote,
-                    )
-                    .await
-                }
-                Target::Offline(_) => {
-                    self.stats.offline.fetch_add(1, Ordering::Relaxed);
-                    record(class, "offline", false);
-                    return Err(offline_error(p));
-                }
+        let local = || erase(local());
+        let remote = |peer: PeerApi| erase(remote(peer));
+        unerase(
+            self.partition_dyn(class, p, write, pin, &local, &remote)
+                .await,
+        )
+    }
+
+    /// [`Self::partition`] over type-erased calls.
+    fn partition_dyn<'s, 'f: 's>(
+        &'s self,
+        class: RouteClass,
+        p: Option<PartitionId>,
+        write: bool,
+        pin: bool,
+        local: &'s LocalFn<'s, 'f>,
+        remote: &'s RemoteFn<'s, 'f>,
+    ) -> BoxFuture<'s, Result<AnyOut, ApiError>> {
+        Box::pin(async move {
+            let meta = current_meta();
+            let Some(p) = p else {
+                let r = self.local(Access::None, local()).await;
+                record(class, "local", r.is_ok());
+                return r;
             };
-            let e = match res {
-                Ok(v) => {
-                    record(class, target.as_str(), true);
-                    return Ok(v);
-                }
-                Err(e) => e,
+            let access = if write {
+                Access::PartitionWrite(p)
+            } else {
+                Access::PartitionRead(p)
             };
-            if !retryable(&e, matches!(target, Target::Node(_))) {
+            if meta.hop >= 1 {
+                // Forwarded in: served here whatever the view says (one hop at most).
+                self.stats.forwarded_in.fetch_add(1, Ordering::Relaxed);
+                let r = self.local(access, local()).await;
+                record(class, "local", r.is_ok());
+                return r;
+            }
+            let mut rerouted = false;
+            loop {
+                let (target, epoch) = self.env.owner(p);
+                let res = match target {
+                    Target::Local => self.local(access, local()).await,
+                    Target::Node(n) => {
+                        self.forward(
+                            n,
+                            &meta,
+                            |m| {
+                                if pin {
+                                    m.partition_pin = Some(p.0);
+                                }
+                            },
+                            remote,
+                        )
+                        .await
+                    }
+                    Target::Offline(_) => {
+                        self.stats.offline.fetch_add(1, Ordering::Relaxed);
+                        record(class, "offline", false);
+                        return Err(offline_error(p));
+                    }
+                };
+                let e = match res {
+                    Ok(v) => {
+                        record(class, target.as_str(), true);
+                        return Ok(v);
+                    }
+                    Err(e) => e,
+                };
+                if !retryable(&e, matches!(target, Target::Node(_))) {
+                    record(class, target.as_str(), false);
+                    return Err(e);
+                }
                 record(class, target.as_str(), false);
-                return Err(e);
+                if rerouted {
+                    self.stats.exhausted.fetch_add(1, Ordering::Relaxed);
+                    return Err(exhausted_error(p, e));
+                }
+                let budget = self.env.retry_wait();
+                let budget = match remaining(&meta) {
+                    Some(r) if r.is_zero() => return Err(deadline_error()),
+                    Some(r) => r.min(budget),
+                    None => budget,
+                };
+                rerouted = true;
+                self.stats.rerouted.fetch_add(1, Ordering::Relaxed);
+                self.env.wait_change(p, (target, epoch), budget).await;
+                if remaining(&meta).is_some_and(|r| r.is_zero()) {
+                    self.stats.exhausted.fetch_add(1, Ordering::Relaxed);
+                    return Err(exhausted_error(p, e));
+                }
             }
-            record(class, target.as_str(), false);
-            if rerouted {
-                self.stats.exhausted.fetch_add(1, Ordering::Relaxed);
-                return Err(exhausted_error(p, e));
-            }
-            let budget = self.env.retry_wait();
-            let budget = match remaining(&meta) {
-                Some(r) if r.is_zero() => return Err(deadline_error()),
-                Some(r) => r.min(budget),
-                None => budget,
-            };
-            rerouted = true;
-            self.stats.rerouted.fetch_add(1, Ordering::Relaxed);
-            self.env.wait_change(p, (target, epoch), budget).await;
-            if remaining(&meta).is_some_and(|r| r.is_zero()) {
-                self.stats.exhausted.fetch_add(1, Ordering::Relaxed);
-                return Err(exhausted_error(p, e));
-            }
-        }
+        })
     }
 
     /// A metadata read (local, behind the read hook).
@@ -517,72 +572,102 @@ impl RouteCore {
         remote: R,
     ) -> Result<T, ApiError>
     where
-        L: Fn() -> LF,
-        LF: Future<Output = Result<T, ApiError>>,
-        R: Fn(PeerApi) -> RF,
-        RF: Future<Output = Result<T, ApiError>>,
+        T: Send + 'static,
+        L: Fn() -> LF + Send + Sync,
+        LF: Future<Output = Result<T, ApiError>> + Send,
+        R: Fn(PeerApi) -> RF + Send + Sync,
+        RF: Future<Output = Result<T, ApiError>> + Send,
     {
-        let meta = current_meta();
-        let me = self.env.local_node();
-        match self.env.meta_leader() {
-            Some(l) if l != me && meta.hop == 0 => {
-                let r = self.forward(l, &meta, |_| {}, &remote).await;
-                record(class, "forwarded", r.is_ok());
-                r
+        let local = || erase(local());
+        let remote = |peer: PeerApi| erase(remote(peer));
+        unerase(self.meta_leader_dyn(class, &local, &remote).await)
+    }
+
+    /// [`Self::meta_leader`] over type-erased calls.
+    fn meta_leader_dyn<'s, 'f: 's>(
+        &'s self,
+        class: RouteClass,
+        local: &'s LocalFn<'s, 'f>,
+        remote: &'s RemoteFn<'s, 'f>,
+    ) -> BoxFuture<'s, Result<AnyOut, ApiError>> {
+        Box::pin(async move {
+            let meta = current_meta();
+            let me = self.env.local_node();
+            match self.env.meta_leader() {
+                Some(l) if l != me && meta.hop == 0 => {
+                    let r = self.forward(l, &meta, |_| {}, remote).await;
+                    record(class, "forwarded", r.is_ok());
+                    r
+                }
+                _ => self.meta_write(class, local()).await,
             }
-            _ => self.meta_write(class, local()).await,
-        }
+        })
     }
 
     /// An unkeyed start: a locally led partition (zero hops) with `"local"` placement,
     /// else a uniform partition, pinned (`ostro-partition`) wherever it runs.
     pub async fn unkeyed_start<T, L, LF, R, RF>(&self, local: L, remote: R) -> Result<T, ApiError>
     where
-        L: Fn() -> LF,
-        LF: Future<Output = Result<T, ApiError>>,
-        R: Fn(PeerApi) -> RF,
-        RF: Future<Output = Result<T, ApiError>>,
+        T: Send + 'static,
+        L: Fn() -> LF + Send + Sync,
+        LF: Future<Output = Result<T, ApiError>> + Send,
+        R: Fn(PeerApi) -> RF + Send + Sync,
+        RF: Future<Output = Result<T, ApiError>> + Send,
     {
-        let meta = current_meta();
-        if meta.hop >= 1 {
-            // Forwarded in: the pin (if any) is honoured by the start path.
-            self.stats.forwarded_in.fetch_add(1, Ordering::Relaxed);
-            let r = self.local(Access::None, local()).await;
-            record(RouteClass::UnkeyedStart, "local", r.is_ok());
-            return r;
-        }
-        let led = self.env.led();
-        let p = if self.env.unkeyed_local() && !led.is_empty() {
-            led[self.env.uniform(led.len())]
-        } else {
-            let n = usize::from(self.count().get());
-            PartitionId(u16::try_from(self.env.uniform(n)).unwrap_or(0))
-        };
-        let me = self.env.local_node();
-        let pinned_local = || {
-            let scoped = RequestMeta {
-                partition_pin: Some(p.0),
-                from_node: Some(me),
-                ..current_meta()
-            };
-            let fut = local();
-            async move {
-                let (r, token) = request_meta::scope_with_consistency(scoped, fut).await;
-                if let Some(t) = token {
-                    request_meta::set_consistency(t);
-                }
-                r
+        let local = || erase(local());
+        let remote = |peer: PeerApi| erase(remote(peer));
+        unerase(self.unkeyed_start_dyn(&local, &remote).await)
+    }
+
+    /// [`Self::unkeyed_start`] over type-erased calls.
+    fn unkeyed_start_dyn<'s, 'f: 's>(
+        &'s self,
+        local: &'s LocalFn<'s, 'f>,
+        remote: &'s RemoteFn<'s, 'f>,
+    ) -> BoxFuture<'s, Result<AnyOut, ApiError>> {
+        Box::pin(async move {
+            let meta = current_meta();
+            if meta.hop >= 1 {
+                // Forwarded in: the pin (if any) is honoured by the start path.
+                self.stats.forwarded_in.fetch_add(1, Ordering::Relaxed);
+                let r = self.local(Access::None, local()).await;
+                record(RouteClass::UnkeyedStart, "local", r.is_ok());
+                return r;
             }
-        };
-        self.partition(
-            RouteClass::UnkeyedStart,
-            Some(p),
-            true,
-            true,
-            pinned_local,
-            remote,
-        )
-        .await
+            let led = self.env.led();
+            let p = if self.env.unkeyed_local() && !led.is_empty() {
+                led[self.env.uniform(led.len())]
+            } else {
+                let n = usize::from(self.count().get());
+                PartitionId(u16::try_from(self.env.uniform(n)).unwrap_or(0))
+            };
+            let me = self.env.local_node();
+            let pinned_local = move || {
+                let scoped = RequestMeta {
+                    partition_pin: Some(p.0),
+                    from_node: Some(me),
+                    ..current_meta()
+                };
+                let fut = local();
+                let pinned: AnyFut<'f> = Box::pin(async move {
+                    let (r, token) = request_meta::scope_with_consistency(scoped, fut).await;
+                    if let Some(t) = token {
+                        request_meta::set_consistency(t);
+                    }
+                    r
+                });
+                pinned
+            };
+            self.partition_dyn(
+                RouteClass::UnkeyedStart,
+                Some(p),
+                true,
+                true,
+                &pinned_local,
+                remote,
+            )
+            .await
+        })
     }
 }
 

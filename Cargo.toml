@@ -181,11 +181,13 @@ strip = "debuginfo"
 # is on the invocation/apply hot path (wasmtime/cranelift, ostro-engine, ostro-partition,
 # ostro-log, ostro-wal, fjall, tokio, hyper/h2, prost and rustls keep opt-level 3).
 # Fat LTO keeps the per-function optsize attribute, so the saving survives the merge.
+# ostro-api and ostro-cli use "z" (musl-size, 2026-11-25: -0.61 MB; REST latency A/B in
+# docs/binary-size.md).
 [profile.release.package.ostro-api]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.ostro-cli]
-opt-level = "s"
+opt-level = "z"
 
 [profile.release.package.ostro-client]
 opt-level = "s"
@@ -221,6 +223,74 @@ opt-level = "s"
 opt-level = "s"
 
 [profile.release.package.serde-saphyr]
+opt-level = "s"
+
+# More cold dependencies (musl-size, 2026-11-25; docs/binary-size.md): kube's YAML and
+# JSONPath stack, configuration loading (config, toml), the CLI's completions and file
+# watcher, ACME / certificate generation (instant-acme, rcgen, yasna), wasmtime's symbol
+# demangling and wasm printer (trap backtraces / debug output only), the Vault client
+# (vaultrs, rustify) and the bridge's DNS resolver (hickory, I/O bound).
+[profile.release.package.granit-parser]
+opt-level = "s"
+
+[profile.release.package.annotate-snippets]
+opt-level = "s"
+
+[profile.release.package.jsonpath-rust]
+opt-level = "s"
+
+[profile.release.package.pest]
+opt-level = "s"
+
+[profile.release.package.config]
+opt-level = "s"
+
+[profile.release.package.toml]
+opt-level = "s"
+
+[profile.release.package.toml_parser]
+opt-level = "s"
+
+[profile.release.package.clap_complete]
+opt-level = "s"
+
+[profile.release.package.notify]
+opt-level = "s"
+
+[profile.release.package.notify-debouncer-full]
+opt-level = "s"
+
+[profile.release.package.instant-acme]
+opt-level = "s"
+
+[profile.release.package.rcgen]
+opt-level = "s"
+
+[profile.release.package.yasna]
+opt-level = "s"
+
+[profile.release.package.cpp_demangle]
+opt-level = "s"
+
+[profile.release.package.rustc-demangle]
+opt-level = "s"
+
+[profile.release.package.wasmprinter]
+opt-level = "s"
+
+[profile.release.package.vaultrs]
+opt-level = "s"
+
+[profile.release.package.rustify]
+opt-level = "s"
+
+[profile.release.package.hickory-proto]
+opt-level = "s"
+
+[profile.release.package.hickory-resolver]
+opt-level = "s"
+
+[profile.release.package.hickory-net]
 opt-level = "s"
 
 # Debug info trimmed to keep target dirs small (they filled the disk, 2026-11-22).

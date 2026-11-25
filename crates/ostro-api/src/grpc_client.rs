@@ -26,18 +26,12 @@
 //! Every trait method has an explicit body here (no trait default is relied on);
 //! `every_trait_method_is_overridden` pins that against the trait sources.
 
-use std::future::Future;
 use std::time::{Duration, Instant};
 
 use ostro_proto::api::v1 as pb;
-use ostro_proto::api::v1::{
-    cluster_client::ClusterClient, connectors_client::ConnectorsClient,
-    inventory_client::InventoryClient, module_lifecycle_client::ModuleLifecycleClient,
-    modules_client::ModulesClient, queues_client::QueuesClient, run_logs_client::RunLogsClient,
-    run_ops_client::RunOpsClient, runs_client::RunsClient, schedules_client::SchedulesClient,
-    secrets_client::SecretsClient, tokens_client::TokensClient, webhooks_client::WebhooksClient,
-    workers_client::WorkersClient, workflows_client::WorkflowsClient,
-};
+use ostro_proto::prost::Message;
+use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
+use tonic::codegen::{BoxFuture, Bytes, http};
 use tonic::transport::Channel;
 
 use crate::domain::{self, ControlPlane};
@@ -158,9 +152,7 @@ fn request<T>(msg: T) -> Result<tonic::Request<T>, ApiError> {
 }
 
 /// Await a call: publish `ostro-consistency`, map errors.
-async fn finish<T>(
-    fut: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
-) -> Result<T, ApiError> {
+async fn finish(fut: BoxFuture<tonic::Response<Bytes>, tonic::Status>) -> Result<Bytes, ApiError> {
     match fut.await {
         Ok(resp) => {
             if let Some(t) = resp
@@ -176,21 +168,69 @@ async fn finish<T>(
     }
 }
 
-/// A sized client of one service over the shared channel.
-macro_rules! client {
-    ($self:ident, $c:ident) => {
-        $c::new($self.channel.clone())
-            .max_decoding_message_size($self.max_message_bytes)
-            .max_encoding_message_size($self.max_message_bytes)
-    };
+/// Pass-through codec: the messages are already protobuf-encoded [`Bytes`]. Every call
+/// shares one `tonic::client::Grpc::unary` instantiation (and one transport future)
+/// instead of one per method and message pair (binary size, docs/binary-size.md); the
+/// typed (prost) encode / decode happens around it in [`GrpcControlPlane::unary`]. The
+/// bytes on the wire are the same as with the generated clients.
+#[derive(Clone, Copy, Debug, Default)]
+struct RawCodec;
+
+/// [`RawCodec`]'s encoder.
+#[derive(Clone, Copy, Debug, Default)]
+struct RawEncoder;
+
+/// [`RawCodec`]'s decoder.
+#[derive(Clone, Copy, Debug, Default)]
+struct RawDecoder;
+
+impl Codec for RawCodec {
+    type Encode = Bytes;
+    type Decode = Bytes;
+    type Encoder = RawEncoder;
+    type Decoder = RawDecoder;
+
+    fn encoder(&mut self) -> RawEncoder {
+        RawEncoder
+    }
+
+    fn decoder(&mut self) -> RawDecoder {
+        RawDecoder
+    }
 }
 
-/// One unary call: `call!(self, Client, method, request_message)`.
+impl Encoder for RawEncoder {
+    type Item = Bytes;
+    type Error = tonic::Status;
+
+    fn encode(&mut self, item: Bytes, dst: &mut EncodeBuf<'_>) -> Result<(), tonic::Status> {
+        bytes::BufMut::put(dst, item);
+        Ok(())
+    }
+}
+
+impl Decoder for RawDecoder {
+    type Item = Bytes;
+    type Error = tonic::Status;
+
+    fn decode(&mut self, src: &mut DecodeBuf<'_>) -> Result<Option<Bytes>, tonic::Status> {
+        let n = bytes::Buf::remaining(src);
+        Ok(Some(bytes::Buf::copy_to_bytes(src, n)))
+    }
+}
+
+/// One unary call: `call!(self, "Service", "Method", pb::Reply, request_message)` calls
+/// `/ostro.api.v1.Service/Method` (the generated clients' path and `GrpcMethod`).
 macro_rules! call {
-    ($self:ident, $c:ident, $m:ident, $msg:expr) => {{
-        let req = request($msg)?;
-        let mut c = client!($self, $c);
-        finish(c.$m(req)).await
+    ($self:ident, $svc:literal, $m:literal, $resp:ty, $msg:expr) => {{
+        $self
+            .unary::<_, $resp>(
+                concat!("/ostro.api.v1.", $svc, "/", $m),
+                concat!("ostro.api.v1.", $svc),
+                $m,
+                $msg,
+            )
+            .await
     }};
 }
 
@@ -213,6 +253,41 @@ impl GrpcControlPlane {
     pub fn with_max_message_bytes(mut self, n: usize) -> Self {
         self.max_message_bytes = n;
         self
+    }
+
+    /// The typed side of a unary call: request metadata and deadline ([`request`]), the
+    /// protobuf encode, the shared transport ([`Self::unary_raw`]) and the reply decode
+    /// (a malformed reply is `INTERNAL`, as with `tonic_prost::ProstCodec`).
+    async fn unary<Q: Message, R: Message + Default>(
+        &self,
+        path: &'static str,
+        service: &'static str,
+        method: &'static str,
+        msg: Q,
+    ) -> Result<R, ApiError> {
+        let mut req = request(Bytes::from(msg.encode_to_vec()))?;
+        req.extensions_mut()
+            .insert(tonic::GrpcMethod::new(service, method));
+        let reply = finish(self.unary_raw(path, req)).await?;
+        R::decode(reply).map_err(|e| status_to_error(&tonic::Status::internal(e.to_string())))
+    }
+
+    /// The untyped transport of every call (not generic: compiled once).
+    fn unary_raw(
+        &self,
+        path: &'static str,
+        req: tonic::Request<Bytes>,
+    ) -> BoxFuture<tonic::Response<Bytes>, tonic::Status> {
+        let mut grpc = tonic::client::Grpc::new(self.channel.clone())
+            .max_decoding_message_size(self.max_message_bytes)
+            .max_encoding_message_size(self.max_message_bytes);
+        Box::pin(async move {
+            grpc.ready()
+                .await
+                .map_err(|e| tonic::Status::unknown(format!("Service was not ready: {e}")))?;
+            grpc.unary(req, http::uri::PathAndQuery::from_static(path), RawCodec)
+                .await
+        })
     }
 }
 
@@ -370,8 +445,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::UploadModuleResult, ApiError> {
         let r = call!(
             self,
-            ModulesClient,
-            upload,
+            "Modules",
+            "Upload",
+            pb::UploadModuleResponse,
             pb::UploadModuleRequest {
                 sha256: req.sha256,
                 wasm: req.wasm.to_vec(),
@@ -387,12 +463,24 @@ impl ControlPlane for GrpcControlPlane {
     }
 
     async fn get_module(&self, sha256: String) -> Result<domain::ModuleInfo, ApiError> {
-        let m = call!(self, ModulesClient, get, pb::GetModuleRequest { sha256 })?;
+        let m = call!(
+            self,
+            "Modules",
+            "Get",
+            pb::ModuleInfo,
+            pb::GetModuleRequest { sha256 }
+        )?;
         Ok(module_info(m))
     }
 
     async fn list_workflows(&self) -> Result<Vec<domain::WorkflowInfo>, ApiError> {
-        let r = call!(self, WorkflowsClient, list, pb::ListWorkflowsRequest {})?;
+        let r = call!(
+            self,
+            "Workflows",
+            "List",
+            pb::ListWorkflowsResponse,
+            pb::ListWorkflowsRequest {}
+        )?;
         Ok(r.workflows.into_iter().map(workflow_info).collect())
     }
 
@@ -402,8 +490,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::WorkflowInfo, ApiError> {
         let w = call!(
             self,
-            WorkflowsClient,
-            activate,
+            "Workflows",
+            "Activate",
+            pb::WorkflowInfo,
             pb::ActivateWorkflowRequest {
                 name: req.name,
                 version: req.version,
@@ -419,8 +508,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::StartRunResult, ApiError> {
         let r = call!(
             self,
-            RunsClient,
-            start,
+            "Runs",
+            "Start",
+            pb::StartRunResponse,
             pb::StartRunRequest {
                 workflow: req.workflow,
                 input_json: req.input_json,
@@ -447,7 +537,13 @@ impl ControlPlane for GrpcControlPlane {
     }
 
     async fn get_run(&self, run_id: String) -> Result<domain::RunInfo, ApiError> {
-        run_info(call!(self, RunsClient, get, pb::GetRunRequest { run_id })?)
+        run_info(call!(
+            self,
+            "Runs",
+            "Get",
+            pb::RunInfo,
+            pb::GetRunRequest { run_id }
+        )?)
     }
 
     async fn run_history(
@@ -456,8 +552,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::HistoryPage, ApiError> {
         let p = call!(
             self,
-            RunsClient,
-            history,
+            "Runs",
+            "History",
+            pb::RunHistoryResponse,
             pb::RunHistoryRequest {
                 run_id: req.run_id,
                 from_seq: req.from_seq,
@@ -484,8 +581,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn list_runs(&self, req: domain::ListRunsRequest) -> Result<domain::RunPage, ApiError> {
         let p = call!(
             self,
-            RunsClient,
-            list,
+            "Runs",
+            "List",
+            pb::ListRunsResponse,
             pb::ListRunsRequest {
                 workflow: req.workflow,
                 status: req.status.map(|s| pb::RunStatus::from(s) as i32),
@@ -532,8 +630,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::SignalResponse, ApiError> {
         let s = call!(
             self,
-            RunsClient,
-            signal,
+            "Runs",
+            "Signal",
+            pb::SignalRunResponse,
             pb::SignalRunRequest {
                 payload_json: json_bytes(&r.payload),
                 run_id: r.run_id,
@@ -555,8 +654,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::CancelResponse, ApiError> {
         let c = call!(
             self,
-            RunsClient,
-            cancel,
+            "Runs",
+            "Cancel",
+            pb::CancelRunResponse,
             pb::CancelRunRequest {
                 run_id: r.run_id,
                 reason: r.reason,
@@ -575,8 +675,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::TerminateResponse, ApiError> {
         let t = call!(
             self,
-            RunsClient,
-            terminate,
+            "Runs",
+            "Terminate",
+            pb::TerminateRunResponse,
             pb::TerminateRunRequest {
                 run_id: r.run_id,
                 reason: r.reason,
@@ -592,8 +693,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn retry_run(&self, r: domain::RetryRequest) -> Result<domain::RetryResponse, ApiError> {
         let t = call!(
             self,
-            RunsClient,
-            retry,
+            "Runs",
+            "Retry",
+            pb::RetryRunResponse,
             pb::RetryRunRequest {
                 run_id: r.run_id,
                 dry_run: r.dry_run,
@@ -619,8 +721,9 @@ impl ControlPlane for GrpcControlPlane {
         };
         let a = call!(
             self,
-            RunsClient,
-            await_result,
+            "Runs",
+            "AwaitResult",
+            pb::AwaitResultResponse,
             pb::AwaitResultRequest {
                 run_id: r.run_id,
                 wait_ms,
@@ -650,8 +753,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::CompleteTokenResponse, ApiError> {
         let c = call!(
             self,
-            TokensClient,
-            complete,
+            "Tokens",
+            "Complete",
+            pb::CompleteTokenResponse,
             pb::CompleteTokenRequest {
                 payload_json: json_bytes(&r.payload),
                 token: r.token,
@@ -672,8 +776,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::RunPolicy, ApiError> {
         let p = call!(
             self,
-            WorkflowsClient,
-            set_policy,
+            "Workflows",
+            "SetPolicy",
+            pb::RunPolicy,
             pb::SetWorkflowPolicyRequest {
                 name: workflow,
                 policy: Some(p.into()),
@@ -685,8 +790,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn get_workflow_policy(&self, workflow: String) -> Result<domain::RunPolicy, ApiError> {
         let p = call!(
             self,
-            WorkflowsClient,
-            get_policy,
+            "Workflows",
+            "GetPolicy",
+            pb::RunPolicy,
             pb::GetWorkflowPolicyRequest { name: workflow }
         )?;
         Ok(p.into())
@@ -699,8 +805,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::RunPolicy, ApiError> {
         let p = call!(
             self,
-            WorkflowsClient,
-            set_queue_policy,
+            "Workflows",
+            "SetQueuePolicy",
+            pb::RunPolicy,
             pb::SetQueuePolicyRequest {
                 name: queue,
                 policy: Some(p.into()),
@@ -712,8 +819,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn get_queue_policy(&self, queue: String) -> Result<domain::RunPolicy, ApiError> {
         let p = call!(
             self,
-            WorkflowsClient,
-            get_queue_policy,
+            "Workflows",
+            "GetQueuePolicy",
+            pb::RunPolicy,
             pb::GetQueuePolicyRequest { name: queue }
         )?;
         Ok(p.into())
@@ -722,8 +830,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn put_secret(&self, req: domain::PutSecret) -> Result<domain::SecretInfo, ApiError> {
         let s = call!(
             self,
-            SecretsClient,
-            put_secret,
+            "Secrets",
+            "PutSecret",
+            pb::SecretInfo,
             pb::PutSecretRequest {
                 name: req.name,
                 value: req.value,
@@ -743,8 +852,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<Vec<domain::SecretInfo>, ApiError> {
         let r = call!(
             self,
-            SecretsClient,
-            list_secrets,
+            "Secrets",
+            "ListSecrets",
+            pb::ListSecretsResponse,
             pb::ListSecretsRequest { tenant }
         )?;
         Ok(r.secrets
@@ -760,8 +870,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn delete_secret(&self, name: String, tenant: Option<String>) -> Result<(), ApiError> {
         call!(
             self,
-            SecretsClient,
-            delete_secret,
+            "Secrets",
+            "DeleteSecret",
+            pb::DeleteSecretResponse,
             pb::DeleteSecretRequest { name, tenant }
         )?;
         Ok(())
@@ -770,8 +881,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn put_grant(&self, g: domain::GrantInfo) -> Result<domain::GrantInfo, ApiError> {
         let g = call!(
             self,
-            SecretsClient,
-            put_grant,
+            "Secrets",
+            "PutGrant",
+            pb::GrantInfo,
             pb::PutGrantRequest {
                 grant: Some(g.into()),
             }
@@ -785,8 +897,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<Vec<domain::GrantInfo>, ApiError> {
         let r = call!(
             self,
-            SecretsClient,
-            list_grants,
+            "Secrets",
+            "ListGrants",
+            pb::ListGrantsResponse,
             pb::ListGrantsRequest { module }
         )?;
         Ok(r.grants.into_iter().map(Into::into).collect())
@@ -795,8 +908,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn delete_grant(&self, id: String) -> Result<(), ApiError> {
         call!(
             self,
-            SecretsClient,
-            delete_grant,
+            "Secrets",
+            "DeleteGrant",
+            pb::DeleteGrantResponse,
             pb::DeleteGrantRequest { id }
         )?;
         Ok(())
@@ -808,8 +922,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<domain::ConnectionInfo, ApiError> {
         let c = call!(
             self,
-            ConnectorsClient,
-            put_connection,
+            "Connectors",
+            "PutConnection",
+            pb::ConnectionInfo,
             pb::PutConnectionRequest {
                 connection: Some(c.into()),
             }
@@ -820,8 +935,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn get_connection(&self, name: String) -> Result<domain::ConnectionInfo, ApiError> {
         let c = call!(
             self,
-            ConnectorsClient,
-            get_connection,
+            "Connectors",
+            "GetConnection",
+            pb::ConnectionInfo,
             pb::GetConnectionRequest { name }
         )?;
         domain::ConnectionInfo::try_from(c).map_err(|e| bad_reply(&e.message))
@@ -830,8 +946,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn list_connections(&self) -> Result<Vec<domain::ConnectionInfo>, ApiError> {
         let r = call!(
             self,
-            ConnectorsClient,
-            list_connections,
+            "Connectors",
+            "ListConnections",
+            pb::ListConnectionsResponse,
             pb::ListConnectionsRequest {}
         )?;
         r.connections
@@ -843,8 +960,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn delete_connection(&self, name: String) -> Result<(), ApiError> {
         call!(
             self,
-            ConnectorsClient,
-            delete_connection,
+            "Connectors",
+            "DeleteConnection",
+            pb::DeleteConnectionResponse,
             pb::DeleteConnectionRequest { name }
         )?;
         Ok(())
@@ -853,8 +971,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn put_egress(&self, e: domain::EgressInfo) -> Result<domain::EgressInfo, ApiError> {
         let e = call!(
             self,
-            ConnectorsClient,
-            put_egress,
+            "Connectors",
+            "PutEgress",
+            pb::EgressInfo,
             pb::PutEgressRequest {
                 egress: Some(e.into()),
             }
@@ -865,8 +984,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn get_egress(&self, module: String) -> Result<domain::EgressInfo, ApiError> {
         let e = call!(
             self,
-            ConnectorsClient,
-            get_egress,
+            "Connectors",
+            "GetEgress",
+            pb::EgressInfo,
             pb::GetEgressRequest { module }
         )?;
         Ok(e.into())
@@ -875,8 +995,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn list_egress(&self) -> Result<Vec<domain::EgressInfo>, ApiError> {
         let r = call!(
             self,
-            ConnectorsClient,
-            list_egress,
+            "Connectors",
+            "ListEgress",
+            pb::ListEgressResponse,
             pb::ListEgressRequest {}
         )?;
         Ok(r.policies.into_iter().map(Into::into).collect())
@@ -885,8 +1006,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn delete_egress(&self, module: String) -> Result<(), ApiError> {
         call!(
             self,
-            ConnectorsClient,
-            delete_egress,
+            "Connectors",
+            "DeleteEgress",
+            pb::DeleteEgressResponse,
             pb::DeleteEgressRequest { module }
         )?;
         Ok(())
@@ -904,8 +1026,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn get_queue_flow(&self, queue: String) -> Result<phase7::QueueFlowInfo, ApiError> {
         let i = call!(
             self,
-            QueuesClient,
-            get_queue_flow,
+            "Queues",
+            "GetQueueFlow",
+            pb::QueueFlowInfo,
             pb::GetQueueFlowRequest { name: queue }
         )?;
         queue_flow_info(i)
@@ -919,8 +1042,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<phase7::QueueFlowInfo, ApiError> {
         let i = call!(
             self,
-            QueuesClient,
-            put_queue_flow,
+            "Queues",
+            "PutQueueFlow",
+            pb::QueueFlowInfo,
             pb::PutQueueFlowRequest {
                 name: queue,
                 flow: Some(flow.into()),
@@ -933,8 +1057,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn pause_queue(&self, queue: String) -> Result<phase7::PauseState, ApiError> {
         let s = call!(
             self,
-            QueuesClient,
-            pause_queue,
+            "Queues",
+            "PauseQueue",
+            pb::QueuePauseState,
             pb::PauseQueueRequest { name: queue }
         )?;
         Ok(phase7::PauseState {
@@ -947,8 +1072,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn resume_queue(&self, queue: String) -> Result<phase7::PauseState, ApiError> {
         let s = call!(
             self,
-            QueuesClient,
-            resume_queue,
+            "Queues",
+            "ResumeQueue",
+            pb::QueuePauseState,
             pb::ResumeQueueRequest { name: queue }
         )?;
         Ok(phase7::PauseState {
@@ -961,8 +1087,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn pause_workflow(&self, workflow: String) -> Result<phase7::PauseState, ApiError> {
         let s = call!(
             self,
-            WorkflowsClient,
-            pause_workflow,
+            "Workflows",
+            "PauseWorkflow",
+            pb::WorkflowPauseState,
             pb::PauseWorkflowRequest { name: workflow }
         )?;
         Ok(phase7::PauseState {
@@ -975,8 +1102,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn resume_workflow(&self, workflow: String) -> Result<phase7::PauseState, ApiError> {
         let s = call!(
             self,
-            WorkflowsClient,
-            resume_workflow,
+            "Workflows",
+            "ResumeWorkflow",
+            pb::WorkflowPauseState,
             pb::ResumeWorkflowRequest { name: workflow }
         )?;
         Ok(phase7::PauseState {
@@ -993,8 +1121,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<phase7::RunPauseState, ApiError> {
         let s = call!(
             self,
-            RunsClient,
-            pause_run,
+            "Runs",
+            "PauseRun",
+            pb::RunPauseState,
             pb::PauseRunRequest { run_id, detail }
         )?;
         Ok(phase7::RunPauseState {
@@ -1007,8 +1136,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn resume_run(&self, run_id: String) -> Result<phase7::RunPauseState, ApiError> {
         let s = call!(
             self,
-            RunsClient,
-            resume_run,
+            "Runs",
+            "ResumeRun",
+            pb::RunPauseState,
             pb::ResumeRunRequest { run_id }
         )?;
         Ok(phase7::RunPauseState {
@@ -1021,8 +1151,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn queue_demand(&self, queue: String) -> Result<phase7::DemandSnapshot, ApiError> {
         let d = call!(
             self,
-            QueuesClient,
-            get_queue_demand,
+            "Queues",
+            "GetQueueDemand",
+            pb::QueueDemand,
             pb::GetQueueDemandRequest { name: queue }
         )?;
         Ok(phase7::DemandSnapshot {
@@ -1038,7 +1169,13 @@ impl ControlPlane for GrpcControlPlane {
     }
 
     async fn list_workers(&self) -> Result<Vec<phase7::WorkerInfo>, ApiError> {
-        let r = call!(self, WorkersClient, list_workers, pb::ListWorkersRequest {})?;
+        let r = call!(
+            self,
+            "Workers",
+            "ListWorkers",
+            pb::ListWorkersResponse,
+            pb::ListWorkersRequest {}
+        )?;
         Ok(r.workers
             .into_iter()
             .map(|w| phase7::WorkerInfo {
@@ -1057,8 +1194,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn drain_worker(&self, worker_id: String) -> Result<phase7::DrainResult, ApiError> {
         let d = call!(
             self,
-            WorkersClient,
-            drain_worker,
+            "Workers",
+            "DrainWorker",
+            pb::DrainWorkerResponse,
             pb::DrainWorkerRequest { worker_id }
         )?;
         Ok(phase7::DrainResult {
@@ -1073,8 +1211,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<phase7::WorkerTokenCreated, ApiError> {
         let t = call!(
             self,
-            WorkersClient,
-            create_worker_token,
+            "Workers",
+            "CreateWorkerToken",
+            pb::WorkerTokenCreated,
             pb::CreateWorkerTokenRequest { ttl_ms: req.ttl_ms }
         )?;
         Ok(phase7::WorkerTokenCreated {
@@ -1088,8 +1227,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn list_worker_tokens(&self) -> Result<Vec<phase7::WorkerTokenInfo>, ApiError> {
         let r = call!(
             self,
-            WorkersClient,
-            list_worker_tokens,
+            "Workers",
+            "ListWorkerTokens",
+            pb::ListWorkerTokensResponse,
             pb::ListWorkerTokensRequest {}
         )?;
         Ok(r.tokens
@@ -1105,8 +1245,9 @@ impl ControlPlane for GrpcControlPlane {
     async fn revoke_worker_token(&self, token_id: String) -> Result<(), ApiError> {
         call!(
             self,
-            WorkersClient,
-            revoke_worker_token,
+            "Workers",
+            "RevokeWorkerToken",
+            pb::RevokeWorkerTokenResponse,
             pb::RevokeWorkerTokenRequest { token_id }
         )?;
         Ok(())
@@ -1118,8 +1259,9 @@ impl ControlPlane for GrpcControlPlane {
     ) -> Result<phase7::JoinResponse, ApiError> {
         let j = call!(
             self,
-            WorkersClient,
-            join_worker,
+            "Workers",
+            "JoinWorker",
+            pb::JoinWorkerResponse,
             pb::JoinWorkerRequest {
                 token: req.token,
                 csr_pem: req.csr_pem,
@@ -1164,15 +1306,22 @@ impl ControlPlane for GrpcControlPlane {
 #[async_trait::async_trait]
 impl ScheduleApi for GrpcControlPlane {
     async fn list_schedules(&self) -> Result<Vec<ScheduleDto>, ApiError> {
-        let r = call!(self, SchedulesClient, list, pb::ListSchedulesRequest {})?;
+        let r = call!(
+            self,
+            "Schedules",
+            "List",
+            pb::ListSchedulesResponse,
+            pb::ListSchedulesRequest {}
+        )?;
         r.schedules.into_iter().map(schedule).collect()
     }
 
     async fn get_schedule(&self, name: String) -> Result<ScheduleDto, ApiError> {
         schedule(call!(
             self,
-            SchedulesClient,
-            get,
+            "Schedules",
+            "Get",
+            pb::Schedule,
             pb::GetScheduleRequest { name }
         )?)
     }
@@ -1180,8 +1329,9 @@ impl ScheduleApi for GrpcControlPlane {
     async fn create_schedule(&self, s: ScheduleDto) -> Result<ScheduleDto, ApiError> {
         schedule(call!(
             self,
-            SchedulesClient,
-            create,
+            "Schedules",
+            "Create",
+            pb::Schedule,
             pb::CreateScheduleRequest {
                 schedule: Some(s.into()),
             }
@@ -1191,8 +1341,9 @@ impl ScheduleApi for GrpcControlPlane {
     async fn update_schedule(&self, s: ScheduleDto) -> Result<ScheduleDto, ApiError> {
         schedule(call!(
             self,
-            SchedulesClient,
-            update,
+            "Schedules",
+            "Update",
+            pb::Schedule,
             pb::UpdateScheduleRequest {
                 schedule: Some(s.into()),
             }
@@ -1206,8 +1357,9 @@ impl ScheduleApi for GrpcControlPlane {
     ) -> Result<(), ApiError> {
         call!(
             self,
-            SchedulesClient,
-            delete,
+            "Schedules",
+            "Delete",
+            pb::DeleteScheduleResponse,
             pb::DeleteScheduleRequest { name, version_tag }
         )?;
         Ok(())
@@ -1216,8 +1368,9 @@ impl ScheduleApi for GrpcControlPlane {
     async fn pause_schedule(&self, name: String) -> Result<ScheduleDto, ApiError> {
         schedule(call!(
             self,
-            SchedulesClient,
-            pause,
+            "Schedules",
+            "Pause",
+            pb::Schedule,
             pb::PauseScheduleRequest { name }
         )?)
     }
@@ -1225,8 +1378,9 @@ impl ScheduleApi for GrpcControlPlane {
     async fn resume_schedule(&self, name: String) -> Result<ScheduleDto, ApiError> {
         schedule(call!(
             self,
-            SchedulesClient,
-            resume,
+            "Schedules",
+            "Resume",
+            pb::Schedule,
             pb::ResumeScheduleRequest { name }
         )?)
     }
@@ -1238,8 +1392,9 @@ impl ScheduleApi for GrpcControlPlane {
     ) -> Result<String, ApiError> {
         let r = call!(
             self,
-            SchedulesClient,
-            trigger,
+            "Schedules",
+            "Trigger",
+            pb::TriggerScheduleResponse,
             pb::TriggerScheduleRequest { name, request_id }
         )?;
         Ok(r.run_id)
@@ -1249,15 +1404,22 @@ impl ScheduleApi for GrpcControlPlane {
 #[async_trait::async_trait]
 impl WebhookApi for GrpcControlPlane {
     async fn list_webhooks(&self) -> Result<Vec<WebhookDto>, ApiError> {
-        let r = call!(self, WebhooksClient, list, pb::ListWebhooksRequest {})?;
+        let r = call!(
+            self,
+            "Webhooks",
+            "List",
+            pb::ListWebhooksResponse,
+            pb::ListWebhooksRequest {}
+        )?;
         r.webhooks.into_iter().map(webhook).collect()
     }
 
     async fn get_webhook(&self, name: String) -> Result<WebhookDto, ApiError> {
         webhook(call!(
             self,
-            WebhooksClient,
-            get,
+            "Webhooks",
+            "Get",
+            pb::Webhook,
             pb::GetWebhookRequest { name }
         )?)
     }
@@ -1265,8 +1427,9 @@ impl WebhookApi for GrpcControlPlane {
     async fn create_webhook(&self, w: WebhookDto) -> Result<WebhookDto, ApiError> {
         webhook(call!(
             self,
-            WebhooksClient,
-            create,
+            "Webhooks",
+            "Create",
+            pb::Webhook,
             pb::CreateWebhookRequest {
                 webhook: Some(w.into()),
             }
@@ -1276,8 +1439,9 @@ impl WebhookApi for GrpcControlPlane {
     async fn update_webhook(&self, w: WebhookDto) -> Result<WebhookDto, ApiError> {
         webhook(call!(
             self,
-            WebhooksClient,
-            update,
+            "Webhooks",
+            "Update",
+            pb::Webhook,
             pb::UpdateWebhookRequest {
                 webhook: Some(w.into()),
             }
@@ -1287,8 +1451,9 @@ impl WebhookApi for GrpcControlPlane {
     async fn delete_webhook(&self, name: String, version_tag: Option<u64>) -> Result<(), ApiError> {
         call!(
             self,
-            WebhooksClient,
-            delete,
+            "Webhooks",
+            "Delete",
+            pb::DeleteWebhookResponse,
             pb::DeleteWebhookRequest { name, version_tag }
         )?;
         Ok(())
@@ -1309,8 +1474,9 @@ impl RunLogsApi for GrpcControlPlane {
     async fn run_logs(&self, req: RunLogsRequest) -> Result<RunLogsResponse, ApiError> {
         let r = call!(
             self,
-            RunLogsClient,
-            get_run_logs,
+            "RunLogs",
+            "GetRunLogs",
+            pb::GetRunLogsResponse,
             pb::GetRunLogsRequest {
                 run_id: req.run_id,
                 limit: req.limit,
@@ -1359,14 +1525,22 @@ impl OpsApi for GrpcControlPlane {
         &self,
         req: phase11::RerunRequest,
     ) -> Result<phase11::RerunResponse, ApiError> {
-        Ok(call!(self, RunOpsClient, rerun, pb::RerunRequest::from(req))?.into())
+        Ok(call!(
+            self,
+            "RunOps",
+            "Rerun",
+            pb::RerunResponse,
+            pb::RerunRequest::from(req)
+        )?
+        .into())
     }
 
     async fn analyze_rerun(&self, run_id: String) -> Result<phase11::RerunCutsView, ApiError> {
         Ok(call!(
             self,
-            RunOpsClient,
-            rerun_cuts,
+            "RunOps",
+            "RerunCuts",
+            pb::RerunCutsView,
             pb::RerunCutsRequest { run_id }
         )?
         .into())
@@ -1375,8 +1549,9 @@ impl OpsApi for GrpcControlPlane {
     async fn list_dlq(&self, req: phase11::DlqListRequest) -> Result<phase11::DlqPage, ApiError> {
         reply(call!(
             self,
-            RunOpsClient,
-            list_dlq,
+            "RunOps",
+            "ListDlq",
+            pb::DlqPage,
             pb::ListDlqRequest {
                 workflow: req.workflow,
                 queue: req.queue,
@@ -1395,8 +1570,9 @@ impl OpsApi for GrpcControlPlane {
     ) -> Result<phase11::DlqRequeueResponse, ApiError> {
         Ok(call!(
             self,
-            RunOpsClient,
-            requeue_dlq,
+            "RunOps",
+            "RequeueDlq",
+            pb::RequeueDlqResponse,
             pb::RequeueDlqRequest {
                 run_id: req.run_id,
                 mode: Some(req.mode.into()),
@@ -1412,8 +1588,9 @@ impl OpsApi for GrpcControlPlane {
     ) -> Result<phase11::DlqEntry, ApiError> {
         reply(call!(
             self,
-            RunOpsClient,
-            dismiss_dlq,
+            "RunOps",
+            "DismissDlq",
+            pb::DlqEntry,
             pb::DismissDlqRequest {
                 run_id: req.run_id,
                 reason: req.reason,
@@ -1427,34 +1604,56 @@ impl OpsApi for GrpcControlPlane {
     ) -> Result<phase11::BulkCreateResponse, ApiError> {
         Ok(call!(
             self,
-            RunOpsClient,
-            create_bulk,
+            "RunOps",
+            "CreateBulk",
+            pb::CreateBulkResponse,
             pb::CreateBulkRequest::from(req)
         )?
         .into())
     }
 
     async fn list_bulk(&self) -> Result<Vec<phase11::BulkJobView>, ApiError> {
-        let r = call!(self, RunOpsClient, list_bulk, pb::ListBulkRequest {})?;
+        let r = call!(
+            self,
+            "RunOps",
+            "ListBulk",
+            pb::ListBulkResponse,
+            pb::ListBulkRequest {}
+        )?;
         Ok(r.jobs.into_iter().map(Into::into).collect())
     }
 
     async fn get_bulk(&self, job_id: String) -> Result<phase11::BulkJobView, ApiError> {
-        Ok(call!(self, RunOpsClient, get_bulk, pb::GetBulkRequest { job_id })?.into())
+        Ok(call!(
+            self,
+            "RunOps",
+            "GetBulk",
+            pb::BulkJob,
+            pb::GetBulkRequest { job_id }
+        )?
+        .into())
     }
 
     async fn cancel_bulk(&self, job_id: String) -> Result<phase11::BulkJobView, ApiError> {
         Ok(call!(
             self,
-            RunOpsClient,
-            cancel_bulk,
+            "RunOps",
+            "CancelBulk",
+            pb::BulkJob,
             pb::CancelBulkRequest { job_id }
         )?
         .into())
     }
 
     async fn limits(&self) -> Result<phase11::LimitsView, ApiError> {
-        Ok(call!(self, RunOpsClient, get_limits, pb::GetLimitsRequest {})?.into())
+        Ok(call!(
+            self,
+            "RunOps",
+            "GetLimits",
+            pb::Limits,
+            pb::GetLimitsRequest {}
+        )?
+        .into())
     }
 
     async fn get_failure_policy(
@@ -1468,8 +1667,9 @@ impl OpsApi for GrpcControlPlane {
         };
         Ok(call!(
             self,
-            RunOpsClient,
-            get_failure_policy,
+            "RunOps",
+            "GetFailurePolicy",
+            pb::FailurePolicy,
             pb::GetFailurePolicyRequest { scope: Some(scope) }
         )?
         .into())
@@ -1487,8 +1687,9 @@ impl OpsApi for GrpcControlPlane {
         };
         Ok(call!(
             self,
-            RunOpsClient,
-            set_failure_policy,
+            "RunOps",
+            "SetFailurePolicy",
+            pb::FailurePolicy,
             pb::SetFailurePolicyRequest {
                 policy: Some(p.into()),
                 scope: Some(scope),
@@ -1506,8 +1707,9 @@ impl InventoryApi for GrpcControlPlane {
     ) -> Result<phase11::ModulePage, ApiError> {
         Ok(call!(
             self,
-            InventoryClient,
-            list_modules,
+            "Inventory",
+            "ListModules",
+            pb::ListModulesResponse,
             pb::ListModulesRequest {
                 limit: req.limit,
                 page_token: req.page_token,
@@ -1517,15 +1719,22 @@ impl InventoryApi for GrpcControlPlane {
     }
 
     async fn list_queues(&self) -> Result<Vec<phase11::QueueView>, ApiError> {
-        let r = call!(self, InventoryClient, list_queues, pb::ListQueuesRequest {})?;
+        let r = call!(
+            self,
+            "Inventory",
+            "ListQueues",
+            pb::ListQueuesResponse,
+            pb::ListQueuesRequest {}
+        )?;
         r.queues.into_iter().map(reply).collect()
     }
 
     async fn list_partitions(&self) -> Result<Vec<phase11::PartitionView>, ApiError> {
         let r = call!(
             self,
-            InventoryClient,
-            list_partitions,
+            "Inventory",
+            "ListPartitions",
+            pb::ListPartitionsResponse,
             pb::ListPartitionsRequest {}
         )?;
         r.partitions.into_iter().map(reply).collect()
@@ -1539,14 +1748,21 @@ impl InventoryApi for GrpcControlPlane {
 #[async_trait::async_trait]
 impl ClusterApi for GrpcControlPlane {
     async fn init(&self, r: phase13::InitRequest) -> Result<phase13::ClusterStatus, ApiError> {
-        reply::<phase13::ClusterStatus, _>(call!(self, ClusterClient, init, init_to_proto(r))?)
+        reply::<phase13::ClusterStatus, _>(call!(
+            self,
+            "Cluster",
+            "Init",
+            pb::ClusterStatus,
+            init_to_proto(r)
+        )?)
     }
 
     async fn join(&self, r: phase13::JoinRequest) -> Result<phase13::JoinResponse, ApiError> {
         reply(call!(
             self,
-            ClusterClient,
-            join,
+            "Cluster",
+            "Join",
+            pb::JoinClusterResponse,
             pb::JoinClusterRequest::from(r)
         )?)
     }
@@ -1554,8 +1770,9 @@ impl ClusterApi for GrpcControlPlane {
     async fn status(&self) -> Result<phase13::ClusterStatus, ApiError> {
         reply::<phase13::ClusterStatus, _>(call!(
             self,
-            ClusterClient,
-            status,
+            "Cluster",
+            "Status",
+            pb::ClusterStatus,
             pb::ClusterStatusRequest {}
         )?)
     }
@@ -1566,8 +1783,9 @@ impl ClusterApi for GrpcControlPlane {
     ) -> Result<phase13::NodeTokenResponse, ApiError> {
         Ok(call!(
             self,
-            ClusterClient,
-            create_node_token,
+            "Cluster",
+            "CreateNodeToken",
+            pb::NodeTokenCreated,
             pb::CreateNodeTokenRequest {
                 ttl_secs: r.ttl_secs,
             }
@@ -1578,8 +1796,9 @@ impl ClusterApi for GrpcControlPlane {
     async fn remove(&self, id: u64, force: bool) -> Result<phase13::ClusterStatus, ApiError> {
         reply::<phase13::ClusterStatus, _>(call!(
             self,
-            ClusterClient,
-            remove,
+            "Cluster",
+            "Remove",
+            pb::ClusterStatus,
             pb::RemoveMemberRequest { node_id: id, force }
         )?)
     }
@@ -1587,8 +1806,9 @@ impl ClusterApi for GrpcControlPlane {
     async fn drain(&self, id: u64) -> Result<phase13::ClusterStatus, ApiError> {
         reply::<phase13::ClusterStatus, _>(call!(
             self,
-            ClusterClient,
-            drain,
+            "Cluster",
+            "Drain",
+            pb::ClusterStatus,
             pb::DrainMemberRequest { node_id: id }
         )?)
     }
@@ -1599,8 +1819,9 @@ impl ClusterApi for GrpcControlPlane {
     ) -> Result<phase13::ClusterStatus, ApiError> {
         reply::<phase13::ClusterStatus, _>(call!(
             self,
-            ClusterClient,
-            reassign,
+            "Cluster",
+            "Reassign",
+            pb::ClusterStatus,
             pb::ReassignPartitionRequest::from(r)
         )?)
     }
@@ -1608,8 +1829,9 @@ impl ClusterApi for GrpcControlPlane {
     async fn rebalance(&self) -> Result<phase13::ClusterStatus, ApiError> {
         reply::<phase13::ClusterStatus, _>(call!(
             self,
-            ClusterClient,
-            rebalance,
+            "Cluster",
+            "Rebalance",
+            pb::ClusterStatus,
             pb::RebalanceRequest {}
         )?)
     }
@@ -1617,8 +1839,9 @@ impl ClusterApi for GrpcControlPlane {
     async fn upgrade_status(&self) -> Result<phase13::UpgradeStatus, ApiError> {
         Ok(call!(
             self,
-            ClusterClient,
-            upgrade_status,
+            "Cluster",
+            "UpgradeStatus",
+            pb::UpgradeStatus,
             pb::UpgradeStatusRequest {}
         )?
         .into())
@@ -1627,22 +1850,31 @@ impl ClusterApi for GrpcControlPlane {
     async fn upgrade_finalize(&self) -> Result<phase13::UpgradeStatus, ApiError> {
         Ok(call!(
             self,
-            ClusterClient,
-            upgrade_finalize,
+            "Cluster",
+            "UpgradeFinalize",
+            pb::UpgradeStatus,
             pb::UpgradeFinalizeRequest {}
         )?
         .into())
     }
 
     async fn upgrade_hold(&self) -> Result<phase13::UpgradeStatus, ApiError> {
-        Ok(call!(self, ClusterClient, upgrade_hold, pb::UpgradeHoldRequest {})?.into())
+        Ok(call!(
+            self,
+            "Cluster",
+            "UpgradeHold",
+            pb::UpgradeStatus,
+            pb::UpgradeHoldRequest {}
+        )?
+        .into())
     }
 
     async fn upgrade_release(&self) -> Result<phase13::UpgradeStatus, ApiError> {
         Ok(call!(
             self,
-            ClusterClient,
-            upgrade_release,
+            "Cluster",
+            "UpgradeRelease",
+            pb::UpgradeStatus,
             pb::UpgradeReleaseRequest {}
         )?
         .into())
@@ -1654,8 +1886,9 @@ impl ModuleLifecycleApi for GrpcControlPlane {
     async fn retire_module(&self, sha: String) -> Result<phase13::RetireModuleResponse, ApiError> {
         Ok(call!(
             self,
-            ModuleLifecycleClient,
-            retire_module,
+            "ModuleLifecycle",
+            "RetireModule",
+            pb::RetireModuleResponse,
             pb::RetireModuleRequest { sha256: sha }
         )?
         .into())
@@ -1664,8 +1897,9 @@ impl ModuleLifecycleApi for GrpcControlPlane {
     async fn run_module_gc(&self) -> Result<phase13::GcRunReport, ApiError> {
         Ok(call!(
             self,
-            ModuleLifecycleClient,
-            run_module_gc,
+            "ModuleLifecycle",
+            "RunModuleGc",
+            pb::GcRunReport,
             pb::RunModuleGcRequest {}
         )?
         .into())
@@ -1677,8 +1911,9 @@ impl ModuleLifecycleApi for GrpcControlPlane {
     ) -> Result<phase13::MigrateRunsReport, ApiError> {
         Ok(call!(
             self,
-            ModuleLifecycleClient,
-            migrate_runs,
+            "ModuleLifecycle",
+            "MigrateRuns",
+            pb::MigrateRunsReport,
             pb::MigrateRunsRequest::from(r)
         )?
         .into())
