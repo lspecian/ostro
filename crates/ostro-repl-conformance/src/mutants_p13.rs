@@ -16,8 +16,8 @@
 //! |--------|-----------|-------------------|
 //! | `upgrade::mutant::emit_ungated` | `move_blocked_before_finalize`, `migrate_refused_before_finalize` | `compat::require` lets every feature through: a level-1 cluster's reassign / rebalance / migrate are no longer refused 409, AlterReplicas / RepinRun reach the logs before finalization (upgrade oracle). The upload gate compares `min_level > finalized` itself, so 13-14's `gated_upload_refused_before_finalize` is not mapped |
 //! | `upgrade::mutant::reject_and_continue` | `reject_continue_never_applies_newer_commands` | a newer-format command is rejected `Invalid(Empty)` and apply moves on instead of fail-stopping (`no_reject_continue` over the replayed outcome stream) |
-//! | `member::mutant::skip_quorum_check` | `force_remove_dead_node` | the meta leader counts every member live: the removal that would leave no live quorum is no longer refused |
-//! | `member::mutant::no_leave_joint` | `join_grows_to_five_voters`, `meta_leader_removal_transfers_first` | the joint configuration is never left (5 voters never settle; `joint_left_within`) |
+//! | `member::mutant::skip_quorum_check` | `dead_voter_replaced_by_learner` | the driver counts every voter live, so a dead voter is never replaced by the live learner. (13-09's `force_remove_dead_node` does not catch it: the API refuses the unsafe removal with its own `check_remove` before the driver; in tier B liveness is raft contact, so a removal without a live quorum cannot commit either) |
+//! | `member::mutant::no_leave_joint` | `explicit_joint_left_after_leader_kill` | an explicit joint change survives the leader's death and is never left. (`join_grows_to_five_voters` / `meta_leader_removal_transfers_first` do not catch it: their joint changes use the Auto transition, which raft leaves by itself) |
 //! | `reassign::mutant::raise_min_insync_early` | `rf_raised_on_join`, `promote_running_single_node_to_three` | the Expand from RF 1 with min_insync 2 is refused at apply: RF never rises (13-10, 13-16) |
 //! | `route::mutant::serve_without_lease` | `zombie_leader_never_serves_stale` | the zombie keeps serving reads past its lease: the RYW checker reports a stale read |
 //! | `gc::mutant::single_scan` | `gc_survives_leader_changes` | scan 2 never runs: the round is not postponed across the leader change between the scans |
@@ -49,14 +49,11 @@ pub const MAP: &[MutantMap] = &[
     },
     MutantMap {
         mutant: "member::mutant::skip_quorum_check",
-        scenarios: &["force_remove_dead_node"],
+        scenarios: &["dead_voter_replaced_by_learner"],
     },
     MutantMap {
         mutant: "member::mutant::no_leave_joint",
-        scenarios: &[
-            "join_grows_to_five_voters",
-            "meta_leader_removal_transfers_first",
-        ],
+        scenarios: &["explicit_joint_left_after_leader_kill"],
     },
     MutantMap {
         mutant: "reassign::mutant::raise_min_insync_early",

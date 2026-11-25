@@ -44,6 +44,16 @@ async fn reject_continue_never_applies_newer_commands() {
     run("reject_continue_never_applies_newer_commands").await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn dead_voter_replaced_by_learner() {
+    run("dead_voter_replaced_by_learner").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn explicit_joint_left_after_leader_kill() {
+    run("explicit_joint_left_after_leader_kill").await;
+}
+
 #[cfg(feature = "failpoints")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn start_during_gc_race() {
@@ -55,8 +65,10 @@ fn every_scenario_has_a_test() {
     let mut names: Vec<&str> = integration_p13::all().iter().map(|s| s.name).collect();
     names.sort_unstable();
     let mut want = vec![
+        "dead_voter_replaced_by_learner",
         "drain_node_with_replicas",
         "emulated_rolling_upgrade_under_load",
+        "explicit_joint_left_after_leader_kill",
         "reject_continue_never_applies_newer_commands",
         "remove_replica_holding_voter",
         "ryw_through_handoffs_and_reassignment",

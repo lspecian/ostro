@@ -9,6 +9,8 @@
 //! | `ryw_through_handoffs_and_reassignment` | 4 nodes RF 3: the 13-13 session checker while graceful handoffs, explicit reassignments (incl. leader moves) and rebalance passes run → 0 violations |
 //! | `start_during_gc_race` | (failpoints) a start that passed its `module_retired` check is held (`gc::start_hold`) while its module is retired and deleted by GC; released, its run fails `module_gone` (loud, never silent); the GC oracle flags nothing for runs live at retire time |
 //! | `emulated_rolling_upgrade_under_load` | 3 nodes at level 1 + workload: each node in turn controlled shutdown (handoff) → restart at this build's level; finalized stays 1 until the last node, then 2; then a reassignment, a migrate (repin) and the level-2 upload gate succeed; upgrade oracles (`no_gated_before_finalize`, `no_reject_continue` over the replayed apply outcomes); every acknowledged run completes |
+//! | `dead_voter_replaced_by_learner` | 3 static + 1 joined learner: a non-leader voter dies → the reconciler replaces it with the live caught-up learner (3 voters, the dead one out), membership oracles (the `member::mutant::skip_quorum_check` scenario: the mutant counts every voter live) |
+//! | `explicit_joint_left_after_leader_kill` | 3 static + 1 joined learner: a joint change with an explicit transition (raft never auto-leaves it, as if the leader died before its auto-leave, 13-09's unit setup) and the meta leader killed → the new leader's driver leaves the joint configuration (the `member::mutant::no_leave_joint` scenario) |
 //! | `reject_continue_never_applies_newer_commands` | the apply-outcome streams of every node's partitions (`harness::outcomes`) hold no reject-and-continue; a newer-format command (a known command carrying a field this build does not know, as a newer Ostro writes it) appended to a real log fail-stops the replay (the `upgrade::mutant::reject_and_continue` scenario) |
 //!
 //! Regression scenarios ([`regressions`], run by `tests/regressions_p13.rs`) pin the fixes
@@ -125,6 +127,16 @@ pub fn all() -> Vec<Scenario> {
             "reject_continue_never_applies_newer_commands",
             spec3,
             reject_continue_never_applies_newer_commands,
+        ),
+        scenario(
+            "dead_voter_replaced_by_learner",
+            spec3,
+            dead_voter_replaced_by_learner,
+        ),
+        scenario(
+            "explicit_joint_left_after_leader_kill",
+            spec3,
+            explicit_joint_left_after_leader_kill,
         ),
     ];
     #[cfg(feature = "failpoints")]
@@ -436,6 +448,124 @@ fn remove_replica_holding_voter(c: &mut InProcCluster) -> BoxFuture<'_, Scenario
         println!("remove_replica_holding_voter: {cnt} runs acknowledged, longest gap {gap:?}");
         acked_everywhere(c, &mut acks).await?;
         reassign_oracles(c, &acks).await?;
+        s.oracles(c)
+    })
+}
+
+// ------------------------------------------------------------------------- membership driver
+
+/// 3 static voters + one joined learner, active and caught up; the samples taken.
+async fn three_voters_and_a_learner(
+    c: &mut InProcCluster,
+    s: &mut Samples,
+) -> Result<u64, ScenarioFailure> {
+    use crate::harness::p13::NodeOpts;
+    wait_meta_leader(c).await?;
+    wait_level2(c).await?;
+    s.until(c, "3 voters", |st| {
+        st.voters.len() == 3 && st.voters_outgoing.is_empty()
+    })
+    .await?;
+    let a = c
+        .add_node(NodeOpts::default())
+        .await
+        .map_err(|e| fail("membership", format!("add_node: {e}")))?;
+    s.until(c, "4 members: 3 voters + the active learner", |st| {
+        st.voters.len() == 3
+            && st.learners == [a]
+            && st
+                .members
+                .iter()
+                .any(|m| m.node_id == a && m.state == "active")
+    })
+    .await?;
+    Ok(a)
+}
+
+fn dead_voter_replaced_by_learner(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult> {
+    Box::pin(async move {
+        let mut s = Samples::new();
+        let a = three_voters_and_a_learner(c, &mut s).await?;
+        let leader = wait_meta_leader(c).await?;
+        let st = s
+            .take(c)
+            .await
+            .ok_or_else(|| fail("membership", "no status"))?;
+        let v = *st
+            .voters
+            .iter()
+            .find(|v| **v != leader)
+            .ok_or_else(|| fail("membership", format!("no follower voter: {:?}", st.voters)))?;
+        let t0 = Instant::now(); // clock-exempt: scenario timing
+        c.kill(v).await;
+        s.skip.push(v);
+        let st = s
+            .until(c, "the dead voter replaced by the live learner", |st| {
+                st.voters.len() == 3
+                    && st.voters.contains(&a)
+                    && !st.voters.contains(&v)
+                    && st.voters_outgoing.is_empty()
+            })
+            .await?;
+        println!(
+            "dead_voter_replaced_by_learner: voter {v} killed, learner {a} promoted in {:?}; voters {:?}",
+            t0.elapsed(),
+            sorted(&st.voters)
+        );
+        s.oracles(c)
+    })
+}
+
+fn explicit_joint_left_after_leader_kill(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult> {
+    Box::pin(async move {
+        use ostro_cluster::membership::reconcile::Step;
+        use ostro_cluster::membership::service::step_conf_change;
+        let mut s = Samples::new();
+        let a = three_voters_and_a_learner(c, &mut s).await?;
+        let leader = wait_meta_leader(c).await?;
+        let st = s
+            .take(c)
+            .await
+            .ok_or_else(|| fail("membership", "no status"))?;
+        let d = *st
+            .voters
+            .iter()
+            .find(|v| **v != leader)
+            .ok_or_else(|| fail("membership", format!("no follower voter: {:?}", st.voters)))?;
+        // The joint change the reconciler would make (add the learner, demote `d`), with an
+        // explicit transition: raft never auto-leaves it, as if the leader died between the
+        // joint entry and its auto-leave (raft.rs: "it may never auto_leave if leader steps
+        // down before enter joint is applied"). 13-09's unit test uses the same setup.
+        let mut cc = step_conf_change(&Step::Joint {
+            add_voters: vec![a],
+            remove_voters: Vec::new(),
+            demote: vec![d],
+        })
+        .ok_or_else(|| fail("harness", "no conf change for a joint step"))?;
+        cc.transition = 2; // eraftpb ConfChangeTransition::Explicit
+        let meta = c.handle(leader).expect("leader running").meta();
+        meta.propose_conf_change(cc)
+            .await
+            .map_err(|e| fail("harness", format!("explicit joint change: {e}")))?;
+        if meta.raft_detail().voters_outgoing.is_empty() {
+            return Err(fail(
+                "harness",
+                "the explicit joint change left the joint state at once",
+            ));
+        }
+        let t0 = Instant::now(); // clock-exempt: scenario timing
+        c.kill(leader).await;
+        s.skip.push(leader);
+        let st = s
+            .until(c, "the joint configuration left by the new leader", |st| {
+                st.voters_outgoing.is_empty() && st.voters.contains(&a) && !st.voters.contains(&d)
+            })
+            .await?;
+        println!(
+            "explicit_joint_left_after_leader_kill: meta leader {leader} killed in joint; left {:?} later; voters {:?}",
+            t0.elapsed(),
+            sorted(&st.voters)
+        );
         s.oracles(c)
     })
 }
