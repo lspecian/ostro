@@ -396,14 +396,20 @@ impl ClusterServices {
         let cluster_id = resolved_cluster_id(&source, marker.as_ref()).map_err(boot)?;
         ostro_partition::bind_cluster_id(data_dir, &cluster_id)?;
         if mode == BootMode::Joiner {
-            // D-P13-29b: no initial voters; the seeds (marker) are the meta peers until the
-            // leader adds this node.
+            // D-P13-29b: no initial configuration; the seeds (marker) are the meta peers
+            // until the leader adds this node. 13-09: they are also the `MetaStart` voters
+            // of `MetaHandle::start_joiner` (the known members, outbox / forwarder targets)
+            // and the MetaPeer callers this node accepts before it has a configuration.
             voters.clear();
             for s in marker.iter().flat_map(|m| m.seeds.iter()) {
                 if s.id != node_id && !peers.contains(&s.id) {
                     peers.push(s.id);
                 }
+                if s.id != node_id && !voters.contains(&s.id) {
+                    voters.push(s.id);
+                }
             }
+            voters.sort_unstable();
         }
         info!(cluster_id = %cluster_id, source = ?source, mode = ?mode, voters = ?voters, "cluster identity bound");
 
@@ -564,17 +570,20 @@ impl ClusterServices {
                 ..OutboxConfig::default()
             },
         );
-        let started = MetaHandle::start_with(
-            &meta_dir,
-            MetaStart {
-                node_id,
-                voters: voters.clone(),
-                outbox: Box::new(outbox),
-                forwarder: Some(Arc::new(GrpcForwarder::new(Arc::clone(&transport)))),
-                tick: tuning.tick(),
-            },
-        )
-        .await;
+        let start = MetaStart {
+            node_id,
+            voters: voters.clone(),
+            outbox: Box::new(outbox),
+            forwarder: Some(Arc::new(GrpcForwarder::new(Arc::clone(&transport)))),
+            tick: tuning.tick(),
+        };
+        // 13-09: a joiner's blank meta gets no bootstrap configuration (start_joiner).
+        let started = if mode == BootMode::Joiner {
+            MetaHandle::start_joiner(&meta_dir, start, ostro_meta::handle::MetaOptions::default())
+                .await
+        } else {
+            MetaHandle::start_with(&meta_dir, start).await
+        };
         let meta = match started {
             Ok(m) => m,
             Err(e) => {

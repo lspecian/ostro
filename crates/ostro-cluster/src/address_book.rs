@@ -1,14 +1,25 @@
-//! Node id → cluster / replication address (12-05).
+//! Node id → cluster / replication address (12-05; dynamic since 13-09, D-P13-8/9).
 //!
-//! Seeded from `[[cluster.peers]]` (empty for a single node); `upsert` / `upsert_member`
-//! let 12-10 / Phase 13 add addresses learned from meta `Member` records. Reads are cheap
-//! clones under a read lock; [`crate::transport::tcp::TcpTransport`] re-dials a node whose
-//! address changed.
+//! Seeded from `[[cluster.peers]]` (empty for a single node) and, on a joiner, from the join
+//! marker's seeds. Since 13-09 the book follows the meta `Member` records
+//! ([`AddressBook::sync_members`], [`AddressBook::follow`]): a node's `cluster_addr` /
+//! `repl_addr` in meta replaces its seed address and later changes apply live.
+//!
+//! **Configured peers are pinned** ([`AddressBook::from_peers`]): an id listed in
+//! `[[cluster.peers]]` keeps its configured address even when its Member record names
+//! another one. The configured address is the operator's route from *this* node (a proxy, a
+//! NAT address, the tier-C chaos proxy links); a difference is logged once per id and never
+//! applied. Ids that are not configured (joined nodes, seeds) follow meta.
+//!
+//! Reads are cheap clones under a read lock; [`crate::transport::tcp::TcpTransport`] re-dials
+//! a node whose address changed.
 
-use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, RwLock};
 
-use ostro_meta::{Member, MetaView};
+use ostro_meta::{Member, MetaState, MetaView};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// The addresses of one node.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +48,10 @@ pub type Seed = PeerEntry;
 #[derive(Debug, Default)]
 pub struct AddressBook {
     inner: RwLock<BTreeMap<u64, PeerAddr>>,
+    /// Ids from `[[cluster.peers]]`: their configured address wins over meta.
+    pinned: RwLock<BTreeSet<u64>>,
+    /// Pinned ids whose meta address differs (logged once each).
+    drift_logged: RwLock<BTreeSet<u64>>,
 }
 
 impl AddressBook {
@@ -45,21 +60,121 @@ impl AddressBook {
         Self::default()
     }
 
-    /// A book holding the static peers.
+    /// A book holding the static peers (pinned: their configured address wins over meta).
     pub fn from_peers(peers: impl IntoIterator<Item = PeerEntry>) -> Self {
         let book = Self::new();
-        for p in peers {
-            book.upsert(p.id, p.addr, p.repl_addr);
-        }
+        book.add_pinned(peers);
         book
     }
 
-    /// Phase 13 (13-01 constructor stub; 13-09 fills it from the meta `Member` records): a
-    /// book seeded from `seeds` that will follow `view`. Until 13-09 it delegates to the
-    /// Phase 12 static book ([`AddressBook::from_peers`]) and ignores `view`.
+    /// Add configured peers (pinned) to this book.
+    pub fn add_pinned(&self, peers: impl IntoIterator<Item = PeerEntry>) {
+        for p in peers {
+            if self.upsert(p.id, p.addr, p.repl_addr) || self.get(p.id).is_some() {
+                self.pinned
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(p.id);
+            }
+        }
+    }
+
+    /// Add seeds (not pinned: a Member record replaces them).
+    pub fn add_seeds(&self, seeds: impl IntoIterator<Item = Seed>) {
+        for s in seeds {
+            if !self.is_pinned(s.id) {
+                self.upsert(s.id, s.addr, s.repl_addr);
+            }
+        }
+    }
+
+    /// A book seeded from `seeds` (not pinned) that takes every Member address already in
+    /// `view`. Call [`AddressBook::follow`] to keep it current.
     pub fn from_meta(view: MetaView, seeds: Vec<Seed>) -> Self {
-        let _ = view;
-        Self::from_peers(seeds)
+        let book = Self::new();
+        book.add_seeds(seeds);
+        view.read(|s| book.sync_members(s));
+        book
+    }
+
+    /// Whether `id` is a configured (pinned) peer.
+    pub fn is_pinned(&self, id: u64) -> bool {
+        self.pinned
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&id)
+    }
+
+    /// Apply every Member record of `state` (except `skip`, normally this node): unpinned
+    /// ids take the meta address; a pinned id whose meta address differs is logged once.
+    /// Returns the ids whose address changed.
+    pub fn sync_members_except(&self, state: &MetaState, skip: Option<u64>) -> Vec<u64> {
+        let mut changed = Vec::new();
+        for m in state.members() {
+            let m = &m.value;
+            if Some(m.node_id) == skip {
+                continue;
+            }
+            let Some(addr) = m.cluster_addr.as_deref().filter(|a| !a.is_empty()) else {
+                continue;
+            };
+            if self.is_pinned(m.node_id) {
+                let cur = self.get(m.node_id);
+                let differs = cur.as_ref().is_some_and(|c| {
+                    c.cluster_addr != addr || c.repl_addr.as_deref() != m.repl_addr.as_deref()
+                });
+                if differs {
+                    let first = self
+                        .drift_logged
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(m.node_id);
+                    if first {
+                        tracing::warn!(
+                            node = m.node_id,
+                            configured = %cur.map(|c| c.cluster_addr).unwrap_or_default(),
+                            meta = %addr,
+                            "[[cluster.peers]] address differs from the node's Member record; \
+                             keeping the configured address (logged once)"
+                        );
+                    }
+                }
+                continue;
+            }
+            if self.upsert_member(m) {
+                changed.push(m.node_id);
+            }
+        }
+        changed
+    }
+
+    /// [`AddressBook::sync_members_except`] without a skipped id.
+    pub fn sync_members(&self, state: &MetaState) -> Vec<u64> {
+        self.sync_members_except(state, None)
+    }
+
+    /// Follow `view`: re-sync on every applied meta change until `stop` (`skip` = this
+    /// node, whose own record never feeds its book).
+    pub fn follow(
+        self: &Arc<Self>,
+        view: MetaView,
+        skip: Option<u64>,
+        stop: CancellationToken,
+    ) -> JoinHandle<()> {
+        let book = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut applied = view.subscribe();
+            loop {
+                let changed = view.read(|s| book.sync_members_except(s, skip));
+                if !changed.is_empty() {
+                    tracing::info!(nodes = ?changed, "address book updated from meta");
+                }
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    r = applied.changed() => if r.is_err() { return },
+                }
+            }
+        })
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<u64, PeerAddr>> {

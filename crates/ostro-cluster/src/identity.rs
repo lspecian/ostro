@@ -141,6 +141,32 @@ pub enum BootError {
         /// What failed.
         reason: String,
     },
+    /// 13-09 (D-P13-29b): a join marker exists but the joined certificate set is incomplete.
+    #[error(
+        "{data_dir} holds a join marker but its joined TLS files are incomplete; re-run \
+         `ostro cluster join` (it resumes the same node id)"
+    )]
+    JoinIncomplete {
+        /// The data dir.
+        data_dir: String,
+    },
+    /// 13-09: the join marker could not be read or is malformed.
+    #[error("join marker {path}: {reason}; re-run `ostro cluster join`")]
+    BadJoinMarker {
+        /// The marker path.
+        path: String,
+        /// What failed.
+        reason: String,
+    },
+    /// 13-09 (D-P13-8/29a): this node's id carries the Removed tombstone.
+    #[error(
+        "node {node_id} was removed from the cluster (tombstone); node ids are never reused: \
+         wipe the data dir and join again as a new node"
+    )]
+    NodeRemoved {
+        /// This node's id.
+        node_id: u64,
+    },
 }
 
 /// Resolve the cluster id: configured → node.toml → stored CA → persisted meta → fresh
@@ -367,6 +393,125 @@ pub fn probe_meta(meta_dir: &Path) -> Result<MetaProbe, BootError> {
     }
     if probe.cluster_id.is_none() && commit > snapshot_index {
         probe.cluster_id = first_init_cluster(meta_dir, snapshot_index, commit).map_err(io_err)?;
+    }
+    Ok(probe)
+}
+
+/// What the persisted meta says about dynamic membership (13-09, read without opening the
+/// store): whether any `Member` record carries a MemberState (ext 97), and which ids carry
+/// the Removed tombstone (the latest committed record of each id wins).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MembersProbe {
+    /// Some Member record carries a MemberState.
+    pub dynamic: bool,
+    /// Ids whose latest record is Removed.
+    pub removed: std::collections::BTreeSet<u64>,
+    /// Every committed `InitCluster` entry above the snapshot: `(index, node_id,
+    /// cluster_id)` (crash tests check that no joiner ever proposes one).
+    pub init_clusters: Vec<(u64, u64, String)>,
+}
+
+/// Probe `meta_dir` read-only for Member records (snapshot state, then the committed log
+/// entries above it). A blank or unreadable meta probes as empty.
+pub fn probe_members(meta_dir: &Path) -> Result<MembersProbe, BootError> {
+    use ostro_meta::ext::{MEMBER_REMOVED, get_member_state};
+    use ostro_meta::{Member, MetaRecord};
+    let bad = |reason: String| BootError::MetaRead {
+        dir: meta_dir.display().to_string(),
+        reason,
+    };
+    let io_err = |e: io::Error| bad(e.to_string());
+    let mut latest: std::collections::BTreeMap<u64, Member> = std::collections::BTreeMap::new();
+    let mut init_clusters = Vec::new();
+    let mut snapshot_index = 0;
+    let mut commit = 0;
+    if let Some(b) = read_opt(&meta_dir.join("state")).map_err(io_err)?
+        && b.get(..4) == Some(STATE_MAGIC.as_slice())
+        && let Some(hs_len) = le_u32(&b, 4)
+        && let Some(hs) = b.get(8..8 + hs_len)
+        && let Ok(hs) = HardState::decode(hs)
+    {
+        commit = hs.commit;
+    }
+    if let Some(b) = read_opt(&meta_dir.join("snapshot")).map_err(io_err)?
+        && b.get(..4) == Some(SNAPSHOT_MAGIC.as_slice())
+        && let Some(body) = snapshot_body(&b)
+        && let Ok(snap) = Snapshot::decode(body)
+    {
+        snapshot_index = snap.metadata.as_ref().map_or(0, |m| m.index);
+        if snapshot_index > 0
+            && !snap.data.is_empty()
+            && let Ok(state) = decode_snapshot(&snap.data)
+        {
+            for m in state.members() {
+                latest.insert(m.value.node_id, m.value.clone());
+            }
+        }
+    }
+    let mut segs: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    match fs::read_dir(meta_dir.join("log")) {
+        Ok(rd) => {
+            for d in rd {
+                let path = d.map_err(io_err)?.path();
+                if let Some(first) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| n.strip_suffix(".seg"))
+                    .and_then(|n| n.parse::<u64>().ok())
+                {
+                    segs.push((first, path));
+                }
+            }
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(e)),
+    }
+    segs.sort();
+    for (_, path) in segs {
+        let b = fs::read(&path).map_err(io_err)?;
+        let mut at = 0;
+        while let Some(len) = le_u32(&b, at) {
+            let Some(body) = b.get(at + 8..at + 8 + len) else {
+                break;
+            };
+            at += 8 + len;
+            let Ok(e) = Entry::decode(body) else {
+                break;
+            };
+            if e.index <= snapshot_index
+                || e.index > commit
+                || e.entry_type != 0
+                || e.data.is_empty()
+            {
+                continue;
+            }
+            match decode_command(&e.data) {
+                Ok(MetaCommand::Put {
+                    record: MetaRecord::Member(m),
+                    ..
+                }) => {
+                    latest.insert(m.node_id, m);
+                }
+                Ok(MetaCommand::InitCluster {
+                    node_id,
+                    cluster_id,
+                    ..
+                }) => init_clusters.push((e.index, node_id, cluster_id)),
+                _ => {}
+            }
+        }
+    }
+    let mut probe = MembersProbe {
+        init_clusters,
+        ..MembersProbe::default()
+    };
+    for (id, m) in &latest {
+        if let Ok(Some(st)) = get_member_state(&m.ext) {
+            probe.dynamic = true;
+            if st.state == MEMBER_REMOVED {
+                probe.removed.insert(*id);
+            }
+        }
     }
     Ok(probe)
 }
