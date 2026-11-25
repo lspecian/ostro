@@ -50,6 +50,13 @@
 //! `ostro server -c <its config>`. `upgrade(node, Some(k))` stops the process gracefully
 //! (SIGTERM, then SIGKILL after [`STOP_T`]) and respawns it with `OSTRO_TEST_LEVEL_MAX=k`
 //! (`None` removes the variable).
+//!
+//! **13-19 (tier-C Phase 13 tests).** [`ProcOptions::level_max`] starts every node of a
+//! static (Phase 12, `[[cluster.peers]]` through the proxy) cluster at an emulated level, so
+//! a rolling upgrade can run with chaos-proxy faults on every link (joined nodes dial their
+//! peers directly: 13-18 handover). [`ProcCluster::stop_gracefully`] is the SIGTERM
+//! (controlled shutdown) stop on its own; [`ProcOptions::bin`] / [`ProcCluster::set_bin`]
+//! start nodes from another `ostro` binary (the previous release in `upgrade_from_prev`).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -205,6 +212,14 @@ pub struct ProcOptions {
     /// `[replication]` timings replacing the tier-C test timings (12-17: the failover
     /// measurement runs the shipped defaults); `rf` / `min_insync` still come from the spec.
     pub replication: Option<ReplicationSection>,
+    /// Phase 13 (13-19): `OSTRO_TEST_LEVEL_MAX` of every node of a multi-node spec at its
+    /// first start (a static cluster at an emulated level; `upgrade(n, None)` lifts it per
+    /// node). The single-node profile takes its level from `start_single_with`.
+    pub level_max: Option<u32>,
+    /// Phase 13 (13-19): the `ostro` binary every node starts with instead of the failpoint
+    /// build (`upgrade_from_prev`: the previous release); [`ProcCluster::set_bin`] changes
+    /// it per node for the next (re)start.
+    pub bin: Option<PathBuf>,
 }
 
 /// Outcome of [`ProcCluster::kill9`].
@@ -241,6 +256,9 @@ struct ProcNode {
     /// Phase 13: the arguments of the next spawn instead of `server -c <config>` (the
     /// `cluster join` command line of a joining node; taken by that spawn).
     next_args: Option<Vec<String>>,
+    /// Phase 13 (13-19): the binary of every (re)start instead of the cluster's (`None` =
+    /// the failpoint build).
+    bin: Option<PathBuf>,
 }
 
 /// The tier-C cluster.
@@ -420,6 +438,8 @@ impl ProcCluster {
             )));
         }
         let bin = ensure_failpoint_bin()?;
+        let node_bin = opts.bin.clone();
+        let static_level = opts.level_max;
         let n = spec.nodes as u64;
         let (r, proxy) = allocate(n).await?;
         let root = test_root()?;
@@ -478,8 +498,12 @@ impl ProcCluster {
                     failpoints,
                     child: None,
                     api: SocketAddr::new(IpAddr::V4(ip), 0),
-                    level_max: single.flatten(),
+                    level_max: match single {
+                        Some(l) => l,
+                        None => static_level,
+                    },
                     next_args: None,
+                    bin: node_bin.clone(),
                 },
             );
         }
@@ -552,8 +576,9 @@ impl ProcCluster {
     /// Spawn node `i`'s process; the receiver yields the API address of its ready line.
     fn spawn(&mut self, i: u64) -> Result<mpsc::Receiver<SocketAddr>, HarnessError> {
         let env = self.env.clone();
-        let bin = self.bin.clone();
+        let default_bin = self.bin.clone();
         let node = self.nodes.get_mut(&i).expect("node");
+        let bin = node.bin.clone().unwrap_or(default_bin);
         if node.child.is_some() {
             return Err(start_err(format!("node {i} is already running")));
         }
@@ -845,13 +870,28 @@ impl ProcCluster {
             .ok_or_else(|| HarnessError::Other("no running node to send the request to".into()))
     }
 
-    /// SIGTERM node `i` and wait up to [`STOP_T`] for it to exit (SIGKILL after that).
-    async fn stop_gracefully(&mut self, i: u64) -> Result<(), HarnessError> {
+    /// The binary node `i` (re)starts with (`None` = the failpoint build); effective at its
+    /// next (re)start (13-19 `upgrade_from_prev`).
+    pub fn set_bin(&mut self, i: u64, bin: Option<PathBuf>) {
+        self.nodes.get_mut(&i).expect("node").bin = bin;
+    }
+
+    /// Set node `i`'s emulated level (`OSTRO_TEST_LEVEL_MAX`; `None` = unset) without
+    /// restarting it; effective at its next (re)start.
+    pub fn set_level_max(&mut self, i: u64, level_max: Option<u32>) {
+        self.nodes.get_mut(&i).expect("node").level_max = level_max;
+    }
+
+    /// SIGTERM node `i` and wait up to [`STOP_T`] for it to exit (SIGKILL after that): the
+    /// controlled shutdown path (13-11 `before_shutdown`). Its data dir is kept; `restart`
+    /// starts it again. Returns whether it exited on its own within [`STOP_T`] (`false` =
+    /// SIGKILL fallback, or the node was not running).
+    pub async fn stop_gracefully(&mut self, i: u64) -> Result<bool, HarnessError> {
         let Some(mut child) = self.nodes.get_mut(&i).expect("node").child.take() else {
-            return Ok(());
+            return Ok(false);
         };
         if let Ok(Some(_)) = child.try_wait() {
-            return Ok(());
+            return Ok(false);
         }
         let pid = libc::pid_t::try_from(child.id())
             .map_err(|e| HarnessError::Other(format!("pid: {e}")))?;
@@ -864,14 +904,14 @@ impl ProcCluster {
         let deadline = Instant::now() + STOP_T;
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(_)) => return Ok(true),
                 Ok(None) if Instant::now() < deadline => {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 _ => {
                     tracing::warn!(node = i, "graceful stop timed out; SIGKILL");
                     kill_child(child);
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -1176,6 +1216,7 @@ impl P13Harness for ProcCluster {
                 api: api_addr,
                 level_max: opts.level_max,
                 next_args: Some(args),
+                bin: None,
             },
         );
         let started = async {

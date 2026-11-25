@@ -817,13 +817,25 @@ fn tag(prefix: &str) -> String {
 }
 
 pub(super) fn load_cfg(c: &InProcCluster, tagp: &str, ops_total: usize, tokens: bool) -> LoadCfg {
+    load_cfg_with(tagp, ops_total, tokens, c.spec().seed, Duration::ZERO)
+}
+
+/// [`load_cfg`] without a tier-B cluster (13-19: the tier-C RYW test), with a think time
+/// between a session's operations.
+pub(super) fn load_cfg_with(
+    tagp: &str,
+    ops_total: usize,
+    tokens: bool,
+    seed: u64,
+    think: Duration,
+) -> LoadCfg {
     LoadCfg {
         sessions: SESSIONS,
         ops_per_session: ops_total.div_ceil(SESSIONS),
         tokens,
         tag: tag(tagp),
-        seed: c.spec().seed,
-        think: Duration::ZERO,
+        seed,
+        think,
     }
 }
 
@@ -1683,4 +1695,131 @@ fn strict_reads_mode(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult> {
         no_unexpected(&rep)?;
         verdict("strict_reads_mode", &checker, &mut rep)
     })
+}
+
+// ---------------------------------------------------------------------------------
+// Tier C (13-19)
+// ---------------------------------------------------------------------------------
+
+/// The session workload and checker for tier-C clusters (13-19 `tests/process_ryw.rs`):
+/// the same `run_load` / `RywChecker` / verdict as the tier-B scenarios, over a
+/// [`crate::harness::process::ProcCluster`]'s REST clients.
+pub mod tier_c {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use tokio::task::JoinHandle;
+
+    use super::{
+        Lb, LoadReport, call, load_cfg_with, no_unexpected, run_load, verdict as verdict_b,
+    };
+    use crate::harness::ClusterHarness;
+    use crate::harness::process::ProcCluster;
+    use crate::oracle::p13_ryw::RywChecker;
+    use crate::scenarios::ScenarioResult;
+    use crate::scenarios::process::tools::{fail, live, poll_async};
+
+    /// Wait until `smoke` and `signals` are active on every live node.
+    pub async fn wait_visible(c: &ProcCluster) -> ScenarioResult {
+        for n in live(c) {
+            let api = c.client(n);
+            let seen = poll_async(Duration::from_secs(60), || {
+                let api = api.clone();
+                async move {
+                    let r = call(
+                        &api,
+                        reqwest::Method::GET,
+                        "/v1/workflows",
+                        None,
+                        None,
+                        Duration::from_secs(10),
+                    )
+                    .await?;
+                    let list = r.body.get("workflows").cloned().unwrap_or(r.body);
+                    let active = |w: &str| {
+                        list.as_array().is_some_and(|a| {
+                            a.iter()
+                                .any(|x| x["name"] == w && x["active_version"].as_u64().is_some())
+                        })
+                    };
+                    (r.st == 200 && active("smoke") && active("signals")).then_some(())
+                }
+            })
+            .await;
+            if seen.is_none() {
+                return Err(fail(
+                    "availability",
+                    format!("node {n}: workflows not visible"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A running session workload.
+    pub struct Run {
+        lb: Lb,
+        checker: RywChecker,
+        task: JoinHandle<LoadReport>,
+    }
+
+    /// What the workload measured, with its checker.
+    pub struct Report {
+        rep: LoadReport,
+        checker: RywChecker,
+    }
+
+    impl Run {
+        /// Start `ops` operations over six sessions against every node of `c` (each
+        /// session pauses `think` between operations).
+        pub fn start(c: &ProcCluster, tag: &str, ops: usize, think: Duration) -> Self {
+            let checker = RywChecker::new();
+            let lb: Lb = Arc::new(Mutex::new(c.node_ids()));
+            let clients = c.node_ids().into_iter().map(|n| (n, c.client(n))).collect();
+            let cfg = load_cfg_with(tag, ops, false, c.spec().seed, think);
+            let task = tokio::spawn(run_load(clients, Arc::clone(&lb), cfg, checker.clone()));
+            Self { lb, checker, task }
+        }
+
+        /// Stop sending to `node`.
+        pub fn lb_remove(&self, node: u64) {
+            self.lb
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|n| *n != node);
+        }
+
+        /// Send to `node` again.
+        pub fn lb_add(&self, node: u64) {
+            let mut lb = self.lb.lock().unwrap_or_else(|e| e.into_inner());
+            if !lb.contains(&node) {
+                lb.push(node);
+            }
+        }
+
+        /// Whether every session finished its operations.
+        pub fn is_finished(&self) -> bool {
+            self.task.is_finished()
+        }
+
+        /// Wait for the workload.
+        pub async fn join(self) -> Report {
+            let rep = self.task.await.expect("harness: session workload task");
+            Report {
+                rep,
+                checker: self.checker,
+            }
+        }
+    }
+
+    /// The workload summary line.
+    pub fn summary(r: &mut Report) -> String {
+        r.rep.summary()
+    }
+
+    /// No unexpected answer, then 0 RYW violations over a non-empty measurement.
+    pub fn verdict(name: &str, r: &mut Report) -> ScenarioResult {
+        no_unexpected(&r.rep)?;
+        verdict_b(name, &r.checker, &mut r.rep)
+    }
 }
