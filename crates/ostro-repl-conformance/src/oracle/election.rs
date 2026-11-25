@@ -13,6 +13,14 @@
 //! - (c) any `SetPartitionLeader` after cluster bootstrap (the first bootstrap placement or
 //!   `ElectLeader` in the log). An RF=1 log that never bootstraps a replicated cluster keeps
 //!   using `SetPartitionLeader` and is not flagged.
+//!
+//! **Compacted meta logs (13-18, held for approval).** A log that continues from a snapshot
+//! taken after the cluster bootstrapped no longer holds the bootstrap placement. The replay
+//! then seeds "placed" with every partition the snapshot holds at epoch >= 1 and
+//! "bootstrapped" when one of them has more than one replica (a replicated bootstrap; an
+//! RF=1 `SetPartitionLeader` log keeps one replica and stays unflagged), so a later
+//! `SetPartitionLeader` (c) or a second placement (b) is flagged as it would be on the full
+//! log.
 
 use std::collections::BTreeSet;
 
@@ -34,9 +42,15 @@ pub fn isr_only(meta_log: &[MetaLogEntry]) -> Report {
 /// every violation (module docs).
 pub fn isr_only_from(initial: MetaState, meta_log: &[MetaLogEntry]) -> Report {
     let mut report = Report::new("election");
+    let mut placed: BTreeSet<u16> = initial
+        .partitions()
+        .filter(|a| a.value.epoch >= 1)
+        .map(|a| a.value.partition)
+        .collect();
+    let mut bootstrapped = initial
+        .partitions()
+        .any(|a| a.value.epoch >= 1 && a.value.replicas.len() > 1);
     let mut state = initial;
-    let mut placed: BTreeSet<u16> = BTreeSet::new();
-    let mut bootstrapped = false;
     for e in meta_log {
         let at = format!("meta index {}", e.index);
         match &e.command {

@@ -771,7 +771,8 @@ pub(crate) mod support {
         let dump = meta_dump(c);
         for v in &views {
             for p in 0..c.spec().partitions {
-                la_rule::check(v, PartitionId(p), &dump.entries).into_result()?;
+                la_rule::check_from(v, PartitionId(p), &dump.snapshot_state, &dump.entries)
+                    .into_result()?;
             }
         }
         election::isr_only_from(dump.snapshot_state.clone(), &dump.entries).into_result()

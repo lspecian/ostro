@@ -322,23 +322,15 @@ pub(super) async fn reassign_oracles(c: &InProcCluster, acks: &[Ack]) -> Scenari
     acked_on_disk_with(&views, acks, c.spec().min_insync, in_state).into_result()?;
     let leader = wait_meta_leader(c).await?;
     let dump = read_dump(c, leader);
-    // A snapshot that still has every partition unplaced (the bootstrap snapshot) leaves
-    // every election in the log; a compaction past elections does not (13-09 note).
-    let elections_in_log = dump.snapshot_state.partitions().all(|p| p.value.epoch == 0);
-    if elections_in_log {
-        for v in &views {
-            for p in 0..c.spec().partitions {
-                la_rule::check(v, PartitionId(p), &dump.entries).into_result()?;
-            }
+    // 13-18: the audits continue from the snapshot state when the log was compacted
+    // (13-09 note): `la_rule::check_from`, `election::isr_only_from`.
+    for v in &views {
+        for p in 0..c.spec().partitions {
+            la_rule::check_from(v, PartitionId(p), &dump.snapshot_state, &dump.entries)
+                .into_result()?;
         }
-        election::isr_only_from(dump.snapshot_state.clone(), &dump.entries).into_result()?;
-    } else {
-        println!(
-            "meta log compacted past elections at {} on node {leader}: LA-rule / election audits skipped (13-09 note)",
-            dump.snapshot_index
-        );
     }
-    Ok(())
+    election::isr_only_from(dump.snapshot_state.clone(), &dump.entries).into_result()
 }
 
 /// Acknowledged runs on every led partition (feeds the on-disk oracle).

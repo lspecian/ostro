@@ -6,10 +6,19 @@
 //! gives epoch 0, accepted `SetPartitionLeader` / `ElectLeader` give later epochs; an
 //! election to leader 0, i.e. offline, names nobody). A log that starts above offset 0 may
 //! begin mid-epoch; its first epoch is checked only when it does start with an announcement.
+//!
+//! **Compacted meta logs (13-18, held for approval).** After a learner joins, the meta leader
+//! compacts its log into a snapshot (13-05), so the `ElectLeader` entries of early epochs
+//! exist only in the snapshot state, which keeps each partition's *current* epoch and leader.
+//! [`check_from`] / [`check_scan_from`] take that snapshot state: its partition record gives
+//! the leader of the snapshot's epoch `S` (checked strictly), epochs `< S` that are not in
+//! the remaining log were compacted and cannot be measured (skipped and counted, like the
+//! mid-epoch rule), and every epoch `> S` must be in the log (strict, as before). An empty
+//! snapshot state is the old rule exactly ([`check`], [`check_scan`]).
 
 use std::collections::BTreeMap;
 
-use ostro_meta::{MetaCommand, MetaRecord, MetaResult};
+use ostro_meta::{MetaCommand, MetaRecord, MetaResult, MetaState};
 use ostro_types::command::decode_command;
 use ostro_types::{Cmd, PartitionId};
 
@@ -59,10 +68,28 @@ pub fn meta_leaders(p: PartitionId, meta_log: &[MetaLogEntry]) -> BTreeMap<u32, 
     out
 }
 
+/// The epochs of partition `p` the meta log continues from: `(snapshot epoch, its leader)`
+/// from the snapshot state's partition record (`None`: no record, nothing compacted).
+pub fn snapshot_leader(p: PartitionId, snapshot: &MetaState) -> Option<(u32, u64)> {
+    snapshot
+        .partition(p.0)
+        .map(|a| (a.value.epoch, a.value.leader))
+}
+
 /// Scan `view`'s partition `p` and check the LA rule against `meta_log`.
 pub fn check(view: &DataDirView, p: PartitionId, meta_log: &[MetaLogEntry]) -> Report {
+    check_from(view, p, &MetaState::default(), meta_log)
+}
+
+/// [`check`] for a meta log that continues from `snapshot` (module docs).
+pub fn check_from(
+    view: &DataDirView,
+    p: PartitionId,
+    snapshot: &MetaState,
+    meta_log: &[MetaLogEntry],
+) -> Report {
     match scan_partition(view, p) {
-        Ok(scan) => check_scan(&scan, meta_log),
+        Ok(scan) => check_scan_from(&scan, snapshot, meta_log),
         Err(e) => {
             let mut r = Report::new("la_rule");
             r.violation(format!(
@@ -76,9 +103,23 @@ pub fn check(view: &DataDirView, p: PartitionId, meta_log: &[MetaLogEntry]) -> R
 
 /// [`check`] over an existing scan.
 pub fn check_scan(scan: &LogScan, meta_log: &[MetaLogEntry]) -> Report {
+    check_scan_from(scan, &MetaState::default(), meta_log)
+}
+
+/// [`check_scan`] for a meta log that continues from `snapshot` (module docs).
+pub fn check_scan_from(scan: &LogScan, snapshot: &MetaState, meta_log: &[MetaLogEntry]) -> Report {
     let mut report = Report::new("la_rule");
     let p = scan.partition;
-    let leaders = meta_leaders(p, meta_log);
+    let mut leaders = meta_leaders(p, meta_log);
+    // The snapshot's own epoch is measured against its record; earlier epochs absent from
+    // the log were compacted away.
+    let compacted_below = match snapshot_leader(p, snapshot) {
+        Some((e, leader)) => {
+            leaders.entry(e).or_insert(leader);
+            Some(e)
+        }
+        None => None,
+    };
     let mut last_epoch = None;
     for r in &scan.records {
         if last_epoch == Some(r.epoch) {
@@ -117,6 +158,7 @@ pub fn check_scan(scan: &LogScan, meta_log: &[MetaLogEntry]) -> Report {
             report.violation(format!("{at}: LeaderAnnounced carries epoch {}", la.epoch));
         }
         match leaders.get(&e) {
+            None if compacted_below.is_some_and(|s| e < s) => {}
             Some(&leader) if leader == la.node_id => {}
             Some(&leader) => report.violation(format!(
                 "{at}: LeaderAnnounced by node {} but meta's leader for epoch {e} is node {leader}",
