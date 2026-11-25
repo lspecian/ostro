@@ -170,6 +170,28 @@ pub enum MetaError {
     NotLeader { hint: Option<u64> },
 }
 
+impl MetaError {
+    /// Whether the call failed only because no metadata leader was reachable: a
+    /// leader-only call on a follower, a timeout, or a proposal that gave up while the
+    /// leader was unknown / unreachable, moved, refused it during a transfer or lost
+    /// leadership before applying it. Callers whose command is idempotent (InitCluster,
+    /// a CAS-guarded upsert) may retry these (p13-bugs2: boot proposals).
+    pub fn is_leader_unavailable(&self) -> bool {
+        match self {
+            MetaError::NotLeader { .. } | MetaError::Timeout => true,
+            MetaError::Propose(m) => {
+                m.starts_with(NOT_LEADER_PREFIX)
+                    || *m == ProposeError::Dropped.to_string()
+                    || *m == ProposeError::OutcomeUnknown.to_string()
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The start of `ProposeError::NotLeader`'s message (with or without a leader hint).
+const NOT_LEADER_PREFIX: &str = "not the raft leader";
+
 fn decode_err(e: DecodeError) -> MetaError {
     match e {
         DecodeError::NewerFormat { found, supported } => {
@@ -860,6 +882,35 @@ fn install_bootstrap(dir: &Path, node_id: u64, index: u64, data: Vec<u8>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// p13-bugs2: the boot retry classifies exactly the "no reachable leader" failures,
+    /// pinned against the driver's messages.
+    #[test]
+    fn leader_unavailable_classification() {
+        let propose = |e: ProposeError| MetaError::Propose(e.to_string());
+        for e in [
+            propose(ProposeError::NotLeader { leader: None }),
+            propose(ProposeError::NotLeader { leader: Some(4) }),
+            propose(ProposeError::Dropped),
+            propose(ProposeError::OutcomeUnknown),
+            MetaError::NotLeader { hint: None },
+            MetaError::Timeout,
+        ] {
+            assert!(e.is_leader_unavailable(), "{e}");
+        }
+        for e in [
+            propose(ProposeError::Stopped),
+            propose(ProposeError::Fatal("apply".into())),
+            MetaError::Rejected("x".into()),
+            MetaError::Start("x".into()),
+            MetaError::NewerFormat {
+                found: 9,
+                supported: 1,
+            },
+        ] {
+            assert!(!e.is_leader_unavailable(), "{e}");
+        }
+    }
 
     #[tokio::test]
     async fn raft_status_reports_the_lone_leader() {

@@ -27,11 +27,14 @@
 //!    Phase 7 Execute service once it attaches), mTLS on `[cluster] listen`, or the
 //!    in-memory incoming of the injected transport (`ServerOptions::cluster_transport`).
 //! 7. Meta: `MetaHandle::start_with(voters, PeerOutbox, GrpcForwarder, [replication] ticks)`,
-//!    `RaftSlot::set`, `wait_ready`, then [`p13::voter_check`] `PostReady` (stub: the live
+//!    `RaftSlot::set`, the TCP address book seeded from the replayed metadata and following
+//!    it (p13-bugs2: a joined leader must be reachable before the boot proposals),
+//!    `wait_ready`, then [`p13::voter_check`] `PostReady` (stub: the live
 //!    voters must equal the configured set). The MetaPeer encode/decode limit is
 //!    `[cluster] meta_max_message_bytes` (13-05 consumes it).
 //! 8. `InitCluster` with the bound id (idempotent), `ClusterInfo.cluster_id` must equal it
-//!    (W2); the own `Member` record is upserted.
+//!    (W2); the own `Member` record is upserted. Both retry while no metadata leader is
+//!    reachable, bounded by `[cluster] join_timeout` (`boot_propose`, p13-bugs2).
 //! 9. The controller (bootstrap placement of epoch-0 partitions, failover) runs on every
 //!    node and acts only as meta leader; the meta-driven [`MetaAssignments`] source and the
 //!    self-demotion watchdog start.
@@ -204,6 +207,45 @@ async fn joined_token_key(
         });
     }
     Ok(key)
+}
+
+/// First pause of [`boot_propose`] between attempts (doubles up to [`BOOT_RETRY_MAX`]).
+const BOOT_RETRY_MIN: Duration = Duration::from_millis(100);
+const BOOT_RETRY_MAX: Duration = Duration::from_secs(2);
+
+/// p13-bugs2: a boot proposal (InitCluster, the own Member record; both idempotent) retried
+/// with backoff while no metadata leader is reachable ([`MetaError::is_leader_unavailable`]:
+/// a leadership move right after `wait_ready`, e.g. a controlled shutdown's meta transfer
+/// racing this node's respawn), bounded by `bound` (`[cluster] join_timeout`). Every other
+/// error returns at once; after `bound` the last leader error is returned.
+///
+/// [`MetaError::is_leader_unavailable`]: ostro_meta::MetaError::is_leader_unavailable
+async fn boot_propose<T, F, Fut>(what: &str, bound: Duration, mut f: F) -> Result<T, ServerError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ServerError>>,
+{
+    let mut last = None;
+    let attempts = async {
+        let mut backoff = BOOT_RETRY_MIN;
+        loop {
+            match f().await {
+                Err(ServerError::Meta(e)) if e.is_leader_unavailable() => {
+                    warn!(what, error = %e, ?backoff, "boot metadata proposal: no reachable metadata leader; retrying");
+                    last = Some(e);
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(BOOT_RETRY_MAX);
+                }
+                other => return other,
+            }
+        }
+    };
+    match tokio::time::timeout(bound, attempts).await {
+        Ok(r) => r,
+        Err(_) => Err(ServerError::Meta(
+            last.unwrap_or(ostro_meta::MetaError::Timeout),
+        )),
+    }
 }
 
 /// A late-bound gRPC fallback of the cluster listener (Phase 13 services, attached after the
@@ -616,6 +658,24 @@ impl ClusterServices {
             }
         };
         slot.set(meta.raft().clone());
+        // p13-bugs2: the TCP address book follows the replayed metadata from here on, not
+        // only once `p13::membership` starts after boot. A restarted static node's book
+        // otherwise holds just `[[cluster.peers]]` (+ marker seeds): with a joined node as
+        // metadata leader its responses and the forwarded boot proposals (InitCluster, the
+        // own Member record) had no address for the leader, and boot failed after the
+        // proposal deadline ("not the raft leader (no leader known)").
+        let tasks_stop = CancellationToken::new();
+        let mut tasks = Vec::new();
+        let tasks_guard = tasks_stop.clone().drop_guard();
+        if let Some(b) = &book {
+            let changed = meta
+                .view()
+                .read(|s| b.sync_members_except(s, Some(node_id)));
+            if !changed.is_empty() {
+                info!(nodes = ?changed, "address book seeded from the persisted metadata");
+            }
+            tasks.push(b.follow(meta.view().clone(), Some(node_id), tasks_stop.clone()));
+        }
         let ready = async {
             if mode == BootMode::Joiner {
                 // D-P13-29b: a joiner fails loudly when no leader adds it in time.
@@ -652,6 +712,7 @@ impl ClusterServices {
 
         // 8. InitCluster with the bound id, then the own Member record.
         let t = std::time::Instant::now(); // clock-exempt: startup timing
+        let boot_bound = cfg.cluster.join_timeout.get();
         let init = async {
             let token_key = if mode == BootMode::Joiner || marker.is_some() {
                 // Never InitCluster on a joiner: the seed's ClusterInfo arrives through the log.
@@ -659,8 +720,10 @@ impl ClusterServices {
                 // cluster, so it never proposes InitCluster at all).
                 joined_token_key(&meta, count, cfg.cluster.join_timeout.get()).await?
             } else {
-                crate::server::init_cluster(&meta, &cluster_id, node_id, count, clock.now_ms())
-                    .await?
+                boot_propose("InitCluster", boot_bound, || {
+                    crate::server::init_cluster(&meta, &cluster_id, node_id, count, clock.now_ms())
+                })
+                .await?
             };
             let stored = meta
                 .view()
@@ -688,7 +751,12 @@ impl ClusterServices {
                 repl_addr: cfg.cluster.replication_listen.map(|a| a.to_string()),
                 ext: Vec::new(),
             };
-            if let Err(e) = ostro_cluster::members::upsert_self(&meta, me).await {
+            let upsert = boot_propose("own Member record", boot_bound, || async {
+                ostro_cluster::members::upsert_self(&meta, me.clone())
+                    .await
+                    .map_err(ServerError::from)
+            });
+            if let Err(e) = upsert.await {
                 warn!(error = %e, "own member record not updated");
             }
             Ok::<_, ServerError>(token_key)
@@ -712,8 +780,7 @@ impl ClusterServices {
         }
 
         // 9. controller, assignment source, self-demotion watchdog.
-        let tasks_stop = CancellationToken::new();
-        let mut tasks = Vec::new();
+        tasks_guard.disarm();
         tasks.push(tokio::spawn(
             Controller::new(
                 Arc::clone(&meta),
