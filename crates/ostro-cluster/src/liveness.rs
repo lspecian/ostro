@@ -301,6 +301,20 @@ pub trait LiveSource: Send + Sync + 'static {
     ) -> LiveFuture<'a, BTreeSet<u64>>;
     /// Resolves when liveness wants a sample before the next tick (a suspect report).
     fn wake(&self) -> LiveFuture<'_, ()>;
+    /// The nodes this controller itself heard from within `within` (13-13 W2 lease wait):
+    /// by default the meta driver's own contacts (`RaftHandle::sample_live`); `None` when
+    /// the driver cannot tell (not leading).
+    fn heard_within<'a>(
+        &'a self,
+        raft: &'a RaftHandle,
+        within: Duration,
+    ) -> LiveFuture<'a, Option<BTreeSet<u64>>> {
+        Box::pin(async move {
+            raft.sample_live(within)
+                .await
+                .map(|v| v.into_iter().collect())
+        })
+    }
 }
 
 impl LivenessHandle {

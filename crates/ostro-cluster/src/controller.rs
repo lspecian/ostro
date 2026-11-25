@@ -20,6 +20,24 @@
 //!
 //! Timing: wall-clock values (election timestamps, liveness windows) come from the injected
 //! [`Clock`]; the loop period is a tokio interval (`ControllerConfig::tick`).
+//!
+//! # Lease wait (13-13, D-P13-15, plan check W2)
+//!
+//! A partition leader serves reads under a lease measured from its metadata lease anchor
+//! (the send instant of its last quorum-confirmed round through the meta leader) for
+//! `session_timeout × (1 − lease_margin)`. With [`ControllerConfig::lease_wait`] set (to
+//! `session_timeout`; [`crate::config::ReplicationTuning::controller`] does), a failover
+//! `ElectLeader` replacing leader `L` (the current leader, or the previous leader of an
+//! offline partition that did not resign) is proposed only when
+//!
+//! 1. this controller has led the metadata group for at least `lease_wait` (a new meta
+//!    leader may not have heard `L`'s last rounds, which the old meta leader confirmed), and
+//! 2. this controller has not heard from `L` for at least `lease_wait`
+//!    ([`LiveSource::heard_within`], the meta driver's own contacts).
+//!
+//! `L`'s anchor is at most its last contact, so its lease ended before the successor is
+//! elected. Resignations, handoffs, placements and fresh terms are not failovers (the old
+//! leader gave the partition up itself) and do not wait.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -57,6 +75,9 @@ pub struct ControllerConfig {
     /// may be elected again if it is live and still in the ISR (it restarted healthy, or
     /// resigns again).
     pub resign_hold: Duration,
+    /// The W2 lease wait (see the module docs); zero = none. Production sets
+    /// `session_timeout`.
+    pub lease_wait: Duration,
 }
 
 impl ControllerConfig {
@@ -68,6 +89,7 @@ impl ControllerConfig {
             min_insync,
             max_in_flight: 32,
             resign_hold: Duration::from_secs(10),
+            lease_wait: Duration::ZERO,
         }
     }
 }
@@ -115,6 +137,10 @@ struct LoopState {
     invalid: HashSet<String>,
     /// Partitions already logged as "not re-placed".
     warned_rf: HashSet<u16>,
+    /// Clock ms at which this node became the active controller.
+    leading_since_ms: u64,
+    /// Partitions whose failover is waiting for the lease wait (logged once per wait).
+    lease_waiting: HashSet<u16>,
 }
 
 /// Bound on the read barrier a new meta leader takes before planning.
@@ -238,6 +264,8 @@ impl Controller {
                 leading = true;
                 st.offline.clear();
                 st.warned_rf.clear();
+                st.lease_waiting.clear();
+                st.leading_since_ms = self.clock.now_ms();
                 self.live.on_became_controller();
                 tracing::info!(
                     node = self.meta.node_id(),
@@ -274,6 +302,17 @@ impl Controller {
         if !self.meta.is_leader() {
             return;
         }
+        // W2: who this controller heard from within the lease wait (asked only when needed).
+        let heard = if self.cfg.lease_wait.is_zero() {
+            None
+        } else {
+            self.live
+                .heard_within(self.meta.raft(), self.cfg.lease_wait)
+                .await
+        };
+        if !self.meta.is_leader() {
+            return;
+        }
         let now = self.clock.now_ms();
         let placement = partition_count
             .map(|n| bootstrap::placement(&voters, n, self.cfg.rf))
@@ -283,7 +322,7 @@ impl Controller {
             if st.in_flight.contains(&p) {
                 continue;
             }
-            let Some(cmd) = self.decide(st, &a, &live, &placement, now) else {
+            let Some(cmd) = self.decide(st, &a, &live, &placement, now, heard.as_ref()) else {
                 continue;
             };
             let key = command_key(&cmd);
@@ -330,6 +369,7 @@ impl Controller {
         live: &BTreeSet<u64>,
         placement: &[Vec<u64>],
         now: u64,
+        heard: Option<&BTreeSet<u64>>,
     ) -> Option<MetaCommand> {
         let p = a.partition;
         if a.epoch == 0 {
@@ -369,6 +409,21 @@ impl Controller {
             Plan::Elect { leader, isr } => {
                 let after_resign =
                     a.leader == 0 && info.is_some_and(|i| i.reason == ELECTION_REASON_RESIGN);
+                // W2: the leader this election replaces (a resigned one gave up itself).
+                let replaced = if a.leader != 0 {
+                    a.leader
+                } else if after_resign {
+                    0
+                } else {
+                    info.map_or(0, |i| i.prev_leader)
+                };
+                if replaced != 0
+                    && replaced != leader
+                    && !self.lease_wait_over(st, p, replaced, now, heard)
+                {
+                    return None;
+                }
+                st.lease_waiting.remove(&p);
                 Some(MetaCommand::ElectLeader {
                     partition: p,
                     epoch: next_epoch,
@@ -415,6 +470,37 @@ impl Controller {
             }
             Plan::Nothing => None,
         }
+    }
+
+    /// Whether a failover replacing `old` may be proposed now (W2, module docs).
+    fn lease_wait_over(
+        &self,
+        st: &mut LoopState,
+        p: u16,
+        old: u64,
+        now: u64,
+        heard: Option<&BTreeSet<u64>>,
+    ) -> bool {
+        let wait = u64::try_from(self.cfg.lease_wait.as_millis()).unwrap_or(u64::MAX);
+        if wait == 0 {
+            return true;
+        }
+        let led_long_enough = now.saturating_sub(st.leading_since_ms) >= wait;
+        // Unknown contacts (not leading the driver right now): wait. This node always
+        // "hears" itself; its own partition already demoted when the offline epoch applied.
+        let silent = old == self.meta.node_id() || heard.is_some_and(|h| !h.contains(&old));
+        let over = led_long_enough && silent;
+        if !over && st.lease_waiting.insert(p) {
+            tracing::info!(
+                partition = p,
+                old_leader = old,
+                led_long_enough,
+                silent,
+                lease_wait_ms = wait,
+                "failover waits until the old leader's read lease has expired"
+            );
+        }
+        over
     }
 
     fn finish(&self, st: &mut LoopState, (p, key, rec): Done) {

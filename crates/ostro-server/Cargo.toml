@@ -105,6 +105,9 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # full-server tests)
 ostro-worker = { path = "../ostro-worker" }
 reqwest = { workspace = true, features = ["rustls", "json"] }
+# 13-13: an in-process 3-voter metadata group for the lease unit tests (the raft message
+# type of the channel outbox; a workspace crate, already in the lock file)
+ostro-raft-driver.workspace = true
 
 [[test]]
 name = "failpoints_phase5"

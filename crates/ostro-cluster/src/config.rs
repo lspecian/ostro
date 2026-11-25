@@ -85,7 +85,11 @@ impl ReplicationTuning {
     /// The controller (bootstrap seeds for `voters` voters).
     pub fn controller(&self, voters: usize) -> ControllerConfig {
         let rf = self.effective_rf(voters);
-        ControllerConfig::new(rf, self.effective_min_insync(rf))
+        ControllerConfig {
+            // 13-13 W2: a failover waits until the old leader's read lease expired.
+            lease_wait: self.session_timeout,
+            ..ControllerConfig::new(rf, self.effective_min_insync(rf))
+        }
     }
 
     /// Liveness windows.
