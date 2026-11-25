@@ -557,8 +557,11 @@ fn explicit_joint_left_after_leader_kill(c: &mut InProcCluster) -> BoxFuture<'_,
         c.kill(leader).await;
         s.skip.push(leader);
         let st = s
+            // `d` may be promoted back right after: the reconciler then replaces the dead old
+            // leader with the live caught-up learner `d` (the plan check caught a sample
+            // after that), so only the joint change's own effect is required here.
             .until(c, "the joint configuration left by the new leader", |st| {
-                st.voters_outgoing.is_empty() && st.voters.contains(&a) && !st.voters.contains(&d)
+                st.voters_outgoing.is_empty() && st.voters.contains(&a)
             })
             .await?;
         println!(
