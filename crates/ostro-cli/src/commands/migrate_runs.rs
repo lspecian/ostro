@@ -126,6 +126,13 @@ pub async fn render(
             m.seq_mismatch.join(", ")
         ));
     }
+    if !m.already_on_target.is_empty() {
+        out.push_str(&format!(
+            "\n\nalready on the target (an earlier call repinned them; counted in passed{}): {}",
+            if req.dry_run { "" } else { " and repinned" },
+            m.already_on_target.join(", ")
+        ));
+    }
     Ok((out, outcome))
 }
 

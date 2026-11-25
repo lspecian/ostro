@@ -189,6 +189,7 @@ fn module_lifecycle_messages_round_trip() {
         }],
         busy: vec!["r3".into()],
         seq_mismatch: vec!["r4".into()],
+        already_on_target: vec!["r5".into()],
     });
 }
 

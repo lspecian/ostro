@@ -668,6 +668,7 @@ pub async fn migrate_runs(
         out.failed.extend(r.failed);
         out.busy.extend(r.busy);
         out.seq_mismatch.extend(r.seq_mismatch);
+        out.already_on_target.extend(r.already_on_target);
     }
     // 13-17: sorted by run id, so the report does not depend on the leg order (which
     // depends on the receiving node).

@@ -156,7 +156,13 @@ async fn passing_runs_repinned_then_complete_on_the_new_version() {
     let (st, dry) = migrate(&s, body(1, 3, true)).await;
     assert_eq!(st, StatusCode::OK, "{dry}");
     assert_eq!(ids(&dry, "passed"), set(&runs), "{dry}");
-    for f in ["repinned", "failed", "busy", "seq_mismatch"] {
+    for f in [
+        "repinned",
+        "failed",
+        "busy",
+        "seq_mismatch",
+        "already_on_target",
+    ] {
         assert!(ids(&dry, f).is_empty(), "{f}: {dry}");
     }
     for r in &runs {
@@ -177,9 +183,12 @@ async fn passing_runs_repinned_then_complete_on_the_new_version() {
     for r in &runs {
         assert_eq!(s.run_record(r).module_sha, Some(v3), "{r} repinned");
     }
-    // A second migrate from v1 finds nothing.
+    // A second migrate from v1 submits nothing: the runs are already on v3 and the report
+    // is the same complete set (p13-follow: idempotent report).
     let again = migrate_ok(&s, body(1, 3, false)).await;
-    assert!(ids(&again, "passed").is_empty(), "{again}");
+    assert_eq!(ids(&again, "already_on_target"), set(&runs), "{again}");
+    assert_eq!(ids(&again, "passed"), set(&runs), "{again}");
+    assert_eq!(ids(&again, "repinned"), set(&runs), "{again}");
     // They wake on v3 and complete (v3 keeps the old order for an unpatched journal).
     for r in &runs {
         let rec = s.wait_status(r, RunStatus::Completed, LIMIT).await;
@@ -231,6 +240,72 @@ async fn diverging_runs_never_repinned() {
             "diverging run kept v1"
         );
     }
+}
+
+/// p13-follow: a migrate retried after a partial success (a leg answered 503 after other
+/// legs repinned) reports the complete set. Here the first call moves part of the runs (a
+/// `filter`); the same call again reports them as `already_on_target` (also in `passed` /
+/// `repinned`) and submits nothing; the unfiltered call reports them next to the newly
+/// repinned ones; a dry run lists them in `passed` and `already_on_target` but never in
+/// `repinned`. A run started directly on the target version is never reported (it was not
+/// migrated), nor is a moved run outside the filter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retried_migrate_reports_runs_already_on_the_target() {
+    let s = server(Duration::from_millis(50)).await;
+    let (_v1, _v2, v3) = deploy(&s).await;
+    let mut first = Vec::new();
+    for _ in 0..2 {
+        first.push(sleeping(&s, 600, &["first"]).await);
+    }
+    let mut rest = Vec::new();
+    for _ in 0..2 {
+        rest.push(sleeping(&s, 600, &[]).await);
+    }
+    let native = s
+        .start_rest(
+            "replay_demo",
+            json!({"input": {"sleep_s": 600}, "version": 3}),
+        )
+        .await;
+    for r in first.iter().chain(&rest) {
+        suspended(&s, r).await;
+    }
+    assert_eq!(s.run_record(&native).module_sha, Some(v3), "started on v3");
+
+    let mut filtered = body(1, 3, false);
+    filtered["filter"] = json!("first");
+    let rep = migrate_ok(&s, filtered.clone()).await;
+    assert_eq!(ids(&rep, "repinned"), set(&first), "{rep}");
+    assert!(ids(&rep, "already_on_target").is_empty(), "{rep}");
+
+    // The same call again (a retry): the same report, nothing submitted.
+    let again = migrate_ok(&s, filtered.clone()).await;
+    assert_eq!(ids(&again, "repinned"), set(&first), "{again}");
+    assert_eq!(ids(&again, "passed"), set(&first), "{again}");
+    assert_eq!(ids(&again, "already_on_target"), set(&first), "{again}");
+
+    // Dry run of the whole migration: the moved runs are passed + already on target.
+    let all: Vec<RunId> = first.iter().chain(&rest).copied().collect();
+    let (st, dry) = migrate(&s, body(1, 3, true)).await;
+    assert_eq!(st, StatusCode::OK, "{dry}");
+    assert_eq!(ids(&dry, "passed"), set(&all), "{dry}");
+    assert_eq!(ids(&dry, "already_on_target"), set(&first), "{dry}");
+    assert!(ids(&dry, "repinned").is_empty(), "{dry}");
+
+    // The whole migration: the complete set, `native` never listed.
+    let full = migrate_ok(&s, body(1, 3, false)).await;
+    assert_eq!(ids(&full, "passed"), set(&all), "{full}");
+    assert_eq!(ids(&full, "repinned"), set(&all), "{full}");
+    assert_eq!(ids(&full, "already_on_target"), set(&first), "{full}");
+    assert!(ids(&full, "failed").is_empty(), "{full}");
+    for r in &all {
+        assert_eq!(s.run_record(r).module_sha, Some(v3), "{r} on v3");
+    }
+
+    // A moved run outside the filter is not listed.
+    let only_first = migrate_ok(&s, filtered).await;
+    assert_eq!(ids(&only_first, "repinned"), set(&first), "{only_first}");
+    assert_eq!(ids(&only_first, "already_on_target"), set(&first), "{only_first}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

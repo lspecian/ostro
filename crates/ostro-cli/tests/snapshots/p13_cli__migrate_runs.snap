@@ -30,6 +30,7 @@ r0   7    step `charge` diverged
 [exit 4]
 $ ostro migrate-runs --workflow order --from 1 --to 2 --limit 1 --json
 {
+  "already_on_target": [],
   "busy": [],
   "failed": [
     {

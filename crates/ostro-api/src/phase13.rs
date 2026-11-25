@@ -330,6 +330,11 @@ pub struct MigrateRunsReport {
     pub busy: Vec<String>,
     /// Runs refused as `SeqMismatch` (progressed since the check; dry-run again).
     pub seq_mismatch: Vec<String>,
+    /// Runs an earlier call of the same migration already repinned (on the target module,
+    /// started on the source). Not checked or submitted again; also listed in `passed` and,
+    /// unless dry run, in `repinned`, so a retried migrate reports the complete set.
+    #[serde(default)]
+    pub already_on_target: Vec<String>,
 }
 
 /// One workflow version named by a retirement.

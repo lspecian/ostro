@@ -7197,6 +7197,13 @@ expression: pretty
           "seq_mismatch"
         ],
         "properties": {
+          "already_on_target": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Runs an earlier call of the same migration already repinned (on the target module,\nstarted on the source). Not checked or submitted again; also listed in `passed` and,\nunless dry run, in `repinned`, so a retried migrate reports the complete set."
+          },
           "busy": {
             "type": "array",
             "items": {

@@ -317,6 +317,9 @@ pub struct MigrateRunsReport {
     /// Progressed since the check (`SeqMismatch`).
     #[serde(default)]
     pub seq_mismatch: Vec<String>,
+    /// Already on the target from an earlier call (also in `passed` / `repinned`).
+    #[serde(default)]
+    pub already_on_target: Vec<String>,
     /// Other fields.
     #[serde(flatten)]
     pub extra: Extra,

@@ -934,6 +934,7 @@ impl From<MigrateRunsReport> for pb::MigrateRunsReport {
                 .collect(),
             busy: r.busy,
             seq_mismatch: r.seq_mismatch,
+            already_on_target: r.already_on_target,
         }
     }
 }
@@ -954,6 +955,7 @@ impl From<pb::MigrateRunsReport> for MigrateRunsReport {
                 .collect(),
             busy: r.busy,
             seq_mismatch: r.seq_mismatch,
+            already_on_target: r.already_on_target,
         }
     }
 }

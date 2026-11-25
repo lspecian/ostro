@@ -33,6 +33,17 @@
 //! `Ok`/`OkFrontier` → `passed`, `Diverged{seq, detail}` → `failed` with that seq and
 //! detail, `Error(e)` (or an unreadable journal) → `failed` with seq 0.
 //!
+//! **Already on the target (p13-follow).** The same scan also finds runs that an earlier
+//! call of the same migration already repinned: non-terminal, `workflow` and `filter` as
+//! above, `module_sha == to_sha`, and started on the source (`workflow_version`'s module in
+//! the metadata is `from_sha`; a repin changes only `module_sha`). They are not checked or
+//! submitted again and do not use the `limit` share (the limit bounds the runs processed);
+//! they are reported in `already_on_target` and also in `passed` and, unless `dry_run`, in
+//! `repinned`. So a migrate is idempotent in its report: when a leg fails (a 503 from its
+//! barrier, a leader change) after other legs repinned, the retried call reports the
+//! complete set instead of only the runs that were left. A run started directly on the
+//! target version is never listed (its `workflow_version` names the target module).
+//!
 //! Without `dry_run`, every passed run gets `Cmd::RepinRun{run_id, from_sha, to_sha,
 //! expected_next_seq = the replayed journal's length, requested_at_ms}`. The apply is the
 //! compare-and-set (`ostro-partition` `apply/repin.rs`), so a run is repinned only at the
@@ -43,7 +54,8 @@
 //!
 //! # Report
 //!
-//! `passed`, `repinned`, `failed` (seq + detail), `busy`, `seq_mismatch`. Every list is
+//! `passed`, `repinned`, `failed` (seq + detail), `busy`, `seq_mismatch`,
+//! `already_on_target` (a subset of `passed`, and of `repinned` unless dry run). Every list is
 //! sorted by run id ([`sort_report`]; the router sorts the merged report too), so the same
 //! request gives the same report at every node.
 //!
@@ -77,7 +89,7 @@ use crate::p13::P13Ctx;
 /// The seq-check mutant (D-P13-25).
 pub const MUTANT_SKIP_SEQ_CHECK: &str = "migrate::mutant::skip_seq_check";
 /// Counter of migrate outcomes, by `outcome` (`passed`, `repinned`, `failed`, `busy`,
-/// `seq_mismatch`).
+/// `seq_mismatch`, `already_on_target`; a run already on the target counts only there).
 pub const METRIC_RUNS: &str = "ostro_migrate_runs_total";
 /// `details.reason` of a refusal before the cluster finalized `RepinRun`'s level.
 pub const REASON_FEATURE: &str = "feature_not_enabled";
@@ -125,6 +137,7 @@ pub fn sort_report(r: &mut MigrateRunsReport) {
     r.failed.sort_by(|a, b| a.run_id.cmp(&b.run_id));
     r.busy.sort();
     r.seq_mismatch.sort();
+    r.already_on_target.sort();
 }
 
 /// Partition `p`'s share of a global `limit` over `count` partitions (module docs).
@@ -228,36 +241,50 @@ async fn prepare(ctx: &P13Ctx, sha: [u8; 32]) -> Result<Arc<Prepared>, ApiError>
         .map_err(|e| ApiError::internal(format!("target module {}: {e}", hex(&sha))))
 }
 
-/// The runs of one partition to check, oldest first.
+/// One partition's scan: the runs to check (on the source, oldest first, at most the
+/// share) and the candidates already on the target (run, `workflow_version`) seen before
+/// the scan stopped (module docs).
+#[derive(Default)]
+struct Selection {
+    to_check: Vec<RunId>,
+    on_target: Vec<(RunId, u32)>,
+}
+
+/// The runs of one partition to check, oldest first, and the runs already on `to`.
 async fn select(
     handle: &PartitionHandle<PartitionLog>,
     r: &MigrateRunsRequest,
     from: [u8; 32],
+    to: [u8; 32],
     share: usize,
-) -> Result<Vec<RunId>, ApiError> {
+) -> Result<Selection, ApiError> {
     if share == 0 {
-        return Ok(Vec::new());
+        return Ok(Selection::default());
     }
     let reader = handle.reader();
     let workflow = r.workflow.clone();
     let filter = r.filter.clone();
     tokio::task::spawn_blocking(move || {
-        let mut out = Vec::new();
+        let mut out = Selection::default();
         let mut after = None;
         loop {
             let rows = query::runs_page(&reader, after, SCAN_PAGE)?;
             let done = rows.len() < SCAN_PAGE;
             after = rows.last().map(|(id, _)| *id);
             for (id, rec) in rows {
-                if !rec.status.is_terminal()
-                    && rec.workflow == workflow
-                    && rec.module_sha == Some(from)
-                    && filter_matches(filter.as_deref(), &rec)
+                if rec.status.is_terminal()
+                    || rec.workflow != workflow
+                    || !filter_matches(filter.as_deref(), &rec)
                 {
-                    out.push(id);
-                    if out.len() >= share {
+                    continue;
+                }
+                if rec.module_sha == Some(from) {
+                    out.to_check.push(id);
+                    if out.to_check.len() >= share {
                         return Ok(out);
                     }
+                } else if rec.module_sha == Some(to) {
+                    out.on_target.push((id, rec.workflow_version));
                 }
             }
             if done {
@@ -405,6 +432,7 @@ pub async fn migrate_runs(
 
     let count_p = ctx.local_cp.partition_count();
     let mut selected = Vec::new();
+    let mut on_target = Vec::new();
     for p in crate::route::table::listed_partitions(count_p) {
         let share = limit_share(r.limit, p, count_p);
         if share == 0 {
@@ -412,15 +440,35 @@ pub async fn migrate_runs(
         }
         crate::route::consistency::before_partition_read(ctx, p).await?;
         let handle = ctx.local_cp.partition(p)?;
-        let runs = select(&handle, &r, from, share).await?;
-        if !runs.is_empty() {
-            selected.push((handle, runs));
+        let sel = select(&handle, &r, from, to, share).await?;
+        on_target.extend(sel.on_target);
+        if !sel.to_check.is_empty() {
+            selected.push((handle, sel.to_check));
         }
     }
 
     let mut out = MigrateRunsReport::default();
+    // Runs an earlier call of this migration repinned: on the target, started on the
+    // source (module docs). Versions are immutable: one meta read per version.
+    let mut started_on_source = std::collections::BTreeMap::new();
+    for (run, version) in on_target {
+        let source = *started_on_source.entry(version).or_insert_with(|| {
+            ctx.meta
+                .view()
+                .read(|s| s.workflow(&r.workflow, version).map(|w| w.value.module_sha256))
+                == Some(from)
+        });
+        if source {
+            let id = run.to_string();
+            out.passed.push(id.clone());
+            if !r.dry_run {
+                out.repinned.push(id.clone());
+            }
+            out.already_on_target.push(id);
+        }
+    }
     if selected.is_empty() {
-        return Ok(out);
+        return Ok(finish(&r, from, to, out));
     }
     let module = prepare(ctx, to).await?;
     let mut passed: Vec<(PartitionHandle<PartitionLog>, Passed)> = Vec::new();
@@ -444,11 +492,26 @@ pub async fn migrate_runs(
             submit(ctx, handle, p, from, to, &mut out).await?;
         }
     }
-    count("passed", out.passed.len());
-    count("repinned", out.repinned.len());
+    Ok(finish(&r, from, to, out))
+}
+
+/// Count, sort and log one leg's report.
+fn finish(
+    r: &MigrateRunsRequest,
+    from: [u8; 32],
+    to: [u8; 32],
+    mut out: MigrateRunsReport,
+) -> MigrateRunsReport {
+    // The metric counts work done by this call: runs already on the target are counted
+    // once, as `already_on_target`, not again as passed / repinned.
+    let aot = out.already_on_target.len();
+    count("passed", out.passed.len().saturating_sub(aot));
+    let aot_repinned = if r.dry_run { 0 } else { aot };
+    count("repinned", out.repinned.len().saturating_sub(aot_repinned));
     count("failed", out.failed.len());
     count("busy", out.busy.len());
     count("seq_mismatch", out.seq_mismatch.len());
+    count("already_on_target", aot);
     sort_report(&mut out);
     tracing::info!(
         workflow = %r.workflow,
@@ -460,7 +523,8 @@ pub async fn migrate_runs(
         failed = out.failed.len(),
         busy = out.busy.len(),
         seq_mismatch = out.seq_mismatch.len(),
+        already_on_target = aot,
         "migrate-runs leg"
     );
-    Ok(out)
+    out
 }
