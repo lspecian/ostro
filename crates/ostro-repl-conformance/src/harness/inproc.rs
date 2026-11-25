@@ -172,6 +172,16 @@ impl InProcCluster {
         &self.slot(node).cfg
     }
 
+    /// The configuration `node` (re)starts with, for editing before a restart (13-13:
+    /// `[api] strict_reads`).
+    pub fn config_mut(&mut self, node: u64) -> &mut ServerConfig {
+        &mut self
+            .nodes
+            .get_mut(&node)
+            .unwrap_or_else(|| panic!("no node {node} in this cluster"))
+            .cfg
+    }
+
     /// A channel that presents `PeerNode(from)` to node `to`, through the fault layer (raw
     /// `Replication` / `MetaPeer` RPCs from scenarios, e.g. a stale-epoch `Fetch`).
     pub fn channel_as(&self, from: u64, to: u64) -> tonic::transport::Channel {
