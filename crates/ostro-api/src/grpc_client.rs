@@ -64,11 +64,34 @@ pub struct GrpcControlPlane {
     max_message_bytes: usize,
 }
 
+/// Whether tonic built `s` on this side from a failure below the gRPC layer (the
+/// connection reset or closed mid-call, an I/O error): such a status carries the error it
+/// came from as its source. A status decoded from a server's trailers has no source.
+fn is_client_transport_failure(s: &tonic::Status) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(s);
+    while let Some(e) = cur {
+        if e.is::<tonic::transport::Error>() || e.is::<std::io::Error>() {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
 /// `tonic::Status` -> [`ApiError`]: the exact inverse of [`crate::grpc::to_status`].
+///
+/// Transport failures are `unavailable` (reason-less, the routed caller's retry rule):
+/// `DEADLINE_EXCEEDED` / `CANCELLED`, and the `UNKNOWN "transport error"` (or an h2
+/// `INTERNAL`) that tonic synthesises on this side when the peer's connection dies
+/// mid-call. A server never sends `UNKNOWN` ([`ErrorCode::grpc_code`] has no such row), and
+/// a server's `INTERNAL` has no source error, so both keep the table.
 pub fn status_to_error(s: &tonic::Status) -> ApiError {
     let details = crate::grpc::status_details(s);
     let code = match s.code() {
         tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => ErrorCode::Unavailable,
+        tonic::Code::Unknown | tonic::Code::Internal if is_client_transport_failure(s) => {
+            ErrorCode::Unavailable
+        }
         c => ErrorCode::from_grpc_code_and_details(c, details.as_ref()),
     };
     ApiError {
