@@ -344,3 +344,57 @@ async fn input_bridge_forwards_inputs_in_journal_order() {
     assert!(eng_rx.recv().await.is_none(), "no duplicate forwarded");
     n.stop().await;
 }
+
+/// Graceful handoff (13-11): once the partition starts quiescing, the input bridge stops
+/// and closes the engine's hot-wait input stream (a parked activation is then evicted at
+/// once); a bridge started while quiescing stops at once too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn input_bridge_closes_on_handoff_quiescing() {
+    let dir = ostro_testkit::fs::tempdir();
+    let n = TestNode::open(dir.path(), Opts::new()).await;
+    let p = PartitionId(0);
+    let h = n.handle(p);
+    let run = RunId::new_v7(p);
+    let epoch = h.epoch();
+    assert!(epoch.0 > 0, "the node leads partition 0");
+
+    let (_seq_tx, seq_rx) = mpsc::unbounded_channel::<u64>();
+    let (_sink_tx, sink_rx) = mpsc::unbounded_channel();
+    let (eng_tx, mut eng_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(input_bridge(h.clone(), run, 1, seq_rx, sink_rx, eng_tx));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !bridge.is_finished(),
+        "the bridge runs while the partition is not quiescing"
+    );
+
+    assert!(h.handoff().begin(epoch));
+    timeout(T, bridge)
+        .await
+        .expect("the bridge stops when quiescing starts")
+        .expect("join");
+    assert!(
+        timeout(T, eng_rx.recv()).await.expect("closed").is_none(),
+        "the engine's input stream is closed"
+    );
+
+    // Started while quiescing: stops at once.
+    let (_seq_tx, seq_rx) = mpsc::unbounded_channel::<u64>();
+    let (_sink_tx, sink_rx) = mpsc::unbounded_channel();
+    let (eng_tx, mut eng_rx) = mpsc::unbounded_channel();
+    timeout(T, input_bridge(h.clone(), run, 1, seq_rx, sink_rx, eng_tx))
+        .await
+        .expect("returns at once");
+    assert!(eng_rx.recv().await.is_none());
+
+    // Abort: a new bridge runs normally again.
+    h.handoff().clear(epoch);
+    let (_seq_tx, seq_rx) = mpsc::unbounded_channel::<u64>();
+    let (_sink_tx, sink_rx) = mpsc::unbounded_channel();
+    let (eng_tx, _eng_rx) = mpsc::unbounded_channel();
+    let bridge = tokio::spawn(input_bridge(h.clone(), run, 1, seq_rx, sink_rx, eng_tx));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!bridge.is_finished(), "the bridge runs after an abort");
+    bridge.abort();
+    n.stop().await;
+}

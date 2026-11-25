@@ -713,6 +713,12 @@ impl Node {
         self.cells.get(p.index())?.running()
     }
 
+    /// The injected clock of partition `p`'s leader services (13-11 handoff stamps).
+    pub(crate) fn leader_clock(&self, p: PartitionId) -> Option<Arc<dyn crate::clock::Clock>> {
+        self.running(p)
+            .and_then(|r| r.ctx.map(|c| Arc::clone(&c.clock)))
+    }
+
     /// Partition `p`'s writable floor slots (the bottomless upload floor, 08-13). `None` for a
     /// partition that did not start.
     pub fn floor_handles(&self, p: PartitionId) -> Option<FloorHandles> {

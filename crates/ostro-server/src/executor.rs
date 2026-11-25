@@ -566,6 +566,12 @@ impl Drop for TaskGuard {
 /// `InputAppended`) and `sink_inputs` (the sink's unsupported completions) are wake-ups
 /// only: on each, the journal is read from `next` to its end and every input event in it
 /// is forwarded once. Public for the ordering test only.
+///
+/// Graceful handoff (13-11): once the partition starts quiescing (a handoff of the current
+/// term), the bridge stops and drops the engine's input stream. A hot-parked activation
+/// (its intents were flushed before it parked) is then evicted at once and the dispatcher
+/// re-queues the run instead of re-running it; a running activation is evicted at its next
+/// hot wait. The inputs are journaled, so the replay sees them.
 #[doc(hidden)]
 pub async fn input_bridge(
     handle: PartitionHandle<ostro_log::PartitionLog>,
@@ -576,8 +582,17 @@ pub async fn input_bridge(
     tx: mpsc::UnboundedSender<Event>,
 ) {
     let (mut seqs_open, mut sink_open) = (true, true);
+    let mut handoff = handle.handoff().subscribe();
+    let mut handoff_open = true;
     while seqs_open || sink_open {
+        if handle.handoff().quiescing(handle.epoch()) {
+            return;
+        }
         let hint = tokio::select! {
+            r = handoff.changed(), if handoff_open => {
+                handoff_open = r.is_ok();
+                continue;
+            }
             s = seqs.recv(), if seqs_open => match s {
                 Some(s) => s,
                 None => { seqs_open = false; continue; }

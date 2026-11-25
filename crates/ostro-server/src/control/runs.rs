@@ -96,6 +96,9 @@ pub(crate) fn partition_error(e: PartitionError) -> ApiError {
     match e {
         PartitionError::NotLeader => ApiError::unavailable("partition leader unavailable")
             .with_details(serde_json::json!({ "reason": "not_leader" })),
+        // Phase 13 (13-11, W11): a graceful handoff froze the partition; retry.
+        PartitionError::LeaderChanged => ApiError::unavailable("partition leader changing")
+            .with_details(serde_json::json!({ "reason": "leader_changed" })),
         PartitionError::Failed(m) => ApiError::unavailable(format!("partition failed: {m}")),
         // Phase 12 (12-14): the min_insync gate (D-P12-5).
         PartitionError::Log(ostro_log::LogError::NotEnoughReplicas { isr, min }) => {
@@ -616,6 +619,7 @@ mod tests {
     fn unavailable_partitions_are_503() {
         for e in [
             PartitionError::NotLeader,
+            PartitionError::LeaderChanged,
             PartitionError::Failed("stopped".into()),
             PartitionError::AckLost(Offset(7)),
             PartitionError::Rejected(RejectReason::WrongPartition),

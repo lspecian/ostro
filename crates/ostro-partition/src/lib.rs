@@ -39,7 +39,9 @@ pub use store::{PartitionStore, StoreConfig, StoreError, StoreMeta, TABLES, Tabl
 
 pub use acks::{ACK_RETAIN, PendingAcks};
 pub use handle::{PartitionError, PartitionHandle};
-pub use handoff::{HandoffControl, HandoffGuard, HandoffRelease};
+pub use handoff::{
+    HandoffCell, HandoffControl, HandoffGuard, HandoffMark, HandoffRelease, HandoffReport,
+};
 pub use machine::{MachineConfig, MachineHandle, PartitionHealth};
 
 pub use clock::{Clock, ManualClock, SystemClock}; // clock-exempt: re-export of the default clock

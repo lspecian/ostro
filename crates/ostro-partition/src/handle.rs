@@ -20,6 +20,7 @@ use ostro_types::{
 
 use crate::acks::PendingAcks;
 use crate::apply::{ApplyOutcome, RejectReason};
+use crate::handoff::HandoffCell;
 use crate::machine::{MachineHandle, wait_failed};
 use crate::store::keys::run_key;
 use crate::store::values::{self, RunRecord};
@@ -44,6 +45,10 @@ pub enum PartitionError {
     Rejected(RejectReason),
     #[error("not leader")]
     NotLeader,
+    /// Phase 13 (13-11, W11): the partition is being handed to another leader and refuses
+    /// new commands; retry (the router finds the new leader). API: 503 `leader_changed`.
+    #[error("partition leader changing (handoff in progress)")]
+    LeaderChanged,
 }
 
 struct Inner<L> {
@@ -54,6 +59,8 @@ struct Inner<L> {
     acks: Arc<PendingAcks>,
     blobs: Arc<BlobStore>,
     epoch: AtomicU32,
+    /// Graceful handoff state (13-11).
+    handoff: Arc<HandoffCell>,
 }
 
 /// One partition's submit/read handle. Cheap to clone; clones share the epoch.
@@ -96,6 +103,7 @@ impl<L: ReplicatedLog> PartitionHandle<L> {
                 acks,
                 blobs,
                 epoch: AtomicU32::new(0),
+                handoff: Arc::new(HandoffCell::default()),
             }),
         }
     }
@@ -111,6 +119,21 @@ impl<L: ReplicatedLog> PartitionHandle<L> {
 
     pub fn epoch(&self) -> Epoch {
         Epoch(self.inner.epoch.load(Ordering::Acquire))
+    }
+
+    /// The partition's graceful-handoff state (13-11).
+    pub fn handoff(&self) -> &HandoffCell {
+        &self.inner.handoff
+    }
+
+    /// The handoff state as a shared reference (guards outlive borrows).
+    pub fn handoff_cell(&self) -> Arc<HandoffCell> {
+        Arc::clone(&self.inner.handoff)
+    }
+
+    /// Whether the dispatcher may lease new attempts (no handoff of the current term).
+    pub fn admission_open(&self) -> bool {
+        !self.inner.handoff.quiescing(self.epoch())
     }
 
     /// Append `cmds` as one envelope and return their outcomes in order, after apply.
@@ -134,6 +157,9 @@ impl<L: ReplicatedLog> PartitionHandle<L> {
         }
         let m = &self.inner.machine;
         m.check_healthy()?;
+        if self.inner.handoff.frozen(self.epoch()) {
+            return Err(PartitionError::LeaderChanged);
+        }
         let bytes = cmds.iter().map(encode_command).collect();
         let receipt = self.inner.log.append(self.epoch(), bytes).await?;
         let rxs = self.inner.acks.register(receipt.base, receipt.last);

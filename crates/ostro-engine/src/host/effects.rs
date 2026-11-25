@@ -14,7 +14,9 @@
 //! registers with the [`ParkedRegistry`](crate::limits::ParkedRegistry), then waits for
 //! committed inputs, delivering them to the replay core and re-checking the wait. It traps with
 //! [`Evict`] `HotWaitElapsed` / `BudgetPressure` / `External` when the window elapses,
-//! budget pressure picks it, or the activation is cancelled. Otherwise an unsatisfied
+//! budget pressure picks it, or the activation is cancelled. A closed input channel ends the
+//! park at once with `HotWaitElapsed` (no input can resolve it any more; the server closes
+//! it when the partition is handed to another leader, 13-11). Otherwise an unsatisfied
 //! wait traps with `WaitUnsatisfied` and appends nothing. The guest sees the same
 //! completions either way (a hot-waited and an evict-and-replay run journal the same
 //! events). Only channel receives and the flush await happen inside the import, which
@@ -242,17 +244,17 @@ impl HostState {
     ) -> wasmtime::Result<Vec<Completion>> {
         let guard = hot.parked.park();
         let deadline = tokio::time::Instant::now() + hot.hot_wait;
-        let mut inputs_open = true;
         loop {
             tokio::select! {
                 biased;
                 _ = hot.cancel.cancelled() => return evict(EvictReason::External),
                 _ = guard.token().cancelled() => return evict(EvictReason::BudgetPressure),
-                ev = hot.inputs.recv(), if inputs_open => {
+                ev = hot.inputs.recv() => {
                     let Some(ev) = ev else {
-                        // No more inputs can arrive; wait out the window (or a cancel).
-                        inputs_open = false;
-                        continue;
+                        // No more inputs can arrive, so the window cannot resolve the wait:
+                        // evict now (13-11: the server closes the stream on a graceful
+                        // handoff; the re-activation replays the journaled inputs).
+                        return evict(EvictReason::HotWaitElapsed);
                     };
                     let mut batch = vec![ev];
                     while let Ok(ev) = hot.inputs.try_recv() {

@@ -89,6 +89,14 @@
 //! needs no in-memory reset (retryable failures are durable since F9); the `EnqueueReady`
 //! that resume emits queues the run again.
 //!
+//! **Graceful handoff (13-11, D-P13-13).** While the partition's
+//! [`HandoffCell`](crate::handoff::HandoffCell) says a handoff of the current term is in
+//! progress, a round leases nothing (entries stay queued; timers still fire into the log),
+//! a job ending [`ExecOutcome::Reactivate`] gives its lease back and is re-queued (it
+//! replays on the new leader, or here after an abort), and every loop turn publishes the
+//! lease count to the cell. The mark's change wakes the loop. A frozen partition (W11)
+//! refuses the pipelined grant with `LeaderChanged`.
+//!
 //! # Rebuild, wake-ups, no polling
 //!
 //! [`spawn`] subscribes to the apply machine's actions **before** scanning, then rebuilds
@@ -1026,9 +1034,12 @@ struct Dispatcher {
     held_slot: Option<OwnedSemaphorePermit>,
     place_rx: watch::Receiver<u64>,
     flow_rx: watch::Receiver<u64>,
+    /// Graceful handoff (13-11): admission turns off / on with the partition's mark.
+    handoff_rx: watch::Receiver<crate::handoff::HandoffMark>,
     /// The watch senders are alive (a closed channel disables its arm).
     place_live: bool,
     flow_live: bool,
+    handoff_live: bool,
     /// Earliest `QueueBlocked{until}` of the last round (clock ms).
     queue_until: Option<u64>,
     /// Last published gauges per queue.
@@ -1057,12 +1068,14 @@ impl Dispatcher {
         Self {
             place_rx: placement.changed(),
             flow_rx: flow.changed(),
+            handoff_rx: ctx.handle.handoff().subscribe(),
             placement,
             flow,
             default_placement,
             held_slot: None,
             place_live: true,
             flow_live: true,
+            handoff_live: true,
             queue_until: None,
             published: BTreeMap::new(),
             st: State::new(cfg.lease_ttl),
@@ -1168,6 +1181,13 @@ impl Dispatcher {
     /// One dispatch round (module docs): fair candidate -> admission -> reservation ->
     /// grant, until no candidate is left (every queue skipped, parked or empty).
     fn dispatch_available(&mut self) {
+        if !self.ctx.handle.admission_open() {
+            // Graceful handoff (13-11): no new lease; ready entries stay queued and the
+            // mark's change wakes the loop when admission comes back (abort).
+            self.queue_until = None;
+            drop(self.held_slot.take());
+            return;
+        }
         self.queue_until = None;
         self.st.fair.begin_round();
         if !self.flow_live {
@@ -1273,6 +1293,8 @@ impl Dispatcher {
                 .fetch_sub(self.reported_leases - now, Ordering::Relaxed);
         }
         self.reported_leases = now;
+        // Per-partition count for the graceful handoff's in-flight wait (13-11).
+        self.ctx.handle.handoff().set_leased(self.st.leases.len());
     }
 
     /// Move `ostro_queue_ready{queue}` by this dispatcher's change since the last report
@@ -1649,6 +1671,18 @@ impl Dispatcher {
                 }
             }
             ExecOutcome::Retry { after_ms } => self.regrant_after_failure(run, after_ms),
+            ExecOutcome::Reactivate if !self.ctx.handle.admission_open() => {
+                // Graceful handoff (13-11): the activation reached a flush/suspend point
+                // (hot wait evicted or elapsed, budget pressure). Give the lease back and
+                // queue the run: it replays on the new leader, or here after an abort
+                // (re-granted n + 1, not an attempt failure).
+                debug!(partition = self.p(), %run, "handoff: activation evicted; lease released");
+                self.ctx.handle.handoff().note_evicted();
+                if let Some(l) = self.st.drop_lease(&run) {
+                    let now = self.now_ms();
+                    self.st.enqueue(run, l.entry.regrant(), now);
+                }
+            }
             ExecOutcome::Reactivate => match self.ctx.handle.read_run(&run) {
                 Ok(Some(rec)) if !rec.status.is_terminal() => {
                     self.stats.reactivated.fetch_add(1, Ordering::Relaxed);
@@ -1856,6 +1890,7 @@ impl Dispatcher {
             let want_slot = self.default_placement && self.st.fair.has_parked_queues();
             let slots = Arc::clone(&self.cfg.slots);
             let (place_live, flow_live) = (self.place_live, self.flow_live);
+            let handoff_live = self.handoff_live;
             let flow = tokio::select! {
                 biased;
                 r = shutdown.changed() => match r {
@@ -1897,6 +1932,13 @@ impl Dispatcher {
                     match r {
                         Ok(()) => self.st.fair.unpark_queues(),
                         Err(_) => self.place_live = false,
+                    }
+                    Flow::Continue
+                },
+                r = self.handoff_rx.changed(), if handoff_live => {
+                    // Admission turned off or on (13-11): the top of the loop re-decides.
+                    if r.is_err() {
+                        self.handoff_live = false;
                     }
                     Flow::Continue
                 },
@@ -2060,6 +2102,10 @@ async fn pipelined_grant(
         after_failure: false,
     });
     h.machine().check_healthy()?;
+    if h.handoff().frozen(epoch) {
+        // Write fence (13-11, W11): the pipelined grant bypasses `submit`.
+        return Err(PartitionError::LeaderChanged);
+    }
     failpoint!("dispatcher::before_grant")?;
     let receipt = h.log().append(epoch, vec![encode_command(&cmd)]).await?;
     rec.current_attempt = Some((epoch.0, n));

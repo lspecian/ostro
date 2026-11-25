@@ -282,6 +282,44 @@ async fn hot_wait_external_cancel() {
     assert_eq!(rt.engine().budget().used(), 0);
 }
 
+/// 13-11: closing the input stream of a parked activation (the server does so when its
+/// partition is handed to another leader) evicts it at once with `HotWaitElapsed`, not at
+/// the end of the window.
+#[tokio::test]
+async fn hot_wait_closed_inputs_evict_at_once() {
+    let rt = runtime(Duration::from_secs(30), None);
+    let p = prepare(&rt, "det-basic");
+    let sink = Arc::new(FakeSink::new());
+    let a = start(&rt, &p, &sink, det_spec("closed", 1));
+    let parked = rt.parked().clone();
+    wait_until("park", Duration::from_secs(5), || {
+        parked.parked_count() == 1
+    })
+    .await;
+    // Parked after flushing its intents (s1 + TimerStarted).
+    assert_eq!(sink.journal(&run_ref("closed")).len(), 3);
+    let Parked {
+        handle,
+        cancel: _cancel,
+        _tx,
+    } = a;
+    let closed = Instant::now();
+    drop(_tx);
+    let outcome = handle.await.expect("join");
+    assert_eq!(
+        outcome,
+        ActivationOutcome::Evicted {
+            reason: EvictReason::HotWaitElapsed
+        }
+    );
+    assert!(
+        closed.elapsed() < Duration::from_secs(5),
+        "evicted in {:?} (window 30 s)",
+        closed.elapsed()
+    );
+    assert_eq!(parked.parked_count(), 0);
+}
+
 /// Memory one parked det-basic activation charges to the node budget.
 async fn det_basic_charge() -> u64 {
     let rt = runtime(Duration::from_secs(10), None);
