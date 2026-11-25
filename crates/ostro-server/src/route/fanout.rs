@@ -640,6 +640,12 @@ pub async fn migrate_runs(
     inner: &Arc<dyn ostro_api::phase13::ModuleLifecycleApi>,
     req: MigrateRunsRequest,
 ) -> Result<MigrateRunsReport, ApiError> {
+    // 13-18: a submitting migrate's feature gate is decided once, here at the entry node,
+    // before any leg (RouteEnv::migrate_gate); forwarded legs (hop 1) never re-decide it here.
+    let entry = current_meta().hop == 0;
+    if !req.dry_run && entry {
+        core.env().migrate_gate().await?;
+    }
     let legs = core
         .fanout_partitions(
             RouteClass::FanoutPartitions,

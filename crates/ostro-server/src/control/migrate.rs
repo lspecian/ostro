@@ -192,6 +192,15 @@ fn feature_error(e: ostro_cluster::compat::FeatureNotEnabled) -> ApiError {
     )
 }
 
+/// 13-18: the gate of a submitting migrate at the entry node, before the fan-out
+/// (`route::RouteEnv::migrate_gate`): the ReadIndex barrier, then
+/// `compat::require(RepinRun)` (409 `feature_not_enabled`).
+pub(crate) async fn entry_gate(ctx: &P13Ctx) -> Result<(), ApiError> {
+    crate::route::consistency::before_meta_read(ctx).await?;
+    ostro_cluster::compat::require(ctx.meta.view(), Feature::RepinRun, ctx.level_max)
+        .map_err(feature_error)
+}
+
 /// The prepared target module (runtime cache, else the node blob store).
 async fn prepare(ctx: &P13Ctx, sha: [u8; 32]) -> Result<Arc<Prepared>, ApiError> {
     if let Some(p) = ctx.runtime.prepared(&sha) {

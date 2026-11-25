@@ -151,6 +151,14 @@ pub trait RouteEnv: Send + Sync + 'static {
     fn token_after_partition_write(&self, p: PartitionId) -> Option<String>;
     /// 13-13: the token after a meta write on this node.
     fn token_after_meta_write(&self) -> Option<String>;
+    /// 13-18: the gate of a submitting `migrate_runs`, decided **once at the entry node**
+    /// before any leg runs (13-17 deviation 8: each leg checked after its own barrier, so a
+    /// finalization committing during the fan-out could refuse one leg after another had
+    /// repinned). After this node's barrier saw the cluster finalized, every leg's barrier
+    /// sees it too (finalization is monotonic). Default: open (unit-test environments).
+    fn migrate_gate(&self) -> BoxFuture<'_, Result<(), ApiError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Per-node routing counters (test probes; the metrics carry the same information).
@@ -189,6 +197,10 @@ pub enum Access {
     MetaRead,
     /// A meta write: `token_after_meta_write()` after success.
     MetaWrite,
+    /// A meta write that validates against metadata first (13-18: activation's
+    /// `module_retired` check): `before_meta_read()` first, `token_after_meta_write()` after
+    /// success.
+    MetaReadWrite,
     /// Neither (uploads, tooling, calls whose partition is unknown).
     None,
 }
@@ -358,14 +370,14 @@ impl RouteCore {
         match access {
             Access::PartitionRead(p) => self.env.before_partition_read(p).await?,
             Access::PartitionWrite(p) => self.env.before_partition_write(p).await?,
-            Access::MetaRead => self.env.before_meta_read().await?,
+            Access::MetaRead | Access::MetaReadWrite => self.env.before_meta_read().await?,
             _ => {}
         }
         self.stats.local.fetch_add(1, Ordering::Relaxed);
         let out = fut.await?;
         let token = match access {
             Access::PartitionWrite(p) => self.env.token_after_partition_write(p),
-            Access::MetaWrite => self.env.token_after_meta_write(),
+            Access::MetaWrite | Access::MetaReadWrite => self.env.token_after_meta_write(),
             _ => None,
         };
         if let Some(t) = token {
@@ -549,6 +561,16 @@ impl RouteCore {
         F: Future<Output = Result<T, ApiError>>,
     {
         let r = self.local(Access::MetaWrite, fut).await;
+        record(class, "local", r.is_ok());
+        r
+    }
+
+    /// A metadata write that validates against metadata first ([`Access::MetaReadWrite`]).
+    pub async fn meta_read_write<T, F>(&self, class: RouteClass, fut: F) -> Result<T, ApiError>
+    where
+        F: Future<Output = Result<T, ApiError>>,
+    {
+        let r = self.local(Access::MetaReadWrite, fut).await;
         record(class, "local", r.is_ok());
         r
     }
@@ -777,13 +799,31 @@ impl ControlPlane for RoutedControlPlane {
         meta_r!(self, list_workflows)
     }
     async fn activate_workflow(&self, req: ActivateWorkflow) -> Result<WorkflowInfo, ApiError> {
-        meta_w!(self, activate_workflow, req)
+        // 13-18: the barrier before the `module_retired` check (13-15 / 13-17 handover).
+        self.core
+            .meta_read_write(
+                table::class(CP, "activate_workflow"),
+                self.inner.activate_workflow(req),
+            )
+            .await
     }
     async fn start_run(&self, req: StartRunRequest) -> Result<StartRunResult, ApiError> {
         let key = req.idempotency_key.as_deref().filter(|k| !k.is_empty());
         let remote = |peer: PeerApi| {
             let r = req.clone();
             async move { peer.cp.start_run(r).await }
+        };
+        // 13-18: a start resolves its workflow version and checks `module_retired` on the
+        // local metadata view. A start carrying `ostro-read-after: m:<index>` (e.g. after a
+        // retire or an activation on another node) passes `before_meta_read` first, so it
+        // sees that write; a start without a meta token adds no barrier (a start must not
+        // wait on, or fail with, a metadata round trip: availability under a meta-quorum
+        // loss and start latency, decision D-13-18-2).
+        let local = || async {
+            if consistency::carries_meta_token(&current_meta()) {
+                self.core.env().before_meta_read().await?;
+            }
+            self.inner.start_run(req.clone()).await
         };
         match key {
             Some(k) => {
@@ -794,21 +834,10 @@ impl ControlPlane for RoutedControlPlane {
                     self.core.count(),
                 );
                 self.core
-                    .partition(
-                        RouteClass::KeyPartition,
-                        p,
-                        true,
-                        false,
-                        || self.inner.start_run(req.clone()),
-                        remote,
-                    )
+                    .partition(RouteClass::KeyPartition, p, true, false, local, remote)
                     .await
             }
-            None => {
-                self.core
-                    .unkeyed_start(|| self.inner.start_run(req.clone()), remote)
-                    .await
-            }
+            None => self.core.unkeyed_start(local, remote).await,
         }
     }
     async fn get_run(&self, run_id: String) -> Result<RunInfo, ApiError> {
@@ -1173,6 +1202,10 @@ impl RouteEnv for NodeEnv {
 
     fn token_after_meta_write(&self) -> Option<String> {
         consistency::token_after_meta_write(&self.ctx)
+    }
+
+    fn migrate_gate(&self) -> BoxFuture<'_, Result<(), ApiError>> {
+        Box::pin(crate::control::migrate::entry_gate(&self.ctx))
     }
 }
 

@@ -195,6 +195,13 @@ fn read_after(meta: &RequestMeta) -> Result<Option<Token>, ApiError> {
     meta.read_after.as_deref().map(parse_token).transpose()
 }
 
+/// Whether `meta` carries a well-formed `ostro-read-after: m:<index>` (13-18: a start then
+/// passes [`before_meta_read`] before its metadata checks). A malformed token is `false`
+/// here; the call's own hooks answer it 400.
+pub fn carries_meta_token(meta: &RequestMeta) -> bool {
+    matches!(read_after(meta), Ok(Some(Token::Meta { .. })))
+}
+
 // ---------------------------------------------------------------------------------
 // The node as the rules see it
 // ---------------------------------------------------------------------------------

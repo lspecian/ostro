@@ -443,6 +443,8 @@ struct FakeEnv {
     peers: HashMap<u64, Arc<FakeCp>>,
     unreachable: Vec<u64>,
     log: Log,
+    /// 13-18: what `migrate_gate` answers (`None`: open).
+    gate: Option<ApiError>,
 }
 
 impl FakeEnv {
@@ -458,6 +460,7 @@ impl FakeEnv {
             peers: HashMap::new(),
             unreachable: vec![],
             log: Arc::clone(log),
+            gate: None,
         }
     }
 
@@ -576,6 +579,11 @@ impl RouteEnv for FakeEnv {
     fn token_after_meta_write(&self) -> Option<String> {
         push(&self.log, "hook token_after_meta_write".into());
         Some("m:7".into())
+    }
+    fn migrate_gate(&self) -> BoxFuture<'_, Result<(), ApiError>> {
+        push(&self.log, "hook migrate_gate".into());
+        let r = self.gate.clone().map_or(Ok(()), Err);
+        Box::pin(async move { r })
     }
 }
 
@@ -1343,4 +1351,129 @@ async fn node_api_router_sets_from_node_and_rejects_workers() {
         "PERMISSION_DENIED"
     );
     assert!(snapshot(&log).is_empty());
+}
+
+// ---------------------------------------------------------------------------------
+// 13-18: meta barriers before the retired checks, the migrate gate at the entry node
+// ---------------------------------------------------------------------------------
+
+fn start_req() -> StartRunRequest {
+    StartRunRequest {
+        workflow: "wf".into(),
+        input_json: b"{}".to_vec(),
+        ..StartRunRequest::default()
+    }
+}
+
+/// Activation checks `module_retired` against metadata: the barrier first, the token after.
+#[tokio::test]
+async fn activation_passes_the_meta_barrier_first() {
+    let log: Log = Arc::default();
+    let inner = FakeCp::new(1, &log);
+    let (cp, _) = routed(FakeEnv::new(1, &log), inner);
+    let r = cp
+        .activate_workflow(ActivateWorkflow {
+            name: "wf".into(),
+            version: 2,
+            expected_version: None,
+        })
+        .await;
+    assert_eq!(r.unwrap_err().code, ErrorCode::NotFound);
+    let l = snapshot(&log);
+    assert_eq!(l[0], "hook before_meta_read", "{l:?}");
+    assert!(l[1].starts_with("call node=1 activate_workflow"), "{l:?}");
+}
+
+/// A start passes `before_meta_read` only when it carries a meta token (D-13-18-2).
+#[tokio::test]
+async fn start_with_a_meta_token_passes_the_meta_barrier() {
+    for (token, barrier) in [(None, false), (Some("m:12"), true), (Some("p1:1:9"), false)] {
+        let log: Log = Arc::default();
+        let inner = FakeCp::new(1, &log);
+        let mut env = FakeEnv::new(1, &log);
+        env.led = vec![PartitionId(1)];
+        let (cp, _) = routed(env, inner);
+        let meta = RequestMeta {
+            read_after: token.map(str::to_owned),
+            ..RequestMeta::default()
+        };
+        let (r, _) = request_meta::scope_with_consistency(meta, cp.start_run(start_req())).await;
+        r.unwrap();
+        let l = snapshot(&log);
+        let b = l.iter().position(|x| x == "hook before_meta_read");
+        let c = l
+            .iter()
+            .position(|x| x.starts_with("call node=1 start_run"));
+        assert!(c.is_some(), "{token:?}: {l:?}");
+        assert_eq!(b.is_some(), barrier, "{token:?}: {l:?}");
+        if let Some(b) = b {
+            assert!(b < c.unwrap(), "{token:?}: barrier after the call: {l:?}");
+        }
+    }
+}
+
+struct FakeLifecycle {
+    calls: Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl ostro_api::phase13::ModuleLifecycleApi for FakeLifecycle {
+    async fn migrate_runs(
+        &self,
+        _r: ostro_api::phase13::MigrateRunsRequest,
+    ) -> Result<ostro_api::phase13::MigrateRunsReport, ApiError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ostro_api::phase13::MigrateRunsReport::default())
+    }
+}
+
+/// 13-17 deviation 8: a submitting migrate decides the gate once at the entry node, before
+/// any leg; a refusal runs no leg, a dry run and a forwarded-in leg never ask.
+#[tokio::test]
+async fn migrate_gate_is_decided_once_at_the_entry_node() {
+    let refused = ApiError::conflict("RepinRun needs cluster feature level 2")
+        .with_details(serde_json::json!({ "reason": "feature_not_enabled" }));
+    for (gate, dry_run, meta, legs, asked) in [
+        (Some(refused.clone()), false, client_meta(), 0, true),
+        (None, false, client_meta(), 1, true),
+        (Some(refused.clone()), true, client_meta(), 1, false),
+        (Some(refused.clone()), false, forwarded_meta(), 1, false),
+    ] {
+        let log: Log = Arc::default();
+        let mut env = FakeEnv::new(1, &log);
+        env.gate = gate.clone();
+        let core = RouteCore::new(Arc::new(env));
+        let lc = Arc::new(FakeLifecycle {
+            calls: Mutex::new(0),
+        });
+        let inner: Arc<dyn ostro_api::phase13::ModuleLifecycleApi> = lc.clone();
+        let req = ostro_api::phase13::MigrateRunsRequest {
+            workflow: "wf".into(),
+            from: ostro_api::phase13::VersionOrSha::Version(1),
+            to_version: 2,
+            filter: None,
+            limit: None,
+            dry_run,
+        };
+        let (r, _) = request_meta::scope_with_consistency(
+            meta.clone(),
+            ostro_server::route::fanout::migrate_runs(&core, &inner, req),
+        )
+        .await;
+        let label = format!("gate {:?} dry {dry_run} hop {}", gate.is_some(), meta.hop);
+        if legs == 0 {
+            let e = r.expect_err(&label);
+            assert_eq!(e.code, ErrorCode::Conflict, "{label}");
+            assert_eq!(e.reason(), Some("feature_not_enabled"), "{label}");
+        } else {
+            r.expect(&label);
+        }
+        assert_eq!(*lc.calls.lock().unwrap(), legs, "{label}: legs");
+        let l = snapshot(&log);
+        assert_eq!(
+            l.iter().filter(|x| *x == "hook migrate_gate").count(),
+            usize::from(asked),
+            "{label}: {l:?}"
+        );
+    }
 }
