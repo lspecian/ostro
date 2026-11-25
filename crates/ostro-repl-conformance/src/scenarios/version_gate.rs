@@ -47,6 +47,8 @@ pub const NODES: usize = 3;
 pub const FINALIZE_WITHIN: Duration = Duration::from_secs(5);
 /// How long "finalized stays at 1" is sampled where nothing should change.
 pub const STAYS_FOR: Duration = Duration::from_secs(4);
+/// Runs the workload must have acknowledged before a scenario's first restart.
+const WARMUP_RUNS: usize = 3;
 /// Bound on one workload run.
 const RUN_T: Duration = Duration::from_secs(120);
 
@@ -149,7 +151,12 @@ async fn settle_voters(c: &InProcCluster, nodes: usize) -> Result<(), HarnessErr
 pub async fn run(nodes: usize, body: GateFn) -> ScenarioResult {
     let mut c = start_level1_cluster(nodes).await.map_err(harness)?;
     let w = Workload::start(&c);
-    let r = body(&mut c, &w).await;
+    // The workload must be serving before the first restart: a scenario that restarts every
+    // node right away would otherwise leave it no window to start a run.
+    let r = match w.wait_acked(WARMUP_RUNS, RUN_T).await {
+        Ok(()) => body(&mut c, &w).await,
+        Err(e) => Err(e),
+    };
     let wr = w.finish().await;
     let oracle = upgrade_oracle(&c).await;
     c.stop().await;
@@ -285,6 +292,29 @@ impl Workload {
             .filter(|n| c.handle(*n).is_some())
             .map(|n| c.client(n))
             .collect()
+    }
+
+    /// Wait until `k` more runs than now have been acknowledged (bounded by `limit`).
+    pub async fn wait_acked(&self, k: usize, limit: Duration) -> ScenarioResult {
+        let base = self.acked.lock().expect("acked").len();
+        // clock-exempt: test timeout
+        let t0 = tokio::time::Instant::now();
+        loop {
+            let n = self.acked.lock().expect("acked").len();
+            if n >= base + k {
+                return Ok(());
+            }
+            if t0.elapsed() > limit {
+                return Err(fail(
+                    "workload",
+                    format!(
+                        "only {} of {k} runs acknowledged within {limit:?}",
+                        n - base
+                    ),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Point the workload at the nodes running now (after a restart).
@@ -575,6 +605,7 @@ pub async fn downgrade_after_finalize_refused(
     }
     w.refresh(c);
     wait_finalized(c, 2, FINALIZE_WITHIN).await?;
+    w.wait_acked(WARMUP_RUNS, RUN_T).await?;
     eprintln!("version_gate: downgrade_after: finalized at 2");
     let victim = *c.node_ids().last().expect("nodes");
     // Stop it first so its files are quiescent, snapshot, then start it at level 1.
