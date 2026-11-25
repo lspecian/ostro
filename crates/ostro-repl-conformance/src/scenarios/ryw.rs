@@ -262,6 +262,10 @@ struct LoadReport {
     writes_acked: usize,
     reads_recorded: usize,
     unavailable: usize,
+    /// Terminates answered `409 run_terminal`: the session's own terminate of that run
+    /// committed in an attempt whose answer was lost (a forward to a peer that died
+    /// mid-call; the router re-routes it once). Not acknowledged, never an observation.
+    retried_terminal: usize,
     unexpected: Vec<String>,
     read_lat: Vec<Duration>,
     write_lat: Vec<Duration>,
@@ -273,6 +277,7 @@ impl LoadReport {
         self.writes_acked += o.writes_acked;
         self.reads_recorded += o.reads_recorded;
         self.unavailable += o.unavailable;
+        self.retried_terminal += o.retried_terminal;
         self.unexpected.extend(o.unexpected);
         self.read_lat.extend(o.read_lat);
         self.write_lat.extend(o.write_lat);
@@ -282,11 +287,12 @@ impl LoadReport {
         self.read_lat.sort_unstable();
         self.write_lat.sort_unstable();
         format!(
-            "{} ops, {} writes acked, {} reads recorded, {} unavailable, {} unexpected; read p50 {:?} p99 {:?}, write p50 {:?} p99 {:?}",
+            "{} ops, {} writes acked, {} reads recorded, {} unavailable, {} retried terminates, {} unexpected; read p50 {:?} p99 {:?}, write p50 {:?} p99 {:?}",
             self.ops,
             self.writes_acked,
             self.reads_recorded,
             self.unavailable,
+            self.retried_terminal,
             self.unexpected.len(),
             pct(&self.read_lat, 0.5),
             pct(&self.read_lat, 0.99),
@@ -644,6 +650,14 @@ async fn one_op(api: &ApiClient, st: &mut SessionState, cfg: &LoadCfg, rep: &mut
                     st.runs[i].waiting = false;
                     rep.writes_acked += 1;
                     rep.write_lat.push(t0.elapsed());
+                }
+                // Only this session terminates this run, once (`terminal_maybe`): the
+                // run is terminal through an attempt whose answer was lost. The effect
+                // stays unacknowledged (the checker only sees acked writes).
+                Some(x)
+                    if x.st == 409 && x.body["error"]["details"]["reason"] == "run_terminal" =>
+                {
+                    rep.retried_terminal += 1;
                 }
                 _ => other_answer(rep, "terminate", &r),
             }
