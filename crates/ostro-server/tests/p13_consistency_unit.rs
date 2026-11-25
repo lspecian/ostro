@@ -327,6 +327,34 @@ async fn not_leading_or_announce_not_applied_is_refused() {
 }
 
 #[tokio::test]
+async fn published_leader_waits_for_its_takeover_bounded() {
+    // The metadata names this node (taking over) but its LeaderAnnounced is not applied:
+    // the read waits (bounded by session_timeout) instead of refusing at once, and is
+    // refused when the takeover never completes.
+    let f = Fake::new(1);
+    f.hint.lock().unwrap().insert(0, 1);
+    let t = f.now();
+    let e = check_partition_read(&*f, p(0), &RequestMeta::default())
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&e), Some("not_leader"));
+    let waited = f.now() - t;
+    assert!(
+        waited >= ST && waited < ST + Duration::from_millis(50),
+        "{waited:?}"
+    );
+    // Another node published: refused at once.
+    f.hint.lock().unwrap().insert(0, 2);
+    let t = f.now();
+    assert!(
+        check_partition_read(&*f, p(0), &RequestMeta::default())
+            .await
+            .is_err()
+    );
+    assert_eq!(f.now(), t);
+}
+
+#[tokio::test]
 async fn strict_reads_take_the_barrier_and_check_the_epoch() {
     let f = Fake::new(1);
     f.lead(0, 5);

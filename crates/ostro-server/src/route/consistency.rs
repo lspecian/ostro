@@ -305,6 +305,38 @@ async fn lease(env: &dyn ReadEnv, meta: &RequestMeta) -> bool {
     false
 }
 
+/// `leading(p)`, waiting (bounded by `session_timeout` and the deadline) while the
+/// metadata already names this node as `p`'s leader and its takeover (the
+/// `LeaderAnnounced` of the new term) is still running: the router re-routes only once, and
+/// a call routed (or forwarded) here by the published assignment would otherwise answer
+/// `not_leader` for the few milliseconds of the takeover.
+async fn leading_or_takeover(
+    env: &dyn ReadEnv,
+    p: PartitionId,
+    meta: &RequestMeta,
+) -> Option<Epoch> {
+    if let Some(e) = env.leading(p) {
+        return Some(e);
+    }
+    if env.leader_hint(p) != Some(env.node_id()) {
+        return None;
+    }
+    let mut until = env.now() + env.session_timeout();
+    if let Some(d) = meta.deadline {
+        until = until.min(d);
+    }
+    while env.now() < until {
+        env.sleep(ANCHOR_POLL).await;
+        if let Some(e) = env.leading(p) {
+            return Some(e);
+        }
+        if env.leader_hint(p) != Some(env.node_id()) {
+            return None;
+        }
+    }
+    None
+}
+
 fn covers_partition(env: &dyn ReadEnv, p: PartitionId, tok: Option<Token>) -> Option<bool> {
     match tok {
         Some(Token::Partition {
@@ -326,7 +358,7 @@ pub async fn check_partition_read(
     meta: &RequestMeta,
 ) -> Result<(), ApiError> {
     let tok = read_after(meta)?;
-    let Some(epoch) = env.leading(p) else {
+    let Some(epoch) = leading_or_takeover(env, p, meta).await else {
         return Err(not_leader(env, p, "this node does not lead it"));
     };
     if env.in_handoff(p) {

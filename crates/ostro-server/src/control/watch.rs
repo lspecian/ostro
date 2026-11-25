@@ -536,6 +536,30 @@ fn response(run: RunId, rec: &RunRecord, payload: Option<&[u8]>) -> AwaitResultR
     }
 }
 
+/// Wait until the metadata names a leader of `p` other than this node (at most
+/// 2 × `session_timeout`, and never past `deadline`).
+async fn wait_successor(cp: &ServerControlPlane, p: PartitionId, deadline: tokio::time::Instant) {
+    let me = cp.cfg.node.node_id;
+    // clock-exempt: bounded wait inside a long-poll deadline.
+    let until =
+        (tokio::time::Instant::now() + cp.cfg.replication.session_timeout.get() * 2).min(deadline);
+    loop {
+        let leader = cp
+            .meta
+            .view()
+            .read(|s| s.partition(p.0).map(|a| a.value.leader))
+            .unwrap_or(0);
+        if leader != 0 && leader != me {
+            return;
+        }
+        // clock-exempt: bounded wait inside a long-poll deadline.
+        if tokio::time::Instant::now() >= until {
+            return;
+        }
+        tokio::time::sleep(SUCCESSOR_POLL).await;
+    }
+}
+
 /// `unavailable` reason `leader_changed` for a long-poll whose partition moved away.
 fn leader_changed(run: RunId) -> ApiError {
     ApiError::unavailable(format!(
@@ -610,7 +634,10 @@ pub(crate) async fn await_result(
         drop(waiter);
         if outcome == Some(WaitOutcome::LeaderChanged) {
             // 13-13: this node no longer leads the run's partition; the routed control
-            // plane re-routes once to the new leader with the remaining deadline.
+            // plane re-routes once to the new leader with the remaining deadline. Answer
+            // once the metadata names a successor (bounded), so that one re-route finds it
+            // instead of the leader-0 window of a resignation.
+            wait_successor(cp, run.partition(), deadline).await;
             return Err(leader_changed(run));
         }
         let woken = outcome.is_some();
