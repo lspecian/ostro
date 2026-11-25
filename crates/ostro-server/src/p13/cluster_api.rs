@@ -50,13 +50,8 @@ fn placement_error(method: &str, e: PlacementError) -> ApiError {
     match e {
         PlacementError::NotImplemented => lands_in(method, "13-10"),
         PlacementError::Invalid(m) => ApiError::invalid_argument(m),
-        PlacementError::FeatureNotEnabled(f) => ApiError::precondition_failed(f.to_string())
-            .with_details(serde_json::json!({
-                "reason": "feature_not_enabled",
-                "feature": f.feature.name(),
-                "needed": f.needed,
-                "finalized": f.finalized,
-            })),
+        // 409, as every gate (13-18, D-P13-17).
+        PlacementError::FeatureNotEnabled(f) => crate::control::module_retire::feature_error(f),
         PlacementError::Conflict(m) => ApiError::conflict(m),
         PlacementError::Meta(m) => ApiError::unavailable(m),
     }

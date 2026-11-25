@@ -145,10 +145,11 @@ impl Fx {
 }
 
 fn feature_not_enabled() -> ApiError {
-    ApiError::precondition_failed("AlterReplicas needs feature level 2; finalized level is 1")
-        .with_details(json!({
+    ApiError::conflict("AlterReplicas needs feature level 2; finalized level is 1").with_details(
+        json!({
             "reason": "feature_not_enabled", "feature": "AlterReplicas", "needed": 2, "finalized": 1
-        }))
+        }),
+    )
 }
 
 fn not_leader() -> ApiError {

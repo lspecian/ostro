@@ -43,8 +43,8 @@ NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
 2     active  voter  yes   1..2    10.0.0.2:7700   10.0.0.2:7701
 [exit 0]
 $ ostro cluster reassign --partition 1 --to 1,2
-error: AlterReplicas needs feature level 2; finalized level is 1 (HTTP 412 precondition_failed, reason feature_not_enabled)
+error: AlterReplicas needs feature level 2; finalized level is 1 (HTTP 409 conflict, reason feature_not_enabled)
 [exit 1]
 $ ostro cluster rebalance --json
-error: AlterReplicas needs feature level 2; finalized level is 1 (HTTP 412 precondition_failed, reason feature_not_enabled)
+error: AlterReplicas needs feature level 2; finalized level is 1 (HTTP 409 conflict, reason feature_not_enabled)
 [exit 1]

@@ -2,7 +2,7 @@
 //! [--dry-run]` (D-P13-21): `POST /v1/runs/migrate` (13-17's server side). 13-02's clap
 //! shape, 13-16's verb: `--json` prints the report, human output the counts, the failed runs
 //! and the runs to retry. Exit codes: 0, 4 when a run diverged or errored (as `ostro
-//! replay`), 1 API error (404 unknown version, 409 `module_retired`, 412
+//! replay`), 1 API error (404 unknown version, 409 `module_retired`, 409
 //! `feature_not_enabled`), 2 usage.
 
 use clap::Args;

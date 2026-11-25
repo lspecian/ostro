@@ -1,7 +1,7 @@
 //! `ostro modules {rm, gc}` (D-P13-20): retire a module (`DELETE /v1/modules/{sha}`,
 //! idempotent) and run one module GC round (`POST /v1/modules/gc`); 13-15's server side,
 //! 13-02's clap shape, 13-16's verbs. Exit codes: 0, 1 API error (404 unknown module, 409
-//! `module_active`, 412 `feature_not_enabled`), 2 usage.
+//! `module_active`, 409 `feature_not_enabled`), 2 usage.
 
 use clap::{Args, Subcommand};
 use ostro_client::cluster::{GcReport, RetiredModule};

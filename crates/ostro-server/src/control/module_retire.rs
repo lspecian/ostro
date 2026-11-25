@@ -8,7 +8,8 @@
 //! - no workflow version of it may be Active (409 `module_active`, the active versions in
 //!   `details.workflows`); activate another version first;
 //! - the write is gated: `compat::require(RetiredExt)` before any proposal (P13-F1 rule 1;
-//!   412 `feature_not_enabled` before the cluster finalized level 2). Apply never validates
+//!   409 `feature_not_enabled` before the cluster finalized level 2; 13-18 aligned every
+//!   gate on 409, D-P13-17). Apply never validates
 //!   the tag (rule 5);
 //! - read-modify-write with CAS on each record (Module first, so new starts are refused at
 //!   once, then each WorkflowVersion); a lost CAS re-reads and retries;
@@ -68,9 +69,11 @@ fn meta_unavailable(e: MetaError) -> ApiError {
     ApiError::unavailable(format!("metadata unavailable: {e}"))
 }
 
-/// 412 `feature_not_enabled` (same shape as the cluster API's gated writes).
+/// 409 `feature_not_enabled` ([`FeatureNotEnabled::HTTP_STATUS`], D-P13-17): the one shape
+/// of every gated refusal (retire, the cluster API's gated writes, migrate, the upload gate;
+/// 13-18 aligned them).
 pub(crate) fn feature_error(f: FeatureNotEnabled) -> ApiError {
-    ApiError::precondition_failed(f.detail()).with_details(serde_json::json!({
+    ApiError::conflict(f.detail()).with_details(serde_json::json!({
         "reason": REASON_FEATURE,
         "feature": f.feature.name(),
         "needed": f.needed,

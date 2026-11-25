@@ -755,11 +755,10 @@ fn move_blocked_before_finalize(_c: &mut InProcCluster) -> BoxFuture<'_, Scenari
     })
 }
 
-/// A gated refusal: 409 (the plan) or 412 (the 13-02 cluster API mapping of
-/// `PlacementError::FeatureNotEnabled`, also used by 13-15's retire) with reason
-/// `feature_not_enabled`.
+/// A gated refusal: 409 with reason `feature_not_enabled` (13-18 aligned every gate on 409,
+/// D-P13-17; the cluster API answered 412 before).
 fn feature_not_enabled(st: reqwest::StatusCode, v: &Value) -> bool {
-    matches!(st.as_u16(), 409 | 412) && v.to_string().contains("feature_not_enabled")
+    st.as_u16() == 409 && v["error"]["details"]["reason"] == "feature_not_enabled"
 }
 
 async fn blocked_body(c: &mut InProcCluster) -> ScenarioResult {
