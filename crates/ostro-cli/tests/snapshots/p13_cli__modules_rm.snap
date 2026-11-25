@@ -1,0 +1,36 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro modules rm aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+retired module aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa at 2023-11-14T22:13:21Z
+workflow versions retired: order@1, order@2
+module GC deletes it once no run references it (`ostro modules gc`)
+[exit 0]
+$ ostro modules rm aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+retired module aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa at 2023-11-14T22:13:21Z
+workflow versions retired: order@1, order@2
+module GC deletes it once no run references it (`ostro modules gc`)
+[exit 0]
+$ ostro modules rm bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+error: module bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb has an active workflow version (HTTP 409 conflict, reason module_active)
+[exit 1]
+$ ostro modules rm cccc
+error: sha256 must be 64 lowercase hex digits (HTTP 400 invalid_argument)
+[exit 1]
+$ ostro modules rm aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --json
+{
+  "retired_at_ms": 1700000001000,
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "versions": [
+    {
+      "name": "order",
+      "version": 1
+    },
+    {
+      "name": "order",
+      "version": 2
+    }
+  ]
+}
+[exit 0]

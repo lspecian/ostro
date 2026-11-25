@@ -1,0 +1,82 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro cluster status
+cluster fake-cluster  meta leader -  finalized level 1  member levels 1..2
+policy: none (a single node or a static cluster; `ostro cluster init` promotes a single node)
+
+NODE  STATE   ROLE  LIVE  LEVELS  API             CLUSTER
+1     active  none  yes   1..2    127.0.0.1:7070  -
+[exit 0]
+$ ostro cluster status
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
+1     active  voter  yes   1..2    127.0.0.1:7070  10.0.0.1:7701
+2     active  voter  yes   1..2    10.0.0.2:7700   10.0.0.2:7701
+[exit 0]
+$ ostro cluster status --json
+{
+  "cluster_id": "fake-cluster",
+  "finalized": 1,
+  "hold": null,
+  "learners": [],
+  "level_max": 2,
+  "level_min": 1,
+  "members": [
+    {
+      "addr": "127.0.0.1:7070",
+      "cluster_addr": "10.0.0.1:7701",
+      "live": true,
+      "node_id": 1,
+      "raft_role": "voter",
+      "state": "active",
+      "version": {
+        "event_codec_ver": 1,
+        "level_max": 2,
+        "level_min": 1,
+        "ostro_version": "0.1.0",
+        "wasmtime": "50.0.2",
+        "wit_lines": [
+          "0.1"
+        ]
+      }
+    },
+    {
+      "addr": "10.0.0.2:7700",
+      "cluster_addr": "10.0.0.2:7701",
+      "live": true,
+      "node_id": 2,
+      "raft_role": "voter",
+      "state": "active",
+      "version": {
+        "event_codec_ver": 1,
+        "level_max": 2,
+        "level_min": 1,
+        "ostro_version": "0.1.0",
+        "wasmtime": "50.0.2",
+        "wit_lines": [
+          "0.1"
+        ]
+      }
+    }
+  ],
+  "meta_leader": 1,
+  "policy": {
+    "max_voters": 5,
+    "min_insync": 2,
+    "rf": 3
+  },
+  "reassignments": [],
+  "voters": [
+    1,
+    2
+  ],
+  "voters_outgoing": []
+}
+[exit 0]
+$ ostro cluster status
+error: not the meta leader; retry (HTTP 503 unavailable, reason not_leader)
+[exit 1]

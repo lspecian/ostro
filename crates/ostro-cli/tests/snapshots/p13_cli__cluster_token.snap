@@ -1,0 +1,32 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro cluster token create --node
+error: this node is not a cluster yet (POST /v1/cluster/init) (HTTP 412 precondition_failed)
+[exit 1]
+$ ostro cluster init
+this node is a cluster now; add nodes with `ostro cluster token create --node` and `ostro cluster join`
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
+1     active  voter  yes   1..2    127.0.0.1:7070  127.0.0.1:7071
+[exit 0]
+$ ostro cluster token create
+error: `ostro cluster token create` needs --node (worker join tokens: `ostro worker token create`)
+[exit 2]
+$ ostro cluster token create --node --ttl 1h
+token id:   njt_1
+expires at: 2023-11-14T23:13:22Z
+join a blank node with (shown once; store the token as a secret):
+  ostro cluster join http://SERVER --token njt_1.fake-secret-1 --ca-hash sha256:0000000000000000000000000000000000000000000000000000000000000000
+[exit 0]
+$ ostro cluster token create --node --json
+{
+  "ca_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "expires_at_ms": 1700003603000,
+  "id": "njt_2",
+  "token": "njt_2.fake-secret-2"
+}
+[exit 0]

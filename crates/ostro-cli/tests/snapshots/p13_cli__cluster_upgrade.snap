@@ -1,0 +1,65 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro cluster upgrade status
+finalized level 1  hold none  highest common level 2  auto-finalize off
+level 2 can be finalized (`ostro cluster upgrade finalize`)
+
+NODE  LEVELS  LIVE
+1     1..2    yes
+2     1..2    yes
+[exit 0]
+$ ostro cluster upgrade hold
+hold set
+finalized level 1  hold 1  highest common level 2  auto-finalize off
+
+NODE  LEVELS  LIVE
+1     1..2    yes
+2     1..2    yes
+[exit 0]
+$ ostro cluster upgrade finalize
+error: the cluster is held at level 1 (HTTP 409 conflict, reason held)
+[exit 1]
+$ ostro cluster upgrade release
+hold released
+finalized level 1  hold none  highest common level 2  auto-finalize off
+level 2 can be finalized (`ostro cluster upgrade finalize`)
+
+NODE  LEVELS  LIVE
+1     1..2    yes
+2     1..2    yes
+[exit 0]
+$ ostro cluster upgrade finalize
+finalized
+finalized level 2  hold none  highest common level 2  auto-finalize off
+
+NODE  LEVELS  LIVE
+1     1..2    yes
+2     1..2    yes
+[exit 0]
+$ ostro cluster upgrade status --json
+{
+  "auto_finalize": false,
+  "common_level_max": 2,
+  "finalized": 2,
+  "hold": null,
+  "members": [
+    {
+      "level_max": 2,
+      "level_min": 1,
+      "live": true,
+      "node_id": 1
+    },
+    {
+      "level_max": 2,
+      "level_min": 1,
+      "live": true,
+      "node_id": 2
+    }
+  ]
+}
+[exit 0]
+$ ostro cluster upgrade finalize
+error: not the meta leader; retry (HTTP 503 unavailable, reason not_leader)
+[exit 1]

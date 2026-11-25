@@ -2403,7 +2403,7 @@ mod p13 {
     /// [`FAKE_EPOCH_MS`].
     ///
     /// - `init` makes node 1 the only voter (`rf`/`min_insync` default 3/2, max voters 5);
-    ///   a second `init` is 409. Everything except `status`/`upgrade_status` before `init`
+    ///   a second `init` answers the status unchanged (idempotent, as the server). Everything except `status`/`upgrade_status` before `init`
     ///   is 412 `precondition_failed`.
     /// - `join` needs a token from `create_node_token` (else 400 `join_token_invalid`,
     ///   tokens are single-use); the joiner becomes a `joining` learner whose binary is
@@ -2493,11 +2493,8 @@ mod p13 {
         async fn init(&self, r: InitRequest) -> Result<ClusterStatus, ApiError> {
             let mut st = self.check("init")?;
             if st.initialized {
-                return Err(reason(
-                    ErrorCode::Conflict,
-                    "this node is already a cluster".into(),
-                    "already_cluster",
-                ));
+                // Idempotent like the server (13-16): the current status, nothing changed.
+                return Ok(st.status());
             }
             st.tick();
             st.initialized = true;
@@ -2743,7 +2740,8 @@ mod p13 {
     /// In-memory [`ModuleLifecycleApi`] for adapter, CLI and parity tests.
     ///
     /// - Modules are seeded with [`FakeModuleLifecycle::add_module`]; retiring an unknown
-    ///   module is 404, an active one 409, a retired one 409 `module_retired`.
+    ///   module is 404, an active one 409 `module_active`, a retired one answers the first
+    ///   retirement again (idempotent, as the server).
     /// - A GC round deletes every retired module not marked referenced
     ///   ([`FakeModuleLifecycle::set_referenced`]); deleted modules are gone (404 after).
     /// - Migration processes the seeded runs of the workflow in run-id order up to `limit`;
@@ -2831,17 +2829,20 @@ mod p13 {
             let Some((versions, active, retired)) = st.modules.get_mut(&sha) else {
                 return Err(ApiError::not_found(format!("module {sha} not found")));
             };
-            if retired.is_some() {
-                return Err(reason(
-                    ErrorCode::Conflict,
-                    format!("module {sha} is already retired"),
-                    "module_retired",
-                ));
+            if let Some(at) = *retired {
+                // Idempotent like the server (13-15): the first retirement again.
+                return Ok(RetireModuleResponse {
+                    sha256: sha,
+                    retired_at_ms: at,
+                    versions: versions.clone(),
+                });
             }
             if *active {
-                return Err(ApiError::conflict(format!(
-                    "module {sha} has an active workflow version"
-                )));
+                return Err(reason(
+                    ErrorCode::Conflict,
+                    format!("module {sha} has an active workflow version"),
+                    "module_active",
+                ));
             }
             *retired = Some(now);
             Ok(RetireModuleResponse {

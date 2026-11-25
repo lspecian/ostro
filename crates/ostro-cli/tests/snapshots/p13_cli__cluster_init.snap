@@ -1,0 +1,64 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro cluster init --advertise-api 10.0.0.1:7700
+error: `ostro cluster init` takes only --advertise-cluster: the API and replication addresses of a promoted node are its listeners ([api] listen, [cluster] replication_listen)
+[exit 2]
+$ ostro cluster init --rf 3
+this node is a cluster now; add nodes with `ostro cluster token create --node` and `ostro cluster join`
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
+1     active  voter  yes   1..2    127.0.0.1:7070  127.0.0.1:7071
+[exit 0]
+$ ostro cluster init --advertise-cluster 10.0.0.1:7701 --rf 5
+this node is a cluster now; add nodes with `ostro cluster token create --node` and `ostro cluster join`
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
+1     active  voter  yes   1..2    127.0.0.1:7070  127.0.0.1:7071
+[exit 0]
+$ ostro cluster init --json
+{
+  "cluster_id": "fake-cluster",
+  "finalized": 1,
+  "hold": null,
+  "learners": [],
+  "level_max": 2,
+  "level_min": 1,
+  "members": [
+    {
+      "addr": "127.0.0.1:7070",
+      "cluster_addr": "127.0.0.1:7071",
+      "live": true,
+      "node_id": 1,
+      "raft_role": "voter",
+      "state": "active",
+      "version": {
+        "event_codec_ver": 1,
+        "level_max": 2,
+        "level_min": 1,
+        "ostro_version": "0.1.0",
+        "wasmtime": "50.0.2",
+        "wit_lines": [
+          "0.1"
+        ]
+      }
+    }
+  ],
+  "meta_leader": 1,
+  "policy": {
+    "max_voters": 5,
+    "min_insync": 2,
+    "rf": 3
+  },
+  "reassignments": [],
+  "voters": [
+    1
+  ],
+  "voters_outgoing": []
+}
+[exit 0]

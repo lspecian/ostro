@@ -1,0 +1,31 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro cluster drain 9
+error: node 9 is not a member (HTTP 404 not_found)
+[exit 1]
+$ ostro cluster drain 2
+node 2 draining: its replicas and leaderships move away
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE     ROLE   LIVE  LEVELS  API             CLUSTER
+1     active    voter  yes   1..2    127.0.0.1:7070  10.0.0.1:7701
+2     draining  voter  yes   1..2    10.0.0.2:7700   10.0.0.2:7701
+[exit 0]
+$ ostro cluster remove 2 --force
+node 2 removed
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE    ROLE   LIVE  LEVELS  API             CLUSTER
+1     active   voter  yes   1..2    127.0.0.1:7070  10.0.0.1:7701
+2     removed  none   no    1..2    10.0.0.2:7700   10.0.0.2:7701
+[exit 0]
+$ ostro cluster remove 2 --json
+error: node 2 is not a member (HTTP 404 not_found)
+[exit 1]
+$ ostro cluster remove 1
+error: removing node 1 would leave no meta voter (HTTP 409 conflict, reason quorum)
+[exit 1]

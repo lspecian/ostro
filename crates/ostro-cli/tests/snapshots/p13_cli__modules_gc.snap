@@ -1,0 +1,30 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro modules gc
+module GC: 0 retired candidate(s)
+deleted:    -
+referenced: -
+[exit 0]
+$ ostro modules gc
+module GC: 2 retired candidate(s)
+deleted:    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+referenced: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+[exit 0]
+$ ostro modules gc --json
+{
+  "candidates": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "deleted": [],
+  "postponed": false,
+  "reason": null,
+  "referenced": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ]
+}
+[exit 0]
+$ ostro modules gc
+error: AlterReplicas needs feature level 2; finalized level is 1 (HTTP 412 precondition_failed, reason feature_not_enabled)
+[exit 1]

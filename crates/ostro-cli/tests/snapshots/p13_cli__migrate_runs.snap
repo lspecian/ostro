@@ -1,0 +1,48 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro migrate-runs --workflow order --from 1 --to 2 --dry-run --filter tag=eu --filter vip
+migrate-runs order version 1 -> version 2 (dry run)
+passed 1, repinned 0, failed 0, busy 1, seq mismatch 1
+
+busy (leased, retry later): r2
+
+progressed since the check (run --dry-run again): r3
+[exit 0]
+$ ostro migrate-runs --workflow order --from aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --to 2
+migrate-runs order module aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -> version 2
+passed 1, repinned 1, failed 0, busy 1, seq mismatch 1
+
+busy (leased, retry later): r2
+
+progressed since the check (run --dry-run again): r3
+[exit 0]
+$ ostro migrate-runs --workflow order --from 1 --to 2 --filter status=running
+error: --filter status=running: only tag filters are supported (`--filter tag=x`), not `status`
+[exit 2]
+$ ostro migrate-runs --workflow order --from 1 --to 2 --limit 2
+migrate-runs order version 1 -> version 2
+passed 1, repinned 1, failed 1, busy 0, seq mismatch 0
+
+RUN  SEQ  DETAIL
+r0   7    step `charge` diverged
+[exit 4]
+$ ostro migrate-runs --workflow order --from 1 --to 2 --limit 1 --json
+{
+  "busy": [],
+  "failed": [
+    {
+      "detail": "step `charge` diverged",
+      "run_id": "r0",
+      "seq": 7
+    }
+  ],
+  "passed": [],
+  "repinned": [],
+  "seq_mismatch": []
+}
+[exit 4]
+$ ostro migrate-runs --workflow order --from 1 --to 2
+error: workflow order v2 is retired (HTTP 409 conflict, reason module_retired)
+[exit 1]

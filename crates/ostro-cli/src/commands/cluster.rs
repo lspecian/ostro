@@ -1,7 +1,20 @@
 //! `ostro cluster {init, join, remove, drain, status, token, reassign, rebalance, upgrade}`
-//! (D-P13-23). Phase 13: the clap tree is fixed by 13-02; 13-16 implements the verbs (output
-//! tables, `--json`, exit codes). Until then every REST verb reaches the 13-02 client stubs
-//! and reports `unimplemented`.
+//! (D-P13-23). The clap tree is 13-02's; 13-16 implements the verbs over
+//! `ostro_client::cluster`: `--json` prints the response body, human output prints the
+//! status / upgrade tables ([`status_text`], [`upgrade_text`]); exit codes follow the
+//! Phase 10 contract (0 ok, 1 API or transport error incl. 404 / 409 / 412 / 503, 2 usage).
+//!
+//! | verb | request | human output |
+//! |------|---------|--------------|
+//! | `init [--advertise-cluster A] [--rf N] [--min-insync N]` | `POST /v1/cluster/init` | headline + status |
+//! | `join <SEED> --token T --ca-hash H [--data D] [--advertise-*] [--no-start]` | the ostro binary (13-09 joiner) | — |
+//! | `remove <ID> [--force]` | `POST /v1/cluster/members/{id}/remove` | headline + status |
+//! | `drain <ID>` | `POST /v1/cluster/members/{id}/drain` | headline + status |
+//! | `status` | `GET /v1/cluster/status` | status |
+//! | `token create --node [--ttl D]` | `POST /v1/cluster/tokens` | token id, expiry, join command (once) |
+//! | `reassign --partition P (--to a,b,c \| --cancel)` | `POST /v1/cluster/reassign` | headline + status |
+//! | `rebalance` | `POST /v1/cluster/rebalance` | headline + status |
+//! | `upgrade {status,finalize,hold,release}` | `GET /v1/cluster/upgrade`, `POST …/{finalize,hold,release}` | levels table |
 //!
 //! `ostro cluster join` prepares a blank data dir and starts the server, so the `ostro`
 //! binary intercepts [`ClusterCmd::Join`] (it calls `ostro_server::p13::joiner::run_join`);
@@ -10,11 +23,13 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use serde_json::json;
+use ostro_client::cluster::{ClusterStatus, InitRequest, NodeToken, UpgradeStatus};
+use serde_json::{Value, json};
 
+use super::worker_tokens::ms_time;
 use super::{Conn, parse_duration};
 use crate::client::{CallError, Client};
-use crate::output::{Out, Outcome};
+use crate::output::{Out, Outcome, table};
 
 /// `ostro cluster ...`.
 #[derive(Debug, Clone, Subcommand)]
@@ -199,49 +214,271 @@ pub enum UpgradeCmd {
     Release(StatusArgs),
 }
 
-/// Run a `cluster` verb (13-16 adds the human output; until then the JSON body).
-pub async fn run(c: &Client, out: Out, cmd: &ClusterCmd) -> Result<Outcome, CallError> {
-    let r = match cmd {
+/// The connection-free part of `ostro cluster token create`: `--node` is required (worker
+/// tokens are `ostro worker token create`).
+fn token_body(a: &TokenCreateArgs) -> Result<Value, CallError> {
+    if !a.node {
+        return Err(CallError::Usage(
+            "`ostro cluster token create` needs --node (worker join tokens: `ostro worker token create`)"
+                .into(),
+        ));
+    }
+    Ok(json!({ "ttl_secs": a.ttl.map(|d| d.as_secs()) }))
+}
+
+/// The init request of `ostro cluster init`: the advertised cluster address (the API and
+/// replication addresses are the listener's own; 13-16 SUMMARY), rf and min_insync.
+fn init_body(a: &InitArgs) -> Result<Value, CallError> {
+    if a.advertise_api.is_some() || a.advertise_repl.is_some() {
+        return Err(CallError::Usage(
+            "`ostro cluster init` takes only --advertise-cluster: the API and replication \
+             addresses of a promoted node are its listeners ([api] listen, [cluster] \
+             replication_listen)"
+                .into(),
+        ));
+    }
+    let req = InitRequest {
+        advertise: a.advertise_cluster.clone(),
+        rf: a.rf,
+        min_insync: a.min_insync,
+    };
+    serde_json::to_value(req).map_err(|e| CallError::Usage(format!("init request: {e}")))
+}
+
+/// Run one `cluster` verb and return what it prints on stdout (`--json`: the response body,
+/// pretty-printed). Errors are returned for the shared `Out::error` mapping (exit 1 for API
+/// and transport errors, 2 for usage).
+pub async fn render(c: &Client, json: bool, cmd: &ClusterCmd) -> Result<String, CallError> {
+    let (headline, r) = match cmd {
         ClusterCmd::Join(_) => {
             return Err(CallError::Usage(
                 "`ostro cluster join` is run by the ostro binary".into(),
             ));
         }
         ClusterCmd::Init(a) => {
-            c.cluster_init(&json!({
-                "advertise": a.advertise_cluster,
-                "rf": a.rf,
-                "min_insync": a.min_insync,
-            }))
-            .await?
+            let r = c.cluster_init(&init_body(a)?).await?;
+            (Some("this node is a cluster now; add nodes with `ostro cluster token create --node` and `ostro cluster join`".to_owned()), r)
         }
-        ClusterCmd::Remove(a) => c.cluster_remove(a.id, &json!({ "force": a.force })).await?,
-        ClusterCmd::Drain(a) => c.cluster_drain(a.id).await?,
-        ClusterCmd::Status(_) => c.cluster_status().await?,
+        ClusterCmd::Remove(a) => {
+            let r = c.cluster_remove(a.id, &json!({ "force": a.force })).await?;
+            (Some(format!("node {} removed", a.id)), r)
+        }
+        ClusterCmd::Drain(a) => {
+            let r = c.cluster_drain(a.id).await?;
+            (
+                Some(format!(
+                    "node {} draining: its replicas and leaderships move away",
+                    a.id
+                )),
+                r,
+            )
+        }
+        ClusterCmd::Status(_) => (None, c.cluster_status().await?),
         ClusterCmd::Token {
             command: TokenCmd::Create(a),
         } => {
-            c.create_node_token(&json!({ "ttl_secs": a.ttl.map(|d| d.as_secs()) }))
-                .await?
+            let r = c.create_node_token(&token_body(a)?).await?;
+            if json {
+                return Ok(pretty(&r.body));
+            }
+            return Ok(token_text(c, &r.body));
         }
         ClusterCmd::Reassign(a) => {
-            c.cluster_reassign(&json!({
-                "partition": a.partition,
-                "replicas": a.to,
-                "cancel": a.cancel,
-            }))
-            .await?
+            let r = c
+                .cluster_reassign(&json!({
+                    "partition": a.partition,
+                    "replicas": a.to,
+                    "cancel": a.cancel,
+                }))
+                .await?;
+            let line = if a.cancel {
+                format!("partition {}: reassignment cancelled", a.partition)
+            } else {
+                format!(
+                    "partition {}: reassignment to {:?} started",
+                    a.partition, a.to
+                )
+            };
+            (Some(line), r)
         }
-        ClusterCmd::Rebalance(_) => c.cluster_rebalance().await?,
-        ClusterCmd::Upgrade { command } => match command {
-            UpgradeCmd::Status(_) => c.upgrade_status().await?,
-            UpgradeCmd::Finalize(_) => c.upgrade_finalize().await?,
-            UpgradeCmd::Hold(_) => c.upgrade_hold().await?,
-            UpgradeCmd::Release(_) => c.upgrade_release().await?,
-        },
+        ClusterCmd::Rebalance(_) => (
+            Some("rebalance requested".to_owned()),
+            c.cluster_rebalance().await?,
+        ),
+        ClusterCmd::Upgrade { command } => {
+            let (line, r) = match command {
+                UpgradeCmd::Status(_) => (None, c.upgrade_status().await?),
+                UpgradeCmd::Finalize(_) => (Some("finalized"), c.upgrade_finalize().await?),
+                UpgradeCmd::Hold(_) => (Some("hold set"), c.upgrade_hold().await?),
+                UpgradeCmd::Release(_) => (Some("hold released"), c.upgrade_release().await?),
+            };
+            if json {
+                return Ok(pretty(&r.body));
+            }
+            let body = upgrade_text(&r.body);
+            return Ok(match line {
+                Some(l) => format!("{l}\n{body}"),
+                None => body,
+            });
+        }
     };
-    out.json(&r.body);
+    if json {
+        return Ok(pretty(&r.body));
+    }
+    let body = status_text(&r.body);
+    Ok(match headline {
+        Some(h) => format!("{h}\n{body}"),
+        None => body,
+    })
+}
+
+/// Run a `cluster` verb, printing its output.
+pub async fn run(c: &Client, out: Out, cmd: &ClusterCmd) -> Result<Outcome, CallError> {
+    let text = render(c, out.json, cmd).await?;
+    println!("{text}");
     Ok(Outcome::Ok)
+}
+
+fn pretty(v: &Value) -> String {
+    serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+}
+
+fn yes(b: bool) -> String {
+    if b { "yes" } else { "no" }.to_owned()
+}
+
+/// Human form of a `ClusterStatus` body.
+pub fn status_text(v: &Value) -> String {
+    let Ok(st) = serde_json::from_value::<ClusterStatus>(v.clone()) else {
+        return pretty(v);
+    };
+    let mut out = format!(
+        "cluster {}  meta leader {}  finalized level {}{}  member levels {}..{}",
+        st.cluster_id,
+        if st.meta_leader == 0 {
+            "-".to_owned()
+        } else {
+            st.meta_leader.to_string()
+        },
+        st.finalized,
+        st.hold
+            .map(|h| format!(" (held at {h})"))
+            .unwrap_or_default(),
+        st.level_min,
+        st.level_max,
+    );
+    out.push('\n');
+    out.push_str(&match &st.policy {
+        Some(p) => format!(
+            "policy: rf {}, min_insync {}, max voters {}",
+            p.rf, p.min_insync, p.max_voters
+        ),
+        None => "policy: none (a single node or a static cluster; `ostro cluster init` promotes a single node)".to_owned(),
+    });
+    let rows: Vec<Vec<String>> = st
+        .members
+        .iter()
+        .map(|m| {
+            vec![
+                m.node_id.to_string(),
+                m.state.clone(),
+                m.raft_role.clone(),
+                yes(m.live),
+                m.version.as_ref().map_or("-".to_owned(), |v| {
+                    format!("{}..{}", v.level_min, v.level_max)
+                }),
+                m.addr.clone(),
+                m.cluster_addr.clone().unwrap_or_else(|| "-".to_owned()),
+            ]
+        })
+        .collect();
+    out.push_str("\n\n");
+    out.push_str(&table(
+        &["NODE", "STATE", "ROLE", "LIVE", "LEVELS", "API", "CLUSTER"],
+        &rows,
+    ));
+    if !st.voters_outgoing.is_empty() {
+        out.push_str(&format!(
+            "\n\njoint configuration: voters {:?}, outgoing {:?}",
+            st.voters, st.voters_outgoing
+        ));
+    }
+    if !st.reassignments.is_empty() {
+        let rows: Vec<Vec<String>> = st
+            .reassignments
+            .iter()
+            .map(|r| {
+                vec![
+                    r.partition.to_string(),
+                    ids(&r.target),
+                    ids(&r.adding),
+                    ids(&r.removing),
+                ]
+            })
+            .collect();
+        out.push_str("\n\nreassignments in flight:\n");
+        out.push_str(&table(
+            &["PARTITION", "TARGET", "ADDING", "REMOVING"],
+            &rows,
+        ));
+    }
+    out
+}
+
+fn ids(v: &[u64]) -> String {
+    if v.is_empty() {
+        return "-".to_owned();
+    }
+    v.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// Human form of an `UpgradeStatus` body.
+pub fn upgrade_text(v: &Value) -> String {
+    let Ok(u) = serde_json::from_value::<UpgradeStatus>(v.clone()) else {
+        return pretty(v);
+    };
+    let mut out = format!(
+        "finalized level {}  hold {}  highest common level {}  auto-finalize {}",
+        u.finalized,
+        u.hold.map_or("none".to_owned(), |h| h.to_string()),
+        u.common_level_max,
+        if u.auto_finalize { "on" } else { "off" },
+    );
+    if u.common_level_max > u.finalized && u.hold.is_none() {
+        out.push_str(&format!(
+            "\nlevel {} can be finalized (`ostro cluster upgrade finalize`)",
+            u.common_level_max
+        ));
+    }
+    let rows: Vec<Vec<String>> = u
+        .members
+        .iter()
+        .map(|m| {
+            vec![
+                m.node_id.to_string(),
+                format!("{}..{}", m.level_min, m.level_max),
+                yes(m.live),
+            ]
+        })
+        .collect();
+    out.push_str("\n\n");
+    out.push_str(&table(&["NODE", "LEVELS", "LIVE"], &rows));
+    out
+}
+
+/// Human form of a created node token: the secret once, and the join command.
+fn token_text(c: &Client, v: &Value) -> String {
+    let Ok(t) = serde_json::from_value::<NodeToken>(v.clone()) else {
+        return pretty(v);
+    };
+    format!(
+        "token id:   {}\nexpires at: {}\njoin a blank node with (shown once; store the token as a secret):\n  ostro cluster join {} --token {} --ca-hash {}",
+        t.id,
+        ms_time(&json!(t.expires_at_ms)),
+        c.base().as_str().trim_end_matches('/'),
+        t.token,
+        t.ca_hash,
+    )
 }
 
 #[cfg(test)]

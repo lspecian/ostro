@@ -234,7 +234,8 @@ async fn rest_cluster_routes_end_to_end() {
     let (st, v) = srv.post_empty("/v1/cluster/tokens").await;
     assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{v}");
 
-    // Init with an empty body takes the defaults; a second init is 409.
+    // Init with an empty body takes the defaults; a second init answers the status
+    // unchanged (idempotent, 13-16).
     let (st, v) = srv.post_empty("/v1/cluster/init").await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["voters"], json!([1]));
@@ -245,7 +246,8 @@ async fn rest_cluster_routes_end_to_end() {
     let (st, v) = srv
         .post("/v1/cluster/init", json!({"rf": 5, "min_insync": 3}))
         .await;
-    assert_eq!((st, reason(&v)), (StatusCode::CONFLICT, "already_cluster"));
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["policy"]["rf"], json!(3), "re-init changes nothing");
 
     // Token: 201, no-store.
     let r = srv
@@ -375,12 +377,14 @@ async fn rest_module_lifecycle_routes_end_to_end() {
     let (st, v) = srv.delete("/v1/modules/not-a-sha").await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
     let (st, v) = srv.delete(&format!("/v1/modules/{SHA_B}")).await;
-    assert_eq!(st, StatusCode::CONFLICT, "active: {v}");
+    assert_eq!((st, reason(&v)), (StatusCode::CONFLICT, "module_active"));
     let (st, v) = srv.delete(&format!("/v1/modules/{SHA_A}")).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["versions"], json!([{"name": "order", "version": 1}]));
+    let retired_at = v["retired_at_ms"].clone();
     let (st, v) = srv.delete(&format!("/v1/modules/{SHA_A}")).await;
-    assert_eq!((st, reason(&v)), (StatusCode::CONFLICT, "module_retired"));
+    assert_eq!(st, StatusCode::OK, "retire is idempotent (13-15): {v}");
+    assert_eq!(v["retired_at_ms"], retired_at);
     // GET of a module is untouched by the new DELETE on the same path.
     let (st, _) = srv.get(&format!("/v1/modules/{SHA_A}")).await;
     assert_eq!(st, StatusCode::NOT_FOUND);

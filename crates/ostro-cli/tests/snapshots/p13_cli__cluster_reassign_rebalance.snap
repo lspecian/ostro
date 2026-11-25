@@ -1,0 +1,50 @@
+---
+source: crates/ostro-cli/tests/p13_cli.rs
+expression: t
+---
+$ ostro cluster reassign --partition 2 --to 1,2
+partition 2: reassignment to [1, 2] started
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
+1     active  voter  yes   1..2    127.0.0.1:7070  10.0.0.1:7701
+2     active  voter  yes   1..2    10.0.0.2:7700   10.0.0.2:7701
+
+reassignments in flight:
+PARTITION  TARGET  ADDING  REMOVING
+2          1,2     1,2     -
+[exit 0]
+$ ostro cluster reassign --partition 2 --to 2,1
+error: partition 2 is already being reassigned (HTTP 409 conflict, reason reassignment_in_progress)
+[exit 1]
+$ ostro cluster reassign --partition 2 --cancel
+partition 2: reassignment cancelled
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
+1     active  voter  yes   1..2    127.0.0.1:7070  10.0.0.1:7701
+2     active  voter  yes   1..2    10.0.0.2:7700   10.0.0.2:7701
+[exit 0]
+$ ostro cluster reassign --partition 2 --cancel
+error: partition 2 has no reassignment in flight (HTTP 404 not_found)
+[exit 1]
+$ ostro cluster reassign --partition 2
+usage: one or more required arguments were not provided
+[exit 2]
+$ ostro cluster rebalance
+rebalance requested
+cluster fake-cluster  meta leader 1  finalized level 1  member levels 1..2
+policy: rf 3, min_insync 2, max voters 5
+
+NODE  STATE   ROLE   LIVE  LEVELS  API             CLUSTER
+1     active  voter  yes   1..2    127.0.0.1:7070  10.0.0.1:7701
+2     active  voter  yes   1..2    10.0.0.2:7700   10.0.0.2:7701
+[exit 0]
+$ ostro cluster reassign --partition 1 --to 1,2
+error: AlterReplicas needs feature level 2; finalized level is 1 (HTTP 412 precondition_failed, reason feature_not_enabled)
+[exit 1]
+$ ostro cluster rebalance --json
+error: AlterReplicas needs feature level 2; finalized level is 1 (HTTP 412 precondition_failed, reason feature_not_enabled)
+[exit 1]

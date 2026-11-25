@@ -165,11 +165,11 @@ impl Client {
         url
     }
 
-    fn request(&self, method: Method, url: Url) -> RequestBuilder {
+    pub(crate) fn request(&self, method: Method, url: Url) -> RequestBuilder {
         self.http.request(method, url).timeout(self.timeout)
     }
 
-    async fn send(&self, rb: RequestBuilder) -> Result<Response, CallError> {
+    pub(crate) async fn send(&self, rb: RequestBuilder) -> Result<Response, CallError> {
         let resp = rb.send().await.map_err(|e| self.transport(e))?;
         let status = resp.status().as_u16();
         let text = resp.text().await.map_err(|e| self.transport(e))?;
@@ -225,7 +225,7 @@ impl Client {
         CallError::Transport(msg)
     }
 
-    async fn get(
+    pub(crate) async fn get(
         &self,
         segments: &[&str],
         query: &[(&str, String)],
@@ -234,7 +234,11 @@ impl Client {
             .await
     }
 
-    async fn post(&self, segments: &[&str], body: &Value) -> Result<Response, CallError> {
+    pub(crate) async fn post(
+        &self,
+        segments: &[&str],
+        body: &Value,
+    ) -> Result<Response, CallError> {
         self.send(
             self.request(Method::POST, self.url(segments, &[]))
                 .json(body),

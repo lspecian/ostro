@@ -66,6 +66,22 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/v1/workflows/{name}/failure-policy"),
     ("GET", "/v1/queues/{name}/failure-policy"),
     ("PUT", "/v1/queues/{name}/failure-policy"),
+    // Phase 13 cluster, upgrades, migration, module lifecycle (13-16; `crate::cluster`)
+    ("POST", "/v1/cluster/init"),
+    ("POST", "/v1/cluster/join"),
+    ("GET", "/v1/cluster/status"),
+    ("POST", "/v1/cluster/tokens"),
+    ("POST", "/v1/cluster/members/{id}/remove"),
+    ("POST", "/v1/cluster/members/{id}/drain"),
+    ("POST", "/v1/cluster/reassign"),
+    ("POST", "/v1/cluster/rebalance"),
+    ("GET", "/v1/cluster/upgrade"),
+    ("POST", "/v1/cluster/upgrade/finalize"),
+    ("POST", "/v1/cluster/upgrade/hold"),
+    ("POST", "/v1/cluster/upgrade/release"),
+    ("POST", "/v1/runs/migrate"),
+    ("DELETE", "/v1/modules/{sha}"),
+    ("POST", "/v1/modules/gc"),
 ];
 
 /// Unknown fields of a response, kept so additive server changes are visible.
@@ -532,7 +548,7 @@ impl Client {
     }
 }
 
-fn decode<T: DeserializeOwned>(
+pub(crate) fn decode<T: DeserializeOwned>(
     r: Result<Response, CallError>,
     what: &str,
 ) -> Result<T, ClientError> {
