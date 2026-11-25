@@ -30,6 +30,17 @@
 //!   (07-12); without one they answer `UNIMPLEMENTED`. A successful append renews the
 //!   lease. `Renew` signs a new certificate for a caller holding a session.
 //! - **Revocation.** A meta watch closes every session whose join token disappeared.
+//! - **Versions (13-14, D-P13-18).** `[workers] version_policy = "compatible"` (default):
+//!   `proto_version` and `event_codec_ver` must equal the server's, and the worker's feature
+//!   level (`Hello.feature_level`; 0 = parsed from `ostro_version`, see
+//!   [`crate::workers::registry::level_of_ostro_version`]) must be at least
+//!   `max(LEVEL_MIN, finalized − 1)`; `ostro_version` / `wasmtime_version` may differ.
+//!   `"exact"` keeps the Phase 7 checks above (`require_same_version`). The meta watch also
+//!   closes, under `compatible`, every session that finalization left too old.
+//! - **Node drain (13-14).** While this node's `Member` record is `Draining` or `Removed`,
+//!   every session gets `GoAway{reason: "node_draining"}` and new sessions are refused the
+//!   same way. `Welcome.members` lists this node's endpoints plus every other `Active`
+//!   member's `cluster_addr`.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -55,13 +66,13 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::config::{ClusterSection, ServerConfig};
+use crate::config::{ClusterSection, ServerConfig, VersionPolicy};
 use crate::p7::{P7Ctx, P7Error};
 use crate::tls::TlsState;
 use crate::tls::ca::WorkerIdentity;
 use crate::workers::join::JoinService;
 use crate::workers::registry::{
-    AppendBatch, AuthzError, JobRpc, PeerIdentity, RemoteEvent, WorkerRegistry,
+    AppendBatch, AuthzError, JobRpc, PeerIdentity, RemoteEvent, WorkerRegistry, WorkerVersion,
 };
 
 /// `Hello.ostro_version` this server accepts (`require_same_version`).
@@ -79,6 +90,8 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_RESERVE: usize = 256;
 /// Journal rows read per store scan.
 const ROWS_PER_SCAN: usize = 256;
+/// `GoAway.reason` while this node drains or after its removal (13-14).
+pub const REASON_NODE_DRAINING: &str = "node_draining";
 /// Graceful-shutdown bound of the cluster listener.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(5);
 /// `token_id` of external identities (`ostro://<cluster>/worker/ext/<id>`, D-W25).
@@ -323,6 +336,8 @@ pub fn execute_service(
             })
             .collect(),
         require_same_version: w.require_same_version,
+        version_policy: w.version_policy,
+        meta: deps.meta.clone(),
         cluster_ca_der,
         external_ca,
         shutdown: deps.shutdown.clone(),
@@ -337,6 +352,10 @@ pub fn execute_service(
         deps.meta.clone(),
         Arc::clone(&deps.registry),
         Arc::clone(&deps.join),
+        WatchVersions {
+            node_id: deps.node_id,
+            policy: w.version_policy,
+        },
         deps.shutdown.clone(),
     ));
     Ok((svc, watch))
@@ -473,10 +492,71 @@ fn log_end(r: Result<Result<(), tonic::transport::Error>, tokio::task::JoinError
 }
 
 /// Close sessions whose join token disappeared (revocation, D-W4), on every meta change.
+/// What the meta watch needs for the 13-14 session closes.
+struct WatchVersions {
+    node_id: u64,
+    policy: VersionPolicy,
+}
+
+/// Whether this node's `Member` record is `Draining` or `Removed` (13-14).
+pub fn node_draining(meta: &MetaView, node_id: u64) -> bool {
+    use ostro_meta::ext::{MEMBER_DRAINING, MEMBER_REMOVED, get_member_state};
+    meta.read(|s| {
+        s.member(node_id).is_some_and(|m| {
+            matches!(
+                get_member_state(&m.value.ext),
+                Ok(Some(st)) if st.state == MEMBER_DRAINING || st.state == MEMBER_REMOVED
+            )
+        })
+    })
+}
+
+/// The lowest feature level a session may have (`compatible`): `max(LEVEL_MIN,
+/// finalized − 1)`.
+pub fn min_session_level(finalized: u32) -> u32 {
+    finalized
+        .saturating_sub(1)
+        .max(ostro_types::compat::LEVEL_MIN)
+}
+
+/// `Welcome.members`: this node's `endpoints` plus every other `Active` member (no ext 97
+/// = Active) that records a `cluster_addr`, by node id.
+pub fn welcome_members(meta: &MetaView, node_id: u64, endpoints: &[String]) -> Vec<v1::Member> {
+    use ostro_meta::ext::{MEMBER_ACTIVE, get_member_state};
+    let mut out: Vec<v1::Member> = endpoints
+        .iter()
+        .map(|e| v1::Member {
+            node_id,
+            endpoint: e.clone(),
+        })
+        .collect();
+    meta.read(|s| {
+        for m in s.members() {
+            let m = &m.value;
+            let active = match get_member_state(&m.ext) {
+                Ok(None) => true,
+                Ok(Some(st)) => st.state == MEMBER_ACTIVE,
+                Err(_) => false,
+            };
+            if m.node_id == node_id || !active {
+                continue;
+            }
+            if let Some(addr) = m.cluster_addr.as_ref().filter(|a| !a.is_empty()) {
+                out.push(v1::Member {
+                    node_id: m.node_id,
+                    endpoint: addr.clone(),
+                });
+            }
+        }
+    });
+    out
+}
+
 async fn revocation_watch(
     meta: MetaView,
     registry: Arc<WorkerRegistry>,
     join: Arc<JoinService>,
+    versions: WatchVersions,
     shutdown: CancellationToken,
 ) {
     let mut rx = meta.subscribe();
@@ -493,6 +573,29 @@ async fn revocation_watch(
                 sessions = n,
                 "closed worker sessions of a revoked join token"
             );
+        }
+        // 13-14: a draining / removed node sends every worker away.
+        if node_draining(&meta, versions.node_id) {
+            let n = registry.close_where(REASON_NODE_DRAINING, |_| true);
+            if n > 0 {
+                info!(sessions = n, "node draining: closed every worker session");
+            }
+        }
+        // 13-14: finalization may leave admitted sessions too old.
+        if versions.policy == VersionPolicy::Compatible {
+            let finalized = meta.read(ostro_cluster::compat::finalized_level);
+            let min = min_session_level(finalized);
+            let reason = format!(
+                "version too old: the cluster is finalized at level {finalized} \
+                 (workers need level {min} or newer)"
+            );
+            let n = registry.close_where_version(&reason, |v| v.level < min);
+            if n > 0 {
+                info!(
+                    sessions = n,
+                    finalized, "closed worker sessions below the finalized level"
+                );
+            }
         }
     }
 }
@@ -514,6 +617,8 @@ struct SvcState {
     limits: v1::EngineLimits,
     members: Vec<v1::Member>,
     require_same_version: bool,
+    version_policy: VersionPolicy,
+    meta: MetaView,
     cluster_ca_der: Vec<u8>,
     external_ca: bool,
     shutdown: CancellationToken,
@@ -590,7 +695,29 @@ impl SvcState {
         }
     }
 
+    /// The admission checks of `[workers] version_policy` (module docs).
     fn check_versions(&self, h: &v1::Hello) -> Result<(), String> {
+        match self.version_policy {
+            VersionPolicy::Exact => self.check_exact(h),
+            VersionPolicy::Compatible => {
+                self.check_wire(h)?;
+                let v = WorkerVersion::from_hello(h)?;
+                let finalized = self.meta.read(ostro_cluster::compat::finalized_level);
+                let min = min_session_level(finalized);
+                if v.level < min {
+                    return Err(format!(
+                        "version too old: worker feature level {} (ostro_version {}), the \
+                         cluster is finalized at level {finalized} and needs {min} or newer",
+                        v.level, h.ostro_version
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `proto_version` and `event_codec_ver` (both policies).
+    fn check_wire(&self, h: &v1::Hello) -> Result<(), String> {
         let codec = u32::from(ostro_types::journal::EVENT_CODEC_VER);
         if h.proto_version != PROTO_VERSION {
             return Err(format!(
@@ -604,6 +731,12 @@ impl SvcState {
                 h.event_codec_ver
             ));
         }
+        Ok(())
+    }
+
+    /// The Phase 7 checks (`version_policy = "exact"`).
+    fn check_exact(&self, h: &v1::Hello) -> Result<(), String> {
+        self.check_wire(h)?;
         if self.require_same_version {
             if h.ostro_version != OSTRO_VERSION {
                 return Err(format!(
@@ -619,6 +752,12 @@ impl SvcState {
             }
         }
         Ok(())
+    }
+
+    /// `Welcome.members` now (module docs); `members` holds this node's endpoints.
+    fn welcome_members(&self) -> Vec<v1::Member> {
+        let own: Vec<String> = self.members.iter().map(|m| m.endpoint.clone()).collect();
+        welcome_members(&self.meta, self.node_id, &own)
     }
 
     fn authorize(
@@ -677,6 +816,16 @@ impl SvcState {
             Self::send(&tx, v1::server_msg::Msg::GoAway(v1::GoAway { reason }));
             return;
         }
+        if node_draining(&self.meta, self.node_id) {
+            session_metric("refused_draining");
+            Self::send(
+                &tx,
+                v1::server_msg::Msg::GoAway(v1::GoAway {
+                    reason: REASON_NODE_DRAINING.to_owned(),
+                }),
+            );
+            return;
+        }
         let worker_id = peer.worker_id.clone();
         let ctl = match self
             .registry
@@ -701,7 +850,7 @@ impl SvcState {
                 heartbeat_ms: self.heartbeat_ms,
                 max_frame_bytes: self.max_frame,
                 limits: Some(self.limits),
-                members: self.members.clone(),
+                members: self.welcome_members(),
             }),
         );
         let reason = loop {

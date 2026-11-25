@@ -24,10 +24,14 @@
 //! - **Wake-ups.** [`WorkerRegistry::changed`] bumps on every credit change (session open
 //!   and close, credit, heartbeat, attach, detach, guard drop, drain): the source of
 //!   `Placement::changed` for 07-12.
+//! - **Versions (13-14, D-P13-18).** Each session records its [`WorkerVersion`] (feature
+//!   level, WIT lines, event codec) from `Hello`; [`WorkerView::version`] carries it to the
+//!   placement predicate ([`crate::workers::placement::compatible`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use ostro_engine::host::linker_set::{OSTRO_PACKAGE, WitLine, parse_version};
 use ostro_log::PartitionLog;
 use ostro_partition::{LeaseRenewer, PartitionHandle};
 use ostro_types::{AttemptToken, Epoch, RunId};
@@ -85,6 +89,78 @@ pub struct WorkerView<'a> {
     pub worker_id: &'a str,
     pub labels: &'a BTreeMap<String, String>,
     pub free: u32,
+    /// The session's advertised versions (13-14).
+    pub version: &'a WorkerVersion,
+}
+
+/// What a worker session can run (13-14, D-P13-18), from its `Hello`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkerVersion {
+    /// `Hello.feature_level`, or (0 = an older worker) the level of `Hello.ostro_version`
+    /// ([`level_of_ostro_version`]); 0 when neither gives one.
+    pub level: u32,
+    /// WIT major lines from `Hello.wit_packages` (`ostro:runtime@x.y.z` entries).
+    pub wit_lines: Vec<WitLine>,
+    /// `Hello.event_codec_ver`.
+    pub event_codec_ver: u32,
+}
+
+impl WorkerVersion {
+    /// The versions `hello` advertises; `Err` (the GoAway reason) when the feature level is
+    /// absent and `ostro_version` names no level.
+    pub fn from_hello(hello: &v1::Hello) -> Result<Self, String> {
+        let v = Self::lenient(hello);
+        if v.level == 0 {
+            return Err(format!(
+                "version mismatch: Hello carries no feature_level and ostro_version {:?} \
+                 names no feature level",
+                hello.ostro_version
+            ));
+        }
+        Ok(v)
+    }
+
+    /// [`Self::from_hello`] with level 0 (never compatible) instead of an error.
+    pub fn lenient(hello: &v1::Hello) -> Self {
+        let level = if hello.feature_level != 0 {
+            hello.feature_level
+        } else {
+            level_of_ostro_version(&hello.ostro_version).unwrap_or(0)
+        };
+        let mut wit_lines: Vec<WitLine> = hello
+            .wit_packages
+            .iter()
+            .filter_map(|p| {
+                let (pkg, ver) = p.split_once('@')?;
+                if pkg == OSTRO_PACKAGE {
+                    WitLine::of_version(ver)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        wit_lines.sort();
+        wit_lines.dedup();
+        Self {
+            level,
+            wit_lines,
+            event_codec_ver: hello.event_codec_ver,
+        }
+    }
+}
+
+/// The feature level of a worker that predates `Hello.feature_level` (D-P13-18), from its
+/// `ostro_version` (`x.y.z`, an optional `-pre` / `+build` suffix ignored): every `0.1.z`
+/// release before Phase 13 is the baseline level `LEVEL_MIN`. `0.0.z` and unparsable
+/// versions name no level (the session is refused). A later minor always sends
+/// `feature_level`; one that does not is assumed to be at the baseline.
+pub fn level_of_ostro_version(v: &str) -> Option<u32> {
+    let core = v.split(['-', '+']).next().unwrap_or(v);
+    let (major, minor, _) = parse_version(core)?;
+    match (major, minor) {
+        (0, 0) => None,
+        _ => Some(ostro_types::compat::LEVEL_MIN),
+    }
 }
 
 /// Something that happened to a remote job.
@@ -195,6 +271,7 @@ pub enum AuthzError {
 
 struct Session {
     peer: PeerIdentity,
+    version: WorkerVersion,
     labels: BTreeMap<String, String>,
     slots: u32,
     memory_bytes: u64,
@@ -433,6 +510,9 @@ impl WorkerRegistry {
                 id,
                 Session {
                     peer,
+                    // The service refuses a Hello without a level before opening; a
+                    // direct caller's unparsable Hello gets level 0 (never compatible).
+                    version: WorkerVersion::lenient(hello),
                     labels: hello
                         .labels
                         .iter()
@@ -512,6 +592,36 @@ impl WorkerRegistry {
             n += 1;
         }
         n
+    }
+
+    /// Close every session whose advertised versions match `pred` with `GoAway{reason}`
+    /// (13-14: sessions too old for the finalized level); returns how many.
+    pub fn close_where_version(
+        &self,
+        reason: &str,
+        pred: impl Fn(&WorkerVersion) -> bool,
+    ) -> usize {
+        let g = self.shared.lock();
+        let mut n = 0;
+        for s in g
+            .sessions
+            .values()
+            .filter(|s| pred(&s.version) && !s.ctl.close.is_cancelled())
+        {
+            *lock(&s.ctl.reason) = Some(reason.to_owned());
+            s.ctl.close.cancel();
+            n += 1;
+        }
+        n
+    }
+
+    /// The advertised versions of `session`.
+    pub fn session_version(&self, session: &[u8]) -> Option<WorkerVersion> {
+        self.shared
+            .lock()
+            .sessions
+            .get(session)
+            .map(|s| s.version.clone())
     }
 
     /// Close the sessions whose certificate carries join token `token_id`.
@@ -682,6 +792,7 @@ impl WorkerRegistry {
                         worker_id: &s.peer.worker_id,
                         labels: &s.labels,
                         free,
+                        version: &s.version,
                     };
                     (free > 0 && pred(&view)).then(|| (free, s.last_assigned, id.clone()))
                 })

@@ -605,7 +605,13 @@ async fn session_revoked_token_closes_and_rejoin_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_version_mismatch_goaway() {
-    let rig = Rig::start(RigOpts::default()).await;
+    // The Phase 7 equality checks are `[workers] version_policy = "exact"` since 13-14
+    // (`compatible`, the default, is covered by tests/worker_compat.rs).
+    let rig = Rig::start(RigOpts {
+        version_policy: ostro_server::config::VersionPolicy::Exact,
+        ..RigOpts::default()
+    })
+    .await;
     let tok = rig.token(Duration::from_secs(600)).await;
     let id = rig.identity(&tok.token, "w1").await;
     for patch in [

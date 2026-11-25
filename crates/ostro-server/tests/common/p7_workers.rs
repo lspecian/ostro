@@ -59,6 +59,8 @@ pub struct RigOpts {
     /// `[workers] heartbeat`.
     pub heartbeat: Duration,
     pub require_same_version: bool,
+    /// `[workers] version_policy` (13-14; default `compatible`, the production default).
+    pub version_policy: ostro_server::config::VersionPolicy,
     /// `[cluster.tls] client_ca` PEM (written to a file).
     pub client_ca_pem: Option<String>,
     /// Open a 1-partition node with a capturing dispatcher.
@@ -73,6 +75,7 @@ impl Default for RigOpts {
             lease_ttl: Duration::from_secs(30),
             heartbeat: Duration::from_secs(10),
             require_same_version: true,
+            version_policy: ostro_server::config::VersionPolicy::default(),
             client_ca_pem: None,
             node: false,
             max_frame_bytes: 1024 * 1024,
@@ -170,6 +173,7 @@ impl Rig {
         cfg.cluster.listen = "127.0.0.1:0".parse().expect("addr");
         cfg.workers.heartbeat = opts.heartbeat.into();
         cfg.workers.require_same_version = opts.require_same_version;
+        cfg.workers.version_policy = opts.version_policy;
         cfg.workers.max_frame_bytes = opts.max_frame_bytes;
         cfg.executor.lease_ttl = opts.lease_ttl.into();
         if let Some(pem) = &opts.client_ca_pem {

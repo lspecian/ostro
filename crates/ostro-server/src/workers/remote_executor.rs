@@ -97,7 +97,7 @@ use crate::executor::{EngineExecutor, JobRecord, REASON_MODULE_NOT_FOUND, REASON
 use crate::journal_io;
 use crate::p7::{P7Ctx, P7Shared};
 use crate::sink::{PartitionSink, RenewFn};
-use crate::workers::placement::WorkerSlot;
+use crate::workers::placement::{CompatSource, MetaCompat, WorkerSlot};
 use crate::workers::registry::{AttachSpec, JobRpc, RemoteEvent, wire_run, wire_token};
 use crate::workers::service::WireDir;
 
@@ -354,21 +354,31 @@ impl RemoteRunner {
     }
 
     /// The job's worker credit: the reservation's, or (a re-grant under the same lease) a
-    /// fresh selector-matching one, preferring the same worker. `None` = lease gone,
-    /// `Some(None)` = no credit.
+    /// fresh selector-matching one, preferring the same worker. A re-grant only picks a
+    /// session that can run the run's module (13-14, [`crate::workers::placement`]).
+    /// `None` = lease gone, `Some(None)` = no credit.
     fn credit(
         &self,
         reservation: &ostro_partition::leader::placement::Reservation,
+        module_sha: Option<&[u8; 32]>,
     ) -> Option<Option<crate::workers::registry::CreditGuard>> {
         let lr = reservation.downcast_ref::<LeaseReservation>()?;
+        let req = MetaCompat::new(self.meta.clone()).for_module(module_sha);
+        let fits = |v: &crate::workers::registry::WorkerView<'_>| {
+            req.as_ref().is_some_and(|r| r.admits(v))
+        };
         lr.with::<WorkerSlot, _>(|w| {
             w.take_credit()
                 .or_else(|| {
+                    self.shared.registry.pick(|v| {
+                        v.worker_id == w.worker_id() && w.queue().matches(v.labels) && fits(v)
+                    })
+                })
+                .or_else(|| {
                     self.shared
                         .registry
-                        .pick(|v| v.worker_id == w.worker_id() && w.queue().matches(v.labels))
+                        .pick(|v| w.queue().matches(v.labels) && fits(v))
                 })
-                .or_else(|| self.shared.registry.pick(|v| w.queue().matches(v.labels)))
         })
     }
 
@@ -381,7 +391,7 @@ impl RemoteRunner {
             return (None, ExecOutcome::Released, false);
         }
         // 1. Credit.
-        let credit = match self.credit(&job.reservation) {
+        let credit = match self.credit(&job.reservation, job.record.module_sha.as_ref()) {
             None => return (None, ExecOutcome::Released, true),
             Some(None) => {
                 debug!(run = %job.run, "no worker credit for the re-grant; abandoning");

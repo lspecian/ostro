@@ -25,17 +25,41 @@
 //!
 //! Metrics: `ostro_placement_reservations_total{queue,kind}` (kind `embedded` | `worker`),
 //! `ostro_placement_blocked_total{queue}`.
+//!
+//! # Version compatibility (13-14, D-P13-18, CLUS-06)
+//!
+//! With a [`CompatSource`] ([`NodePlacement::with_compat`]; production: [`MetaCompat`]),
+//! a worker credit is only picked from a session that can run the activation:
+//!
+//! - the session is current: `event_codec_ver` equals this server's and its feature level
+//!   is at least `finalized − 1` ([`session_current`]);
+//! - [`compatible`] with the module's requirement: the module's WIT line is one of the
+//!   session's lines (from `Hello.wit_packages`) and the session's level is at least the
+//!   module's `min_level`. The requirement is `ModuleRecord` ext 101 `WitRequirement`
+//!   ([`module_requirement`]; absent = `{line 0.1, min_level 1}`, an undecodable one
+//!   matches no worker).
+//!
+//! The ready row carries the workflow name, not the module, so a reservation checks the
+//! requirement of **every** module registered for that workflow (the strictest wins; a
+//! run of any version can then run on the chosen worker). A re-grant under the same lease
+//! ([`crate::workers::remote_executor`]) knows the run's module and checks it exactly.
+//! When no worker qualifies the queue behaves as with no worker credit: `auto` stays
+//! embedded, `workers` waits. The predicate only narrows which activations are offered;
+//! the Phase 7 session identity checks are unchanged.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use ostro_engine::host::linker_set::{WitLine, WitSelection};
+use ostro_meta::{MetaState, MetaView, ModuleRecord};
 use ostro_partition::leader::placement::{EntryView, Reservation, ReservationKind, Reserve};
 use ostro_partition::{Clock, DispatcherConfig, Placement};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tracing::warn;
 
 use crate::config::PlacementSetting;
+use crate::control::names::qualify;
 use crate::p7::P7Ctx;
-use crate::workers::registry::{CreditGuard, WorkerRegistry};
+use crate::workers::registry::{CreditGuard, WorkerRegistry, WorkerVersion, WorkerView};
 use crate::workers::remote_executor::{PlacementExecutor, RemoteRunner};
 use crate::workers::selector::{PlacementPolicies, PolicySource, QueuePlacement};
 use crate::workers::spill::SpillHandle;
@@ -61,6 +85,135 @@ impl SpillSource for SpillHandle {
 
     fn changed(&self) -> Option<watch::Receiver<u64>> {
         Some(SpillHandle::changed(self))
+    }
+}
+
+/// The requirement of a module with no ext 101: the 0.1 line at the baseline level.
+pub fn default_requirement() -> WitSelection {
+    WitSelection {
+        line: WitLine::V0_1,
+        min_level: ostro_types::compat::LEVEL_MIN,
+    }
+}
+
+/// A module's requirement: ext 101 `WitRequirement` (absent = [`default_requirement`]).
+/// `None` = undecodable ext or line: no worker may run it (it stays embedded).
+pub fn module_requirement(r: &ModuleRecord) -> Option<WitSelection> {
+    match ostro_meta::ext::get_wit_requirement(&r.ext) {
+        Ok(None) => Some(default_requirement()),
+        Ok(Some(w)) => Some(WitSelection {
+            line: WitLine::parse(&w.line)?,
+            min_level: w.min_level,
+        }),
+        Err(_) => None,
+    }
+}
+
+/// D-P13-18: whether a session can run a module with requirement `req` (its WIT line is
+/// one of the session's lines and its level is at least the module's `min_level`).
+pub fn compatible(w: &WorkerView<'_>, req: &WitSelection) -> bool {
+    w.version.wit_lines.contains(&req.line) && w.version.level >= req.min_level
+}
+
+/// D-P13-18: whether a session is current for the cluster: the event codec equals this
+/// server's and its level is at least `finalized − 1` (the admission rule of
+/// `version_policy = "compatible"`, re-checked per pick because finalization moves).
+pub fn session_current(v: &WorkerVersion, finalized: u32) -> bool {
+    v.event_codec_ver == u32::from(ostro_types::journal::EVENT_CODEC_VER)
+        && v.level
+            >= finalized
+                .saturating_sub(1)
+                .max(ostro_types::compat::LEVEL_MIN)
+}
+
+/// What an activation needs of a worker session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivationReq {
+    /// The cluster's finalized feature level.
+    pub finalized: u32,
+    /// Every module the activation may run (the strictest decides).
+    pub modules: Vec<WitSelection>,
+}
+
+impl ActivationReq {
+    /// Whether session `w` may take the activation.
+    pub fn admits(&self, w: &WorkerView<'_>) -> bool {
+        session_current(w.version, self.finalized) && self.modules.iter().all(|r| compatible(w, r))
+    }
+}
+
+/// Where the placement predicate reads the cluster level and module requirements.
+pub trait CompatSource: Send + Sync + 'static {
+    /// The requirement of a ready entry (every module registered for its workflow);
+    /// `None` = no worker may take it.
+    fn for_entry(&self, workflow: &str, tenant: Option<&str>) -> Option<ActivationReq>;
+    /// The requirement of a run on module `sha` (`None` sha = the default requirement);
+    /// `None` = no worker may take it.
+    fn for_module(&self, sha: Option<&[u8; 32]>) -> Option<ActivationReq>;
+}
+
+/// [`CompatSource`] over the local meta view.
+#[derive(Clone)]
+pub struct MetaCompat {
+    meta: MetaView,
+}
+
+impl std::fmt::Debug for MetaCompat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetaCompat").finish_non_exhaustive()
+    }
+}
+
+impl MetaCompat {
+    pub fn new(meta: MetaView) -> Self {
+        Self { meta }
+    }
+}
+
+fn module_req_in(s: &MetaState, sha: &[u8; 32]) -> Option<WitSelection> {
+    match s.module(sha) {
+        Some(r) => module_requirement(&r.value),
+        // Not (yet) recorded locally: the baseline (an upload writes ext 101 only when the
+        // module needs more, and the record precedes any run of it).
+        None => Some(default_requirement()),
+    }
+}
+
+impl CompatSource for MetaCompat {
+    fn for_entry(&self, workflow: &str, tenant: Option<&str>) -> Option<ActivationReq> {
+        let qualified = qualify(tenant, workflow);
+        self.meta.read(|s| {
+            let mut modules: Vec<WitSelection> = Vec::new();
+            for w in s
+                .workflows()
+                .filter(|w| w.value.name == workflow || w.value.name == qualified)
+            {
+                let req = module_req_in(s, &w.value.module_sha256)?;
+                if !modules.contains(&req) {
+                    modules.push(req);
+                }
+            }
+            if modules.is_empty() {
+                modules.push(default_requirement());
+            }
+            Some(ActivationReq {
+                finalized: ostro_cluster::compat::finalized_level(s),
+                modules,
+            })
+        })
+    }
+
+    fn for_module(&self, sha: Option<&[u8; 32]>) -> Option<ActivationReq> {
+        self.meta.read(|s| {
+            let req = match sha {
+                Some(sha) => module_req_in(s, sha)?,
+                None => default_requirement(),
+            };
+            Some(ActivationReq {
+                finalized: ostro_cluster::compat::finalized_level(s),
+                modules: vec![req],
+            })
+        })
     }
 }
 
@@ -128,6 +281,8 @@ pub struct NodePlacement {
     policies: Arc<dyn PolicySource>,
     clock: Arc<dyn Clock>,
     changed: Arc<watch::Sender<u64>>,
+    /// The version predicate (13-14); `None` = every session qualifies (unit tests).
+    compat: Option<Arc<dyn CompatSource>>,
 }
 
 impl std::fmt::Debug for NodePlacement {
@@ -154,7 +309,14 @@ impl NodePlacement {
             policies,
             clock,
             changed: Arc::new(watch::Sender::new(0)),
+            compat: None,
         }
+    }
+
+    /// Offer worker credit only to sessions that can run the activation (module docs).
+    pub fn with_compat(mut self, compat: Arc<dyn CompatSource>) -> Self {
+        self.compat = Some(compat);
+        self
     }
 
     /// Bump `changed()`.
@@ -203,8 +365,16 @@ impl NodePlacement {
         ))
     }
 
-    fn worker(&self, queue: &Arc<QueuePlacement>) -> Option<Reservation> {
-        let credit = self.registry.pick(|w| queue.matches(w.labels))?;
+    fn worker(&self, queue: &Arc<QueuePlacement>, e: &EntryView<'_>) -> Option<Reservation> {
+        let credit = match &self.compat {
+            None => self.registry.pick(|w| queue.matches(w.labels))?,
+            Some(c) => {
+                // No worker qualifies for an unreadable requirement.
+                let req = c.for_entry(e.workflow, e.tenant)?;
+                self.registry
+                    .pick(|w| queue.matches(w.labels) && req.admits(w))?
+            }
+        };
         Some(Reservation::new(
             ReservationKind::Worker,
             WorkerSlot {
@@ -219,7 +389,7 @@ impl NodePlacement {
         let qp = self.policies.queue(e.queue);
         match qp.placement {
             PlacementSetting::Embedded => self.embedded(),
-            PlacementSetting::Workers => self.worker(&qp),
+            PlacementSetting::Workers => self.worker(&qp, e),
             PlacementSetting::Auto => {
                 if !self.spill.spilling(e.queue) {
                     return self.embedded();
@@ -229,7 +399,7 @@ impl NodePlacement {
                 }
                 // Overflow attempt (counted whether or not a credit is found).
                 self.spill.note_overflow(e.queue, self.clock.now_ms());
-                self.worker(&qp)
+                self.worker(&qp, e)
             }
         }
     }
@@ -273,13 +443,16 @@ pub fn install(ctx: &P7Ctx, cfg: &mut DispatcherConfig) {
         ctx.meta.clone(),
         ctx.config.workers.default_placement,
     ));
-    let placement = Arc::new(NodePlacement::new(
-        Arc::clone(&cfg.slots),
-        Arc::clone(&ctx.shared.registry),
-        Arc::clone(&ctx.shared.spill) as Arc<dyn SpillSource>,
-        policies,
-        Arc::clone(&ctx.clock),
-    ));
+    let placement = Arc::new(
+        NodePlacement::new(
+            Arc::clone(&cfg.slots),
+            Arc::clone(&ctx.shared.registry),
+            Arc::clone(&ctx.shared.spill) as Arc<dyn SpillSource>,
+            policies,
+            Arc::clone(&ctx.clock),
+        )
+        .with_compat(Arc::new(MetaCompat::new(ctx.meta.clone()))),
+    );
     match tokio::runtime::Handle::try_current() {
         Ok(_) => {
             // Stops with the server (P7Ctx::shutdown); not joined (it holds no resources).
