@@ -199,8 +199,8 @@ impl Bed {
             Arc::clone(&self.g.nodes[&id]),
             self.handoff.clone(),
             self.cfg.clone(),
+            self.clock.clone(),
         )
-        .with_clock(self.clock.clone())
         .with_live_source(Arc::new(move |u: &BTreeSet<u64>| {
             let down = down.lock().unwrap();
             u.iter().copied().filter(|id| !down.contains(id)).collect()

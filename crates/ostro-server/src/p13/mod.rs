@@ -505,7 +505,9 @@ pub async fn start(ctx: Arc<P13Ctx>) -> P13Services {
     ));
     // 13-09: membership loop (+ the Removed handler).
     tasks.extend(membership::start(&ctx, stop.clone()));
-    // 13-10: placement controller and preferred-leader balancer.
+    // 13-10: placement controller and preferred-leader balancer, on the server's clock and
+    // the 12-10 liveness view (13-16 applied 13-10's hunk).
+    let live_cluster = Arc::clone(&ctx.cluster);
     tasks.push(
         PlacementController::new(
             Arc::clone(&ctx.meta),
@@ -516,8 +518,12 @@ pub async fn start(ctx: Arc<P13Ctx>) -> P13Services {
                 level_max: ctx.level_max,
                 ..PlacementConfig::default()
             },
+            Arc::clone(&ctx.clock),
         )
         .with_trigger(ctx.placement_trigger.clone())
+        .with_live_source(Arc::new(move |u: &std::collections::BTreeSet<u64>| {
+            live_cluster.liveness().lock().live_set(u)
+        }))
         .start(stop.clone()),
     );
     // 13-15: module GC (meta leader).

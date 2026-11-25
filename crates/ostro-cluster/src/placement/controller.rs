@@ -428,20 +428,20 @@ impl std::fmt::Debug for PlacementController {
 }
 
 impl PlacementController {
-    /// A controller over `meta`, moving leaders through `handoff`.
+    /// A controller over `meta`, moving leaders through `handoff`, timed by `clock` (the
+    /// one injectable clock: `started_at_ms`, handoff retry, balancer interval).
     pub fn new(
         meta: Arc<MetaHandle>,
         handoff: Arc<dyn HandoffClient>,
         cfg: PlacementConfig,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 meta,
                 handoff,
                 cfg,
-                // clock-exempt: default only; `started_at_ms` is informational (status) and the
-                // server/tests inject the one clock through `with_clock`.
-                clock: Arc::new(ostro_partition::SystemClock), // clock-exempt: default only, see above
+                clock,
                 live: None,
                 memory: Mutex::new(Memory::default()),
             }),
@@ -451,12 +451,6 @@ impl PlacementController {
 
     fn inner_mut(&mut self) -> &mut Inner {
         Arc::get_mut(&mut self.inner).expect("builder methods run before start")
-    }
-
-    /// The one injectable clock (`started_at_ms`, handoff retry, balancer interval).
-    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
-        self.inner_mut().clock = clock;
-        self
     }
 
     /// The live-set source for the leader balancer (default: raft `recent_active` on the
