@@ -1,11 +1,12 @@
 //! Phase 13 format contract (plan 13-01; CLUS-07, D-P13-21/22): `RejectReason`
 //! `ModuleMismatch` (23, outcome code 39) and `RunBusy` (24, code 40) above the placeholders
-//! 16..=22, and apply routing of `Cmd::RepinRun` (43) to `apply/repin.rs`, which rejects with
-//! `Invalid(NotImplemented)` without reads or writes until 13-17.
+//! 16..=22, and apply routing of `Cmd::RepinRun` (43) to `apply/repin.rs` (13-01 stub:
+//! `Invalid(NotImplemented)`; since 13-17 the real apply, whose rules are covered by
+//! `tests/apply_repin.rs`: an unknown run is `RunNotFound` after one read, nothing written).
 
 use ostro_partition::StoreError;
 use ostro_partition::apply::{
-    Action, ApplyOutcome, Cursor, InvalidCode, RejectReason, apply_command, fold_hash,
+    Action, ApplyOutcome, Cursor, RejectReason, apply_command, fold_hash,
 };
 use ostro_partition::{PartitionStore, StoreConfig};
 use ostro_types::command::{RepinRun, encode_command};
@@ -40,7 +41,7 @@ fn newer_format_error_names_the_remedy() {
 }
 
 #[test]
-fn repin_run_routes_to_the_stub_and_touches_nothing() {
+fn repin_run_routes_to_repin_and_touches_nothing() {
     let dir = ostro_testkit::fs::tempdir();
     let (store, meta) = PartitionStore::open(
         dir.path(),
@@ -76,10 +77,7 @@ fn repin_run_routes_to_the_stub_and_touches_nothing() {
         expected_next_seq: 5,
         requested_at_ms: 1,
     }));
-    assert_eq!(
-        out,
-        ApplyOutcome::Rejected(RejectReason::Invalid(InvalidCode::NotImplemented))
-    );
+    assert_eq!(out, ApplyOutcome::Rejected(RejectReason::RunNotFound));
     assert!(actions.is_empty());
-    assert_eq!((reads, writes), (0, 0));
+    assert_eq!((reads, writes), (1, 0));
 }
