@@ -249,19 +249,65 @@ fn member_state(ctx: &P13Ctx, id: u64) -> Result<u8, ApiError> {
         .ok_or_else(|| ApiError::not_found(format!("node {id} is not a member")))
 }
 
-fn live_inline(ctx: &P13Ctx) -> BTreeSet<u64> {
+/// The live members as this node can tell them, for the request-time checks: the liveness
+/// accumulator is fed only on the meta leader, so every configuration member (and `extra`)
+/// is probed directly over the cluster transport (a `Membership.Removed` naming node 0,
+/// which every node refuses with `InvalidArgument`; any answer = reachable, a transport
+/// failure or 1 s of silence = not). The meta leader's driver re-checks the live quorum
+/// before any conf change, so this view only decides what to ask for.
+async fn live_now(ctx: &P13Ctx, extra: u64) -> BTreeSet<u64> {
     let st = ctx.meta.raft_detail();
-    let conf: BTreeSet<u64> = st
+    let me = ctx.node_id();
+    let ids: BTreeSet<u64> = st
         .voters
         .iter()
         .chain(&st.learners)
         .chain(&st.voters_outgoing)
         .chain(&st.learners_next)
         .copied()
+        .chain([extra])
+        .filter(|id| *id != me)
         .collect();
-    let mut live = ctx.cluster.liveness().lock().live_set(&conf);
-    live.insert(ctx.node_id());
+    let probes = ids.into_iter().map(|id| async move {
+        let Ok(ch) = ctx.cluster.transport().channel(id) else {
+            return (id, false);
+        };
+        let mut client = MembershipClient::new(ch);
+        let call = client.removed(RemovedNotice {
+            node_id: 0,
+            cluster_id: ctx.cluster.cluster_id().to_owned(),
+            reason: "liveness probe".to_owned(),
+        });
+        let ok = match tokio::time::timeout(Duration::from_secs(1), call).await {
+            Ok(Ok(_)) => true,
+            Ok(Err(s)) => !matches!(
+                s.code(),
+                tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::DeadlineExceeded
+            ),
+            Err(_) => false,
+        };
+        (id, ok)
+    });
+    let mut live: BTreeSet<u64> = futures_join(probes)
+        .await
+        .into_iter()
+        .filter_map(|(id, ok)| ok.then_some(id))
+        .collect();
+    live.insert(me);
     live
+}
+
+/// Join every future (no `futures` dependency in this crate).
+async fn futures_join<F: std::future::Future>(fs: impl IntoIterator<Item = F>) -> Vec<F::Output> {
+    let mut out = Vec::new();
+    let mut set = Vec::new();
+    for f in fs {
+        set.push(Box::pin(f));
+    }
+    for f in set {
+        out.push(f.await);
+    }
+    out
 }
 
 /// `POST /v1/cluster/members/{id}/drain`: MemberState Draining.
@@ -275,7 +321,7 @@ pub async fn request_drain(ctx: &P13Ctx, id: u64) -> Result<ClusterStatus, ApiEr
         MEMBER_DRAINING => return super::status::status(ctx).await,
         _ => {}
     }
-    voter_guards(ctx, id, &live_inline(ctx))?;
+    voter_guards(ctx, id, &live_now(ctx, id).await)?;
     set_member_state(&ctx.meta, id, MEMBER_DRAINING, ctx.clock.now_ms())
         .await
         .map_err(state_error)?;
@@ -289,7 +335,7 @@ pub async fn request_remove(ctx: &P13Ctx, id: u64, force: bool) -> Result<Cluste
     if member_state(ctx, id)? == MEMBER_REMOVED {
         return super::status::status(ctx).await;
     }
-    let live = live_inline(ctx);
+    let live = live_now(ctx, id).await;
     voter_guards(ctx, id, &live)?;
     let st = ctx.meta.raft_detail();
     let voters: Vec<u64> = st

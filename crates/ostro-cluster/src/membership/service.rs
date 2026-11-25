@@ -111,6 +111,11 @@ pub fn member_state_of(m: &ostro_meta::Member) -> u8 {
     }
 }
 
+/// [`member_state_of`] of a versioned record.
+pub fn member_state_of_versioned(m: &ostro_meta::Versioned<ostro_meta::Member>) -> u8 {
+    member_state_of(&m.value)
+}
+
 /// Whether dynamic membership is in use: some Member record carries a MemberState.
 pub fn dynamic_membership(state: &MetaState) -> bool {
     state
@@ -471,9 +476,15 @@ impl MembershipService {
             }
         }
         let commit = detail.commit;
+        // Caught up = heard from (raft `recent_active`, a non-zero match) and within
+        // `promote_lag` of the commit, no snapshot in flight. A learner that never answered
+        // is not caught up, however small the log is.
         let caught_up = |id: u64| {
             progress.get(&id).is_some_and(|p| {
-                p.pending_snapshot == 0 && p.matched.saturating_add(self.cfg.promote_lag) >= commit
+                p.recent_active
+                    && p.matched > 0
+                    && p.pending_snapshot == 0
+                    && p.matched.saturating_add(self.cfg.promote_lag) >= commit
             })
         };
         if let Some(id) = members.iter().find_map(|(id, (st, _, _))| {
