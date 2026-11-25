@@ -17,6 +17,15 @@
 //!    the default tenant). A `(name, version)` already bound to a different module is
 //!    `409` naming that sha, and one bound under a different explicit module name is
 //!    `409` too: bindings are write-once (research Pitfall 6). Nothing is stored then.
+//!    Phase 13 (13-14, ENG-10, D-P13-17): validation runs `linker_set::select` (13-07) and
+//!    the selection comes back as `Prepared.wit` (WIT line, minimum feature level).
+//!    [`upload_gate`] refuses a module needing a level above the cluster's finalized level
+//!    (`409`, reason `feature_not_enabled`: "module needs cluster level N; finalize the
+//!    upgrade first"). Mixed lines, an unsupported line and an unknown `ostro:runtime`
+//!    function are validation errors (`400`). A module needing more than the baseline
+//!    (`{line 0.1, min_level 1}`) carries `ModuleRecord` ext 101 `WitRequirement`, written
+//!    only once the cluster is finalized at level 2 or higher (rule 1); absence means the
+//!    baseline. A re-upload of a recorded sha is unchanged (step 3).
 //! 6. The blob goes into the node-wide blob store (the executor loads modules from it).
 //! 7. Meta: create-only `Workflow(name, version)` records carrying
 //!    `module = qualify(tenant, name)` (empty without a name), then a create-only `Active`
@@ -267,6 +276,8 @@ pub(crate) async fn upload_module(
     };
 
     let existing = cp.meta.view().read(|s| s.module(&sha).cloned());
+    // ext of a fresh Module record (13-14: ext 101 when the module needs it).
+    let mut module_ext = Vec::new();
     let by_local = match &existing {
         // Already stored: register this tenant's versions from the earlier registration
         // without touching the runtime or the blob store.
@@ -286,14 +297,9 @@ pub(crate) async fn upload_module(
                 .prepare_cached(&req.wasm)
                 .await
                 .map_err(engine_error)?;
-            // Phase 13 (13-14): the WIT line / feature level gate. 13-14 takes the selection
-            // from `linker_set::select` (13-07); until then every module is a 0.1 / level-1
-            // module.
-            let selection = ostro_engine::host::linker_set::WitSelection {
-                line: ostro_engine::host::linker_set::WitLine::V0_1,
-                min_level: ostro_types::compat::LEVEL_MIN,
-            };
-            upload_gate(cp.meta.view(), &selection)?;
+            // Phase 13 (13-14): the WIT line / feature level gate over the selection
+            // `linker_set::select` computed during validation.
+            module_ext = upload_gate(cp.meta.view(), &prepared.wit)?;
             let metas = cp.runtime.describe(&prepared).await.map_err(|e| {
                 ApiError::invalid_argument(format!("describe() of the module failed: {e}"))
             })?;
@@ -425,7 +431,7 @@ pub(crate) async fn upload_module(
             language: req.language.filter(|l| !l.is_empty()),
             workflows: pairs.clone(),
             uploaded_at_ms: now,
-            ext: Vec::new(),
+            ext: module_ext,
         };
         match cp
             .meta
@@ -522,14 +528,58 @@ pub(crate) fn list_workflows(cp: &ServerControlPlane) -> Vec<WorkflowInfo> {
     })
 }
 
-/// Phase 13 (13-14, ENG-10): refuse an upload whose WIT selection needs a feature level the
-/// cluster has not finalized (409 `feature_not_enabled`). Stub: allows every module.
-fn upload_gate(
+/// `details.reason` of an upload refused for its feature level.
+pub const REASON_FEATURE_NOT_ENABLED: &str = "feature_not_enabled";
+
+/// Phase 13 (13-14, ENG-10, D-P13-17): the upload gate over a module's WIT selection.
+///
+/// - `selection.min_level` above the cluster's finalized level: `409 conflict`, reason
+///   [`REASON_FEATURE_NOT_ENABLED`] ("module needs cluster level N; finalize the upgrade
+///   first").
+/// - Otherwise the ext of the new `Module` record: empty for a baseline module (`{line
+///   0.1, min_level 1}`, the meaning of an absent ext 101); else ext 101 `WitRequirement`,
+///   whose emission is gated by `compat::require(Feature::WitRequirementExt)` (finalized
+///   and this binary at level 2 or higher; a refusal is the same `409`).
+pub fn upload_gate(
     view: &MetaView,
     selection: &ostro_engine::host::linker_set::WitSelection,
-) -> Result<(), ApiError> {
-    let _ = (view, selection);
-    Ok(())
+) -> Result<Vec<u8>, ApiError> {
+    use ostro_engine::host::linker_set::WitLine;
+    use ostro_types::compat::{Feature, LEVEL_MIN};
+    let finalized = view.read(ostro_cluster::compat::finalized_level);
+    let line = selection.line.to_string();
+    let refuse = |needed: u32, finalized: u32| {
+        ApiError::conflict(format!(
+            "module needs cluster level {needed}; finalize the upgrade first (the cluster is \
+             finalized at level {finalized})"
+        ))
+        .with_details(serde_json::json!({
+            "reason": REASON_FEATURE_NOT_ENABLED,
+            "needed": needed,
+            "finalized": finalized,
+            "wit_line": line,
+        }))
+    };
+    if selection.min_level > finalized {
+        return Err(refuse(selection.min_level, finalized));
+    }
+    if selection.line == WitLine::V0_1 && selection.min_level <= LEVEL_MIN {
+        return Ok(Vec::new());
+    }
+    ostro_cluster::compat::require(
+        view,
+        Feature::WitRequirementExt,
+        ostro_types::compat::level_max(),
+    )
+    .map_err(|e| refuse(e.needed, e.finalized))?;
+    ostro_meta::ext::put_wit_requirement(
+        &[],
+        &ostro_meta::ext::WitRequirement {
+            line: line.clone(),
+            min_level: selection.min_level,
+        },
+    )
+    .map_err(|e| ApiError::internal(format!("encoding the WIT requirement failed: {e}")))
 }
 
 pub(crate) async fn activate_workflow(
