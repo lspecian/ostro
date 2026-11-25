@@ -461,10 +461,14 @@ async fn oscillation() {
 
     let mut on_levels = Vec::new();
     let mut max_on = Duration::ZERO;
+    let mut walls = Vec::new();
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
+        let at = t0.elapsed();
         let (wall, cpu) = burn_phase(&c, ON_RUNS, ON_MS, par).await;
         max_on = max_on.max(wall);
+        // (start offset from the test start, wall): stalls show as single long phases.
+        walls.push((at, wall));
         if let Some(x) = cpu {
             on_levels.push(x);
         }
@@ -489,7 +493,8 @@ async fn oscillation() {
     );
     assert!(
         max_on < Duration::from_millis(sustain_ms),
-        "an on-phase ({max_on:?}) outlasted sustain: the toggle was not faster than sustain"
+        "an on-phase ({max_on:?}) outlasted sustain ({sustain_ms} ms, calibration \
+         {cal_wall:?}): the toggle was not faster than sustain; on-phases {walls:?}"
     );
     // Positive control: the same load held continuously past `sustain` does enter.
     let held = Instant::now();
@@ -508,7 +513,8 @@ async fn oscillation() {
     assert_eq!(transitions(&c.api, "burst").await.0, 1);
     eprintln!(
         "worker_failover::oscillation: parallelism {par}, calibration {cal_wall:?} at {:.1}% \
-         -> cpu_pct {cpu_pct}, sustain {sustain_ms} ms; {} on-phases (max {max_on:?}), {} \
+         -> cpu_pct {cpu_pct}, sustain {sustain_ms} ms; {} on-phases (max {max_on:?}, \
+         walls {walls:?}), {} \
          above the line, levels {:?}; transitions 0 (/metrics); control: continuous load \
          entered after {entered_after:?}; total {:?}",
         cal * 100.0,
