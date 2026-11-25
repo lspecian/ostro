@@ -470,7 +470,7 @@ Plans:
 - [ ] 13-09-PLAN.md — Membership: dynamic address book, join handshake + CA secret + resume, marker-first joiner with five crash tests, both voter checks lifted, Member upsert RMW, reconciler driver, removal/--force/orphan tombstones, status (wave 4; CLUS-05)
 - [ ] 13-10-PLAN.md — AlterReplicas apply + placement controller (RF raise, drain/force evacuation, reassign/cancel, replica removal cleanup, leader balancer) (wave 5; CLUS-05, CLUS-06)
 - [x] 13-11-PLAN.md — Graceful leader handoff (quiesce, append fence, in_handoff) + controlled shutdown, no drain (wave 4; CLUS-06)
-- [ ] 13-12-PLAN.md — Any-node routing: RoutedControlPlane over every API trait, consistency hooks on the local branch, one hop, not_leader/leader_changed re-route, unkeyed placement, fan-out, node-only API (wave 4; API-08)
+- [x] 13-12-PLAN.md — Any-node routing: RoutedControlPlane over every API trait, consistency hooks on the local branch, one hop, not_leader/leader_changed re-route, unkeyed placement, fan-out, node-only API (wave 4; API-08)
 - [ ] 13-13-PLAN.md — Read-your-writes: ACK-anchored leader leases + controller failover wait, meta ReadIndex barrier, consistency tokens, strict_reads, per-term RunWatchers, zombie_asymmetric (wave 5; API-08)
 - [ ] 13-14-PLAN.md — Worker version compatibility, module upload gate (WitRequirement), AOT pre-warm, version-gate scenarios (wave 4; CLUS-06, ENG-10)
 - [ ] 13-15-PLAN.md — Module retire + two-scan reference-checked GC with partition/epoch coverage, protecting retryable runs (wave 4; CLUS-07)
