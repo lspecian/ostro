@@ -467,7 +467,7 @@ Plans:
 - [x] 13-06-PLAN.md — Pure algorithms (TDD): reconciler with joint 1->3->5 changes, placement planner, reassignment state machine (shrink only when target in ISR), leader balancer, proptest models (wave 2; CLUS-05)
 - [x] 13-07-PLAN.md — LinkerSet by WIT major line, JOURNAL_IFACE fix, per-function level requirement, test-only 0.1.1 host and 0.2 fixture line, cache key by line (wave 2; ENG-10)
 - [x] 13-08-PLAN.md — Harness: P13Harness in tiers B and C + RYW/membership/upgrade/GC oracles (wave 3; all)
-- [ ] 13-09-PLAN.md — Membership: dynamic address book, join handshake + CA secret + resume, marker-first joiner with five crash tests, both voter checks lifted, Member upsert RMW, reconciler driver, removal/--force/orphan tombstones, status (wave 4; CLUS-05)
+- [x] 13-09-PLAN.md — Membership: dynamic address book, join handshake + CA secret + resume, marker-first joiner with five crash tests, both voter checks lifted, Member upsert RMW, reconciler driver, removal/--force/orphan tombstones, status (wave 4; CLUS-05) — 2026-11-25 (874f98c, 75cd701, d2eb93b, 84c6c8f); cluster.rs seam fix for restarted joined nodes HELD on wip/13-09-seam (57a33fa, 13-02-owned file, orchestrator OK needed)
 - [ ] 13-10-PLAN.md — AlterReplicas apply + placement controller (RF raise, drain/force evacuation, reassign/cancel, replica removal cleanup, leader balancer) (wave 5; CLUS-05, CLUS-06)
 - [x] 13-11-PLAN.md — Graceful leader handoff (quiesce, append fence, in_handoff) + controlled shutdown, no drain (wave 4; CLUS-06)
 - [x] 13-12-PLAN.md — Any-node routing: RoutedControlPlane over every API trait, consistency hooks on the local branch, one hop, not_leader/leader_changed re-route, unkeyed placement, fan-out, node-only API (wave 4; API-08)
