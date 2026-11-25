@@ -45,15 +45,20 @@ pub struct MetaState {
 
 /// An ISR in an `ElectLeader` / `AlterIsr` command: non-empty, no node 0, no duplicates.
 fn check_isr_shape(isr: &[u64]) -> Result<(), String> {
-    if isr.is_empty() {
-        return Err("the ISR must not be empty".into());
+    check_node_set("the ISR", isr)
+}
+
+/// A node set (`what` names it in the message): non-empty, no node 0, no duplicates.
+fn check_node_set(what: &str, set: &[u64]) -> Result<(), String> {
+    if set.is_empty() {
+        return Err(format!("{what} must not be empty"));
     }
-    if isr.contains(&0) {
-        return Err(format!("the ISR {isr:?} contains node 0"));
+    if set.contains(&0) {
+        return Err(format!("{what} {set:?} contains node 0"));
     }
-    for (i, n) in isr.iter().enumerate() {
-        if isr[..i].contains(n) {
-            return Err(format!("the ISR {isr:?} lists node {n} twice"));
+    for (i, n) in set.iter().enumerate() {
+        if set[..i].contains(n) {
+            return Err(format!("{what} {set:?} lists node {n} twice"));
         }
     }
     Ok(())
@@ -128,9 +133,24 @@ impl MetaState {
             // Phase 13 placeholder (13-01, P-15): never proposed.
             MetaCommand::ReservedP12_7 {} => MetaResult::Invalid("reserved".into()),
             // Phase 13 (D-P13-12): shape 13-01, apply 13-10.
-            MetaCommand::AlterReplicas { .. } => {
-                MetaResult::Invalid("Phase 13: implemented in 13-10".into())
-            }
+            MetaCommand::AlterReplicas {
+                partition,
+                epoch,
+                expected_isr_version,
+                replicas,
+                isr,
+                min_insync,
+                reassignment,
+            } => self.alter_replicas(
+                index,
+                partition,
+                epoch,
+                expected_isr_version,
+                replicas,
+                isr,
+                min_insync,
+                reassignment.as_ref(),
+            ),
         }
     }
 
@@ -479,6 +499,110 @@ impl MetaState {
         };
         cur.value.isr = isr;
         cur.value.isr_version = isr_version;
+        cur.updated_index = index;
+        MetaResult::Ok {
+            version: cur.version,
+        }
+    }
+
+    /// `AlterReplicas` (13-10, D-P13-12): reassign a partition's replica set (KIP-455 shape)
+    /// without an epoch bump.
+    ///
+    /// `isr_version` is the CAS token for the whole replica-and-ISR state: every command that
+    /// changes `replicas`, `isr` or `min_insync` (`ElectLeader`, `AlterIsr`, `ResignLeader`,
+    /// `AlterReplicas`) bumps it, so a proposer that read version `v` changes exactly the
+    /// state it observed.
+    ///
+    /// Checks, in order: the partition exists (`NotFound`); it is placed, `epoch != 0`
+    /// (`Invalid`: bootstrap placement owns unplaced partitions, D-P13-29c); `epoch` equals
+    /// the current epoch (`StaleVersion { current: epoch }`); `expected_isr_version` matches
+    /// (`StaleVersion { current: isr_version }`); `replicas` and `isr` are non-empty, have no
+    /// duplicates or 0, and `isr ⊆ replicas`; a non-zero current leader is in `replicas` and
+    /// in `isr`; `1 <= min_insync <= |isr|` (all `Invalid`). On success `replicas`, `isr` and
+    /// `min_insync` are replaced, `isr_version` is bumped, and ext tag 100 is set from
+    /// `reassignment` verbatim (`None` removes it; never validated, 05-20 rule 5). Epoch,
+    /// version, leader and every other ext entry are unchanged. Any failure changes nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn alter_replicas(
+        &mut self,
+        index: u64,
+        partition: u16,
+        epoch: u32,
+        expected_isr_version: u64,
+        replicas: Vec<u64>,
+        isr: Vec<u64>,
+        min_insync: u8,
+        reassignment: Option<&crate::ext::Reassignment>,
+    ) -> MetaResult {
+        let Some(cur) = self.partitions.get(&partition) else {
+            return MetaResult::NotFound;
+        };
+        if cur.version == 0 || epoch == 0 {
+            return MetaResult::Invalid(format!(
+                "AlterReplicas p{partition}: the partition is unplaced (epoch 0)"
+            ));
+        }
+        if u64::from(epoch) != cur.version {
+            return MetaResult::StaleVersion {
+                current: cur.version,
+            };
+        }
+        if expected_isr_version != cur.value.isr_version {
+            return MetaResult::StaleVersion {
+                current: cur.value.isr_version,
+            };
+        }
+        if let Err(msg) = check_node_set("the replica set", &replicas) {
+            return MetaResult::Invalid(format!("AlterReplicas p{partition}: {msg}"));
+        }
+        if let Err(msg) = check_isr_shape(&isr) {
+            return MetaResult::Invalid(format!("AlterReplicas p{partition}: {msg}"));
+        }
+        if let Some(n) = isr.iter().find(|n| !replicas.contains(n)) {
+            return MetaResult::Invalid(format!(
+                "AlterReplicas p{partition}: ISR member {n} is not in the replicas {replicas:?}"
+            ));
+        }
+        let leader = cur.value.leader;
+        if leader != 0 && !replicas.contains(&leader) {
+            return MetaResult::Invalid(format!(
+                "AlterReplicas p{partition}: leader {leader} is not in the replicas {replicas:?}"
+            ));
+        }
+        if leader != 0 && !isr.contains(&leader) {
+            return MetaResult::Invalid(format!(
+                "AlterReplicas p{partition}: leader {leader} is not in the ISR {isr:?}"
+            ));
+        }
+        if min_insync == 0 || usize::from(min_insync) > isr.len() {
+            return MetaResult::Invalid(format!(
+                "AlterReplicas p{partition}: min_insync {min_insync} must be in 1..={}",
+                isr.len()
+            ));
+        }
+        let Some(isr_version) = cur.value.isr_version.checked_add(1) else {
+            return MetaResult::Invalid(format!(
+                "AlterReplicas p{partition}: isr_version overflow"
+            ));
+        };
+        let ext = match reassignment {
+            Some(r) => crate::ext::put_reassignment(&cur.value.ext, r),
+            None => crate::ext::ext_remove(&cur.value.ext, crate::ext::EXT_REASSIGNMENT),
+        };
+        let ext = match ext {
+            Ok(ext) => ext,
+            Err(e) => {
+                return MetaResult::Invalid(format!(
+                    "AlterReplicas p{partition}: stored ext is malformed: {e}"
+                ));
+            }
+        };
+        let cur = self.partitions.get_mut(&partition).expect("checked above");
+        cur.value.replicas = replicas;
+        cur.value.isr = isr;
+        cur.value.min_insync = min_insync;
+        cur.value.isr_version = isr_version;
+        cur.value.ext = ext;
         cur.updated_index = index;
         MetaResult::Ok {
             version: cur.version,
