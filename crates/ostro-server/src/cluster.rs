@@ -53,7 +53,9 @@
 //! every partition it leads as leaderless in its assignment view, so the role drivers step
 //! down locally (clients get 503 fast; zombie safety does not depend on it, research
 //! Pattern 4). Contact back: the real view returns and the node asks for a fresh term.
-//! Counted by `ostro_repl_self_demotions_total`.
+//! Counted by `ostro_repl_self_demotions_total`. A node that is the sole voter and leads
+//! never self-demotes: it is its own metadata quorum, and its contact only ages while its
+//! own meta Raft loop is paused (`contact_lost`).
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -82,7 +84,7 @@ use ostro_cluster::transport::tcp::{NodeTls, PeerIdentity, TcpTransport};
 use ostro_cluster::transport::{ClusterIncoming, ClusterTransport};
 use ostro_log::ReplicatedLog as _;
 use ostro_meta::handle::MetaStart;
-use ostro_meta::{MetaHandle, MetaState};
+use ostro_meta::{MetaHandle, MetaState, RaftStatus};
 use ostro_partition::roles::{
     AssignmentSource, FollowerDriver, FollowerTask, PartitionAssignmentView, PartitionLogHandle,
 };
@@ -1144,6 +1146,28 @@ fn views_of(
         .collect()
 }
 
+/// Whether node `me` lost metadata contact (self-demotion): its last contact with the meta
+/// leader (`age`, refreshed by the meta Raft loop) is older than `session_timeout` — unless
+/// `me` is the sole voter and leads, live (bug hunt p13-offline). A single voter is its own
+/// metadata quorum and cannot be cut off from it; its contact only ages while its own Raft
+/// loop is paused (a slow meta fsync, a process stall), and demoting then took every
+/// partition of a single node offline (leader 0, `503 partition_offline`) for a watchdog
+/// period and bumped every epoch with a fresh term. A stopped or halted driver
+/// (`failed` / `fatal`) and a joint configuration still follow the age rule.
+fn contact_lost(
+    status: &RaftStatus,
+    me: u64,
+    age: Option<Duration>,
+    session_timeout: Duration,
+) -> bool {
+    let sole_voter = status.voters == [me]
+        && (status.voters_outgoing.is_empty() || status.voters_outgoing == [me]);
+    if sole_voter && status.is_leader && status.failed.is_none() && status.fatal.is_none() {
+        return false;
+    }
+    age.is_some_and(|age| age > session_timeout)
+}
+
 impl MetaAssignments {
     fn start(
         node_id: u64,
@@ -1200,9 +1224,12 @@ impl MetaAssignments {
                     _ = stop.cancelled() => return,
                     _ = tick.tick() => {}
                 }
-                let lost = raft
-                    .leader_contact_age()
-                    .is_some_and(|age| age > session_timeout);
+                let lost = contact_lost(
+                    &raft.status(),
+                    node_id,
+                    raft.leader_contact_age(),
+                    session_timeout,
+                );
                 let was = *demoted_tx.borrow();
                 if lost != was {
                     demoted_tx.send_replace(lost);
@@ -1623,4 +1650,57 @@ impl ClusterServices {
 /// The role of `p` on `node`, for the API's not-leader answers.
 pub fn role_of(node: &Node, p: PartitionId) -> Option<PartitionRole> {
     node.role(p).map(|r| *r.borrow())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T: Duration = Duration::from_secs(3);
+    const STALE: Option<Duration> = Some(Duration::from_secs(4));
+    const FRESH: Option<Duration> = Some(Duration::from_millis(5));
+
+    fn status(voters: &[u64], is_leader: bool) -> RaftStatus {
+        RaftStatus {
+            id: 1,
+            is_leader,
+            leader_id: is_leader.then_some(1),
+            voters: voters.to_vec(),
+            ..RaftStatus::default()
+        }
+    }
+
+    #[test]
+    fn sole_leading_voter_never_loses_contact() {
+        assert!(!contact_lost(&status(&[1], true), 1, STALE, T));
+        assert!(!contact_lost(&status(&[1], true), 1, FRESH, T));
+        assert!(!contact_lost(&status(&[1], true), 1, None, T));
+        // Learners do not change the quorum.
+        let mut s = status(&[1], true);
+        s.learners = vec![2];
+        assert!(!contact_lost(&s, 1, STALE, T));
+    }
+
+    #[test]
+    fn age_rule_everywhere_else() {
+        // Several voters (leader or not).
+        assert!(contact_lost(&status(&[1, 2, 3], true), 1, STALE, T));
+        assert!(contact_lost(&status(&[1, 2, 3], false), 1, STALE, T));
+        assert!(!contact_lost(&status(&[1, 2, 3], false), 1, FRESH, T));
+        assert!(!contact_lost(&status(&[1, 2, 3], false), 1, None, T));
+        // A sole voter that does not lead (campaigning), or is not this node.
+        assert!(contact_lost(&status(&[1], false), 1, STALE, T));
+        assert!(contact_lost(&status(&[2], false), 1, STALE, T));
+        // Joint configuration leaving other voters.
+        let mut s = status(&[1], true);
+        s.voters_outgoing = vec![1, 2, 3];
+        assert!(contact_lost(&s, 1, STALE, T));
+        // A stopped or halted meta driver.
+        let mut s = status(&[1], true);
+        s.failed = Some("EIO".into());
+        assert!(contact_lost(&s, 1, STALE, T));
+        let mut s = status(&[1], true);
+        s.fatal = Some("FatalApply".into());
+        assert!(contact_lost(&s, 1, STALE, T));
+    }
 }
