@@ -472,7 +472,7 @@ Plans:
 - [x] 13-11-PLAN.md — Graceful leader handoff (quiesce, append fence, in_handoff) + controlled shutdown, no drain (wave 4; CLUS-06)
 - [x] 13-12-PLAN.md — Any-node routing: RoutedControlPlane over every API trait, consistency hooks on the local branch, one hop, not_leader/leader_changed re-route, unkeyed placement, fan-out, node-only API (wave 4; API-08)
 - [x] 13-13-PLAN.md — Read-your-writes: ACK-anchored leader leases + controller failover wait, meta ReadIndex barrier, consistency tokens, strict_reads, per-term RunWatchers, zombie_asymmetric (wave 5; API-08) — 2026-11-25 (d5209a9, a7264a7, d2ce09b, 2a864c5, 70bf2a5, 2e48cce)
-- [ ] 13-14-PLAN.md — Worker version compatibility, module upload gate (WitRequirement), AOT pre-warm, version-gate scenarios (wave 4; CLUS-06, ENG-10)
+- [x] 13-14-PLAN.md — Worker version compatibility, module upload gate (WitRequirement), AOT pre-warm, version-gate scenarios (wave 4; CLUS-06, ENG-10) — done 2026-11-25 (8e5e689, 77a0b04, 824a02d, f5e4663, 65c6249, d01b147; 13-14-SUMMARY)
 - [x] 13-15-PLAN.md — Module retire + two-scan reference-checked GC with partition/epoch coverage, protecting retryable runs (wave 4; CLUS-07)
 - [ ] 13-16-PLAN.md — Online `ostro cluster init` promotion + ostro-client + CLI verbs (cluster, migrate-runs, modules rm/gc) (wave 6; CLUS-05..07)
 - [ ] 13-17-PLAN.md — RepinRun apply (hot-parked runs busy) + migrate-runs with dry-run replay + module_gone (wave 5; CLUS-07)
