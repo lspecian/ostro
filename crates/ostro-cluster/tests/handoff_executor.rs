@@ -87,6 +87,8 @@ struct Meta {
     a: Mutex<PartitionAssignment>,
     proposals: Mutex<Vec<MetaCommand>>,
     answer: Mutex<Option<MetaResult>>,
+    /// `propose` never answers (metadata group without a leader).
+    hang: std::sync::atomic::AtomicBool,
 }
 
 impl Meta {
@@ -104,6 +106,7 @@ impl Meta {
             }),
             proposals: Mutex::new(Vec::new()),
             answer: Mutex::new(None),
+            hang: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -127,7 +130,11 @@ impl HandoffMeta for Meta {
     fn propose(&self, cmd: MetaCommand) -> BoxFuture<'_, Result<MetaResult, String>> {
         lock(&self.proposals).push(cmd.clone());
         let scripted = lock(&self.answer).take();
+        let hang = self.hang.load(std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
             if let Some(r) = scripted {
                 return Ok(r);
             }
@@ -417,6 +424,24 @@ async fn invalid_election_aborts() {
     let ex = executor(&control, &meta, &log, 2_000);
     let out = ex.execute(P, 2, Epoch(5)).await.expect("answered");
     assert!(aborted(&out).contains("not applied"), "{out:?}");
+    assert_eq!(control.events().last().map(String::as_str), Some("abort"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unanswered_election_aborts_within_the_bound() {
+    let control = Arc::new(Control::default());
+    let meta = Meta::new(ME, 5, &[1, 2, 3]);
+    meta.hang.store(true, std::sync::atomic::Ordering::SeqCst);
+    let log = Log::new(40, &[(2, 40)]);
+    let ex = executor(&control, &meta, &log, 2_000);
+    let out = tokio::time::timeout(
+        ostro_cluster::handoff::ELECT_TIMEOUT * 2,
+        ex.execute(P, 2, Epoch(5)),
+    )
+    .await
+    .expect("bounded by ELECT_TIMEOUT")
+    .expect("answered");
+    assert!(aborted(&out).contains("outcome unknown"), "{out:?}");
     assert_eq!(control.events().last().map(String::as_str), Some("abort"));
 }
 

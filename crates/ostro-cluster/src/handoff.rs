@@ -20,7 +20,8 @@
 //!    `ElectLeader{epoch + 1, leader: to, isr: published ISR unchanged, expected_isr_version}`
 //!    (meta apply re-checks `to ∈ ISR` and the CAS). The target leads only at an epoch above
 //!    its log's latest (12-14): if not, its role driver requests a fresh term itself, which
-//!    still counts as moved. Failpoint `handoff::after_elect`.
+//!    still counts as moved. The proposal is bounded by [`ELECT_TIMEOUT`]. Failpoint
+//!    `handoff::after_elect`.
 //! 6. Applied → `complete()` (the fence stays until the Phase 12 role lifecycle demotes this
 //!    node on the assignment change) and [`HandoffOutcome::Moved`]. Any failure (catch-up
 //!    timeout, `StaleVersion`, `Invalid`, meta error, `to` out of the ISR, failpoint) →
@@ -83,6 +84,11 @@ const CATCHUP_POLL: Duration = Duration::from_millis(10);
 /// this long (it is not fetching: dead, isolated or stopping), instead of waiting out
 /// `handoff_catchup_timeout`. A fetching follower reports progress on every fetch round.
 pub const CATCHUP_STALL: Duration = Duration::from_secs(2);
+
+/// Bound on the `ElectLeader` proposal: a metadata group that cannot commit within it (its
+/// leader stopping, no quorum) aborts the handoff instead of holding the partition frozen
+/// for the whole proposal deadline.
+pub const ELECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Margin on top of `grace + catchup_timeout` for a remote `NodeOps.HandOff` call
 /// (propose + apply + transport).
@@ -279,7 +285,14 @@ impl LocalHandoff {
                 prev_leader: me,
             },
         };
-        match self.meta.propose(cmd).await {
+        let proposed = match tokio::time::timeout(ELECT_TIMEOUT, self.meta.propose(cmd)).await {
+            Ok(r) => r,
+            Err(_) => Err(format!(
+                "no answer within {ELECT_TIMEOUT:?} (outcome unknown; if the election applies \
+                 later it is a valid in-ISR election and the role lifecycle demotes this node)"
+            )),
+        };
+        match proposed {
             Ok(MetaResult::Ok { .. }) => {
                 after_elect();
                 guard.complete();
