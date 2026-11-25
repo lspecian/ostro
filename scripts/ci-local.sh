@@ -13,6 +13,25 @@
 # Polyglot block (09-17): Node 24 + npm, uv 0.7.15 and a Python 3.12 that `uv python find`
 # sees (skip only with --no-polyglot).
 # Clients (10-02): Go 1.23+ for clients/go (skip only with --no-go).
+#
+# Step selection (for running groups of steps in parallel, e.g. `ostro-k8s-ci --parallel`).
+# Each variable is an extended regex (bash =~, unanchored: anchor it yourself); unset or
+# empty means "everything". A unit runs when it matches *_ONLY (if set) and does not match
+# *_SKIP (if set). Nothing set = the full gate, unchanged.
+#   CI_LOCAL_ONLY / CI_LOCAL_SKIP              step names as printed in the summary; an
+#       unselected step is recorded as SKIP with time "- (not in group)". The "Phase 6
+#       external services" banner is selected under that name.
+#   CI_LOCAL_TARGETS_ONLY / CI_LOCAL_TARGETS_SKIP   work units of "cargo test" and "musl
+#       zigbuild test": "unit" (--lib --bins --examples of every workspace member), "doc"
+#       (--doc) and "test:<name>" per integration test target (`--test <name>`; targets with
+#       required-features are not run by `cargo test --workspace` and are not units). The
+#       selected units run as `cargo test --workspace --locked <units>` (features unified
+#       over the whole workspace, exactly as the unsharded step).
+#   CI_LOCAL_FAILPOINT_ONLY / CI_LOCAL_FAILPOINT_SKIP   work units of "failpoint suites":
+#       "lint" (the clippy pass over every failpoint crate) and each FAILPOINT_CRATES entry
+#       (e.g. "ostro-partition", "ostro-server:dlq_api").
+# Every step builds what it needs, except "musl binary size < 60 MB", which reads the binary
+# "musl release (static, mimalloc)" builds: select both together.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -113,9 +132,23 @@ declare -a NAMES=() RESULTS=() TIMES=()
 
 record() { NAMES+=("$1"); RESULTS+=("$2"); TIMES+=("$3"); }
 
+# selected <unit> <only-ERE> <skip-ERE>: is the unit selected (see "Step selection" above)?
+selected() {
+  [[ -z "$2" || "$1" =~ $2 ]] && [[ -z "$3" || ! "$1" =~ $3 ]]
+}
+
+step_selected() { selected "$1" "${CI_LOCAL_ONLY:-}" "${CI_LOCAL_SKIP:-}"; }
+
+not_in_group() {
+  echo
+  echo "==> $1 (SKIP: not in group)"
+  record "$1" SKIP "- (not in group)"
+}
+
 # step <name> <command...>: runs the command, records PASS/FAIL and duration.
 step() {
   local name="$1"; shift
+  step_selected "$name" || { not_in_group "$name"; return 0; }
   echo
   echo "==> ${name}"
   local start=$SECONDS
@@ -127,6 +160,7 @@ step() {
 }
 
 skip() {
+  step_selected "$1" || { not_in_group "$1"; return 0; }
   echo
   echo "==> $1 (SKIP: $2)"
   record "$1" SKIP "-"
@@ -213,21 +247,28 @@ check_phase7() {
   bash deploy/check-manifests.sh
 }
 
+fp_selected() { selected "$1" "${CI_LOCAL_FAILPOINT_ONLY:-}" "${CI_LOCAL_FAILPOINT_SKIP:-}"; }
+
 check_failpoints() {
   local c crate cmd
   local -A linted=()
-  for c in "${FAILPOINT_CRATES[@]}" "${FAILPOINT_LINT_ONLY[@]}"; do
-    crate="${c%%:*}"
-    # A crate listed more than once (`crate:target` entries) is linted once.
-    [[ -n "${linted[$crate]:-}" ]] && continue
-    linted[$crate]=1
-    # ostro-wal is vendored and excluded from workspace clippy; lint the rest.
-    if [[ "$crate" != "ostro-wal" ]]; then
-      cargo clippy -p "$crate" --features failpoints --all-targets --locked -- -D warnings || return 1
-    fi
-  done
+  if fp_selected lint; then
+    for c in "${FAILPOINT_CRATES[@]}" "${FAILPOINT_LINT_ONLY[@]}"; do
+      crate="${c%%:*}"
+      # A crate listed more than once (`crate:target` entries) is linted once.
+      [[ -n "${linted[$crate]:-}" ]] && continue
+      linted[$crate]=1
+      # ostro-wal is vendored and excluded from workspace clippy; lint the rest.
+      if [[ "$crate" != "ostro-wal" ]]; then
+        cargo clippy -p "$crate" --features failpoints --all-targets --locked -- -D warnings || return 1
+      fi
+    done
+  else
+    echo "failpoint lint: not in group"
+  fi
   # 12-18: a pending or non-biting replication mutant fails the suites (CLUS-01).
   for c in "${FAILPOINT_CRATES[@]}"; do
+    fp_selected "$c" || { echo "failpoint suite $c: not in group"; continue; }
     mapfile -t cmd < <(failpoint_test_cmd "$c")
     OSTRO_REPL_REQUIRE_ALL=1 "${cmd[@]}" || return 1
   done
@@ -385,7 +426,35 @@ check_musl_size() {
 
 check_musl_test() {
   # `cargo zigbuild test` is not a subcommand; the test runner is `cargo-zigbuild test`.
-  cargo-zigbuild test --workspace --locked --target "$MUSL_TARGET"
+  workspace_test cargo-zigbuild test --target "$MUSL_TARGET"
+}
+
+# workspace_test <test command...>: `<cmd> --workspace --locked`, or only the units selected
+# by CI_LOCAL_TARGETS_ONLY / CI_LOCAL_TARGETS_SKIP (see "Step selection" at the top).
+workspace_test() {
+  if [[ -z "${CI_LOCAL_TARGETS_ONLY:-}${CI_LOCAL_TARGETS_SKIP:-}" ]]; then
+    "$@" --workspace --locked
+    return
+  fi
+  local only="${CI_LOCAL_TARGETS_ONLY:-}" skip="${CI_LOCAL_TARGETS_SKIP:-}" t rc=0 doc=0
+  local -a names=() sel=()
+  mapfile -t names < <(cargo metadata --no-deps --format-version 1 --locked | jq -r '
+    [.packages[].targets[] | select(.kind == ["test"] and .test != false
+      and ((."required-features" // []) | length) == 0) | .name] | unique[]') || return 1
+  [[ "${#names[@]}" -gt 0 ]] || { echo "cargo metadata listed no test targets"; return 1; }
+  selected unit "$only" "$skip" && sel+=(--lib --bins --examples)
+  selected doc "$only" "$skip" && doc=1
+  for t in "${names[@]}"; do
+    selected "test:$t" "$only" "$skip" && sel+=(--test "$t")
+  done
+  echo "units in this group: $( ((${#sel[@]})) && printf '%s ' "${sel[@]}")$( ((doc)) && echo --doc)"
+  if [[ "${#sel[@]}" -gt 0 ]]; then
+    "$@" --workspace --locked "${sel[@]}" || rc=1
+  fi
+  if [[ "$doc" -eq 1 ]]; then
+    "$@" --workspace --locked --doc || rc=1
+  fi
+  return "$rc"
 }
 
 # Polyglot block (plan 09-17, D-P9-12/D-P9-28): Python and TypeScript SDK host tests plus
@@ -549,6 +618,17 @@ external_services_banner() {
   fi
 }
 
+external_services() {
+  local var
+  if step_selected "Phase 6 external services"; then
+    external_services_banner
+  else
+    for var in OSTRO_TEST_PG_URL OSTRO_TEST_MYSQL_URL OSTRO_TEST_S3_URL; do
+      [[ -n "${!var:-}" ]] || record "external: ${var}" SKIP "- (not in group)"
+    done
+  fi
+}
+
 step "toolchain 1.100.0" check_toolchain
 step "cargo fmt --check" cargo fmt --all --check
 step "cargo clippy -D warnings" check_clippy
@@ -557,8 +637,8 @@ step "sdk workspace fmt + clippy" check_sdk_lint
 step "sdk workspace test + wasm build" check_sdk_test
 step "guests build (wasm32-wasip2)" check_guests
 step "order-saga example" check_order_saga
-external_services_banner
-step "cargo test" cargo test --workspace --locked
+external_services
+step "cargo test" workspace_test cargo test
 if [[ "$RUN_POLYGLOT" -eq 1 ]]; then
   step "polyglot toolchains present" check_polyglot_toolchains
   step "python sdk tests" check_python_sdk
