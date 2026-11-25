@@ -62,7 +62,6 @@ use ostro_types::command::{
 use ostro_types::journal::{
     Event, EventBody, Payload, SignalPayload, TokenCompleted, encode_event,
 };
-use ostro_types::routing::partition_for_new_run;
 use ostro_types::{PayloadRef, RunId};
 
 use super::ServerControlPlane;
@@ -373,6 +372,8 @@ async fn restart(
     old: RunId,
     rec: RunRecord,
 ) -> Result<RetryResponse, ApiError> {
+    // Phase 13 (13-18): a retired module takes no new run (as a start).
+    crate::rerun::check_restart_module(cp.meta().view(), rec.module_sha.as_ref())?;
     let reader = old_handle.reader();
     let input = tokio::task::spawn_blocking(move || {
         query::run_payload(&reader, &old, query::PAYLOAD_INPUT)
@@ -390,7 +391,9 @@ async fn restart(
         .map_err(partition_error)?;
 
     let uuid = uuid::Uuid::now_v7();
-    let p = partition_for_new_run(&uuid, cp.partition_count());
+    // Phase 13 (13-18): a partition this node leads (the StartRun is built on local
+    // handles; `crate::rerun::restart_partition`).
+    let p = crate::rerun::restart_partition(cp, &uuid);
     let run = RunId::new(p, uuid);
     let handle = &cp.partition(p)?;
     let mut seed = [0u8; 32];

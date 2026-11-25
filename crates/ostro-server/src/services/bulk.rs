@@ -1145,6 +1145,8 @@ async fn restart_with_key(
     key: &str,
 ) -> Result<RunId, ApiError> {
     let cp = &ctx.cc.partitions;
+    // Phase 13 (13-18): a retired module takes no new run (as a start).
+    crate::rerun::check_restart_module(ctx.cc.meta.view(), rec.module_sha.as_ref())?;
     let old_handle = &cp.partition(old.partition())?;
     let reader = old_handle.reader();
     let input = tokio::task::spawn_blocking(move || {

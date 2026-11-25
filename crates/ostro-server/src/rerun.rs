@@ -291,8 +291,70 @@ pub(crate) fn before_rearm() -> Result<(), ostro_partition::ExecOutcome> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------
+// Phase 13 (13-18): restarts on a cluster
+// ---------------------------------------------------------------------------------
+
+/// The partition of a restart's new run when no dedupe key fixes it (D1 retry in
+/// `Restarted` mode, a rerun without an idempotency key). 13-18: a restart builds its
+/// `StartRun` on this node's partition handles (it copies the source's payloads, pinned
+/// module and lineage, which no public start request carries), so the new run goes to a
+/// partition **this node leads**, uniformly by the new uuid (like `[api]
+/// unkeyed_start_placement = "local"`). The router sent the call to the source run's
+/// leader, so at least that partition qualifies. A node that leads nothing (a forwarded
+/// call racing a leader change) falls back to `partition_for_new_run`, whose `not_leader`
+/// the router re-routes.
+pub(crate) fn restart_partition(
+    cp: &crate::control::ServerControlPlane,
+    uuid: &uuid::Uuid,
+) -> ostro_types::PartitionId {
+    let count = cp.partition_count();
+    let led: Vec<ostro_types::PartitionId> =
+        count.ids().filter(|p| cp.partition(*p).is_ok()).collect();
+    pick_led(&led, uuid).unwrap_or_else(|| ostro_types::partition_for_new_run(uuid, count))
+}
+
+/// `led[uuid mod len]` (`None` when `led` is empty).
+fn pick_led(
+    led: &[ostro_types::PartitionId],
+    uuid: &uuid::Uuid,
+) -> Option<ostro_types::PartitionId> {
+    let n = u128::try_from(led.len()).ok().filter(|n| *n > 0)?;
+    let i = usize::try_from(uuid.as_u128() % n).ok()?;
+    led.get(i).copied()
+}
+
+/// 13-18 (13-15 finding): a restart (D1 retry `Restarted`, Phase 11 rerun, DLQ and bulk
+/// restart) pinned to a retired module takes no new run, like a start: 409
+/// `module_retired`. A run without a pinned module resolves its module at activation.
+pub(crate) fn check_restart_module(
+    view: &ostro_meta::MetaView,
+    module_sha: Option<&[u8; 32]>,
+) -> Result<(), ostro_api::ApiError> {
+    match module_sha {
+        Some(sha) => crate::control::module_retire::check_not_retired(view, sha),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// 13-18: restart placement stays on the given (led) partitions.
+    #[test]
+    fn pick_led_stays_on_led_partitions() {
+        use ostro_types::PartitionId;
+        let led = [PartitionId(3), PartitionId(7), PartitionId(11)];
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let u = uuid::Uuid::now_v7();
+            let p = super::pick_led(&led, &u).expect("some");
+            assert!(led.contains(&p), "{p:?}");
+            seen.insert(p);
+        }
+        assert_eq!(seen.len(), 3, "uniform over the led partitions");
+        assert_eq!(super::pick_led(&[], &uuid::Uuid::now_v7()), None);
+    }
+
     use super::*;
     use ostro_types::journal::{
         AttemptBackoff, AwaitTokenCreated, ChildCompleted, ChildOptions, ChildStarted, CommandMeta,

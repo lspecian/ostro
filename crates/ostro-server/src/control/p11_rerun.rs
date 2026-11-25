@@ -17,11 +17,13 @@
 //! 3. **Target version.** `active` (default; 412 without one), `source` (the source's
 //!    version and its exact pinned module) or `N` (404 when unknown). The module is
 //!    prepared through the executor's runtime cache (`Runtime::prepared` /
-//!    `prepare_cached` over the node blob store, as the executor does).
+//!    `prepare_cached` over the node blob store, as the executor does). A retired target
+//!    module is 409 `module_retired` (13-18, as a start).
 //! 4. **Run id.** With an idempotency key the dedupe key is `__rerun/<source>/<key>` and
 //!    the partition `partition_for_key(workflow, dedupe)` (as starts route keyed runs); when
 //!    the dedupe row already exists, the existing run id is used, else a fresh uuid v7 on
-//!    that partition. Without a key: a fresh uuid v7 on `partition_for_new_run` (as starts).
+//!    that partition. Without a key: a fresh uuid v7 on a partition this node leads
+//!    (13-18, `crate::rerun::restart_partition`: the StartRun is built on local handles).
 //! 5. **Mandatory replay check** (D-P11-5): [`ostro_engine::replay_check::replay_check`]
 //!    replays events `[0, cut)` against the target module **as the new run id**.
 //!    `ok`/`ok_frontier` pass; `diverged{seq}` → 409 `rerun_nondeterministic{seq, detail}`;
@@ -74,7 +76,7 @@ use ostro_types::command::{
     encode_command,
 };
 use ostro_types::journal::Event;
-use ostro_types::routing::{partition_for_key, partition_for_new_run};
+use ostro_types::routing::partition_for_key;
 use ostro_types::{PartitionId, PayloadRef, RunId};
 
 use super::history::event_seq_and_attempt;
@@ -456,6 +458,8 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
 
     // 3. Target version and module.
     let (version, module_sha) = target_version(ctx, &src.rec, &req.version)?;
+    // Phase 13 (13-18): a retired target module takes no new run (as a start).
+    crate::rerun::check_restart_module(ctx.cc.meta.view(), Some(&module_sha))?;
     let module = prepare(ctx, module_sha).await?;
 
     // 4. The new run id (pre-allocated: the replay check runs as this id).
@@ -469,7 +473,8 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
     let uuid = uuid::Uuid::now_v7();
     let p: PartitionId = match &dedupe {
         Some(d) => partition_for_key(&workflow, d.as_bytes(), count_p),
-        None => partition_for_new_run(&uuid, count_p),
+        // Phase 13 (13-18): a partition this node leads (`crate::rerun::restart_partition`).
+        None => crate::rerun::restart_partition(cp, &uuid),
     };
     let handle = &cp.partition(p)?;
     let existing = match &dedupe {
