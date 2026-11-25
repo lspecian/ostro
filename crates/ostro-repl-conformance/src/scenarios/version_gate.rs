@@ -108,8 +108,40 @@ pub async fn start_level1_cluster(nodes: usize) -> Result<InProcCluster, Harness
         })
         .await?;
     }
+    if nodes > 1 {
+        settle_voters(&c, nodes).await?;
+    }
     c.client(1).deploy_test_module().await?;
     Ok(c)
+}
+
+/// Wait until the meta group has the largest odd voter count `<= nodes`, no joint
+/// configuration and every member `active` (13-09's reconciler promotes joined learners),
+/// so a restart of any one node keeps a quorum.
+async fn settle_voters(c: &InProcCluster, nodes: usize) -> Result<(), HarnessError> {
+    let want = if nodes % 2 == 1 { nodes } else { nodes - 1 };
+    // clock-exempt: test timeout
+    let t0 = tokio::time::Instant::now();
+    let mut last = Value::Null;
+    loop {
+        let leader = meta_leader(c).unwrap_or(1);
+        if let Ok(st) = c.cluster_status(leader).await {
+            let len = |k: &str| st[k].as_array().map_or(0, Vec::len);
+            let all_active = st["members"]
+                .as_array()
+                .is_some_and(|m| m.len() == nodes && m.iter().all(|x| x["state"] == "active"));
+            if len("voters") == want && len("voters_outgoing") == 0 && all_active {
+                return Ok(());
+            }
+            last = st;
+        }
+        if t0.elapsed() > crate::harness::inproc::MEMBERSHIP_T {
+            return Err(HarnessError::Other(format!(
+                "membership did not settle at {want} voters: {last}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Run `body` on a fresh level-1 cluster of `nodes` nodes with the workload and the upgrade

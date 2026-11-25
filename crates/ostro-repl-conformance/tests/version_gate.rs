@@ -3,9 +3,11 @@
 //! (`scenarios::version_gate`). Each runs on its own cluster started at the emulated level 1.
 //!
 //! - The plan's tests (`auto_finalize_after_last_upgrade`, ...) run on [`NODES`] = 3 nodes,
-//!   two of them joined through `add_node` (the real join flow). They are `#[ignore]`d
-//!   until 13-09 implements node join tokens and the joiner (`POST /v1/cluster/tokens`
-//!   answers 501 before it); 13-09 or 13-18 removes the `ignore`.
+//!   two of them joined through `add_node`. They are `#[ignore]`d: with 13-09 on main the
+//!   joins work and the group settles at 3 voters, but in tier B any node restarted after
+//!   the joins (`upgrade`, a graceful restart from its data dir) fails its start with
+//!   "metadata raft did not elect a leader / catch up in time" (joined and seed nodes
+//!   alike). 13-09 / 13-18 own that fix and remove the `ignore`.
 //! - `single_node_*` run the same scenario bodies on one node now (every claim except "the
 //!   cluster waits for the last of several nodes").
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -34,7 +36,7 @@ async fn scenario_on(nodes: usize, name: &str) {
 macro_rules! gate_tests {
     ($($name:ident, $single:ident;)*) => {$(
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        #[ignore = "needs 13-09: add_node (node join tokens + joiner)"]
+        #[ignore = "tier B: a restarted joined-cluster node does not rejoin meta (13-09/13-18)"]
         async fn $name() {
             scenario_on(NODES, stringify!($name)).await;
         }
