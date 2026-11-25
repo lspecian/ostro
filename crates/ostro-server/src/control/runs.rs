@@ -288,6 +288,9 @@ pub(crate) async fn start_run(
     let wf = resolve_version(cp, &workflow, req.version)?;
     // Phase 13 (13-15): a retired module takes no new runs (`module_retired`).
     super::module_retire::check_not_retired(cp.meta().view(), &wf.module_sha256)?;
+    // 13-18: the tier-B start-during-GC race widens the window here (failpoints build).
+    #[cfg(feature = "failpoints")]
+    super::module_retire::start_hold().await;
     let queue = match req_queue {
         Some(q) => q,
         None => {

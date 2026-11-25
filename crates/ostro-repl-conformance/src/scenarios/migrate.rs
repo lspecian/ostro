@@ -152,7 +152,7 @@ async fn deploy(c: &InProcCluster, node: u64, guest: &str) -> [u8; 32] {
 }
 
 /// Deploy v1 (active), v2 and v3; every running node then sees v3.
-async fn deploy_all(c: &InProcCluster) -> ([u8; 32], [u8; 32], [u8; 32]) {
+pub(super) async fn deploy_all(c: &InProcCluster) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let v1 = deploy(c, 1, "p10-replay-v1").await;
     let v2 = deploy(c, 1, "p10-replay-v2").await;
     let v3 = deploy(c, 1, "p10-replay-v3").await;
@@ -258,7 +258,7 @@ async fn wait_record(
 const SLEEPING_SEQ: u64 = 4;
 
 /// Sleeping runs, one per partition in `parts`, suspended on their timer.
-async fn sleeping_runs(
+pub(super) async fn sleeping_runs(
     c: &InProcCluster,
     parts: impl IntoIterator<Item = u16>,
     sleep_s: u64,
@@ -276,7 +276,7 @@ async fn sleeping_runs(
     Ok(runs)
 }
 
-fn body(from: u32, to: u32, dry_run: bool) -> Value {
+pub(super) fn body(from: u32, to: u32, dry_run: bool) -> Value {
     json!({"workflow": WF, "from": {"version": from}, "to_version": to, "dry_run": dry_run})
 }
 
@@ -294,7 +294,11 @@ async fn migrate(c: &InProcCluster, node: u64, b: &Value) -> (StatusCode, Value)
 
 /// A migrate that must succeed: retries `feature_not_enabled` (the cluster finalizes level
 /// 2 once every member advertised its version) and router 503s.
-async fn migrate_ok(c: &InProcCluster, node: u64, b: &Value) -> Result<Value, ScenarioFailure> {
+pub(super) async fn migrate_ok(
+    c: &InProcCluster,
+    node: u64,
+    b: &Value,
+) -> Result<Value, ScenarioFailure> {
     let deadline = Instant::now() + OP_T;
     loop {
         let (st, v) = migrate(c, node, b).await;
@@ -334,7 +338,7 @@ fn set(runs: &[RunId]) -> BTreeSet<String> {
     runs.iter().map(RunId::to_string).collect()
 }
 
-fn expect_ids(rep: &Value, field: &str, want: &[RunId]) -> ScenarioResult {
+pub(super) fn expect_ids(rep: &Value, field: &str, want: &[RunId]) -> ScenarioResult {
     let got = ids(rep, field);
     if got == set(want) {
         Ok(())
@@ -348,7 +352,11 @@ fn expect_ids(rep: &Value, field: &str, want: &[RunId]) -> ScenarioResult {
 
 /// Every running replica of `run`'s partition shows the pin `sha` (followers apply the
 /// same command: the repin is identical everywhere).
-async fn pinned_everywhere(c: &InProcCluster, run: &RunId, sha: [u8; 32]) -> ScenarioResult {
+pub(super) async fn pinned_everywhere(
+    c: &InProcCluster,
+    run: &RunId,
+    sha: [u8; 32],
+) -> ScenarioResult {
     let replicas = c.assignment(run.partition().0).await.replicas;
     let deadline = Instant::now() + OP_T;
     loop {
@@ -674,7 +682,7 @@ async fn finalized_everywhere(c: &InProcCluster) -> ScenarioResult {
 }
 
 /// Every node answers `/readyz` and every partition has a leader.
-async fn wait_ready(c: &InProcCluster) -> ScenarioResult {
+pub(super) async fn wait_ready(c: &InProcCluster) -> ScenarioResult {
     let deadline = Instant::now() + OP_T;
     loop {
         let mut ok = true;
@@ -715,7 +723,7 @@ fn level_of(c: &InProcCluster, node: u64) -> Option<u32> {
     super::version_gate::finalized(c, node)
 }
 
-async fn wait_level(c: &InProcCluster, level: u32) -> ScenarioResult {
+pub(super) async fn wait_level(c: &InProcCluster, level: u32) -> ScenarioResult {
     let deadline = Instant::now() + OP_T;
     loop {
         let l: Vec<(u64, Option<u32>)> = running(c)
@@ -732,7 +740,7 @@ async fn wait_level(c: &InProcCluster, level: u32) -> ScenarioResult {
     }
 }
 
-fn scans_all(c: &InProcCluster) -> Vec<crate::oracle::disk::LogScan> {
+pub(super) fn scans_all(c: &InProcCluster) -> Vec<crate::oracle::disk::LogScan> {
     let mut scans = Vec::new();
     for node in c.node_ids() {
         let view = c.node_disk(node);

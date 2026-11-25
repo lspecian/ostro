@@ -51,11 +51,11 @@ use crate::oracle::p13_gc::{RetireEvent, RunResult, no_module_gone_for_live};
 /// The GC grace of every scenario round (scans 1 s apart).
 pub const GRACE: Duration = Duration::from_secs(2);
 /// The workflow of both modules.
-const WF: &str = "pipeline";
+pub(super) const WF: &str = "pipeline";
 /// Bound on one REST answer with retries, a run's end, a leadership change.
-const OP_T: Duration = Duration::from_secs(60);
+pub(super) const OP_T: Duration = Duration::from_secs(60);
 /// Poll step.
-const STEP: Duration = Duration::from_millis(100);
+pub(super) const STEP: Duration = Duration::from_millis(100);
 const ORACLE: &str = "p13_gc";
 
 /// Every `module_gc` scenario.
@@ -95,7 +95,7 @@ fn rf3() -> ClusterSpec {
 // Helpers
 // ------------------------------------------------------------------------------------
 
-fn hex(sha: &[u8; 32]) -> String {
+pub(super) fn hex(sha: &[u8; 32]) -> String {
     sha.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -103,7 +103,7 @@ fn harness_err<T>(what: &str, r: Result<T, HarnessError>) -> T {
     r.unwrap_or_else(|e| panic!("harness: {what}: {e}"))
 }
 
-fn reason(v: &Value) -> &str {
+pub(super) fn reason(v: &Value) -> &str {
     v["error"]["details"]["reason"].as_str().unwrap_or("")
 }
 
@@ -122,7 +122,7 @@ fn ctx(c: &InProcCluster, node: u64) -> Arc<P13Ctx> {
     )
 }
 
-async fn send(rb: reqwest::RequestBuilder, what: &str) -> (StatusCode, Value) {
+pub(super) async fn send(rb: reqwest::RequestBuilder, what: &str) -> (StatusCode, Value) {
     let r = rb
         .send()
         .await
@@ -133,7 +133,7 @@ async fn send(rb: reqwest::RequestBuilder, what: &str) -> (StatusCode, Value) {
 }
 
 /// `PUT /v1/modules/{sha}` of `guest` on `node`.
-async fn deploy(c: &InProcCluster, node: u64, guest: &str) -> [u8; 32] {
+pub(super) async fn deploy(c: &InProcCluster, node: u64, guest: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let wasm = harness_err("guest build", guest_wasm(guest));
     let sha: [u8; 32] = Sha256::digest(&wasm).into();
@@ -150,7 +150,11 @@ async fn deploy(c: &InProcCluster, node: u64, guest: &str) -> [u8; 32] {
     sha
 }
 
-async fn delete_module(c: &InProcCluster, node: u64, sha: &[u8; 32]) -> (StatusCode, Value) {
+pub(super) async fn delete_module(
+    c: &InProcCluster,
+    node: u64,
+    sha: &[u8; 32],
+) -> (StatusCode, Value) {
     let cl = c.client(node);
     send(
         cl.http
@@ -162,7 +166,7 @@ async fn delete_module(c: &InProcCluster, node: u64, sha: &[u8; 32]) -> (StatusC
 
 /// Retire `sha` on `node`, waiting out the feature gate (the cluster auto-finalizes level 2
 /// once every member advertised its version).
-async fn retire(c: &InProcCluster, node: u64, sha: &[u8; 32]) -> (StatusCode, Value) {
+pub(super) async fn retire(c: &InProcCluster, node: u64, sha: &[u8; 32]) -> (StatusCode, Value) {
     let deadline = Instant::now() + OP_T;
     loop {
         let (st, v) = delete_module(c, node, sha).await;
@@ -173,7 +177,7 @@ async fn retire(c: &InProcCluster, node: u64, sha: &[u8; 32]) -> (StatusCode, Va
     }
 }
 
-async fn activate(c: &InProcCluster, node: u64, version: u32) -> (StatusCode, Value) {
+pub(super) async fn activate(c: &InProcCluster, node: u64, version: u32) -> (StatusCode, Value) {
     let cl = c.client(node);
     send(
         cl.http
@@ -185,7 +189,7 @@ async fn activate(c: &InProcCluster, node: u64, version: u32) -> (StatusCode, Va
 }
 
 /// Every running node applied everything committed so far (ReadIndex barrier on each).
-async fn barrier_all(c: &InProcCluster) {
+pub(super) async fn barrier_all(c: &InProcCluster) {
     for n in running(c) {
         if let Some(h) = c.handle(n) {
             harness_err(
@@ -201,7 +205,12 @@ async fn barrier_all(c: &InProcCluster) {
 
 /// Start `pipeline` (`version`, `input`) on partition `p` through its leader (keyed
 /// routing); retries across leader moves. Returns the run id.
-async fn start_on(c: &InProcCluster, p: u16, version: Option<u32>, input: Value) -> String {
+pub(super) async fn start_on(
+    c: &InProcCluster,
+    p: u16,
+    version: Option<u32>,
+    input: Value,
+) -> String {
     static N: AtomicUsize = AtomicUsize::new(0);
     let count = PartitionCount::new(c.spec().partitions).expect("partitions");
     let key = loop {
@@ -239,7 +248,7 @@ async fn start_on(c: &InProcCluster, p: u16, version: Option<u32>, input: Value)
 }
 
 /// `GET /v1/runs/{id}` from the leader of the run's partition (retried).
-async fn get_run(c: &InProcCluster, run_id: &str) -> Value {
+pub(super) async fn get_run(c: &InProcCluster, run_id: &str) -> Value {
     let id: RunId = run_id.parse().expect("run id");
     let deadline = Instant::now() + OP_T;
     loop {
@@ -277,7 +286,11 @@ async fn live_runs(c: &InProcCluster, ids: &[String]) -> Vec<String> {
     out
 }
 
-async fn wait_terminal(c: &InProcCluster, run_id: &str, limit: Duration) -> Option<Value> {
+pub(super) async fn wait_terminal(
+    c: &InProcCluster,
+    run_id: &str,
+    limit: Duration,
+) -> Option<Value> {
     let deadline = Instant::now() + limit;
     loop {
         let v = get_run(c, run_id).await;
@@ -291,7 +304,7 @@ async fn wait_terminal(c: &InProcCluster, run_id: &str, limit: Duration) -> Opti
     }
 }
 
-async fn gc_round(c: &InProcCluster, node: u64, protect_resumable: bool) -> GcRunReport {
+pub(super) async fn gc_round(c: &InProcCluster, node: u64, protect_resumable: bool) -> GcRunReport {
     let ctx = ctx(c, node);
     harness_err(
         "gc round",
@@ -308,7 +321,7 @@ async fn gc_round(c: &InProcCluster, node: u64, protect_resumable: bool) -> GcRu
 }
 
 /// Rounds from `node` until `sha` is a candidate (its grace has passed).
-async fn round_as_candidate(
+pub(super) async fn round_as_candidate(
     c: &InProcCluster,
     node: u64,
     sha: &[u8; 32],
@@ -330,7 +343,7 @@ async fn round_as_candidate(
 }
 
 /// Whether any running node still has module `sha` or `pipeline@version` (after a barrier).
-async fn module_present(c: &InProcCluster, sha: &[u8; 32], version: u32) -> Vec<u64> {
+pub(super) async fn module_present(c: &InProcCluster, sha: &[u8; 32], version: u32) -> Vec<u64> {
     barrier_all(c).await;
     running(c)
         .into_iter()
@@ -345,7 +358,7 @@ async fn module_present(c: &InProcCluster, sha: &[u8; 32], version: u32) -> Vec<
 }
 
 /// Deploy v1 and v2 on node 1 (v1 is active after its first upload).
-async fn deploy_both(c: &InProcCluster) -> ([u8; 32], [u8; 32]) {
+pub(super) async fn deploy_both(c: &InProcCluster) -> ([u8; 32], [u8; 32]) {
     let v1 = deploy(c, 1, "p11-rerun").await;
     let v2 = deploy(c, 1, "p11-rerun-v2").await;
     (v1, v2)

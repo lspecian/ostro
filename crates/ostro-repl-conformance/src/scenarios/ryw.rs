@@ -240,11 +240,11 @@ async fn deploy(c: &InProcCluster) -> ScenarioResult {
 // ---------------------------------------------------------------------------------
 
 /// What the load balancer may send requests to (scenarios edit it).
-type Lb = Arc<Mutex<Vec<u64>>>;
+pub(super) type Lb = Arc<Mutex<Vec<u64>>>;
 
 /// Workload knobs.
 #[derive(Clone)]
-struct LoadCfg {
+pub(super) struct LoadCfg {
     sessions: usize,
     ops_per_session: usize,
     tokens: bool,
@@ -257,7 +257,7 @@ struct LoadCfg {
 
 /// What the workload measured.
 #[derive(Debug, Default)]
-struct LoadReport {
+pub(super) struct LoadReport {
     ops: usize,
     writes_acked: usize,
     reads_recorded: usize,
@@ -353,7 +353,7 @@ impl SessionState {
 
 /// Run the session workload against the nodes `lb` lists; every observation goes to
 /// `checker`.
-async fn run_load(
+pub(super) async fn run_load(
     clients: BTreeMap<u64, ApiClient>,
     lb: Lb,
     cfg: LoadCfg,
@@ -802,7 +802,7 @@ async fn one_op(api: &ApiClient, st: &mut SessionState, cfg: &LoadCfg, rep: &mut
 // Scenario plumbing
 // ---------------------------------------------------------------------------------
 
-fn clients(c: &InProcCluster) -> BTreeMap<u64, ApiClient> {
+pub(super) fn clients(c: &InProcCluster) -> BTreeMap<u64, ApiClient> {
     c.node_ids().into_iter().map(|n| (n, c.client(n))).collect()
 }
 
@@ -816,7 +816,7 @@ fn tag(prefix: &str) -> String {
     format!("{prefix}{}", N.fetch_add(1, Ordering::Relaxed))
 }
 
-fn load_cfg(c: &InProcCluster, tagp: &str, ops_total: usize, tokens: bool) -> LoadCfg {
+pub(super) fn load_cfg(c: &InProcCluster, tagp: &str, ops_total: usize, tokens: bool) -> LoadCfg {
     LoadCfg {
         sessions: SESSIONS,
         ops_per_session: ops_total.div_ceil(SESSIONS),
@@ -828,7 +828,7 @@ fn load_cfg(c: &InProcCluster, tagp: &str, ops_total: usize, tokens: bool) -> Lo
 }
 
 /// The checker's verdict (0 violations), with the workload summary in the detail.
-fn verdict(name: &str, checker: &RywChecker, rep: &mut LoadReport) -> ScenarioResult {
+pub(super) fn verdict(name: &str, checker: &RywChecker, rep: &mut LoadReport) -> ScenarioResult {
     let r = checker.check();
     let summary = rep.summary();
     println!("{name}: {summary}");
@@ -849,7 +849,7 @@ fn verdict(name: &str, checker: &RywChecker, rep: &mut LoadReport) -> ScenarioRe
 }
 
 /// Fail on answers that are neither success nor availability errors.
-fn no_unexpected(rep: &LoadReport) -> ScenarioResult {
+pub(super) fn no_unexpected(rep: &LoadReport) -> ScenarioResult {
     if rep.unexpected.is_empty() {
         return Ok(());
     }
@@ -871,13 +871,13 @@ async fn full_isr(c: &InProcCluster) -> ScenarioResult {
     Ok(())
 }
 
-async fn prepare(c: &InProcCluster) -> ScenarioResult {
+pub(super) async fn prepare(c: &InProcCluster) -> ScenarioResult {
     deploy(c).await?;
     full_isr(c).await
 }
 
 /// `NodeOps.HandOff` of `p` from `leader` to `to` (as node `caller`).
-async fn hand_off(
+pub(super) async fn hand_off(
     c: &InProcCluster,
     caller: u64,
     leader: u64,

@@ -51,7 +51,7 @@ use crate::oracle::{election, la_rule, replica};
 
 const DEADLINE: Duration = Duration::from_secs(420);
 /// Bound on one reassignment converging.
-const MOVE_T: Duration = Duration::from_secs(90);
+pub(super) const MOVE_T: Duration = Duration::from_secs(90);
 /// Longest gap between two acknowledged workload starts where a scenario claims no stall.
 pub const STALL_MAX: Duration = Duration::from_secs(2);
 /// Bound on one workload run completing.
@@ -208,7 +208,7 @@ pub(super) async fn wait_parts(
 }
 
 /// Write `ReplicationPolicy` (ext 99) on the cluster record through the meta leader.
-async fn set_policy(c: &InProcCluster, rf: u8, min_insync: u8) -> ScenarioResult {
+pub(super) async fn set_policy(c: &InProcCluster, rf: u8, min_insync: u8) -> ScenarioResult {
     let leader = wait_meta_leader(c).await?;
     let meta = c.handle(leader).expect("leader").meta();
     for _ in 0..10 {
@@ -260,7 +260,7 @@ async fn reassign(
         .map_err(|e| fail("reassign", format!("POST /v1/cluster/reassign: {e}")))
 }
 
-async fn reassign_ok(
+pub(super) async fn reassign_ok(
     c: &InProcCluster,
     node: u64,
     partition: u16,
@@ -297,7 +297,7 @@ fn release_fetch(c: &InProcCluster, node: u64) {
 }
 
 /// The node of `ids` that is not the meta leader and not in `avoid` (lowest first).
-fn pick_node(c: &InProcCluster, avoid: &[u64]) -> Option<u64> {
+pub(super) fn pick_node(c: &InProcCluster, avoid: &[u64]) -> Option<u64> {
     let leader = super::placement::support::meta_leader(c);
     running(c)
         .into_iter()
@@ -575,7 +575,10 @@ fn drain_evacuates_replicas(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResu
 }
 
 /// A partition whose replicas exclude exactly one running node; `(partition, outsider)`.
-fn partition_with_outsider(c: &InProcCluster, skip: &[u16]) -> Option<(PartitionAssignment, u64)> {
+pub(super) fn partition_with_outsider(
+    c: &InProcCluster,
+    skip: &[u16],
+) -> Option<(PartitionAssignment, u64)> {
     let nodes = running(c);
     published_all(c).into_iter().find_map(|a| {
         if skip.contains(&a.partition) || a.leader == 0 {

@@ -41,6 +41,27 @@ pub const REASON_ACTIVE: &str = "module_active";
 /// `details.reason` of a gated write before the cluster finalized the feature's level.
 pub const REASON_FEATURE: &str = "feature_not_enabled";
 
+/// Failpoint (13-18, tier-B `start_during_gc_race`): while set to `return`, a start that
+/// passed its `module_retired` check waits before it submits (the start path's window
+/// between the metadata check and the partition write, widened past `gc_grace`).
+pub const FP_START_HOLD: &str = "gc::start_hold";
+
+/// Starts that reached [`FP_START_HOLD`] while it was set (test probe).
+#[cfg(feature = "failpoints")]
+pub static START_HOLDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Hold a start at [`FP_START_HOLD`] until the failpoint is removed (failpoints build only).
+#[cfg(feature = "failpoints")]
+pub(crate) async fn start_hold() {
+    if fail::eval(FP_START_HOLD, |_| ()).is_none() {
+        return;
+    }
+    START_HOLDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    while fail::eval(FP_START_HOLD, |_| ()).is_some() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 /// CAS attempts of one retire call before it answers 503.
 const RETIRE_ATTEMPTS: usize = 8;
 
