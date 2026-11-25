@@ -54,6 +54,12 @@ use crate::common;
 /// Hang guard for process starts and run waits.
 pub const P7_T: Duration = Duration::from_secs(90);
 
+/// Hang guard for a server's ready line. Startup creates the stores and the TLS material
+/// (many fsyncs); under the I/O and CPU stalls of a loaded CI node a fresh server took
+/// more than 90 s (single steps of 8-40 s) while it starts in about 1 s otherwise.
+/// Nothing asserts startup time; this only bounds a hang.
+pub const P7_BOOT_T: Duration = Duration::from_secs(240);
+
 /// Server start attempts on an address-in-use failure.
 pub const BIND_ATTEMPTS: usize = 5;
 
@@ -690,7 +696,7 @@ impl P7Cluster {
                 }
             }
             let mut p = P7Proc::spawn(self.server_command());
-            match p.wait_stdout(P7_T, TlsReady::parse) {
+            match p.wait_stdout(P7_BOOT_T, TlsReady::parse) {
                 Ok(r) => return (p, r),
                 Err(e) => {
                     let lower = e.to_ascii_lowercase();
