@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use ostro_log::EpochHistory;
 use ostro_log::hw::ReplicaProgress;
-use ostro_log::replica::divergence::{FetchCheck, check, follower_truncation_point};
+use ostro_log::replica::divergence::{FetchCheck, check, check_leading, follower_truncation_point};
 use ostro_log::replica::failover::{AssignmentIn, Plan, plan};
 use ostro_log::replica::isr::{
     IsrState, PendingChange, maximal, next_change, should_expand, should_shrink,
@@ -409,6 +409,68 @@ fn epoch_older_than_retained_history_needs_snapshot() {
     let h = hist(&[(4, 100), (6, 200)]);
     assert_eq!(
         check(&h, o(100), o(250), o(150), Some(Epoch(2))),
+        FetchCheck::SnapshotRequired
+    );
+}
+
+#[test]
+fn leading_epoch_starts_at_leo_before_its_announcement() {
+    // p12-r4: leader of epoch 697 whose history still ends at 695 (LeaderAnnounced{697} not
+    // in the log yet); the follower holds one record of epoch 696 from a deposed leader.
+    let h = hist(&[(1, 0), (695, 100)]);
+    let lead = Epoch(697);
+    assert_eq!(
+        check(&h, o(0), o(180), o(182), Some(Epoch(696))),
+        FetchCheck::SnapshotRequired,
+        "the bare history cannot answer epoch 696"
+    );
+    assert_eq!(
+        check_leading(&h, lead, o(0), o(180), o(182), Some(Epoch(696))),
+        FetchCheck::Diverging {
+            epoch: Epoch(695),
+            end: o(180)
+        }
+    );
+    // The follower truncates to where its epoch 696 began, then is served.
+    let own = hist(&[(1, 0), (695, 100), (696, 181)]);
+    let point = follower_truncation_point(&own, o(182), Epoch(695), o(180));
+    assert_eq!(point, o(180));
+    assert_eq!(
+        check_leading(&h, lead, o(0), o(180), point, Some(Epoch(695))),
+        FetchCheck::Ok
+    );
+    // A follower that is behind and below log_start still needs a snapshot.
+    assert_eq!(
+        check_leading(&h, lead, o(150), o(180), o(120), Some(Epoch(696))),
+        FetchCheck::SnapshotRequired
+    );
+    // A claim of the leading epoch itself (no such record exists yet), or of a newer one.
+    for e in [697, 698] {
+        assert_eq!(
+            check_leading(&h, lead, o(0), o(180), o(182), Some(Epoch(e))),
+            FetchCheck::SnapshotRequired,
+            "claim of epoch {e}"
+        );
+    }
+    // Once the announcement is in the history, check_leading == check.
+    let announced = hist(&[(1, 0), (695, 100), (697, 180)]);
+    for (fetch, e) in [(182, 696), (181, 697), (150, 695), (190, 697)] {
+        assert_eq!(
+            check_leading(&announced, lead, o(0), o(181), o(fetch), Some(Epoch(e))),
+            check(&announced, o(0), o(181), o(fetch), Some(Epoch(e))),
+            "fetch {fetch} epoch {e}"
+        );
+    }
+    // Answers check already gives are kept (older epochs, retained-history floor).
+    assert_eq!(
+        check_leading(
+            &hist(&[(4, 100), (6, 200)]),
+            Epoch(7),
+            o(100),
+            o(250),
+            o(150),
+            Some(Epoch(2))
+        ),
         FetchCheck::SnapshotRequired
     );
 }

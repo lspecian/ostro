@@ -71,6 +71,40 @@ pub fn check(
     }
 }
 
+/// [`check`] as answered by a leader of epoch `leading` (what the fetch service calls).
+///
+/// A leader's own epoch starts at its LEO the moment it leads (Kafka assigns it in
+/// `makeLeader`), but `h` only gains `leading` once `LeaderAnnounced{leading}` is in the log.
+/// In that window a follower whose last record carries an epoch `e` with
+/// `latest(h) < e < leading`, written by a deposed leader of `e` that the new leader never
+/// followed, would get UNDEFINED → `SnapshotRequired` from [`check`]. Its log is a
+/// truncatable prefix plus that foreign suffix, so the answer is the one the history with
+/// `leading` at `leo` gives: `Diverging{latest(h), leo}` (p12-r4: a whole-partition install,
+/// minutes under load, instead of dropping one record).
+///
+/// A claim of `e == leading` (no record of the leading epoch exists yet) and epochs above
+/// it stay `SnapshotRequired`; `Ok` and `Diverging` answers of [`check`] are unchanged.
+pub fn check_leading(
+    h: &EpochHistory,
+    leading: Epoch,
+    log_start: Offset,
+    leo: Offset,
+    fetch_offset: Offset,
+    last_fetched_epoch: Option<Epoch>,
+) -> FetchCheck {
+    let verdict = check(h, log_start, leo, fetch_offset, last_fetched_epoch);
+    if verdict != FetchCheck::SnapshotRequired || fetch_offset < log_start {
+        return verdict;
+    }
+    match (last_fetched_epoch, h.latest()) {
+        (Some(e), Some(latest)) if latest < e && e < leading => FetchCheck::Diverging {
+            epoch: latest,
+            end: leo,
+        },
+        _ => verdict,
+    }
+}
+
 /// Follower-side truncation point for a `Diverging{epoch, end}` answer (KIP-279):
 /// `min(end, own end of that epoch)`, never above `own_leo`. The follower truncates there,
 /// re-fetches with its new last epoch, and repeats until `Ok`.

@@ -8,8 +8,10 @@
 //!    the partition → `FENCED_LEADER_EPOCH`; above it → `UNKNOWN_LEADER_EPOCH` (this node is
 //!    behind on meta). The `repl::mutant::skip_epoch_check` failpoint skips this step.
 //! 3. **Leadership:** the local log must lead exactly that epoch, else `NOT_LEADER`.
-//! 4. **Divergence (KIP-595):** [`divergence::check`] over the leader's epoch history:
-//!    `diverging{epoch, end}` (no error code, as in Kafka) or `SNAPSHOT_REQUIRED`.
+//! 4. **Divergence (KIP-595):** [`divergence::check_leading`] over the leader's epoch
+//!    history, with the leading epoch starting at the LEO even before its announcement is
+//!    in the log: `diverging{epoch, end}` (no error code, as in Kafka) or
+//!    `SNAPSHOT_REQUIRED`.
 //! 5. **Progress:** only after the check returned `Ok`, and before any wait:
 //!    `record_progress{durable_leo: min(durable_leo, fetch_offset), fetch_offset, now_ms,
 //!    leader_durable_end}`, where `leader_durable_end` is the durable end sampled **before**
@@ -261,8 +263,9 @@ pub async fn handle_fetch(
     let last_fetched = (req.last_fetched_epoch != 0).then_some(Epoch(req.last_fetched_epoch));
     let hw = *log.high_watermark().borrow();
     let log_start = log.log_start();
-    match divergence::check(
+    match divergence::check_leading(
         &log.epochs(),
+        leader_epoch,
         log_start,
         log.log_end(),
         fetch_offset,
