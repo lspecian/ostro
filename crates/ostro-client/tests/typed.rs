@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Request, State};
+use ostro_client::cluster::{
+    InitRequest, MigrateRunsRequest, NodeTokenRequest, ReassignRequest, VersionOrSha,
+};
 use ostro_client::typed::{PolicyTarget, ROUTES, ReplaySelect, RunFilter};
 use ostro_client::{ClientError, StartRun, TypedClient};
 use serde_json::{Value, json};
@@ -94,6 +97,37 @@ async fn every_typed_method_calls_a_listed_route() {
     let _ = c
         .set_failure_policy(PolicyTarget::Queue, "q", &json!({}), None)
         .await;
+    // Phase 13 (13-16, `ostro_client::cluster`).
+    let _ = c.cluster_init(&InitRequest::default()).await;
+    let _ = c.raw().cluster_join(&json!({})).await;
+    let _ = c.cluster_status().await;
+    let _ = c.create_node_token(&NodeTokenRequest::default()).await;
+    let _ = c.cluster_remove(4, true).await;
+    let _ = c.cluster_drain(4).await;
+    let _ = c
+        .cluster_reassign(&ReassignRequest {
+            partition: 1,
+            replicas: vec![1, 2, 3],
+            cancel: false,
+        })
+        .await;
+    let _ = c.cluster_rebalance().await;
+    let _ = c.upgrade_status().await;
+    let _ = c.upgrade_finalize().await;
+    let _ = c.upgrade_hold().await;
+    let _ = c.upgrade_release().await;
+    let _ = c
+        .migrate_runs(&MigrateRunsRequest {
+            workflow: "w".into(),
+            from: VersionOrSha::Version(1),
+            to_version: 2,
+            filter: None,
+            limit: None,
+            dry_run: true,
+        })
+        .await;
+    let _ = c.retire_module(&sha).await;
+    let _ = c.run_module_gc().await;
 
     let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let unlisted: Vec<_> = seen
