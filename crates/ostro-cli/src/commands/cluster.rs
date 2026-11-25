@@ -87,19 +87,22 @@ impl ClusterCmd {
 /// `ostro cluster init`.
 #[derive(Debug, Clone, Args)]
 pub struct InitArgs {
-    /// Advertised API address (default: `[cluster] advertise` / the listener).
+    /// Not accepted by `init` (a usage error): a promoted node's API address is its
+    /// `[api] listen`.
     #[arg(long, value_name = "HOST:PORT")]
     pub advertise_api: Option<String>,
-    /// Advertised cluster listener address.
+    /// Advertised cluster listener address peers dial (default: the first `[cluster]
+    /// advertise` entry, with the listener port when it names only a host).
     #[arg(long, value_name = "HOST:PORT")]
     pub advertise_cluster: Option<String>,
-    /// Advertised replication listener address.
+    /// Not accepted by `init` (a usage error): the replication listener is `[cluster]
+    /// replication_listen`.
     #[arg(long, value_name = "HOST:PORT")]
     pub advertise_repl: Option<String>,
     /// Replication factor policy (1, 3 or 5; default 3).
     #[arg(long)]
     pub rf: Option<u8>,
-    /// `min_insync` policy (default 2 for rf 3).
+    /// `min_insync` policy (1..=rf; default rf / 2 + 1, i.e. 2 for rf 3).
     #[arg(long)]
     pub min_insync: Option<u8>,
     #[command(flatten)]
