@@ -667,7 +667,16 @@ impl ClusterServices {
                 .read(|s| s.cluster().map(|c| c.value.cluster_id.clone()));
             identity::check_cluster_info(stored.as_deref(), &cluster_id).map_err(boot)?;
             let cluster_addr = if is_tcp {
-                Some(listener_addr.to_string())
+                // 13-18: keep the advertised address init / the join stored (a restart used
+                // to overwrite it with the bound listener, e.g. `0.0.0.0:7701`).
+                let stored = meta
+                    .view()
+                    .read(|s| s.member(node_id).and_then(|m| m.value.cluster_addr.clone()));
+                Some(p13::promote::self_cluster_addr(
+                    &cfg.cluster.advertise,
+                    stored.as_deref(),
+                    listener_addr,
+                ))
             } else {
                 Some(format!("mem://{node_id}"))
             };

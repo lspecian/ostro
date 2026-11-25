@@ -139,6 +139,31 @@ pub fn advertise_of(
     })
 }
 
+/// The `cluster_addr` a (re)starting TCP node writes into its own Member record (13-18, the
+/// 13-16 handover): the configured `[cluster] advertise` ([`advertise_of`]) when set; else
+/// the address init or the join stored, while the bound listener is a wildcard
+/// (`0.0.0.0` / `::`) or listens on the stored port (a restart must not replace an
+/// advertised host with the bind address); else the bound listener.
+pub fn self_cluster_addr(
+    configured: &[String],
+    stored: Option<&str>,
+    bound: std::net::SocketAddr,
+) -> String {
+    if let Some(a) = advertise_of(None, configured, bound.port()) {
+        return a;
+    }
+    let keep = stored.map(str::trim).filter(|s| !s.is_empty()).filter(|s| {
+        bound.ip().is_unspecified()
+            || s.rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .is_some_and(|port| port == bound.port())
+    });
+    match keep {
+        Some(s) => s.to_owned(),
+        None => bound.to_string(),
+    }
+}
+
 /// Promote this node to a cluster (module docs).
 pub async fn init(ctx: &P13Ctx, r: InitRequest) -> Result<ClusterStatus, ApiError> {
     // 1. profile.
@@ -347,6 +372,37 @@ fn check_node_cert(ctx: &P13Ctx, advertise: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 13-18: a restart keeps the advertised address (13-16 handover).
+    #[test]
+    fn self_cluster_addr_keeps_the_advertised_address() {
+        let wild: std::net::SocketAddr = "0.0.0.0:7701".parse().unwrap();
+        let lo: std::net::SocketAddr = "127.0.0.1:7701".parse().unwrap();
+        let other: std::net::SocketAddr = "127.0.0.1:7801".parse().unwrap();
+        // `[cluster] advertise` wins (bare host completed with the bound port).
+        assert_eq!(
+            self_cluster_addr(&["node-a.example".into()], Some("10.0.0.5:7701"), wild),
+            "node-a.example:7701"
+        );
+        // A wildcard bind never replaces the stored advertised address.
+        assert_eq!(
+            self_cluster_addr(&[], Some("10.0.0.5:7701"), wild),
+            "10.0.0.5:7701"
+        );
+        // Same port on a concrete bind: still the advertised host.
+        assert_eq!(
+            self_cluster_addr(&[], Some("node-a.example:7701"), lo),
+            "node-a.example:7701"
+        );
+        // The listener moved to another port: the bound address.
+        assert_eq!(
+            self_cluster_addr(&[], Some("10.0.0.5:7701"), other),
+            "127.0.0.1:7801"
+        );
+        // Nothing stored (first boot of a static node): the bound address.
+        assert_eq!(self_cluster_addr(&[], None, lo), "127.0.0.1:7701");
+        assert_eq!(self_cluster_addr(&[], Some(""), wild), "0.0.0.0:7701");
+    }
 
     #[test]
     fn policy_defaults_and_bounds() {
