@@ -28,9 +28,7 @@ use std::time::{Duration, Instant};
 
 use common::{ServerOpts, TestServer, server_config, tmpfs_dir};
 use ostro_partition::store::values::RunStatus;
-use ostro_server::control::migrate::{
-    BeforeSubmitHook, MUTANT_SKIP_SEQ_CHECK, limit_share, set_before_submit_hook,
-};
+use ostro_server::control::migrate::{BeforeSubmitHook, limit_share, set_before_submit_hook};
 use ostro_types::journal::{EventBody, EventKind};
 use ostro_types::{PartitionCount, PartitionId, RunId};
 use reqwest::StatusCode;
@@ -437,6 +435,7 @@ async fn level_1_refuses_submission_dry_run_works() {
 #[cfg(feature = "failpoints")]
 mod failpoints {
     use super::*;
+    use ostro_server::control::migrate::MUTANT_SKIP_SEQ_CHECK;
 
     struct Cfg(&'static str);
     impl Cfg {
