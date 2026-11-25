@@ -1352,6 +1352,27 @@ impl ReplicatedLog for PartitionLog {
             // An older publication arriving late: the newer one stays.
             return Ok(());
         }
+        // Phase 13 (13-10): `AlterReplicas` changes the replica set at the same epoch; the
+        // tracker follows it so an added replica's fetches count (ISR expand) and a removed
+        // one is no longer tracked.
+        let mut replicas = set.replicas.clone();
+        for r in &set.isr {
+            if !replicas.contains(r) {
+                replicas.push(*r);
+            }
+        }
+        let now = self.core.clock.now_ms();
+        if let Some(t) = st.tracker.as_mut()
+            && !replicas.is_empty()
+            && t.set_replicas(&replicas, now)
+        {
+            info!(
+                partition = self.pid.0,
+                epoch = epoch.0,
+                replicas = ?replicas,
+                "leader follows the published replica set"
+            );
+        }
         st.isr.set_published(set.isr, set.isr_version);
         st.min_insync = usize::from(set.min_insync.max(1));
         self.core.republish(&mut st);

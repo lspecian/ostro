@@ -68,6 +68,43 @@ impl ReplicaTracker {
         Self { self_id, entries }
     }
 
+    /// Follow a replica-set change published without a new term (Phase 13 `AlterReplicas`,
+    /// 13-10): replicas that stay keep their measured progress, new ones start like
+    /// [`new`](Self::new) followers (offset 0, caught up at `now_ms`, never fetched, so never
+    /// expanded into the ISR before they fetch), removed ones are dropped. The leader is
+    /// always kept. Returns whether the tracked set changed.
+    pub fn set_replicas(&mut self, replicas: &[u64], now_ms: u64) -> bool {
+        let mut want: Vec<u64> = Vec::with_capacity(replicas.len() + 1);
+        if !replicas.contains(&self.self_id) {
+            want.push(self.self_id);
+        }
+        for r in replicas {
+            if !want.contains(r) {
+                want.push(*r);
+            }
+        }
+        if want == self.replicas() {
+            return false;
+        }
+        let mut entries = Vec::with_capacity(want.len());
+        for r in want {
+            let e = match self.entry(r) {
+                Some(e) => e.clone(),
+                None => Entry {
+                    replica: r,
+                    durable_leo: Offset::ZERO,
+                    fetch_offset: Offset::ZERO,
+                    last_caught_up_ms: now_ms,
+                    last_fetch_ms: None,
+                    prev_response_end: None,
+                },
+            };
+            entries.push(e);
+        }
+        self.entries = entries;
+        true
+    }
+
     /// The leader's node id.
     pub fn self_id(&self) -> u64 {
         self.self_id
@@ -203,5 +240,31 @@ impl ReplicaTracker {
                     && now_ms.saturating_sub(e.last_caught_up_ms) <= lag_max_ms,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod set_replicas_tests {
+    use super::*;
+
+    #[test]
+    fn set_replicas_keeps_progress_adds_and_drops() {
+        let mut t = ReplicaTracker::new(1, &[1, 2], Offset(10), 100);
+        t.on_fetch(2, Offset(10), Offset(10), Offset(10), 150);
+        assert!(!t.set_replicas(&[1, 2], 200), "same set: no change");
+        assert!(t.set_replicas(&[1, 2, 3], 200));
+        assert_eq!(t.replicas(), vec![1, 2, 3]);
+        assert_eq!(t.durable_leo(2), Some(Offset(10)), "2 keeps its progress");
+        assert_eq!(t.durable_leo(3), Some(Offset::ZERO));
+        assert_eq!(t.last_fetch_ms(3), None, "3 never fetched");
+        // Unknown before: a fetch from 3 now counts.
+        t.on_fetch(3, Offset(10), Offset(10), Offset(10), 250);
+        assert_eq!(t.durable_leo(3), Some(Offset(10)));
+        // [2, 3] without the leader: the leader (1) is kept, so nothing changes.
+        assert!(!t.set_replicas(&[2, 3], 300));
+        assert_eq!(t.replicas(), vec![1, 2, 3]);
+        assert!(t.set_replicas(&[1, 3], 300));
+        assert_eq!(t.replicas(), vec![1, 3]);
+        assert_eq!(t.durable_leo(2), None, "2 dropped");
     }
 }
