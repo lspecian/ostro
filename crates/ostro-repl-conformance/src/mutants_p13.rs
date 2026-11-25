@@ -9,9 +9,8 @@
 //! matrix when `OSTRO_P13_REQUIRE_ALL=1` (13-20 makes that mandatory in CI).
 //!
 //! Scenario names resolve through [`find`]: the registered tier-B scenarios
-//! ([`crate::scenarios::all`]) plus the matrix-only wrappers of [`wrappers`] (bodies that own
-//! their cluster and are run elsewhere through their own test, e.g. 13-17's
-//! `migrate_refused_before_finalize`).
+//! ([`crate::scenarios::all`]; `tests/p13_skeleton.rs` requires every name there) plus
+//! [`wrappers`] (none today).
 //!
 //! | mutant | scenarios | why they catch it |
 //! |--------|-----------|-------------------|
@@ -24,7 +23,7 @@
 //! | `gc::mutant::single_scan` | `gc_survives_leader_changes` | scan 2 never runs: the round is not postponed across the leader change between the scans |
 //! | `migrate::mutant::skip_seq_check` | `concurrent_growth_seq_mismatch` | a run that grew since the replay check is repinned instead of reported `seq_mismatch` |
 
-use crate::scenarios::{self, Scenario, ScenarioResult, Tier};
+use crate::scenarios::{self, Scenario};
 
 /// One mutant and the scenarios that catch it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,23 +88,11 @@ pub fn entry(mutant: &str) -> Option<&'static MutantMap> {
     MAP.iter().find(|m| m.mutant == mutant)
 }
 
-fn migrate_refused_before_finalize(
-    _c: &mut crate::harness::inproc::InProcCluster,
-) -> futures_util::future::BoxFuture<'_, ScenarioResult> {
-    Box::pin(scenarios::migrate::refused_before_finalize(3))
-}
-
-/// Matrix-only scenarios: bodies that start their own cluster (the runner's cluster is a
-/// single idle node) and are otherwise run by their group's test.
+/// Matrix-only scenarios (bodies that start their own cluster and are not in the
+/// registry). None today: 13-17's `migrate_refused_before_finalize` is registered in
+/// `scenarios::migrate::all` (13-18), as `tests/p13_skeleton.rs` requires of matrix names.
 pub fn wrappers() -> Vec<Scenario> {
-    vec![Scenario {
-        name: "migrate_refused_before_finalize",
-        group: "migrate",
-        tier: Tier::B,
-        deadline: std::time::Duration::from_secs(420),
-        spec: crate::harness::ClusterSpec::single,
-        run: migrate_refused_before_finalize,
-    }]
+    Vec::new()
 }
 
 /// A tier-B scenario by name: the registry first, then [`wrappers`].
@@ -121,6 +108,7 @@ mod tests {
     use ostro_types::compat::MUTANTS;
 
     use super::*;
+    use crate::scenarios::Tier;
 
     #[test]
     fn map_covers_exactly_the_eight_mutants_in_order() {

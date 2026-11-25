@@ -85,6 +85,13 @@ pub fn all() -> Vec<Scenario> {
             concurrent_growth_seq_mismatch,
         ),
         s("busy_runs_reported", rf3, busy_runs_reported),
+        // 13-18: registered for the P13 mutant matrix (emit_ungated); the body owns its
+        // 3-node level-1 cluster, the runner's cluster is one idle node.
+        s(
+            "migrate_refused_before_finalize",
+            ClusterSpec::single,
+            migrate_refused_before_finalize,
+        ),
     ]
 }
 
@@ -700,6 +707,10 @@ pub(super) async fn wait_ready(c: &InProcCluster) -> ScenarioResult {
         }
         tokio::time::sleep(STEP).await;
     }
+}
+
+fn migrate_refused_before_finalize(_c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult> {
+    Box::pin(refused_before_finalize(3))
 }
 
 /// `migrate_refused_before_finalize` on its own cluster: `nodes` nodes started at the
