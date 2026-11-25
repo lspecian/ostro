@@ -582,6 +582,18 @@ pub fn upload_gate(
     .map_err(|e| ApiError::internal(format!("encoding the WIT requirement failed: {e}")))
 }
 
+/// [`upload_gate`] for a selection given as a line string (`"0.1"`) and a level: the
+/// gate's view on any node for callers without the engine types (conformance scenarios).
+/// An unparsable line is `400`.
+pub fn upload_gate_for(view: &MetaView, line: &str, min_level: u32) -> Result<Vec<u8>, ApiError> {
+    let line = ostro_engine::host::linker_set::WitLine::parse(line)
+        .ok_or_else(|| ApiError::invalid_argument(format!("not a WIT line: {line:?}")))?;
+    upload_gate(
+        view,
+        &ostro_engine::host::linker_set::WitSelection { line, min_level },
+    )
+}
+
 pub(crate) async fn activate_workflow(
     cp: &ServerControlPlane,
     req: ActivateWorkflow,
