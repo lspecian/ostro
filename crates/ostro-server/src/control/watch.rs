@@ -32,6 +32,19 @@
 //! waiter of the partition and subscribes to the new machine. Actions are emitted whenever
 //! the partition leads (catch-up discards them, but nothing can wait on a partition that is
 //! not serving).
+//!
+//! # Per-term subscriptions (13-13, the 05-13 hand-off)
+//!
+//! The task also watches the node's led set (`PartitionRoles::led()`): on every new term of
+//! the partition here (newly led, or a new epoch) it re-subscribes to the current machine
+//! (the new receiver is taken before the old one is drained and dropped, so nothing in
+//! between is lost). When the partition stops being led here (demotion, a graceful
+//! handoff, a failover elsewhere) its waiters are woken with [`WaitOutcome::LeaderChanged`]
+//! and the old term's subscription is dropped; [`await_result`] then answers `unavailable`
+//! reason `leader_changed`, which the routed control plane (13-12) re-routes once to the new
+//! leader with the call's remaining deadline. A new epoch on the same node wakes waiters
+//! with [`WaitOutcome::Retry`] (they re-read here). `Lagged` / `Closed` still wake the whole
+//! partition with `Retry`.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -43,8 +56,8 @@ use ostro_api::domain::{AwaitResultRequest, AwaitResultResponse, RunStatus, effe
 use ostro_partition::Action;
 use ostro_partition::query;
 use ostro_partition::store::values::{self, RunRecord};
-use ostro_types::{PartitionId, RunId};
-use tokio::sync::{broadcast, oneshot};
+use ostro_types::{Epoch, PartitionId, RunId};
+use tokio::sync::{broadcast, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::ServerControlPlane;
@@ -53,7 +66,68 @@ use super::runs::{not_found, parse_run_id, partition_error, status, store_error,
 /// Poll interval while a followed continuation's successor is not created yet.
 const SUCCESSOR_POLL: Duration = Duration::from_millis(10);
 
-type Waiters = BTreeMap<RunId, Vec<(u64, oneshot::Sender<()>)>>;
+/// Why a [`Waiter`] was woken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// The run completed (`Action::RunCompleted`).
+    Completed,
+    /// The partition's waiters were woken without knowing which run completed (`Lagged`,
+    /// `Closed`, a new term here, [`RunWatchers::wake_partition`]): re-read.
+    Retry,
+    /// This node stopped leading the partition: re-route to the new leader.
+    LeaderChanged,
+}
+
+type Waiters = BTreeMap<RunId, Vec<(u64, oneshot::Sender<WaitOutcome>)>>;
+
+/// The led set of a node (`PartitionRoles::led()`).
+pub type LedRx = watch::Receiver<Arc<Vec<(PartitionId, Epoch)>>>;
+
+/// What [`ActionSource::subscribe`] found.
+pub enum Subscription {
+    /// A receiver of the partition's current apply machine.
+    Rx(broadcast::Receiver<Arc<Vec<Action>>>),
+    /// The partition is not running now (quiesced, restarting): ask again later.
+    NotRunning,
+    /// The node is gone: stop.
+    Gone,
+}
+
+impl std::fmt::Debug for Subscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Subscription::Rx(_) => "Rx",
+            Subscription::NotRunning => "NotRunning",
+            Subscription::Gone => "Gone",
+        })
+    }
+}
+
+/// Where a partition's action broadcasts come from (the node; tests plug in fakes).
+pub trait ActionSource: Send + Sync + 'static {
+    /// Subscribe to `p`'s current apply machine.
+    fn subscribe(&self, p: PartitionId) -> Subscription;
+}
+
+/// [`ActionSource`] over a node, held weakly (the handle used to subscribe is dropped at
+/// once, so a receiver never pins the partition's store, 12-16).
+struct NodeActions(std::sync::Weak<ostro_partition::Node>);
+
+impl ActionSource for NodeActions {
+    fn subscribe(&self, p: PartitionId) -> Subscription {
+        let Some(node) = self.0.upgrade() else {
+            return Subscription::Gone;
+        };
+        match node.handle(p) {
+            Some(h) => Subscription::Rx(h.machine().subscribe_actions()),
+            None => Subscription::NotRunning,
+        }
+    }
+}
+
+fn term_of(led: &[(PartitionId, Epoch)], p: PartitionId) -> Option<Epoch> {
+    led.iter().find(|(q, _)| *q == p).map(|(_, e)| *e)
+}
 
 struct Inner {
     parts: Vec<Mutex<Waiters>>,
@@ -72,16 +146,79 @@ impl Inner {
     fn wake_run(&self, run: &RunId) {
         if let Some(ws) = self.part(run.partition()).remove(run) {
             for (_, tx) in ws {
-                let _ = tx.send(());
+                let _ = tx.send(WaitOutcome::Completed);
             }
         }
     }
 
     fn wake_all(&self, p: PartitionId) {
+        self.wake_all_with(p, WaitOutcome::Retry);
+    }
+
+    fn wake_all_with(&self, p: PartitionId, why: WaitOutcome) {
         let all = std::mem::take(&mut *self.part(p));
         for (_, tx) in all.into_values().flatten() {
-            let _ = tx.send(());
+            let _ = tx.send(why);
         }
+    }
+
+    fn complete(&self, batch: &[Action]) {
+        for a in batch {
+            if let Action::RunCompleted { run, .. } = a {
+                self.wake_run(run);
+            }
+        }
+    }
+
+    /// Hand every batch still queued in `rx` to the waiters (before it is dropped).
+    fn drain(&self, p: PartitionId, rx: &mut broadcast::Receiver<Arc<Vec<Action>>>) {
+        loop {
+            match rx.try_recv() {
+                Ok(batch) => self.complete(&batch),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => self.wake_all(p),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+/// A led-set change for partition `p`: a new term here re-subscribes (new receiver first,
+/// then the old one drained and dropped); losing the partition wakes its waiters with
+/// [`WaitOutcome::LeaderChanged`]; a new epoch here wakes them with `Retry`.
+fn on_led(
+    inner: &Inner,
+    p: PartitionId,
+    term: &mut Option<Epoch>,
+    led: &mut Option<LedRx>,
+    actions: &mut Option<broadcast::Receiver<Arc<Vec<Action>>>>,
+    source: &dyn ActionSource,
+) {
+    let Some(rx) = led.as_mut() else { return };
+    let now = term_of(&rx.borrow_and_update(), p);
+    if now == *term {
+        return;
+    }
+    let fresh = match source.subscribe(p) {
+        Subscription::Rx(r) => Some(r),
+        _ => None,
+    };
+    if let Some(mut old) = actions.take() {
+        inner.drain(p, &mut old);
+    }
+    *actions = fresh;
+    match (*term, now) {
+        (Some(_), None) => inner.wake_all_with(p, WaitOutcome::LeaderChanged),
+        (Some(_), Some(_)) => inner.wake_all_with(p, WaitOutcome::Retry),
+        (None, _) => {}
+    }
+    *term = now;
+}
+
+/// Resolves when `led` changes (`true`) or its sender is gone (`false`); never without one.
+async fn led_changed(led: &mut Option<LedRx>) -> bool {
+    match led {
+        Some(rx) => rx.changed().await.is_ok(),
+        None => std::future::pending().await,
     }
 }
 
@@ -116,37 +253,67 @@ impl RunWatchers {
     }
 
     /// Forward partition `p`'s action broadcasts to the waiters for as long as `node` lives,
-    /// re-subscribing whenever the partition's apply machine is replaced (one task per
+    /// re-subscribing whenever the partition's apply machine is replaced and on every new
+    /// term of the partition here, and waking its waiters with
+    /// [`WaitOutcome::LeaderChanged`] when the node stops leading it (one task per
     /// partition; the node's handles are never held between subscriptions).
     pub fn follow_partition(&self, node: std::sync::Weak<ostro_partition::Node>, p: PartitionId) {
-        let inner = Arc::clone(&self.inner);
-        // The first subscription is taken now, so nothing applied after this call is missed.
-        let mut first = node
+        let led = node
             .upgrade()
-            .and_then(|n| n.handle(p))
-            .map(|h| h.machine().subscribe_actions());
+            .map(|n| ostro_partition::roles::PartitionRoles::led(&*n));
+        self.follow(p, led, Arc::new(NodeActions(node)));
+    }
+
+    /// [`RunWatchers::follow_partition`] over any led set and action source (`led = None`:
+    /// no leadership tracking, the Phase 12 behaviour).
+    pub fn follow(&self, p: PartitionId, led: Option<LedRx>, source: Arc<dyn ActionSource>) {
+        let inner = Arc::clone(&self.inner);
+        let mut led = led;
+        let mut term = led
+            .as_mut()
+            .and_then(|r| term_of(&r.borrow_and_update(), p));
+        // The first subscription is taken now, so nothing applied after this call is missed.
+        let first = match source.subscribe(p) {
+            Subscription::Rx(rx) => Some(rx),
+            _ => None,
+        };
         let task = tokio::spawn(async move {
+            let mut actions = first;
             loop {
-                let mut actions = match first.take() {
-                    Some(rx) => rx,
-                    None => match next_actions(&node, p, None).await {
-                        Some(rx) => rx,
-                        None => break,
-                    },
-                };
-                loop {
-                    match actions.recv().await {
-                        Ok(batch) => {
-                            for a in batch.iter() {
-                                if let Action::RunCompleted { run, .. } = a {
-                                    inner.wake_run(run);
+                if actions.is_none() {
+                    match source.subscribe(p) {
+                        Subscription::Rx(rx) => actions = Some(rx),
+                        Subscription::Gone => break,
+                        Subscription::NotRunning => {
+                            tokio::select! {
+                                () = tokio::time::sleep(RESUBSCRIBE_POLL) => {}
+                                alive = led_changed(&mut led) => {
+                                    if alive {
+                                        on_led(&inner, p, &mut term, &mut led, &mut actions, &*source);
+                                    } else {
+                                        led = None;
+                                    }
                                 }
                             }
+                            continue;
                         }
+                    }
+                }
+                let Some(rx) = actions.as_mut() else { continue };
+                tokio::select! {
+                    r = rx.recv() => match r {
+                        Ok(batch) => inner.complete(&batch),
                         Err(broadcast::error::RecvError::Lagged(_)) => inner.wake_all(p),
                         Err(broadcast::error::RecvError::Closed) => {
                             inner.wake_all(p);
-                            break;
+                            actions = None;
+                        }
+                    },
+                    alive = led_changed(&mut led) => {
+                        if alive {
+                            on_led(&inner, p, &mut term, &mut led, &mut actions, &*source);
+                        } else {
+                            led = None;
                         }
                     }
                 }
@@ -168,13 +335,7 @@ impl RunWatchers {
         let task = tokio::spawn(async move {
             loop {
                 match actions.recv().await {
-                    Ok(batch) => {
-                        for a in batch.iter() {
-                            if let Action::RunCompleted { run, .. } = a {
-                                inner.wake_run(run);
-                            }
-                        }
-                    }
+                    Ok(batch) => inner.complete(&batch),
                     Err(broadcast::error::RecvError::Lagged(_)) => inner.wake_all(p),
                     Err(broadcast::error::RecvError::Closed) => {
                         inner.wake_all(p);
@@ -191,6 +352,7 @@ impl RunWatchers {
 
     /// Register a waiter for `run` (do this **before** reading the run).
     pub fn register(&self, run: RunId) -> Waiter {
+        // (A waiter woken by a dropped sender, e.g. at shutdown, reads `Retry`.)
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.inner
@@ -277,7 +439,7 @@ pub struct Waiter {
     inner: Arc<Inner>,
     run: RunId,
     id: u64,
-    rx: oneshot::Receiver<()>,
+    rx: oneshot::Receiver<WaitOutcome>,
 }
 
 impl std::fmt::Debug for Waiter {
@@ -290,9 +452,9 @@ impl std::fmt::Debug for Waiter {
 }
 
 impl Waiter {
-    /// Resolves when the run completes (or the partition's waiters are woken).
-    pub async fn notified(&mut self) {
-        let _ = (&mut self.rx).await;
+    /// Resolves when the run completes (or the partition's waiters are woken), with why.
+    pub async fn notified(&mut self) -> WaitOutcome {
+        (&mut self.rx).await.unwrap_or(WaitOutcome::Retry)
     }
 }
 
@@ -374,6 +536,18 @@ fn response(run: RunId, rec: &RunRecord, payload: Option<&[u8]>) -> AwaitResultR
     }
 }
 
+/// `unavailable` reason `leader_changed` for a long-poll whose partition moved away.
+fn leader_changed(run: RunId) -> ApiError {
+    ApiError::unavailable(format!(
+        "partition {} moved to another leader while waiting for run {run}",
+        run.partition().0
+    ))
+    .with_details(serde_json::json!({
+        "reason": "leader_changed",
+        "partition": run.partition().0,
+    }))
+}
+
 /// Long-poll: register, read, wait up to `min(wait, 60 s)` for a completion, re-read.
 /// With `follow_continuations`, a `ContinuedAsNew` run is followed to its successor
 /// (`RunRecord.continued_to`) within the same deadline. The successor is created by the
@@ -430,10 +604,16 @@ pub(crate) async fn await_result(
         if now >= deadline {
             return Ok(response(run, &rec, None));
         }
-        let woken = tokio::time::timeout_at(deadline, waiter.notified())
+        let outcome = tokio::time::timeout_at(deadline, waiter.notified())
             .await
-            .is_ok();
+            .ok();
         drop(waiter);
+        if outcome == Some(WaitOutcome::LeaderChanged) {
+            // 13-13: this node no longer leads the run's partition; the routed control
+            // plane re-routes once to the new leader with the remaining deadline.
+            return Err(leader_changed(run));
+        }
+        let woken = outcome.is_some();
         if !woken {
             // Deadline: one last read, then answer whatever it says.
             let (rec, payload) = read_outcome(cp, run).await?;
