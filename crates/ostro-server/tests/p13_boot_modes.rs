@@ -319,7 +319,6 @@ async fn join_crash_after_marker_before_node_toml() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "restarts a joined node: needs the 13-09 cluster.rs seam fix (13-02-owned file) held on wip/13-09-seam"]
 async fn join_crash_after_node_toml_before_meta() {
     let root = tmp();
     let seed = start(seed_cfg(root.path())).await.expect("seed");
@@ -430,7 +429,6 @@ async fn removed_node_refuses_to_start() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "restarts a joined node: needs the 13-09 cluster.rs seam fix (13-02-owned file) held on wip/13-09-seam"]
 async fn static_three_grown_to_five_restarts_without_the_grow_fail_stop() {
     let root = tmp();
     let mut cfgs = static_cluster(root.path(), 3, PARTS, CLUSTER);

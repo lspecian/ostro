@@ -410,6 +410,28 @@ impl ClusterServices {
                 }
             }
             voters.sort_unstable();
+        } else if mode == BootMode::Existing {
+            // 13-09: a restarted member of a dynamically grown group (a joined node, or a
+            // static node whose group grew) knows its other members from the persisted
+            // configuration and the join marker, not from `[[cluster.peers]]`: they are its
+            // meta peers and MetaPeer callers, and they make a one-entry configured set
+            // start as a multi-voter member (it must not campaign alone).
+            let conf = probe.conf.clone().unwrap_or_default();
+            let known = conf
+                .voters
+                .iter()
+                .chain(conf.learners.iter())
+                .copied()
+                .chain(marker.iter().flat_map(|m| m.seeds.iter().map(|s| s.id)));
+            for id in known {
+                if id != node_id && !peers.contains(&id) {
+                    peers.push(id);
+                }
+                if !voters.contains(&id) {
+                    voters.push(id);
+                }
+            }
+            voters.sort_unstable();
         }
         info!(cluster_id = %cluster_id, source = ?source, mode = ?mode, voters = ?voters, "cluster identity bound");
 
@@ -629,8 +651,10 @@ impl ClusterServices {
         // 8. InitCluster with the bound id, then the own Member record.
         let t = std::time::Instant::now(); // clock-exempt: startup timing
         let init = async {
-            let token_key = if mode == BootMode::Joiner {
+            let token_key = if mode == BootMode::Joiner || marker.is_some() {
                 // Never InitCluster on a joiner: the seed's ClusterInfo arrives through the log.
+                // 13-09: nor on a joined node's later restarts (it never bootstrapped the
+                // cluster, so it never proposes InitCluster at all).
                 joined_token_key(&meta, count, cfg.cluster.join_timeout.get()).await?
             } else {
                 crate::server::init_cluster(&meta, &cluster_id, node_id, count, clock.now_ms())
@@ -669,8 +693,9 @@ impl ClusterServices {
         let init_cluster = t.elapsed();
         let meta = Arc::new(meta);
 
-        // A joiner's voter set is the group's (it starts with none of its own).
-        if mode == BootMode::Joiner {
+        // A joiner's voter set is the group's (it starts with none of its own); so is a
+        // restarted member's once its group changed (13-09).
+        if mode == BootMode::Joiner || mode == BootMode::Existing {
             voters = meta.raft().status().voters;
             voters.sort_unstable();
         }
