@@ -1284,7 +1284,14 @@ pub fn read_meta_log(meta_dir: &Path) -> Result<MetaLogDump, HarnessError> {
     let snapshot_state = state.clone();
     let mut entries = Vec::new();
     let mut undecodable = Vec::new();
-    for (index, e) in by_index.range(snapshot_index + 1..=commit) {
+    // A snapshot taken at the commit index (`create_snapshot` allows `index <= commit`)
+    // leaves nothing to replay: the snapshot state is the committed state.
+    let replay = if snapshot_index < commit {
+        by_index.range(snapshot_index + 1..=commit)
+    } else {
+        by_index.range(0..0)
+    };
+    for (index, e) in replay {
         // EntryNormal only; an empty entry is a new leader's no-op.
         if e.entry_type != 0 || e.data.is_empty() {
             continue;
