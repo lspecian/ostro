@@ -4,6 +4,7 @@
 //! |------|-----|----------|
 //! | `restart_of_retired_module_refused` | retry-restart / rerun / DLQ / bulk restart refuse a retired module (`rerun::check_restart_module`) | 13-15 `protects_retryable_terminal_runs` (restart-path finding) |
 //! | `restart_lands_on_a_led_partition` | a restart's new run goes to a partition the serving node leads (`rerun::restart_partition`) | 13-15 `protects_retryable_terminal_runs` (up to 40 `not_leader` attempts), 13-12 / 13-17 handover |
+//! | `keyed_restart_on_another_leader` | a keyed restart (keyed rerun, DLQ restart) whose dedupe key maps to a partition another node leads is started there (`p13::keyed_start`, `NodeOps.StartRestart`) | 13-18 deviation 2 (D-13-18-3), p13-follow |
 //! | `gates_answer_409` | every gate answers 409 `feature_not_enabled` | 13-14 / 13-16 / 13-17 handover (409 vs 412) |
 //! | `outcome_stream_replays_and_fail_stops` | the `OutcomeRecord` producer (`harness::outcomes`) | 13-08 / 13-10 handover (`no_reject_continue` had no producer) |
 //!
@@ -47,6 +48,11 @@ async fn restart_of_retired_module_refused() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn restart_lands_on_a_led_partition() {
     run("restart_lands_on_a_led_partition").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn keyed_restart_on_another_leader() {
+    run("keyed_restart_on_another_leader").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]

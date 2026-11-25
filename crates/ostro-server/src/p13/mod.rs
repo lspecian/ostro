@@ -38,6 +38,7 @@ pub mod membership;
 pub mod module_gc;
 pub mod module_lifecycle;
 pub mod module_refs;
+pub mod keyed_start;
 pub mod node_ops;
 pub mod prewarm;
 pub mod promote;
@@ -438,6 +439,10 @@ pub fn cluster_listener_services(ctx: &Arc<P13Ctx>) -> Vec<Routes> {
         node_ops::NodeOpsService::new(
             Arc::clone(&ctx.handoff) as Arc<dyn ostro_cluster::contracts::HandoffExecutor>,
             Arc::clone(&ctx.module_refs) as Arc<dyn ostro_cluster::contracts::ModuleRefsSource>,
+        )
+        .with_restarts(
+            Arc::new(node_ops::NodeRestarts::new(ctx)),
+            keyed_start::max_message_bytes(ctx),
         )
         .routes(),
     );

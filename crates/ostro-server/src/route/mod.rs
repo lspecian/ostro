@@ -1250,6 +1250,12 @@ fn shared(ctx: &Arc<P13Ctx>) -> Arc<NodeShared> {
     s
 }
 
+/// The routing environment of `ctx`'s node (p13-follow: `p13::keyed_start` resolves a
+/// keyed restart's target leader with the router's view).
+pub(crate) fn route_env(ctx: &Arc<P13Ctx>) -> Arc<dyn RouteEnv> {
+    Arc::clone(shared(ctx).core.env())
+}
+
 /// The routing counters of `ctx`'s node (`None` before [`wrap_control_plane`] or after the
 /// routed control plane is gone). Test probe.
 pub fn stats(ctx: &Arc<P13Ctx>) -> Option<Arc<RouteStats>> {
@@ -1262,6 +1268,9 @@ pub fn wrap_control_plane(
     local: Arc<ServerControlPlane>,
 ) -> Arc<dyn ControlPlane> {
     let s = shared(ctx);
+    // p13-follow: keyed restarts reach their target partition's leader
+    // (`p13::keyed_start`, NodeOps.StartRestart).
+    local.set_remote_start(Arc::new(crate::p13::keyed_start::NodeRemoteStart::new(ctx)));
     Arc::new(
         RoutedControlPlane::new(Arc::clone(&s.core), local as Arc<dyn ControlPlane>).keep_alive(s),
     )

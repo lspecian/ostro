@@ -162,6 +162,11 @@ pub fn regressions() -> Vec<Scenario> {
             restart_lands_on_a_led_partition,
         ),
         scenario("gates_answer_409", single, gates_answer_409),
+        scenario(
+            "keyed_restart_on_another_leader",
+            spec3,
+            keyed_restart_on_another_leader,
+        ),
     ]
 }
 
@@ -1070,6 +1075,164 @@ fn restart_lands_on_a_led_partition(c: &mut InProcCluster) -> BoxFuture<'_, Scen
         }
         println!(
             "restart_lands_on_a_led_partition: new runs on partitions {placed:?} (all led by {leader})"
+        );
+        Ok(())
+    })
+}
+
+/// p13-follow fix (13-18 deviation 2, D-13-18-3): a keyed restart whose dedupe key maps to
+/// a partition **another node leads** is started there (`NodeOps.StartRestart`), on the
+/// first attempt, through the source run's leader:
+///
+/// - keyed rerun (`idempotency_key` chosen so `__rerun/<src>/<key>` hashes to a partition
+///   led by another node): 200, the new run on that partition, readable; the same request
+///   again returns the same run with `existing` (the dedupe lookup crosses nodes too);
+/// - DLQ restart (a failed run on a DLQ-enabled queue whose requeue key
+///   `__dlq/<run>/1` hashes to a partition led by another node): 200, the new run on that
+///   partition, readable.
+///
+/// Before the fix both answered 503 `not_leader` (the StartRun was built on the source
+/// leader's local handle of the target partition).
+fn keyed_restart_on_another_leader(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResult> {
+    use super::module_gc::{OP_T, WF, deploy, get_run, send, start_on, wait_terminal};
+    Box::pin(async move {
+        deploy(c, 1, "p11-rerun").await;
+        let count = PartitionCount::new(c.spec().partitions).expect("partitions");
+        let part_of = |key: &str| ostro_types::routing::partition_for_key(WF, key.as_bytes(), count).0;
+        let parse = |s: &str| -> Result<ostro_types::RunId, ScenarioFailure> {
+            s.parse()
+                .map_err(|e| fail("routing", format!("run id {s:?}: {e}")))
+        };
+        // Failed runs on a DLQ-enabled queue, one per partition.
+        let mut failed = Vec::new();
+        for p in 0..c.spec().partitions {
+            let id = start_on(c, p, Some(1), json!({ "fail_at": 3 })).await;
+            failed.push(id);
+        }
+        let mut queue = String::new();
+        for id in &failed {
+            let rec = wait_terminal(c, id, OP_T)
+                .await
+                .ok_or_else(|| fail("harness", format!("run {id} did not end")))?;
+            if rec["status"] != "failed" {
+                return Err(fail("harness", format!("fail_at run ended {rec}")));
+            }
+            queue = rec["queue"].as_str().unwrap_or("default").to_owned();
+        }
+        let cl = c.client(1);
+        let (st, v) = send(
+            cl.http
+                .put(format!("{}/v1/queues/{queue}/failure-policy", cl.base_url))
+                .json(&json!({ "dlq": { "enabled": true, "hook_catchup_ms": 1000 } })),
+            "PUT failure-policy",
+        )
+        .await;
+        if !st.is_success() {
+            return Err(fail("harness", format!("enable the DLQ on {queue}: {st} {v}")));
+        }
+        super::module_gc::barrier_all(c).await;
+
+        // 1. Keyed rerun.
+        let src = failed[0].clone();
+        let src_id = parse(&src)?;
+        let leader = c.assignment(src_id.partition().0).await.leader;
+        let key = (0..10_000)
+            .map(|i| format!("pf-{i}"))
+            .find(|k| {
+                let p = part_of(&format!("__rerun/{src}/{k}"));
+                published(c, p).leader != leader
+            })
+            .ok_or_else(|| fail("harness", "no rerun key on another leader's partition"))?;
+        let target = part_of(&format!("__rerun/{src}/{key}"));
+        let owner = published(c, target).leader;
+        let body = json!({ "run_id": src, "from": { "seq": 1 }, "version": "source",
+                           "idempotency_key": key });
+        let lc = c.client(leader);
+        let mut first = String::new();
+        for attempt in 0..2 {
+            let (st, v) = send(
+                lc.http
+                    .post(format!("{}/v1/runs/{src}/rerun", lc.base_url))
+                    .json(&body),
+                "POST rerun",
+            )
+            .await;
+            if !st.is_success() {
+                return Err(fail(
+                    "routing",
+                    format!(
+                        "keyed rerun {attempt} via the source's leader {leader} (target p{target} led by {owner}): {st} {v}"
+                    ),
+                ));
+            }
+            let new = v["new_run_id"].as_str().unwrap_or_default().to_owned();
+            if parse(&new)?.partition().0 != target {
+                return Err(fail(
+                    "routing",
+                    format!("keyed rerun {attempt}: new run {new} not on partition {target} ({v})"),
+                ));
+            }
+            if attempt == 0 {
+                if v["existing"] == true {
+                    return Err(fail("routing", format!("first keyed rerun reported existing: {v}")));
+                }
+                first = new;
+            } else if new != first || v["existing"] != true {
+                return Err(fail(
+                    "routing",
+                    format!("repeated keyed rerun: {v}, want {first} existing"),
+                ));
+            }
+        }
+        if get_run(c, &first).await["run_id"] != first.as_str() {
+            return Err(fail("routing", format!("rerun {first} is not readable")));
+        }
+
+        // 2. DLQ restart.
+        let mut dlq_case = None;
+        for id in &failed {
+            let rid = parse(id)?;
+            let l = c.assignment(rid.partition().0).await.leader;
+            let p = part_of(&ostro_server::onfailure::requeue_dedupe_key(id, 1));
+            if published(c, p).leader != l {
+                dlq_case = Some((id.clone(), l, p));
+                break;
+            }
+        }
+        let Some((run, l, p)) = dlq_case else {
+            return Err(fail(
+                "harness",
+                "no failed run whose DLQ restart key maps to another leader's partition",
+            ));
+        };
+        let owner = published(c, p).leader;
+        let rc = c.client(l);
+        let (st, v) = send(
+            rc.http
+                .post(format!("{}/v1/dlq/{run}/requeue", rc.base_url))
+                .json(&json!({ "mode": "restart" })),
+            "POST requeue",
+        )
+        .await;
+        if !st.is_success() {
+            return Err(fail(
+                "routing",
+                format!("DLQ restart of {run} via its leader {l} (target p{p} led by {owner}): {st} {v}"),
+            ));
+        }
+        let new = v["new_run_id"].as_str().unwrap_or_default().to_owned();
+        if parse(&new)?.partition().0 != p {
+            return Err(fail(
+                "routing",
+                format!("DLQ restart: new run {new} not on partition {p} ({v})"),
+            ));
+        }
+        if get_run(c, &new).await["run_id"] != new.as_str() {
+            return Err(fail("routing", format!("DLQ restart {new} is not readable")));
+        }
+        println!(
+            "keyed_restart_on_another_leader: rerun {src}@{leader} -> {first}@{target}/{}; DLQ restart {run}@{l} -> {new}@{p}/{owner}",
+            published(c, target).leader
         );
         Ok(())
     })

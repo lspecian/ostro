@@ -1,12 +1,14 @@
 //! The `ostro.cluster.v1.NodeOps` service (D-P13-23) on the cluster listener: `HandOff`
-//! (13-11's [`HandoffExecutor`]) and `ModuleRefs` (13-15's [`ModuleRefsSource`]), node
-//! identities only (`authz::require_node`).
+//! (13-11's [`HandoffExecutor`]), `ModuleRefs` (13-15's [`ModuleRefsSource`]) and
+//! `StartRestart` (p13-follow, [`RestartServer`]: a keyed restart's new run on the
+//! partition this node leads, `p13::keyed_start`), node identities only
+//! (`authz::require_node`).
 //!
 //! 13-02 wrote the delegation; 13-03 swapped its stand-in message shapes for the generated
 //! `ostro.cluster.v1` types (`ostro/cluster/v1/membership.proto`) and mounts the tonic
 //! server ([`NodeOpsService::routes`], attached through `cluster_listener_services`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use ostro_cluster::authz;
 use ostro_cluster::contracts::{HandoffError, HandoffExecutor, HandoffOutcome, ModuleRefsSource};
@@ -17,7 +19,52 @@ use tonic::{Request, Response, Status};
 use ostro_api::proto::cluster::v1::node_ops_server::{NodeOps, NodeOpsServer};
 pub use ostro_api::proto::cluster::v1::{
     HandOffRequest, HandOffResponse, ModuleRefsRequest, ModuleRefsResponse, PartitionEpoch,
+    StartRestartRequest, StartRestartResponse,
 };
+
+type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// `NodeOps.StartRestart` behind the service (p13-follow).
+pub trait RestartServer: Send + Sync + 'static {
+    /// Serve one request on this node.
+    fn start_restart(
+        &self,
+        req: StartRestartRequest,
+    ) -> BoxFuture<'_, Result<StartRestartResponse, ostro_api::ApiError>>;
+}
+
+/// Production [`RestartServer`]: the partition-write check (leading + the lease, as a
+/// routed write), then `keyed_start::serve` on the local control plane.
+pub struct NodeRestarts {
+    ctx: Weak<super::P13Ctx>,
+}
+
+impl NodeRestarts {
+    /// Over `ctx` (weak: the cluster listener outlives the node).
+    pub fn new(ctx: &Arc<super::P13Ctx>) -> Self {
+        Self {
+            ctx: Arc::downgrade(ctx),
+        }
+    }
+}
+
+impl RestartServer for NodeRestarts {
+    fn start_restart(
+        &self,
+        req: StartRestartRequest,
+    ) -> BoxFuture<'_, Result<StartRestartResponse, ostro_api::ApiError>> {
+        Box::pin(async move {
+            let ctx = self
+                .ctx
+                .upgrade()
+                .ok_or_else(|| ostro_api::ApiError::unavailable("the node is shutting down"))?;
+            if let Ok(p) = u16::try_from(req.partition) {
+                crate::route::consistency::before_partition_write(&ctx, PartitionId(p)).await?;
+            }
+            super::keyed_start::serve(&ctx.local_cp, req).await
+        })
+    }
+}
 
 fn partition(p: u32) -> Result<PartitionId, Status> {
     u16::try_from(p)
@@ -39,6 +86,8 @@ fn handoff_status(e: HandoffError) -> Status {
 pub struct NodeOpsService {
     handoff: Arc<dyn HandoffExecutor>,
     refs: Arc<dyn ModuleRefsSource>,
+    restarts: Option<Arc<dyn RestartServer>>,
+    max_message_bytes: Option<usize>,
 }
 
 impl std::fmt::Debug for NodeOpsService {
@@ -50,12 +99,48 @@ impl std::fmt::Debug for NodeOpsService {
 impl NodeOpsService {
     /// A service over the local handoff executor and module-refs source.
     pub fn new(handoff: Arc<dyn HandoffExecutor>, refs: Arc<dyn ModuleRefsSource>) -> Self {
-        Self { handoff, refs }
+        Self {
+            handoff,
+            refs,
+            restarts: None,
+            max_message_bytes: None,
+        }
+    }
+
+    /// p13-follow: serve `StartRestart` through `restarts`; messages up to `max` bytes (a
+    /// StartRun with inline payloads). Without it `StartRestart` is `unimplemented`.
+    pub fn with_restarts(mut self, restarts: Arc<dyn RestartServer>, max: usize) -> Self {
+        self.restarts = Some(restarts);
+        self.max_message_bytes = Some(max);
+        self
     }
 
     /// The tonic routes of the `NodeOps` server.
     pub fn routes(self) -> Option<Routes> {
-        Some(Routes::new(NodeOpsServer::new(self)))
+        let max = self.max_message_bytes;
+        let mut server = NodeOpsServer::new(self);
+        if let Some(m) = max {
+            server = server
+                .max_decoding_message_size(m)
+                .max_encoding_message_size(m);
+        }
+        Some(Routes::new(server))
+    }
+
+    /// `NodeOps.StartRestart`: a keyed restart's new run on the partition this node leads
+    /// (`p13::keyed_start`). Errors keep the API error (`not_leader` with its details).
+    pub async fn start_restart(
+        &self,
+        req: Request<StartRestartRequest>,
+    ) -> Result<Response<StartRestartResponse>, Status> {
+        authz::require_node(&req)?;
+        let Some(r) = &self.restarts else {
+            return Err(Status::unimplemented("StartRestart is not served by this node"));
+        };
+        r.start_restart(req.into_inner())
+            .await
+            .map(Response::new)
+            .map_err(ostro_api::grpc::to_status)
     }
 
     /// `NodeOps.HandOff`: this node (the partition leader) hands `partition` to `to`.
@@ -138,6 +223,13 @@ impl NodeOps for NodeOpsService {
     ) -> Result<Response<ModuleRefsResponse>, Status> {
         NodeOpsService::module_refs(self, req).await
     }
+
+    async fn start_restart(
+        &self,
+        req: Request<StartRestartRequest>,
+    ) -> Result<Response<StartRestartResponse>, Status> {
+        NodeOpsService::start_restart(self, req).await
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +280,65 @@ mod tests {
 
     fn svc() -> NodeOpsService {
         NodeOpsService::new(Arc::new(Moves), Arc::new(Refs))
+    }
+
+    /// Echoes the partition into the run id; partition 7 is led elsewhere.
+    struct Restarts;
+    impl RestartServer for Restarts {
+        fn start_restart(
+            &self,
+            req: StartRestartRequest,
+        ) -> BoxFuture<'_, Result<StartRestartResponse, ostro_api::ApiError>> {
+            Box::pin(async move {
+                if req.partition == 7 {
+                    return Err(ostro_api::ApiError::unavailable("partition 7: not the leader")
+                        .with_details(serde_json::json!({ "reason": "not_leader", "partition": 7 })));
+                }
+                Ok(StartRestartResponse {
+                    run_id: vec![u8::try_from(req.partition).unwrap_or(0)],
+                    existing: req.lookup_only,
+                    rejected: String::new(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn start_restart_needs_a_node_and_keeps_the_api_error() {
+        let plain = svc();
+        let e = plain
+            .start_restart(as_node(StartRestartRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), tonic::Code::Unimplemented, "not wired: {e:?}");
+        let s = svc().with_restarts(Arc::new(Restarts), 1 << 20);
+        let e = s
+            .start_restart(Request::new(StartRestartRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code(), tonic::Code::Unauthenticated);
+        let r = s
+            .start_restart(as_node(StartRestartRequest {
+                partition: 3,
+                lookup_only: true,
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!((r.run_id, r.existing), (vec![3], true));
+        // A not_leader refusal crosses the wire with its reason, so the caller re-routes.
+        let st = s
+            .start_restart(as_node(StartRestartRequest {
+                partition: 7,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        let e = ostro_api::grpc_client::status_to_error(&st);
+        assert_eq!(e.reason(), Some("not_leader"), "{e:?}");
+        assert!(crate::route::retryable(&e, true));
+        assert!(s.routes().is_some());
     }
 
     fn as_node<T>(m: T) -> Request<T> {

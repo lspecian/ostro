@@ -6,6 +6,8 @@
 // parity check).
 //
 // This file is fixed by 13-03; a later change needs a STOP + re-plan note.
+// p13-follow: NodeOps.StartRestart and its two messages appended (additive only,
+// orchestrator decision on 13-18 deviation 2; RESERVATIONS P13 rows).
 syntax = "proto3";
 
 package ostro.cluster.v1;
@@ -30,6 +32,11 @@ service NodeOps {
   rpc HandOff(HandOffRequest) returns (HandOffResponse);
   // Which module shas the partitions this node leads still reference (13-15).
   rpc ModuleRefs(ModuleRefsRequest) returns (ModuleRefsResponse);
+  // p13-follow (additive): start a keyed restart's new run on the partition this node
+  // leads. DLQ restart, bulk restart and keyed rerun build the StartRun on the source
+  // run's leader (payloads, pinned module, lineage); the dedupe key fixes the target
+  // partition, which another node may lead.
+  rpc StartRestart(StartRestartRequest) returns (StartRestartResponse);
 }
 
 message HandOffRequest {
@@ -67,4 +74,31 @@ message ModuleRefsResponse {
   repeated bytes referenced = 1;
   // Asked partitions this node does not lead at that epoch.
   repeated PartitionEpoch uncovered = 2;
+}
+
+// p13-follow: NodeOps.StartRestart.
+message StartRestartRequest {
+  // The target partition (this node must lead it).
+  uint32 partition = 1;
+  // The partition command (frozen `ostro_types::command::Command` bytes) holding the
+  // StartRun, every payload inline; empty with `lookup_only`.
+  bytes start_run = 2;
+  // Admit through the StartRun rate limit first (bulk restart, rerun).
+  bool rate_limit = 3;
+  // Rerun: fit the copied prefix into this many encoded bytes (0 = no prefix).
+  uint64 prefix_bound = 4;
+  // Only resolve the run `idempotency_key` maps to; nothing is submitted.
+  bool lookup_only = 5;
+  // `lookup_only`: the workflow and the dedupe key.
+  string workflow = 6;
+  bytes idempotency_key = 7;
+}
+
+message StartRestartResponse {
+  // The new run, the existing run of the dedupe key, or empty (lookup: none).
+  bytes run_id = 1;
+  // The dedupe key already mapped to `run_id`.
+  bool existing = 2;
+  // The partition refused the StartRun (the RejectReason, for the caller's error).
+  string rejected = 3;
 }

@@ -76,8 +76,8 @@ use ostro_api::{ApiError, ControlPlane, ErrorCode};
 use ostro_meta::RateSpec;
 use ostro_partition::store::derived::IndexState;
 use ostro_partition::store::values::{RunRecord, RunStatus};
-use ostro_partition::{ApplyOutcome, Clock, query};
-use ostro_types::command::{self as cmd, Command, StartRun};
+use ostro_partition::{Clock, query};
+use ostro_types::command::{self as cmd, StartRun};
 use ostro_types::routing::partition_for_key;
 use ostro_types::{PartitionId, PayloadRef, RunId};
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,7 @@ use tracing::{info, warn};
 use super::ServiceCtx;
 use crate::config::BulkSection;
 use crate::control::lifecycle::read_record;
-use crate::control::runs::{attach_run_started, partition_error, store_error, task_error};
+use crate::control::runs::{store_error, task_error};
 use crate::control::{p11_dlq, p11_rerun, p11_search};
 use crate::flow::limits::{Gcra, ms_to_ns, ns_to_ms_ceil};
 use crate::onfailure;
@@ -1138,6 +1138,8 @@ async fn op_once(
 /// The Phase 5 restart copy with the job's dedupe key: the new run is placed by
 /// `partition_for_key(workflow, key)`, the start goes through the StartRun rate limit
 /// (Phase 7, D-W21: 429 is retried by the caller), and a repeat returns the existing run.
+/// p13-follow: the StartRun goes to that partition's leader wherever it is
+/// (`p13::keyed_start`; the rate limit is admitted there).
 async fn restart_with_key(
     ctx: &P11Ctx,
     old: RunId,
@@ -1156,22 +1158,8 @@ async fn restart_with_key(
     .map_err(task_error)?
     .map_err(store_error)?;
     let input = input.unwrap_or_else(|| PayloadRef::inline(Bytes::from_static(b"null")));
-    let input_bytes = old_handle
-        .fetch_payload(&input)
-        .await
-        .map_err(partition_error)?;
     let p = partition_for_key(&rec.workflow, key.as_bytes(), cp.partition_count());
     let run = RunId::new(p, uuid::Uuid::now_v7());
-    let handle = &cp.partition(p)?;
-    crate::flow::rate_limit::admit(
-        cp,
-        handle,
-        &rec.workflow,
-        &rec.queue,
-        &rec.concurrency_key,
-        Some(key),
-    )
-    .await?;
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed)
         .map_err(|e| ApiError::internal(format!("OS random source unavailable: {e}")))?;
@@ -1207,17 +1195,16 @@ async fn restart_with_key(
         run_started: None,
         ..Default::default()
     };
-    let start = attach_run_started(handle, start, &input_bytes).await?;
-    match handle
-        .submit_one(Command::start_run(start))
-        .await
-        .map_err(partition_error)?
-    {
-        ApplyOutcome::Accepted => Ok(run),
-        ApplyOutcome::Duplicate { existing } => Ok(existing.unwrap_or(run)),
-        ApplyOutcome::Rejected(e) => Err(ApiError::invalid_argument(format!(
-            "restart rejected: {e:?}"
-        ))),
+    let ks = crate::p13::keyed_start::KeyedStart {
+        start,
+        rate_limit: true,
+        prefix_bound: None,
+    };
+    match crate::p13::keyed_start::submit(cp, old_handle, ks).await? {
+        crate::p13::keyed_start::Started::Run { run, .. } => Ok(run),
+        crate::p13::keyed_start::Started::Rejected(e) => Err(ApiError::invalid_argument(
+            format!("restart rejected: {e}"),
+        )),
     }
 }
 

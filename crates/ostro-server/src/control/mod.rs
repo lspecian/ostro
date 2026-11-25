@@ -143,6 +143,10 @@ pub struct ServerControlPlane {
     /// Phase 12 (12-14, D-P12-22): pushes a new module blob to enough peers before its
     /// `Module` record is written.
     pub(crate) module_push: Option<Arc<dyn ModulePush>>,
+    /// p13-follow: the node-to-node half of keyed restarts (`p13::keyed_start`), set once
+    /// by the server on a cluster node; unset = a keyed restart on a partition another node
+    /// leads answers `not_leader` (single node, unit tests).
+    pub(crate) remote_start: Arc<OnceLock<Arc<dyn crate::p13::keyed_start::RemoteStart>>>,
 }
 
 /// Phase 12 (12-14, D-P12-22): module blob replication before the `Module` record.
@@ -229,7 +233,18 @@ impl ServerControlPlane {
             dev: None,
             leader_hints: None,
             module_push: None,
+            remote_start: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// p13-follow: install the node-to-node half of keyed restarts (once).
+    pub(crate) fn set_remote_start(&self, r: Arc<dyn crate::p13::keyed_start::RemoteStart>) {
+        let _ = self.remote_start.set(r);
+    }
+
+    /// p13-follow: the node-to-node half of keyed restarts, if installed.
+    pub(crate) fn remote_start(&self) -> Option<Arc<dyn crate::p13::keyed_start::RemoteStart>> {
+        self.remote_start.get().cloned()
     }
 
     /// Phase 12 (12-14): replicate module blobs before their `Module` record.

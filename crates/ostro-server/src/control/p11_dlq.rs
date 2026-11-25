@@ -82,7 +82,7 @@ use super::p11_rerun;
 use super::p11_search::{decode_token, encode_token};
 use super::policy::policy_key;
 use super::runs::{
-    attach_run_started, not_found, parse_run_id, partition_error, status, store_error, task_error,
+    not_found, parse_run_id, partition_error, status, store_error, task_error,
 };
 use crate::onfailure::{self, DlqPolicy, OnFailure};
 use crate::p11::{P11Ctx, P11Feature, p11_feature_enabled};
@@ -739,6 +739,8 @@ pub async fn requeue_dlq(
 
 /// The Phase 5 restart copy (`control/lifecycle.rs`) with a dedupe key: the new run is
 /// placed by `partition_for_key(workflow, key)` and a repeat returns the existing run.
+/// p13-follow: the StartRun goes to that partition's leader wherever it is
+/// (`p13::keyed_start`).
 async fn restart_with_key(
     ctx: &P11Ctx,
     old_handle: &PartitionHandle<PartitionLog>,
@@ -757,14 +759,9 @@ async fn restart_with_key(
     .map_err(task_error)?
     .map_err(store_error)?;
     let input = input.unwrap_or_else(|| PayloadRef::inline(Bytes::from_static(b"null")));
-    let input_bytes = old_handle
-        .fetch_payload(&input)
-        .await
-        .map_err(partition_error)?;
     let uuid = uuid::Uuid::now_v7();
     let p = partition_for_key(&rec.workflow, key.as_bytes(), cp.partition_count());
     let run = RunId::new(p, uuid);
-    let handle = &cp.partition(p)?;
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed)
         .map_err(|e| ApiError::internal(format!("OS random source unavailable: {e}")))?;
@@ -800,17 +797,16 @@ async fn restart_with_key(
         run_started: None,
         ..Default::default()
     };
-    let start = attach_run_started(handle, start, &input_bytes).await?;
-    match handle
-        .submit_one(Command::start_run(start))
-        .await
-        .map_err(partition_error)?
-    {
-        ApplyOutcome::Accepted => Ok(run),
-        ApplyOutcome::Duplicate { existing } => Ok(existing.unwrap_or(run)),
-        ApplyOutcome::Rejected(e) => Err(ApiError::invalid_argument(format!(
-            "restart rejected: {e:?}"
-        ))),
+    let ks = crate::p13::keyed_start::KeyedStart {
+        start,
+        rate_limit: false,
+        prefix_bound: None,
+    };
+    match crate::p13::keyed_start::submit(cp, old_handle, ks).await? {
+        crate::p13::keyed_start::Started::Run { run, .. } => Ok(run),
+        crate::p13::keyed_start::Started::Rejected(e) => Err(ApiError::invalid_argument(
+            format!("restart rejected: {e}"),
+        )),
     }
 }
 

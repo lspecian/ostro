@@ -70,7 +70,7 @@ use ostro_log::PartitionLog;
 use ostro_partition::store::Table;
 use ostro_partition::store::keys::{dedupe_key, event_key};
 use ostro_partition::store::values::RunRecord;
-use ostro_partition::{ApplyOutcome, PartitionHandle, query};
+use ostro_partition::{PartitionHandle, query};
 use ostro_types::command::{
     self as cmd, Command, JournalEvent, MAX_RUN_TAGS, ON_FAILURE_OF_TAG, RERUN_FROM_TAG, StartRun,
     encode_command,
@@ -303,7 +303,7 @@ async fn source_rows(
 }
 
 /// The id of the run already deduped under `dedupe` on `handle`, if any.
-async fn existing_run(
+pub(crate) async fn existing_run(
     handle: &PartitionHandle<PartitionLog>,
     workflow: &str,
     dedupe: &str,
@@ -346,7 +346,7 @@ fn encoded_len(start: &StartRun) -> usize {
 /// Offload copied inline payloads over [`OFFLOAD_MIN_BYTES`] (largest first) until the
 /// encoded StartRun fits `bound` (D-P11-7). Returns the encoded size and the number of
 /// payloads offloaded.
-async fn fit_envelope(
+pub(crate) async fn fit_envelope(
     handle: &PartitionHandle<PartitionLog>,
     start: &mut StartRun,
     bound: usize,
@@ -476,9 +476,10 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
         // Phase 13 (13-18): a partition this node leads (`crate::rerun::restart_partition`).
         None => crate::rerun::restart_partition(cp, &uuid),
     };
-    let handle = &cp.partition(p)?;
+    // p13-follow: the dedupe partition may be led by another node; the lookup and the
+    // submit go to its leader (`p13::keyed_start`). An unkeyed rerun's partition is led here.
     let existing = match &dedupe {
-        Some(d) => existing_run(handle, &workflow, d).await?,
+        Some(d) => crate::p13::keyed_start::lookup(cp, p, &workflow, d).await?,
         None => None,
     };
     let new_run = existing.unwrap_or_else(|| RunId::new(p, uuid));
@@ -556,7 +557,7 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
         &rec.queue,
         RunPolicy::default(),
     );
-    let mut start = StartRun {
+    let start = StartRun {
         run_id: new_run.as_bytes().to_vec(),
         workflow: workflow.clone(),
         workflow_version: version,
@@ -584,38 +585,22 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
         rerun_prefix: rows,
         rerun_from_seq: cut,
     };
-    let (size, offloaded) = fit_envelope(handle, &mut start, prefix_bound(&src.run)).await?;
-    tracing::info!(
-        source = %src.run,
-        run = %new_run,
-        cut,
-        encoded_bytes = size,
-        offloaded,
-        verdict,
-        "rerun submitted"
-    );
-
-    // 7. Submit.
-    crate::flow::rate_limit::admit(
-        cp,
-        handle,
-        &workflow,
-        &start.queue,
-        &start.concurrency_key,
-        dedupe.as_deref(),
-    )
-    .await?;
-    match handle
-        .submit_one(Command::start_run(start))
-        .await
-        .map_err(partition_error)?
-    {
-        ApplyOutcome::Accepted => Ok(response(Some(new_run.to_string()), false)),
-        ApplyOutcome::Duplicate { existing } => Ok(response(
-            Some(existing.unwrap_or(new_run).to_string()),
-            true,
-        )),
-        ApplyOutcome::Rejected(r) => Err(ApiError::internal(format!("rerun rejected: {r:?}"))),
+    // 7. Fit the envelope, admit through the rate limit and submit, on the target
+    // partition's leader (`p13::keyed_start::submit_local` there).
+    let ks = crate::p13::keyed_start::KeyedStart {
+        start,
+        rate_limit: true,
+        prefix_bound: Some(prefix_bound(&src.run)),
+    };
+    let started = crate::p13::keyed_start::submit(cp, src_handle, ks).await?;
+    tracing::info!(source = %src.run, run = %new_run, cut, verdict, "rerun submitted");
+    match started {
+        crate::p13::keyed_start::Started::Run { run, existing } => {
+            Ok(response(Some(run.to_string()), existing))
+        }
+        crate::p13::keyed_start::Started::Rejected(r) => {
+            Err(ApiError::internal(format!("rerun rejected: {r}")))
+        }
     }
 }
 
