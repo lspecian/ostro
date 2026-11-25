@@ -35,14 +35,18 @@ pub struct RunResult {
 }
 
 impl RunResult {
-    /// From a `GET /v1/runs/{id}` body (`run_id`, `status`, and the `error` object or string
-    /// rendered as text).
+    /// From a `GET /v1/runs/{id}` body (`run_id`, `status`, and the failure detail rendered
+    /// as text). 13-18 (held for approval): a run reports its failure in `failure` (a JSON
+    /// string, `{"reason_code", "kind", "message"}` for engine failures such as
+    /// `module_gone`); `error` (an object or string) is read first for older shapes, then
+    /// `failure`.
     pub fn from_json(v: &Value) -> Self {
-        let error = match &v["error"] {
+        let text = |x: &Value| match x {
             Value::Null => None,
             Value::String(s) => Some(s.clone()),
             other => Some(other.to_string()),
         };
+        let error = text(&v["error"]).or_else(|| text(&v["failure"]));
         Self {
             run_id: v["run_id"].as_str().unwrap_or_default().to_owned(),
             status: v["status"].as_str().unwrap_or_default().to_owned(),
