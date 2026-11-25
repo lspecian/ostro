@@ -32,6 +32,7 @@
 //! and the cluster listener's services are detached in `ClusterServices::stop_tasks`.
 
 pub mod cluster_api;
+pub mod inbound;
 pub mod join;
 pub mod joiner;
 pub mod keyed_start;
@@ -444,6 +445,8 @@ pub fn cluster_listener_services(ctx: &Arc<P13Ctx>) -> Vec<Routes> {
             Arc::new(node_ops::NodeRestarts::new(ctx)),
             keyed_start::max_message_bytes(ctx),
         )
+        // p13-bugs2: outbox batches for partitions this node leads (`inbound`).
+        .with_inbound(Arc::new(inbound::NodeInbound::new(ctx)))
         .routes(),
     );
     routes.extend(crate::route::node_api_services(ctx));

@@ -541,6 +541,10 @@ async fn start_inner(
     // Phase 12 (12-13/12-14): every role comes from meta, RF=1 included.
     node_cfg.assignments = Some(cluster.assignments());
     node_cfg.follower_driver = Some(cluster.follower_driver());
+    // p13-bugs2: outbox batches for partitions another node leads go over NodeOps
+    // (`p13::inbound`); routed once the Phase 13 context is installed below.
+    let inbound = p13::inbound::InboundRoute::default();
+    node_cfg.router_wrapper = Some(inbound.wrapper());
     node_cfg.leader.dispatcher = Some(p7::dispatcher_config(
         executor,
         Some(Arc::clone(&stats)),
@@ -642,6 +646,7 @@ async fn start_inner(
         clock: Arc::clone(&clock),
     });
     let routed = p13::wrap_control_plane(&p13_ctx, Arc::clone(&control));
+    inbound.install(&p13_ctx);
     cluster.attach_p13_services(p13::cluster_listener_services(&p13_ctx));
     let p13_services = p13::start(Arc::clone(&p13_ctx)).await;
     let fatal_rx = p13_ctx.fatal_watch();

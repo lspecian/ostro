@@ -1,7 +1,10 @@
 //! Cross-partition delivery (shuffler -> target partition).
 //!
 //! Single node: [`InProcessRouter`] submits the `InboundBatch` to the target's local
-//! [`PartitionHandle`]. Phase 13 adds a network-forwarding implementation of the same trait.
+//! [`PartitionHandle`]. Cluster (p13-bugs2): `ostro-server`'s `p13::inbound::ClusterRouter`
+//! wraps it (`NodeConfig::router_wrapper`) and forwards batches for partitions another node
+//! leads over `NodeOps.DeliverInbound`; that node delivers through its own
+//! [`InProcessRouter`].
 //!
 //! Phase 12 (12-13): a partition is registered only while this node leads it (after its
 //! `LeaderAnnounced` applied) and unregistered on demotion; [`InProcessRouter::leader_hint`]

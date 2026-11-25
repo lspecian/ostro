@@ -8,6 +8,8 @@
 // This file is fixed by 13-03; a later change needs a STOP + re-plan note.
 // p13-follow: NodeOps.StartRestart and its two messages appended (additive only,
 // orchestrator decision on 13-18 deviation 2; RESERVATIONS P13 rows).
+// p13-bugs2: NodeOps.DeliverInbound and its two messages appended (additive only,
+// orchestrator task p13-bugs2 bug 3; RESERVATIONS P13 row).
 syntax = "proto3";
 
 package ostro.cluster.v1;
@@ -37,6 +39,11 @@ service NodeOps {
   // run's leader (payloads, pinned module, lineage); the dedupe key fixes the target
   // partition, which another node may lead.
   rpc StartRestart(StartRestartRequest) returns (StartRestartResponse);
+  // p13-bugs2 (additive): deliver an outbox batch (child-run starts, parent
+  // notifications, run-to-run messages) to the target partition this node leads:
+  // the network half of ostro-partition's PartitionRouter. The target dedupes
+  // (src, seq) exactly as for an in-process delivery.
+  rpc DeliverInbound(DeliverInboundRequest) returns (DeliverInboundResponse);
 }
 
 message HandOffRequest {
@@ -101,4 +108,21 @@ message StartRestartResponse {
   bool existing = 2;
   // The partition refused the StartRun (the RejectReason, for the caller's error).
   string rejected = 3;
+}
+
+// p13-bugs2: NodeOps.DeliverInbound.
+message DeliverInboundRequest {
+  // The target partition (this node must lead it).
+  uint32 partition = 1;
+  // The partition command (frozen `ostro_types::command::Command` bytes) holding the
+  // InboundBatch, exactly as the target's log stores it.
+  bytes batch = 2;
+}
+
+message DeliverInboundResponse {
+  // The target's apply outcome code (`ApplyOutcome::code`: 0 accepted, 1 duplicate,
+  // 16 + RejectReason index rejected).
+  uint32 outcome = 1;
+  // The rejection (debug text) when `outcome` >= 16.
+  string rejected = 2;
 }

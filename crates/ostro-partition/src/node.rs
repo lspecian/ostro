@@ -82,7 +82,8 @@ pub enum StartMode {
 }
 
 /// Wraps the node's [`InProcessRouter`] before it is handed to the leader services (test
-/// doubles: lossy/duplicating delivery, instrumentation).
+/// doubles: lossy/duplicating delivery, instrumentation; p13-bugs2: the server's cluster
+/// router, which forwards batches for partitions another node leads).
 pub type RouterWrapper =
     Arc<dyn Fn(Arc<InProcessRouter>) -> Arc<dyn PartitionRouter> + Send + Sync>;
 

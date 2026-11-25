@@ -1,8 +1,9 @@
 //! The `ostro.cluster.v1.NodeOps` service (D-P13-23) on the cluster listener: `HandOff`
 //! (13-11's [`HandoffExecutor`]), `ModuleRefs` (13-15's [`ModuleRefsSource`]) and
 //! `StartRestart` (p13-follow, [`RestartServer`]: a keyed restart's new run on the
-//! partition this node leads, `p13::keyed_start`), node identities only
-//! (`authz::require_node`).
+//! partition this node leads, `p13::keyed_start`) and `DeliverInbound` (p13-bugs2,
+//! [`InboundServer`]: an outbox batch for a partition this node leads, `p13::inbound`),
+//! node identities only (`authz::require_node`).
 //!
 //! 13-02 wrote the delegation; 13-03 swapped its stand-in message shapes for the generated
 //! `ostro.cluster.v1` types (`ostro/cluster/v1/membership.proto`) and mounts the tonic
@@ -18,8 +19,9 @@ use tonic::{Request, Response, Status};
 
 use ostro_api::proto::cluster::v1::node_ops_server::{NodeOps, NodeOpsServer};
 pub use ostro_api::proto::cluster::v1::{
-    HandOffRequest, HandOffResponse, ModuleRefsRequest, ModuleRefsResponse, PartitionEpoch,
-    StartRestartRequest, StartRestartResponse,
+    DeliverInboundRequest, DeliverInboundResponse, HandOffRequest, HandOffResponse,
+    ModuleRefsRequest, ModuleRefsResponse, PartitionEpoch, StartRestartRequest,
+    StartRestartResponse,
 };
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -31,6 +33,15 @@ pub trait RestartServer: Send + Sync + 'static {
         &self,
         req: StartRestartRequest,
     ) -> BoxFuture<'_, Result<StartRestartResponse, ostro_api::ApiError>>;
+}
+
+/// `NodeOps.DeliverInbound` behind the service (p13-bugs2, `p13::inbound`).
+pub trait InboundServer: Send + Sync + 'static {
+    /// Serve one request on this node; `Status` answers make the sender resend later.
+    fn deliver_inbound(
+        &self,
+        req: DeliverInboundRequest,
+    ) -> BoxFuture<'_, Result<DeliverInboundResponse, Status>>;
 }
 
 /// Production [`RestartServer`]: the partition-write check (leading + the lease, as a
@@ -87,6 +98,7 @@ pub struct NodeOpsService {
     handoff: Arc<dyn HandoffExecutor>,
     refs: Arc<dyn ModuleRefsSource>,
     restarts: Option<Arc<dyn RestartServer>>,
+    inbound: Option<Arc<dyn InboundServer>>,
     max_message_bytes: Option<usize>,
 }
 
@@ -103,6 +115,7 @@ impl NodeOpsService {
             handoff,
             refs,
             restarts: None,
+            inbound: None,
             max_message_bytes: None,
         }
     }
@@ -113,6 +126,28 @@ impl NodeOpsService {
         self.restarts = Some(restarts);
         self.max_message_bytes = Some(max);
         self
+    }
+
+    /// p13-bugs2: serve `DeliverInbound` through `inbound` (messages up to the
+    /// [`NodeOpsService::with_restarts`] bound). Without it `DeliverInbound` is
+    /// `unimplemented` (the sender keeps resending).
+    pub fn with_inbound(mut self, inbound: Arc<dyn InboundServer>) -> Self {
+        self.inbound = Some(inbound);
+        self
+    }
+
+    /// `NodeOps.DeliverInbound`: an outbox batch for a partition this node leads.
+    pub async fn deliver_inbound(
+        &self,
+        req: Request<DeliverInboundRequest>,
+    ) -> Result<Response<DeliverInboundResponse>, Status> {
+        authz::require_node(&req)?;
+        let Some(i) = &self.inbound else {
+            return Err(Status::unimplemented(
+                "DeliverInbound is not served by this node",
+            ));
+        };
+        i.deliver_inbound(req.into_inner()).await.map(Response::new)
     }
 
     /// The tonic routes of the `NodeOps` server.
@@ -231,6 +266,13 @@ impl NodeOps for NodeOpsService {
         req: Request<StartRestartRequest>,
     ) -> Result<Response<StartRestartResponse>, Status> {
         NodeOpsService::start_restart(self, req).await
+    }
+
+    async fn deliver_inbound(
+        &self,
+        req: Request<DeliverInboundRequest>,
+    ) -> Result<Response<DeliverInboundResponse>, Status> {
+        NodeOpsService::deliver_inbound(self, req).await
     }
 }
 
