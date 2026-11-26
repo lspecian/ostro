@@ -381,6 +381,9 @@ impl RaftHandle {
 pub struct RaftDriver {
     handle: RaftHandle,
     thread: Option<JoinHandle<()>>,
+    /// Ostro (P4): the store, for tests (state-file write counts).
+    #[cfg(test)]
+    store: RaftLogStore,
 }
 
 impl RaftDriver {
@@ -421,6 +424,11 @@ impl RaftDriver {
                 .restore(snap_index, &data)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("restoring snapshot: {}", e)))?;
         }
+
+        // Ostro (P4): entries up to the commit index persisted before this open are
+        // re-applied by raft (the restart replay); their conf changes are not written to
+        // the state file one by one (see `apply_conf_change`).
+        let replay_until = store.initial_state().map(|s| s.hard_state.commit).unwrap_or(0);
 
         let raft_config = Config {
             id: config.id,
@@ -473,7 +481,11 @@ impl RaftDriver {
             read_timeout,
             force_snapshot: false,
             halted: None,
+            replay_until,
+            conf_dirty: false,
         };
+        #[cfg(test)]
+        let test_store = core.store.clone();
         core.publish_status(None);
         let tick = config.tick_interval;
         let thread = std::thread::Builder::new()
@@ -482,6 +494,8 @@ impl RaftDriver {
         Ok(Self {
             handle: RaftHandle { tx, status: status_rx, leader_contact, epoch, lease_anchor, lease_wanted },
             thread: Some(thread),
+            #[cfg(test)]
+            store: test_store,
         })
     }
 
@@ -548,6 +562,12 @@ struct DriverCore<S: StateMachine, O: Outbox> {
     force_snapshot: bool,
     /// Set by a `FatalApply`: the cycle stops with this message.
     halted: Option<String>,
+    // ---- Ostro (P4, p13-campaign) ----
+    /// The commit index persisted before this open: conf changes at or below it are
+    /// replayed, and their configuration is kept in memory until the replay is done.
+    replay_until: u64,
+    /// The in-memory configuration is newer than the state file.
+    conf_dirty: bool,
 }
 
 /// Fails the driver: raft must not continue on storage it cannot trust.
@@ -998,6 +1018,11 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
                 }
             }
         }
+        // Ostro (P4): the replay is done: write the configuration it reached, once.
+        if self.conf_dirty && self.applied >= self.replay_until {
+            self.store.flush_state()?;
+            self.conf_dirty = false;
+        }
         Ok(())
     }
 
@@ -1013,7 +1038,19 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
         };
         match applied {
             Ok(cs) => {
-                self.store.set_conf_state(cs.clone())?;
+                // Ostro (P4, p13-campaign): a replayed conf change (committed before this
+                // open) only updates the in-memory configuration; `apply_entries` writes
+                // the state file once the replay is done. Writing and fsyncing the state
+                // file for each one made a restart take seconds to minutes on a busy disk
+                // after many membership changes (up to `snapshot_every` entries replayed).
+                if entry.index <= self.replay_until {
+                    self.store.set_conf_state_deferred(cs.clone());
+                    self.conf_dirty = true;
+                } else if self.conf_dirty {
+                    self.store.set_conf_state_deferred(cs.clone());
+                } else {
+                    self.store.set_conf_state(cs.clone())?;
+                }
                 self.sm.on_conf_change(entry.index, &cs);
                 tracing::info!(
                     "Raft node {}: membership at {} is voters {:?} learners {:?}",

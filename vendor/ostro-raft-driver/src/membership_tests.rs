@@ -426,3 +426,68 @@ async fn snapshot_now_compacts_and_a_lagging_voter_installs_it() {
     assert_eq!(c.sms[&down].set().len(), 50);
     assert!(c.sms[&down].applied_log().len() < 50, "{} replayed", c.sms[&down].applied_log().len());
 }
+
+/// Ostro (P4, p13-campaign): a restart replays every entry since the last snapshot, conf
+/// changes included. A replayed conf change no longer writes (and fsyncs) the state file:
+/// the replay writes it once at the end, so the restart cost does not grow with the number
+/// of membership changes (the Phase 13 campaign saw 1-2 s per conf change on a busy disk
+/// and node restarts beyond 120 s). The state file still ends at the latest configuration,
+/// and the node keeps working across further restarts and conf changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_replay_writes_the_state_file_once_not_per_conf_change() {
+    const CYCLES: u64 = 40;
+    let mut c = Cluster::new(&[1, 2, 3], config);
+    c.leader().await;
+    let mut last = 0;
+    for i in 0..CYCLES {
+        let id = 100 + i;
+        propose_cc(&c, cc(vec![single(ConfChangeType::AddLearnerNode, id)], ConfChangeTransition::Auto)).await;
+        last = propose_cc(&c, cc(vec![single(ConfChangeType::RemoveNode, id)], ConfChangeTransition::Auto)).await.index;
+        last = last.max(write_n(&c, &format!("w{}-", i), 2).await);
+    }
+    c.settle(last).await;
+    let leader = c.leader().await;
+    let follower = [1u64, 2, 3].into_iter().find(|&i| i != leader).unwrap();
+
+    // A follower restart replays 2 * CYCLES conf changes.
+    c.stop(follower);
+    c.start(follower);
+    tokio::time::timeout(LONG, c.h(follower).wait_applied(last)).await.expect("replayed").unwrap();
+    let writes = c.drivers[&follower].store.state_writes();
+    assert!(writes <= 4, "{writes} state-file writes for a replay of {} conf changes", 2 * CYCLES);
+
+    // The state file holds the latest configuration (voters 1-3, no learners).
+    let voters_of = |c: &Cluster, id: u64| {
+        let st = c.h(id).status();
+        (st.voters.clone(), st.learners.clone())
+    };
+    assert_eq!(voters_of(&c, follower), (vec![1, 2, 3], vec![]));
+    c.stop(follower);
+    let store = RaftLogStore::open(c.dirs[&follower].path(), LogStoreOptions::default()).unwrap();
+    let cs = raft::Storage::initial_state(&store).unwrap().conf_state;
+    let mut v = cs.voters.clone();
+    v.sort();
+    assert_eq!((v, cs.learners.clone()), (vec![1, 2, 3], vec![]));
+    drop(store);
+
+    // A whole-cluster restart, then a new conf change and a write still work everywhere.
+    for id in [1u64, 2, 3] {
+        c.stop(id);
+    }
+    for id in [1u64, 2, 3] {
+        c.start(id);
+    }
+    c.settle(last).await;
+    propose_cc(&c, cc(vec![single(ConfChangeType::AddLearnerNode, 999)], ConfChangeTransition::Auto)).await;
+    let w = write_n(&c, "after", 1).await;
+    c.settle(w).await;
+    for id in [1u64, 2, 3] {
+        assert_eq!(voters_of(&c, id), (vec![1, 2, 3], vec![999]), "node {id}");
+    }
+    // Live conf changes are still written as they apply: restart one node and check.
+    let leader = c.leader().await;
+    let f = [1u64, 2, 3].into_iter().find(|&i| i != leader).unwrap();
+    c.stop(f);
+    let store = RaftLogStore::open(c.dirs[&f].path(), LogStoreOptions::default()).unwrap();
+    assert_eq!(raft::Storage::initial_state(&store).unwrap().conf_state.learners, vec![999]);
+}

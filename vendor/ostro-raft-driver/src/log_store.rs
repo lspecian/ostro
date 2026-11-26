@@ -94,6 +94,8 @@ struct Core {
     /// Latest snapshot, data included; served to followers that are too far behind.
     snapshot: Snapshot,
     segments: Vec<Segment>,
+    /// Ostro (P4): state-file writes (`persist_state`) since open, for tests.
+    state_writes: u64,
 }
 
 impl Core {
@@ -125,7 +127,8 @@ impl Core {
 
     // ---- state -------------------------------------------------------------
 
-    fn persist_state(&self, hs: &HardState, cs: &ConfState) -> io::Result<()> {
+    fn persist_state(&mut self, hs: &HardState, cs: &ConfState) -> io::Result<()> {
+        self.state_writes += 1;
         let hs_bytes = hs.encode_to_vec();
         let cs_bytes = cs.encode_to_vec();
         let mut buf = Vec::with_capacity(16 + hs_bytes.len() + cs_bytes.len());
@@ -143,7 +146,8 @@ impl Core {
         if hs == self.raft_state.hard_state {
             return Ok(());
         }
-        self.persist_state(&hs, &self.raft_state.conf_state)?;
+        let cs = self.raft_state.conf_state.clone();
+        self.persist_state(&hs, &cs)?;
         self.raft_state.hard_state = hs;
         Ok(())
     }
@@ -152,7 +156,8 @@ impl Core {
         if cs == self.raft_state.conf_state {
             return Ok(());
         }
-        self.persist_state(&self.raft_state.hard_state, &cs)?;
+        let hs = self.raft_state.hard_state.clone();
+        self.persist_state(&hs, &cs)?;
         self.raft_state.conf_state = cs;
         Ok(())
     }
@@ -417,6 +422,7 @@ impl RaftLogStore {
             locations: Vec::new(),
             snapshot,
             segments: Vec::new(),
+            state_writes: 0,
         };
         recover_segments(&mut core)?;
         Ok(Self { core: Arc::new(RwLock::new(core)), snapshot_requested: Arc::new(AtomicBool::new(false)) })
@@ -451,6 +457,29 @@ impl RaftLogStore {
     /// Persist the configuration after a ConfChange is applied.
     pub fn set_conf_state(&self, cs: ConfState) -> io::Result<()> {
         self.wl().set_conf_state(cs)
+    }
+
+    /// Ostro (P4, p13-campaign): set the configuration in memory only, while the driver
+    /// re-applies entries that were already committed before this open (the restart
+    /// replay). [`flush_state`](Self::flush_state) writes it once the replay is done.
+    /// Until then the state file keeps the configuration persisted before the restart; a
+    /// crash in between replays the same entries again, so nothing is lost. Writing (and
+    /// fsyncing) the state file for every replayed conf change made a restart cost one
+    /// state-file write plus two fsyncs per conf change since the last snapshot.
+    pub fn set_conf_state_deferred(&self, cs: ConfState) {
+        self.wl().raft_state.conf_state = cs;
+    }
+
+    /// Ostro (P4): write the in-memory `HardState` + `ConfState` to the state file now.
+    pub fn flush_state(&self) -> io::Result<()> {
+        let mut core = self.wl();
+        let (hs, cs) = (core.raft_state.hard_state.clone(), core.raft_state.conf_state.clone());
+        core.persist_state(&hs, &cs)
+    }
+
+    /// Ostro (P4): state-file writes since open (tests).
+    pub fn state_writes(&self) -> u64 {
+        self.rl().state_writes
     }
 
     /// Install a snapshot received from the leader. The outer error is I/O
