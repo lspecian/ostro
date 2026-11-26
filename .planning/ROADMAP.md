@@ -43,7 +43,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 9: Polyglot SDKs & Conformance** - Python and TypeScript SDKs with SDK-owned event loops and reseeding, cross-language children, saga helper, three-SDK conformance
 - [x] **Phase 10: Developer CLI & Test Kits** - `ostro init/build/deploy/replay/dev --watch` with hermetic toolchains, time-skipping test harnesses, thin client libraries
 - [x] **Phase 11: Run Operations & Embedded UI** - Rerun-from-step, bulk ops, DLQ with `on_failure`, tags/search, published limits, and an embedded UI with actions
-- [ ] **Phase 12: Replicated Partition Logs** - Replication conformance suite first, then follower-pull ISR, HW, epoch truncation, ISR-only election, hot-standby followers
+- [x] **Phase 12: Replicated Partition Logs** - Replication conformance suite first, then follower-pull ISR, HW, epoch truncation, ISR-only election, hot-standby followers
 - [ ] **Phase 13: Cluster Membership, Routing & Upgrades** - Multi-voter metadata, `ostro cluster init/join/remove`, request forwarding, rolling upgrades with N/N-1 WIT linkers, module GC and `migrate-runs`
 - [ ] **Phase 14: Multi-Tenancy, Security & 1.0 Release** - Scoped/tenant tokens and quotas, signed modules, audit log, fuzzing + external review, Jepsen/soak/benchmarks, release artefacts, Helm, docs
 

@@ -8,13 +8,15 @@ last_updated: "2026-11-18T20:20:00.000Z"
 last_activity: 2026-11-18 — Completed 01-08-PLAN.md (quiet-machine confirmation; fjall crash test 5/5 + RMW 106.9k cmds/s; three Phase 1 decisions logged in PROJECT.md; FOUND-06 complete)
 progress:
   total_phases: 14
-  completed_phases: 11
+  completed_phases: 12
   total_plans: 8
   completed_plans: 8
   percent: 100
 ---
 
 # Project State
+
+Phase 12 COMPLETE (2026-11-26, user decision): closed on QA-01 campaign r5 evidence — 5,780 of 10,000 faults, 2,257,483 acked runs, every batch disk check green, 0 lost; r5 stopped only because its 20 GiB RAM scratch filled (fail-stop on full storage, not a product bug). Earlier runs: r3 5,050 (harness crash, fixed 60d8fee), r4 ~1,900 (deposed-epoch snapshot bug, fixed 4af96b3). 12-VERIFICATION human_needed, no gaps. Run r6 (10k, >=45 GB scratch, dell-3) continues as confirmation; Phase 12 reopens if it finds a bug.
 
 ## Project Reference
 
