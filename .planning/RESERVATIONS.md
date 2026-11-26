@@ -272,7 +272,7 @@ Rules (D20):
 | 19–20 | — (QueueFlow / WorkflowFlow only if F2 had been rejected) | reserved P7, **unused** (F2 landed in 05-07: SpillPolicy, RateSpec, key_rate_limit, key_concurrency, on_retries_exhausted, placement, selector, WorkflowPolicy.paused; F8 `ApiToken.expires_at_ms` landed too; verified by 07-01). No Phase 7 META_FORMAT bump. |
 | 21 | — (P8 needs 0 post-freeze; Webhook landed in P5) | reserved P8 |
 | 22–23 | — | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) (unused at Phase 9 end; fallback not needed) |
-| 24–25 | — (fallback only if Phase 14 F2/F3/F4 had not landed pre-freeze) | reserved P14 |
+| 24–25 | — (fallback only if Phase 14 F2/F3/F4 had not landed pre-freeze) | reserved P14, unused (F2/F3/F4 landed pre-freeze) (14-01: MetaRecord ends at index 16; no Phase 14 META_FORMAT bump) |
 | 26 | — (PartitionReplication fallback only if Phase 12 F7 had not landed pre-freeze) | reserved P12, unused (12-18: MetaRecord ends at index 16) (F7 landed in 05-07: `PartitionAssignment.{replicas, isr_version, min_insync}`, `MemberRecord.{cluster_addr, repl_addr}`; verified by 12-01). No Phase 12 META_FORMAT bump. |
 | 27+ | — | unallocated |
 
@@ -323,7 +323,13 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 101 | `ModuleRecord` WitRequirement `{line, min_level}` | exists (P13; declared 13-01): `ext::EXT_WIT_REQUIREMENT`, postcard `WitRequirement{line: String, min_level: u32}` |
 | 102 | `ModuleRecord` / `WorkflowVersion` Retired `{retired_at_ms}` | exists (P13; declared 13-01): `ext::EXT_RETIRED`, postcard `Retired{retired_at_ms: u64}` |
 | 103–111 | spare | reserved P13, unused |
-| 112–143 | reserved P14 (ApiToken name/description/created_by/rotation link, ModuleRecord signature evidence + uploader tenants, ClusterInfo security policy, SealedSecret created/rotated, further Tenant knobs) | — |
+| 112 | `ApiToken` ApiTokenMeta `{name, description, created_by, rotated_from}` | planned P14 (14-01): `ext::EXT_API_TOKEN_META`, postcard `ApiTokenMeta{name: String, description: String, created_by: String, rotated_from: Option<String>}` (D-P14-28) |
+| 113 | `ModuleRecord` ModuleSignatures `{sigs}` (signature evidence; key fingerprints) | planned P14 (14-01): `ext::EXT_MODULE_SIGNATURES`, postcard `ModuleSignatures{sigs: Vec<ModuleSig{alg: u8 (1 minisign-Ed, 2 minisign-ED, 3 cosign-p256), key_fingerprint: [u8; 32] (sha256(alg ‖ public_key)), key_id: Vec<u8>, sig: Vec<u8>, added_at_ms: u64, added_by: String}>}` (D-P14-28, D-P14-10 B1) |
+| 114 | `ModuleRecord` ModuleUploaders `{tenants}` | planned P14 (14-01): `ext::EXT_MODULE_UPLOADERS`, postcard `ModuleUploaders{tenants: Vec<String>}` (D-P14-9) |
+| 115 | `ClusterInfo` SecurityPolicy `{require_signed_modules, trusted_keys, auth_mode}` | planned P14 (14-01): `ext::EXT_SECURITY_POLICY`, postcard `SecurityPolicy{require_signed_modules: bool, trusted_keys: Vec<TrustedKey{alg: u8, key_id: Vec<u8>, public_key: Vec<u8>, comment: String}>, auth_mode: u8}` (D-P14-10) |
+| 116 | `Tenant` TenantSecurity `{require_signed_modules, trusted_keys}` (can only tighten) | planned P14 (14-01): `ext::EXT_TENANT_SECURITY`, postcard `TenantSecurity{require_signed_modules: Option<bool>, trusted_keys: Vec<TrustedKey>}` (D-P14-10) |
+| 117 | `SealedSecret` SecretTimes `{created_at_ms, rotated_at_ms}` | planned P14 (14-01): `ext::EXT_SECRET_TIMES`, postcard `SecretTimes{created_at_ms: u64, rotated_at_ms: Option<u64>}` (D-P14-28) |
+| 118–143 | spare | reserved P14, spare |
 | 144 | `WorkflowPolicy` / `QueuePolicy` OnFailure | exists (P11, 11-12) |
 | 145 | DlqPolicy `{enabled, hook_catchup_ms}` | exists (P11, 11-12) |
 | 146–159 | spare | reserved P11 |
@@ -392,6 +398,34 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Crates / dirs | `fuzz/` (separate workspace, crate `ostro-fuzz`), `ostro-jepsen`, `deploy/helm/ostro`, `deploy/image` | P14 |
 | Id prefixes | `otk_` (API tokens; `wkr_` = Phase 7 worker tokens) | P14 / P7 |
 | Metric prefixes | `ostro_auth_`, `ostro_audit_`, `ostro_tenant_` | P14 |
+| Crate | `ostro-fuzz-targets` (`publish = false`; fuzz target logic + stable corpus replay in the main workspace, D-P14-17) | P14 (14-01) |
+| gRPC service | `ostro.api.v1.Security` (next to the reserved `Tenants`, `ApiTokens`, `Audit`) | P14 (D-P14-29) |
+| REST paths | `GET\|POST /v1/tenants`, `GET\|PATCH\|DELETE /v1/tenants/{id}`, `POST /v1/tenants/{id}/{suspend,resume}`, `GET\|POST /v1/auth/tokens`, `DELETE /v1/auth/tokens/{id}`, `POST /v1/auth/tokens/{id}/rotate`, `GET /v1/auth/whoami`, `GET /v1/audit`, `GET\|PUT /v1/security/modules/policy`, `POST /v1/security/modules/keys`, `DELETE /v1/security/modules/keys/{key_id}`, `POST /v1/modules/{sha}/signatures`, `POST /hooks/{tenant}/{name}`, `POST /ui/login`, `POST /ui/logout` | P14 (D-P14-29) |
+| REST test endpoints (failpoints builds only; 404 in a default build) | `POST /v1/admin/test/clock`, `POST /v1/admin/test/failpoints` | P14 (D-P14-29, D-P14-34) |
+| Header | `Ostro-Module-Signature` (repeatable; base64 of a `.minisig` or cosign signature, ≤ 8 KiB each, ≤ 4) | P14 (D-P14-10) |
+| Cookie | `ostro_session` (UI session: base64url(`{token_id, exp_ms}`) ‖ HMAC-SHA256) | P14 (D-P14-31) |
+| Sealed secret | `__ostro/ui-session-key` (plaintext-v0 until 14-19's reseal; `__ostro/token-key`, `__ostro/cluster-ca` resealed too, D-P14-30) | P14 (D-P14-29/31) |
+| CLI verbs | `ostro tenant {create,ls,get,set,suspend,resume,rm}`, `ostro auth {token {create,ls,revoke,rotate},whoami,bootstrap}`, `ostro audit {ls,verify}`, `ostro security {policy {get,set},trust {add,rm}}`, `ostro deploy --signature <file>` | P14 (D-P14-29) |
+| Env vars | `OSTRO_TOKEN` (CLI bearer), `OSTRO_BOOTSTRAP_TOKEN`, `OSTRO_REQUIRE_SIGNATURE`, `OSTRO_DOWNLOAD_BASE`, `OSTRO_INSTALL_DIR`, `OSTRO_FUZZ_SECS`, `OSTRO_JEPSEN_SECS`, `OSTRO_JEPSEN_SEED`, `OSTRO_JEPSEN_SEEDS`, `OSTRO_JEPSEN_OUT`, `OSTRO_JEPSEN_TOKEN`, `OSTRO_BENCH_ENFORCE`, `OSTRO_SOAK_SECS`, `OSTRO_SOAK_LOAD`, `OSTRO_EXPORT_AUTH_MATRIX`, `OSTRO_AUDIT_CRASH_ITERS`, `OSTRO_MINISIGN_PUBKEY` | P14 (D-P14-29) |
+| Data-dir file | `<data>/admin.token` (generated bootstrap bearer, 0600; next to `<data>/audit/`) | P14 (D-P14-5) |
+| Failpoints | `auth::lookup`, `audit::before_fsync`, `audit::writer_stall`, `audit::mutant::skip_chain` | P14 (D-P14-29) |
+| API error `details.reason` values | `unauthenticated`, `missing_scope`, `tenant_suspended`, `tenant_event_rate`, `tenant_not_empty`, `signature_required`, `signature_invalid`, `audit_unavailable`, `forbidden_tenant`, `audit_commit_failed` | P14 (D-P14-29) |
+| Metric prefix | `ostro_security_` (covers `ostro_security_policy_drift`) | P14 (D-P14-29) |
+| Config keys | `[tenants] metrics_tenant_labels`, `metrics_label_limit`; `[audit] head_export_interval` (plus the D-P14-5/11/12/31 keys inside the reserved `[auth]`/`[audit]` sections) | P14 (D-P14-29/39) |
+| Files / dirs | `install.sh`, `deploy/helm/ostro`, `deploy/helm/schemas`, `deploy/image`, `.github/workflows/{release,fuzz}.yml`, `docs/security/` | P14 (D-P14-29) |
+| Crate | `ostro-kafka` (`publish = false`; Kafka-protocol consumer client, 14-31/14-34) | P14 (D-P14-51) |
+| Cargo feature | `kafka` (crates `ostro-server` and `ostro`; default-on in `ostro`, D-P14-42) | P14 (D-P14-51) |
+| Config | `[[triggers.kafka]]` (key `kafka` inside the Phase 8 `[triggers]` section) with sub-tables `tls`, `sasl` | P14 (D-P14-51) |
+| Name grammar | idempotency-key prefix `__kafka/` (joins `__ostro/`, `__cron/`, `__hook/` under the D23 `__` reservation) | P14 (D-P14-51) |
+| Run tag | `ostro.kafka` (`ostro.kafka=<trigger name>`) | P14 (D-P14-51) |
+| Metric prefix | `ostro_kafka_` | P14 (D-P14-51) |
+| Failpoint prefixes | `kafka::`, `cluster_restore::` | P14 (D-P14-51) |
+| Failpoints (mutants, `repl::mutant::*` convention) | `repl::mutant::readd_stale_progress` (14-33), `repl::mutant::restore_skip_fixpoint` (14-30) | P14 (D-P14-51) |
+| Object key | `meta/head` (cluster bucket metadata-snapshot pointer, D-P14-45) | P14 (D-P14-51) |
+| Env vars | `OSTRO_TEST_KAFKA_BOOTSTRAP`, `OSTRO_TEST_KAFKA_TLS_*`, `OSTRO_TEST_KAFKA_SASL_*`, `OSTRO_TEST_SERVICES_DIR`, `OSTRO_KAFKA_CRASH_ITERS`, `OSTRO_KAFKA_CAPTURE_FIXTURES` | P14 (D-P14-51) |
+| Script | `scripts/test-services.sh` | P14 (D-P14-51) |
+| Docs | `docs/kafka-triggers.md`, `docs/cluster-restore.md` | P14 (D-P14-51) |
+| Error / report names | `NoConsistentCut` (cluster restore), `unsupported_version` (Kafka client) | P14 (D-P14-51) |
 | Crate | `ostro-repl-conformance` (replication conformance; P9 owns `ostro-conformance`) | P12 |
 | gRPC package | `ostro.cluster.v1` (services `Replication`, `MetaPeer`) | P12 |
 | Config | `[replication]`; inside P7's `[cluster]`: `[[cluster.peers]]`, `replication_listen` | P12 |
