@@ -44,7 +44,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 10: Developer CLI & Test Kits** - `ostro init/build/deploy/replay/dev --watch` with hermetic toolchains, time-skipping test harnesses, thin client libraries
 - [x] **Phase 11: Run Operations & Embedded UI** - Rerun-from-step, bulk ops, DLQ with `on_failure`, tags/search, published limits, and an embedded UI with actions
 - [x] **Phase 12: Replicated Partition Logs** - Replication conformance suite first, then follower-pull ISR, HW, epoch truncation, ISR-only election, hot-standby followers
-- [ ] **Phase 13: Cluster Membership, Routing & Upgrades** - Multi-voter metadata, `ostro cluster init/join/remove`, request forwarding, rolling upgrades with N/N-1 WIT linkers, module GC and `migrate-runs`
+- [x] **Phase 13: Cluster Membership, Routing & Upgrades** - Multi-voter metadata, `ostro cluster init/join/remove`, request forwarding, rolling upgrades with N/N-1 WIT linkers, module GC and `migrate-runs`
 - [ ] **Phase 14: Multi-Tenancy, Security & 1.0 Release** - Scoped/tenant tokens and quotas, signed modules, audit log, fuzzing + external review, Jepsen/soak/benchmarks, release artefacts, Helm, docs
 
 ## Phase Details
@@ -462,7 +462,7 @@ Plans:
 - [x] 13-01-PLAN.md — PHASE-13 GATE (Phase 12 + 9-11 complete, seams incl. both voter-check sites, route inventory, reservations) + decisions/USER REVIEW to STATE + manifests first + library contracts (compat levels, RepinRun/AlterReplicas shapes, ext 96-102, NewerFormat, handoff/address-book constructor stubs, phase13 API traits) (all)
 - [x] 13-02-PLAN.md — Server/CLI/harness seam: p13/ with call sites (both voter checks, boot rule, fence, routing wrap, start, shutdown), config keys, client/CLI stubs, P13Harness trait + stub modules (wave 2; all)
 - [x] 13-03-PLAN.md — Wire surface: Cluster/ModuleLifecycle/Membership/NodeOps protos (ModuleRefs with partition/epoch coverage), worker Hello feature_level, REST/gRPC adapters + RequestMeta, production GrpcControlPlane with parity (wave 3; API-08, CLUS-05..07)
-- [ ] 13-04-PLAN.md — Compatibility gate (require, finalizer, hold, NodeVersion, boot/running fences, level emulation) + partition fail-stop on unknown commands (wave 2; CLUS-06) — PARTIAL 2026-11-24: gate/finalizer/hold/advertiser/fences on main (88f4c78, 08bd9be, 20ddfb0); partition fail-stop (Task 2) HELD on wip/13-04-task2 pending orchestrator OK for the rebuild_digest Op::Raw generator change (13-04-SUMMARY)
+- [x] 13-04-PLAN.md — Compatibility gate (require, finalizer, hold, NodeVersion, boot/running fences, level emulation) + partition fail-stop on unknown commands (wave 2; CLUS-06) — 2026-11-24/25 (88f4c78, 08bd9be, 20ddfb0; Task 2 db09626 + a649ebd, user-approved rebuild_digest generator change)
 - [x] 13-05-PLAN.md — Vendored driver FatalApply (halt before applied) + MetaSm fail-stop, TransferLeader/ReadIndex/progress, MetaHandle surface, MetaPeer large snapshots + lease anchor, remedy text (wave 2; CLUS-05, CLUS-06, API-08)
 - [x] 13-06-PLAN.md — Pure algorithms (TDD): reconciler with joint 1->3->5 changes, placement planner, reassignment state machine (shrink only when target in ISR), leader balancer, proptest models (wave 2; CLUS-05)
 - [x] 13-07-PLAN.md — LinkerSet by WIT major line, JOURNAL_IFACE fix, per-function level requirement, test-only 0.1.1 host and 0.2 fixture line, cache key by line (wave 2; ENG-10)

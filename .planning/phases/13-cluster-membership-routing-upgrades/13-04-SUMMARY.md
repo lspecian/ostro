@@ -32,7 +32,7 @@ key-decisions:
   - "Any hold blocks auto and manual finalize (Held / NotReady); hold = Some(finalized), release clears; both idempotent and forwardable from any node"
   - "Undecodable tag 98 reads as LEVEL_MIN for gates/fences (safe direction) but the finalizer refuses to overwrite it"
   - "start_advertiser / start_finalizer take the node's Arc<dyn Clock> (P12 clock gate: no SystemClock in ostro-cluster); *_with variants add config"
-requirements-completed: []
+requirements-completed: [CLUS-06]
 duration: "see Metrics"
 completed: 2026-11-24
 ---
