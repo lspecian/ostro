@@ -66,7 +66,7 @@ created: 2026-11-19
 | 14-01-03 | 01 | 1 | all | Dependency matrix + every manifest + new-crate skeletons + fuzz manifest/nightly | `cargo deny check`; forbidden crates; per-manifest dependency greps; `cargo tree` wasm-smith 0.261.0; 15 `[[bin]]`; skeleton tests | ⬜ pending |
 | 14-01b-01 | 01b | 2 | all | p14 seam + stubs + config | `--test config`, `--test p14_skeleton`; version_gate/metrics_tenant_labels/head_export_interval greps | ⬜ pending |
 | 14-01b-02 | 01b | 2 | all | Call sites (upload before existing-sha, version_gate, ingress, audit, workers), main.rs intercepts, CLI/client stubs | call-site greps + order check; `-p ostro-server/-p ostro-cli/-p ostro-client` tests | ⬜ pending |
-| 14-01b-03 | 01b | 2 | all | Fuzz bins, tool pins, CI sync | nightly fuzz build; fetch-tools; FAILPOINT list diff; no manifest diff; CLOCK_GATE_SCOPED | ⬜ pending |
+| 14-01b-03 | 01b | 2 | all | Fuzz bins, tool pins, test services (S3 + Kafka listeners), shared size limit, CI sync | nightly fuzz build; fetch-tools; FAILPOINT list diff; no manifest diff; CLOCK_GATE_SCOPED | ⬜ pending |
 | 14-02-01 | 02 | 3 | SEC-02..04, DISP-06 | Protos + wire tests | `cargo test -p ostro-proto --test p14_wire` | ⬜ pending |
 | 14-02-02 | 02 | 3 | SEC-02 | Authentication layer + interceptor | `cargo test -p ostro-api --test p14_authn` | ⬜ pending |
 | 14-02-03 | 02 | 3 | SEC-02..04 | Adapters, signature carriage, tenant hooks, fakes, OpenAPI, parity | `cargo test -p ostro-api --test p14_routes --test parity --test openapi`; OpenAPI diff additive | ⬜ pending |
@@ -131,7 +131,7 @@ created: 2026-11-19
 | 14-31-01 | 31 | 3 | TRIG-04 | Transport: framing, ApiVersions negotiation, TLS, SASL PLAIN/SCRAM (fake broker, rcgen CA at test time) | `cargo test -p ostro-kafka --lib`; `--test transport`; no rdkafka/openssl/lz4-sys/zstd-sys; no committed keys | ⬜ pending |
 | 14-31-02 | 31 | 3 | TRIG-04 | TLS + SASL against the Kafka 4.1 test broker (SSL + SASL_PLAINTEXT listeners) | test-services start; `--test broker_auth`; fails on `SKIP:` | ⬜ pending |
 | 14-34-01 | 34 | 4 | TRIG-04 | Codecs (pure Rust), metadata, coordinator/offsets, fetch, testkit | `cargo test -p ostro-kafka --features testkit --test codec` + `--lib` | ⬜ pending |
-| 14-34-02 | 34 | 4 | TRIG-04 | Broker suite, locally captured fixtures, musl size (70 MB rule) | test-services start; `--test broker` (fails on `SKIP:`); fixtures present; size recorded, gate 60 or 70 MB | ⬜ pending |
+| 14-34-02 | 34 | 4 | TRIG-04 | Broker suite, locally captured fixtures, musl size (70 MB rule via the shared limit file) | test-services start; `--test broker` (fails on `SKIP:`); fixtures present; `scripts/binary-size-limit` 60000000 or 70000000 and matching docs | ⬜ pending |
 | 14-32-01 | 32 | 5 | TRIG-04 | Pure keys/input/CommitTracker/owner + config validation | `PROPTEST_CASES=512 cargo test -p ostro-triggers --test kafka`; `-p ostro-server --features kafka --lib -- p14::kafka` | ⬜ pending |
 | 14-32-02 | 32 | 5 | TRIG-04 | Driver: owner-leader consumers, durable-then-commit, backpressure, leadership move | test-services start; `cargo test -p ostro-server --features kafka --test kafka_trigger`; `-p ostro-repl-conformance --test kafka_failover` (OSTRO_FAILPOINT_BIN); fails on `SKIP:`; `cargo build -p ostro --no-default-features`; CLOCK_GATE_SCOPED | ⬜ pending |
 | 14-32-03 | 32 | 5 | TRIG-04 | kill -9 crash test + operator doc | `OSTRO_KAFKA_CRASH_ITERS=20 … --test kafka_crash -- --ignored` (cluster `--cmd`); doc keyword checks | ⬜ pending |
