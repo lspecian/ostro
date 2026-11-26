@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 // Phase 14 (14-01): Principal / Scope / Authenticator / Method inventory (D-P14-3/6).
 pub mod auth;
+// Phase 14 (14-02): bearer authentication layer (PRINCIPAL), unauthenticated route list.
+pub mod authn_layer;
 pub mod domain;
 pub mod error;
 #[cfg(any(test, feature = "fake"))]
@@ -221,7 +223,8 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
     // its body, so it sits outside the API middleware stack, like the presign route.
     let join = phase13_adapters::join_router(ext.clone())
         .layer(axum::extract::DefaultBodyLimit::max(cfg.max_request_bytes));
-    rest.with_state(cp)
+    let app = rest
+        .with_state(cp)
         .layer(axum::Extension(opts))
         .merge(phase11::router(ext.clone()))
         .merge(phase13_adapters::router(ext.clone()))
@@ -232,7 +235,11 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .merge(objects)
         .merge(join)
-        .merge(grpc)
+        .merge(grpc);
+    // Phase 14 (14-02): bearer authentication around every REST and gRPC route (the
+    // unauthenticated ones are `authn_layer::UNAUTHENTICATED`); requests run inside
+    // `auth::PRINCIPAL`.
+    authn_layer::apply(app, Arc::clone(&cfg.authenticator))
         // Phase 13 (13-03): request metadata (`ostro-*` headers, deadline) for every REST and
         // gRPC call; `ostro-consistency` out on success.
         .layer(axum::middleware::from_fn(request_meta::middleware))
