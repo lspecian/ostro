@@ -425,6 +425,11 @@ pub async fn migrate_runs(
     crate::route::consistency::before_meta_read(ctx).await?;
     let (from, to) = resolve(ctx, &r)?;
     check_not_retired(ctx.meta.view(), &to)?;
+    // Phase 14 (14-01b, B1a): the repin target passes the signature gate (14-19).
+    if let Some(p14) = crate::p14::ctx_of(&ctx.local_cp)? {
+        let tenant = split_qualified(&r.workflow).0;
+        crate::p14::version_gate(&p14, tenant, &r.workflow, r.to_version, to).await?;
+    }
     if !r.dry_run {
         ostro_cluster::compat::require(ctx.meta.view(), Feature::RepinRun, ctx.level_max)
             .map_err(feature_error)?;

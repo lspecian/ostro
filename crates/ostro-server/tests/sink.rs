@@ -651,6 +651,7 @@ impl BridgeFx {
                 node_id: 1,
                 clock: Arc::new(ostro_partition::SystemClock),
                 public_base_url: "http://127.0.0.1:1".into(),
+                audit: Arc::new(ostro_types::audit::NoopAuditSink),
             },
         )
         .await

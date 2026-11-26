@@ -36,6 +36,8 @@ pub mod reassign;
 pub mod routing;
 pub mod ryw;
 pub mod version_gate;
+// Phase 14 (14-01b declares; later Phase 14 plans fill it).
+pub mod p14;
 
 use std::time::Duration;
 
@@ -138,6 +140,8 @@ pub fn all() -> Vec<Scenario> {
         promotion::all(),
         migrate::all(),
         integration_p13::all(),
+        // Phase 14 (14-01b).
+        p14::all(),
     ]
     .into_iter()
     .flatten()

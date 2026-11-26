@@ -316,6 +316,10 @@ pub struct UploadModule {
     /// Deployed module name (Phase 14 F4), stored tenant-qualified on every workflow
     /// version this upload registers.
     pub name: Option<String>,
+    /// Phase 14 (14-01b contract; carriage 14-02, verification 14-19): detached signature
+    /// files (`.minisig` / cosign), decoded from the repeatable `Ostro-Module-Signature`
+    /// header or the gRPC `signatures` field. Empty = unsigned.
+    pub signatures: Vec<Vec<u8>>,
 }
 
 /// Upload outcome.

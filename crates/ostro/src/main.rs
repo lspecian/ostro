@@ -22,6 +22,10 @@
 //! `--no-start`). A Phase 13 fail-stop (running fence, removed node) ends `dev` / `server`
 //! with a non-zero exit after the graceful shutdown.
 //!
+//! Phase 14 (14-01b): `ostro auth bootstrap --data-dir` ([`ostro_server::p14::bootstrap::offline`],
+//! 14-03) and `ostro audit verify --data-dir` ([`ostro_server::audit::verify::offline`], 14-04)
+//! are offline commands on a stopped node's data dir, also run by this binary.
+//!
 //! `dev` and `server` load the layered configuration (base profile < optional TOML file
 //! < `OSTRO_<SECTION>__<KEY>` env < flags), start [`ostro_server::Server`], print one
 //! ready line on stdout, then wait for SIGINT / SIGTERM (or the API server stopping) and
@@ -256,6 +260,25 @@ fn main() -> ExitCode {
             ostro_cli::ClientCommand::Cluster {
                 command: ostro_cli::commands::cluster::ClusterCmd::Join(a),
             } => run_cluster_join(a, started),
+            // Phase 14 (14-01b): offline commands that need server internals on a stopped
+            // node's data dir.
+            ostro_cli::ClientCommand::Auth(ostro_cli::commands::auth::AuthCmd::Bootstrap(a)) => {
+                offline(ostro_server::p14::bootstrap::offline(
+                    ostro_server::p14::bootstrap::BootstrapArgs {
+                        data_dir: a.data_dir,
+                        config: a.config,
+                        expires: a.expires,
+                    },
+                ))
+            }
+            ostro_cli::ClientCommand::Audit(ostro_cli::commands::audit::AuditCmd::Verify(a)) => {
+                offline(ostro_server::audit::verify::offline(
+                    ostro_server::audit::verify::VerifyArgs {
+                        data_dir: a.data_dir,
+                        config: a.config,
+                    },
+                ))
+            }
             other => ostro_cli::run(other).into(),
         },
         None => {
@@ -264,6 +287,15 @@ fn main() -> ExitCode {
             println!();
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// The exit of a Phase 14 offline command (`ostro auth bootstrap`, `ostro audit verify`):
+/// the command prints its own output; an error is one stderr line, exit 1.
+fn offline(res: Result<(), ostro_server::p14::P14Error>) -> ExitCode {
+    match res {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => fail(e),
     }
 }
 

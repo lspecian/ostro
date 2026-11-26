@@ -70,6 +70,8 @@ pub struct Client {
     base: Url,
     http: reqwest::Client,
     timeout: Duration,
+    /// Phase 14 (14-01b): the bearer sent on every request (`OSTRO_TOKEN` by default).
+    bearer: Option<reqwest::header::HeaderValue>,
 }
 
 /// Parse a `--server` value: `http(s)://host:port[/prefix]`, or `host:port` (http implied).
@@ -137,7 +139,15 @@ impl Client {
             base,
             http,
             timeout,
+            bearer: crate::bearer_from_env().and_then(|t| crate::authorization(&t)),
         })
+    }
+
+    /// Send `token` as `Authorization: Bearer <token>` (`None`: no header), replacing the
+    /// `OSTRO_TOKEN` default.
+    pub fn with_bearer(mut self, token: Option<&str>) -> Self {
+        self.bearer = token.and_then(crate::authorization);
+        self
     }
 
     /// The server base URL.
@@ -166,7 +176,11 @@ impl Client {
     }
 
     pub(crate) fn request(&self, method: Method, url: Url) -> RequestBuilder {
-        self.http.request(method, url).timeout(self.timeout)
+        let r = self.http.request(method, url).timeout(self.timeout);
+        match &self.bearer {
+            Some(b) => r.header(reqwest::header::AUTHORIZATION, b.clone()),
+            None => r,
+        }
     }
 
     pub(crate) async fn send(&self, rb: RequestBuilder) -> Result<Response, CallError> {

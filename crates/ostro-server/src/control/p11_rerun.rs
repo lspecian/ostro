@@ -460,6 +460,18 @@ async fn rerun(ctx: &P11Ctx, req: RerunRequest) -> Result<RerunResponse, ApiErro
     let (version, module_sha) = target_version(ctx, &src.rec, &req.version)?;
     // Phase 13 (13-18): a retired target module takes no new run (as a start).
     crate::rerun::check_restart_module(ctx.cc.meta.view(), Some(&module_sha))?;
+    // Phase 14 (14-01b, B1a): every rerun target (source pin, explicit or active version)
+    // passes the signature gate (14-19).
+    if let Some(p14) = crate::p14::ctx_of(&ctx.cc.partitions)? {
+        crate::p14::version_gate(
+            &p14,
+            src.rec.tenant.as_deref(),
+            &src.rec.workflow,
+            version,
+            module_sha,
+        )
+        .await?;
+    }
     let module = prepare(ctx, module_sha).await?;
 
     // 4. The new run id (pre-allocated: the replay check runs as this id).

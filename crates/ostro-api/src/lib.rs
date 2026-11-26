@@ -70,7 +70,7 @@ pub fn tls_provider() -> rustls::crypto::CryptoProvider {
 }
 
 /// HTTP API limits and router options.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ApiConfig {
     /// Body limit of `PUT /v1/modules/{sha256}` only.
     pub max_module_bytes: usize,
@@ -82,7 +82,34 @@ pub struct ApiConfig {
     /// When set, `GET /` answers `303 See Other` to this location instead of the shell
     /// page (D-P11-17; implemented by 11-09). `None` by default.
     pub root_redirect: Option<String>,
+    /// Phase 14 (14-01b contract for 14-02's authentication layer, D-P14-6): bearer →
+    /// principal. [`auth::AllowDev`] by default (`[auth] mode = "none"`); the server sets
+    /// `p14::authenticator`. Compared by identity.
+    pub authenticator: Arc<dyn auth::Authenticator>,
 }
+
+impl std::fmt::Debug for ApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiConfig")
+            .field("max_module_bytes", &self.max_module_bytes)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("max_payload_bytes", &self.max_payload_bytes)
+            .field("root_redirect", &self.root_redirect)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ApiConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_module_bytes == other.max_module_bytes
+            && self.max_request_bytes == other.max_request_bytes
+            && self.max_payload_bytes == other.max_payload_bytes
+            && self.root_redirect == other.root_redirect
+            && Arc::ptr_eq(&self.authenticator, &other.authenticator)
+    }
+}
+
+impl Eq for ApiConfig {}
 
 impl Default for ApiConfig {
     /// 64 MiB modules, 4 MiB requests (matches ostro-server's `[api]` defaults), 4 MiB
@@ -93,6 +120,7 @@ impl Default for ApiConfig {
             max_request_bytes: 4 * 1024 * 1024,
             max_payload_bytes: 4 * 1024 * 1024,
             root_redirect: None,
+            authenticator: Arc::new(auth::AllowDev),
         }
     }
 }

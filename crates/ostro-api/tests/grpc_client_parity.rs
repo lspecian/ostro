@@ -241,6 +241,7 @@ async fn scenario(t: &Target, f: &Fakes) -> Transcript {
     let wasm = fake_module(&[("greet", 1), ("other", 1)]);
     let sha = sha256_hex(&wasm);
     let up = |sha: &str, wasm: &bytes::Bytes| UploadModule {
+        signatures: Vec::new(),
         sha256: sha.to_owned(),
         wasm: wasm.clone(),
         language: Some("rust".into()),

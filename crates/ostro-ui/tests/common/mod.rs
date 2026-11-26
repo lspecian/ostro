@@ -150,6 +150,7 @@ pub async fn seed(ui: &Ui) -> Seeded {
     let cp = &ui.cp;
     let wasm = fake_module(&[("greet", 1), ("billing", 2)]);
     cp.upload_module(UploadModule {
+        signatures: Vec::new(),
         sha256: sha256_hex(&wasm),
         wasm,
         language: None,

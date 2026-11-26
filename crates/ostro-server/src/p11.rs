@@ -206,8 +206,22 @@ pub fn ui_config(cfg: &ServerConfig) -> ostro_ui::UiConfig {
     }
 }
 
+/// Phase 14 (14-01b, D-P14-33): what the client-facing routers receive, built by
+/// `server.rs` from the routed control plane and slots (`p14::wrap_ingress`, `p14::ui_auth`,
+/// `p14::ui_scope_layer`).
+pub struct ApiFront {
+    /// The guarded control plane and slots (REST, gRPC, UI).
+    pub guarded: crate::p14::Guarded,
+    /// The UI's authentication.
+    pub ui_auth: Arc<dyn ostro_ui::auth::UiAuth>,
+    /// The `/ui` principal scope.
+    pub ui_layer: crate::p14::UiScopeLayer,
+}
+
 /// Build the Phase 11 context and the one-port router (see the module docs). `router` is
 /// the base the API and UI routers are merged onto (`server.rs` passes an empty one).
+/// `front` (Phase 14) turns the routed control plane and slots into what REST, gRPC and the
+/// UI serve; in-process consumers keep `cc.routed`.
 #[allow(clippy::too_many_arguments)]
 pub fn wire(
     cc: &ControlCtx,
@@ -218,6 +232,7 @@ pub fn wire(
     router: axum::Router,
     cfg: &Arc<ServerConfig>,
     p13_extensions: &dyn Fn(&mut ApiExtensions),
+    front: &dyn Fn(Arc<dyn ControlPlane>, ApiExtensions) -> ApiFront,
 ) -> axum::Router {
     let limits = cfg.limits.to_run_limits();
     let bulk = BulkRegistry::new(cc.data_dir.clone(), cfg.bulk.clone(), Arc::clone(&cc.clock));
@@ -248,14 +263,21 @@ pub fn wire(
     // Phase 13 (13-02): the Phase 13 slots and routing over every slot, then the routed
     // control plane for the API and the UI.
     p13_extensions(&mut ext);
-    let cp: Arc<dyn ControlPlane> = Arc::clone(&cc.routed);
+    // Phase 14 (14-01b): the guarded instances for the client-facing routers.
+    let ApiFront {
+        guarded,
+        ui_auth,
+        ui_layer,
+    } = front(Arc::clone(&cc.routed), ext);
+    let cp = guarded.control;
+    let ext = guarded.ext;
     let api = ostro_api::router_with(Arc::clone(&cp), api_cfg.clone(), ext.clone());
-    let ui_router = ostro_ui::router(ostro_ui::UiDeps {
+    let ui_router = ui_layer.apply(ostro_ui::router(ostro_ui::UiDeps {
         cp,
         ext,
         cfg: ui,
-        auth: Arc::new(ostro_ui::auth::AllowAll),
-    });
+        auth: ui_auth,
+    }));
     router.merge(api).merge(ui_router)
 }
 

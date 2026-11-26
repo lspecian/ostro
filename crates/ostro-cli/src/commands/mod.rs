@@ -38,6 +38,11 @@ pub mod toolchain;
 pub mod cluster;
 pub mod migrate_runs;
 pub mod modules_lc;
+// Phase 14 (14-01b clap shapes; 14-17 tenant/auth, 14-18 audit, 14-19 security).
+pub mod audit;
+pub mod auth;
+pub mod security;
+pub mod tenant;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -183,6 +188,23 @@ pub enum ClientCommand {
         #[command(subcommand)]
         command: modules_lc::ModulesCommand,
     },
+    /// Tenants (ls; create, update, suspend, resume, delete land with 14-17).
+    #[command(subcommand)]
+    Tenant(tenant::TenantCmd),
+    /// API tokens (create, ls, revoke, rotate), whoami, and offline admin bootstrap.
+    #[command(subcommand)]
+    Auth(auth::AuthCmd),
+    /// The audit log: query (ls) and offline chain verification (verify).
+    #[command(subcommand)]
+    Audit(audit::AuditCmd),
+    /// Module signing policy (policy get/set) and trusted keys (trust add/rm).
+    #[command(subcommand)]
+    Security(security::SecurityCmd),
+}
+
+/// The answer of a Phase 14 CLI stub (a usage error naming the owner plan).
+pub(crate) fn lands_in(verb: &str, plan: &str) -> CallError {
+    CallError::Usage(format!("{verb}: not implemented until {plan}"))
 }
 
 /// Run a verb to completion on a current-thread runtime.
@@ -298,6 +320,22 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         },
         ClientCommand::MigrateRuns(a) => &a.conn,
         ClientCommand::Modules { command } => command.conn(),
+        ClientCommand::Tenant(c) => c.conn(),
+        ClientCommand::Auth(c) => match c.conn() {
+            Some(c) => c,
+            None => {
+                eprintln!("ostro: error: `ostro auth bootstrap` is run by the ostro binary");
+                return Outcome::Usage;
+            }
+        },
+        ClientCommand::Audit(c) => match c.conn() {
+            Some(c) => c,
+            None => {
+                eprintln!("ostro: error: `ostro audit verify` is run by the ostro binary");
+                return Outcome::Usage;
+            }
+        },
+        ClientCommand::Security(c) => c.conn(),
         ClientCommand::Init(_)
         | ClientCommand::Build(_)
         | ClientCommand::Toolchain(_)
@@ -340,6 +378,10 @@ pub async fn dispatch(cmd: ClientCommand) -> Outcome {
         ClientCommand::Cluster { command } => cluster::run(&client, out, command).await,
         ClientCommand::MigrateRuns(a) => migrate_runs::run(&client, out, a).await,
         ClientCommand::Modules { command } => modules_lc::run(&client, out, command).await,
+        ClientCommand::Tenant(c) => tenant::run(&client, out, c).await,
+        ClientCommand::Auth(c) => auth::run(&client, out, c).await,
+        ClientCommand::Audit(c) => audit::run(&client, out, c).await,
+        ClientCommand::Security(c) => security::run(&client, out, c).await,
         ClientCommand::Init(_)
         | ClientCommand::Build(_)
         | ClientCommand::Toolchain(_)

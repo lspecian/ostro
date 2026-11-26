@@ -288,6 +288,21 @@ pub(crate) async fn start_run(
     let wf = resolve_version(cp, &workflow, req.version)?;
     // Phase 13 (13-15): a retired module takes no new runs (`module_retired`).
     super::module_retire::check_not_retired(cp.meta().view(), &wf.module_sha256)?;
+    // Phase 14 (14-01b, B1a): an explicit version selection passes the signature gate
+    // (14-19; the active version was gated at activation).
+    let p14 = crate::p14::ctx_of(cp)?;
+    if req.version.is_some()
+        && let Some(ctx) = &p14
+    {
+        crate::p14::version_gate(
+            ctx,
+            tenant.as_deref(),
+            &workflow,
+            wf.version,
+            wf.module_sha256,
+        )
+        .await?;
+    }
     // 13-18: the tier-B start-during-GC race widens the window here (failpoints build).
     #[cfg(feature = "failpoints")]
     super::module_retire::start_hold().await;
@@ -368,6 +383,28 @@ pub(crate) async fn start_run(
         };
     }
 
+    // Phase 14 (14-01b): ingress admission after the dedupe lookup (14-20: suspended
+    // tenants, event-rate budgets; a dedupe hit is not charged). The trigger comes from the
+    // idempotency key (`__cron/`, `__hook/`, `__kafka/`).
+    if let Some(ctx) = &p14 {
+        let dedupe_hit = match &idem {
+            Some(k) => {
+                let reader = handle.reader();
+                let dk = dedupe_key(&workflow, k.as_bytes());
+                tokio::task::spawn_blocking(move || reader.get(Table::Dedupe, &dk))
+                    .await
+                    .map_err(task_error)?
+                    .map_err(store_error)?
+                    .is_some()
+            }
+            None => false,
+        };
+        let kind = crate::p14::IngressKind::Start {
+            dedupe_hit,
+            trigger: crate::p14::TriggerKind::of_key(idem.as_deref()),
+        };
+        crate::p14::admit_ingress(ctx, kind, tenant.as_deref()).await?;
+    }
     // 07-08 (D-W21): StartRun rate limit before anything is written or proposed (429).
     crate::flow::rate_limit::admit(
         cp,

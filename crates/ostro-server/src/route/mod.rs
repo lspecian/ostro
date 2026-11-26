@@ -1311,6 +1311,9 @@ fn api_config(ctx: &P13Ctx) -> ostro_api::ApiConfig {
         max_request_bytes: usize::try_from(c.api.max_request_bytes).unwrap_or(usize::MAX),
         max_payload_bytes: usize::try_from(c.limits.max_payload_bytes.get()).unwrap_or(usize::MAX),
         root_redirect: None,
+        // Phase 14 (14-01b): the node API is reached by node identities only; the forwarded
+        // principal (14-15) is not a bearer.
+        ..ostro_api::ApiConfig::default()
     }
 }
 

@@ -186,6 +186,11 @@ pub(crate) async fn signal_run(
             dry_run: true,
         });
     }
+    // Phase 14 (14-01b): ingress admission of the signal (14-20).
+    if let Some(ctx) = crate::p14::ctx_of(cp)? {
+        crate::p14::admit_ingress(&ctx, crate::p14::IngressKind::Signal, rec.tenant.as_deref())
+            .await?;
+    }
     let event = encoded_event(
         cp,
         handle,
@@ -500,6 +505,15 @@ pub(crate) async fn complete_token(
                 "no open await-token wait for this op",
             )),
         };
+    }
+    // Phase 14 (14-01b): ingress admission of the await-token completion (14-20).
+    if let Some(ctx) = crate::p14::ctx_of(cp)? {
+        crate::p14::admit_ingress(
+            &ctx,
+            crate::p14::IngressKind::TokenComplete,
+            rec.tenant.as_deref(),
+        )
+        .await?;
     }
     let event = encoded_event(
         cp,

@@ -45,6 +45,11 @@ pub mod client;
 pub mod cluster;
 pub mod error;
 pub mod typed;
+// Phase 14 (14-01b stubs; 14-17 tenants/api_tokens, 14-18 audit, 14-19 security).
+pub mod api_tokens;
+pub mod audit;
+pub mod security;
+pub mod tenants;
 
 pub use client::{CallError, Client, Response};
 pub use error::ClientError;
@@ -58,6 +63,36 @@ use tokio as _;
 use tracing as _;
 // Plan 14-01 (D-P14-37): `base64` for signature upload (14-17/14-19), anchored until it is used.
 use base64 as _;
+
+/// The environment variable holding the API bearer token (Phase 14, D-P14-5).
+pub const TOKEN_ENV: &str = "OSTRO_TOKEN";
+
+/// The bearer token from [`TOKEN_ENV`] (`None` when unset or blank). [`Client`] sends it as
+/// `Authorization: Bearer <token>` on every request ([`authorization`]).
+pub fn bearer_from_env() -> Option<String> {
+    std::env::var(TOKEN_ENV)
+        .ok()
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
+
+/// The `Authorization` header value for `token` (`Bearer <token>`); `None` when the token
+/// is not a valid header value.
+pub fn authorization(token: &str) -> Option<reqwest::header::HeaderValue> {
+    let mut v = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).ok()?;
+    v.set_sensitive(true);
+    Some(v)
+}
+
+/// The answer of a Phase 14 client stub: `unimplemented`, naming the owner plan.
+pub(crate) fn lands_in(method: &str, plan: &str) -> ClientError {
+    ClientError {
+        status: None,
+        code: "unimplemented".to_owned(),
+        message: format!("{method}: Phase 14: implemented in {plan}"),
+        details: serde_json::Value::Null,
+    }
+}
 
 #[cfg(test)]
 mod dev_dep_anchors {

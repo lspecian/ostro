@@ -274,8 +274,24 @@ pub(crate) async fn upload_module(
         }
         None => String::new(),
     };
+    // Phase 14 (14-01b, B1b): the signature gate, right after the sha check and before the
+    // existing-module lookup, compilation, every meta write and the auto-activation (a
+    // cross-tenant re-upload of a stored sha is gated like a fresh upload).
+    let p14 = crate::p14::ctx_of(cp)?;
+    let evidence = match &p14 {
+        Some(ctx) => crate::p14::upload_gate(ctx, tenant, sha, &req.wasm, &req.signatures).await?,
+        None => crate::p14::UploadEvidence::default(),
+    };
 
     let existing = cp.meta.view().read(|s| s.module(&sha).cloned());
+    // Phase 14 (14-01b): the existing-sha branch (14-16: per-tenant registration).
+    if existing.is_some()
+        && let Some(ctx) = &p14
+        && let crate::p14::RegisterDecision::Deny(e) =
+            crate::p14::register_existing(ctx, sha, tenant).await
+    {
+        return Err(e);
+    }
     // ext of a fresh Module record (13-14: ext 101 when the module needs it).
     let mut module_ext = Vec::new();
     let by_local = match &existing {
@@ -423,8 +439,16 @@ pub(crate) async fn upload_module(
     let pairs: Vec<(String, u32)> = by_key.keys().cloned().collect();
     let created = if existing.is_some() {
         merge_module_workflows(cp, &sha, &pairs).await?;
+        // Phase 14 (14-19): new valid signatures join the stored evidence (ext 113).
+        if let Some(ctx) = &p14
+            && !evidence.is_empty()
+        {
+            crate::p14::merge_evidence(ctx, sha, evidence).await?;
+        }
         false
     } else {
+        // Phase 14 (14-19): the upload's signature evidence (ext 113).
+        crate::p14::evidence_ext(&evidence, &mut module_ext);
         let record = ModuleRecord {
             sha256: sha,
             size: req.wasm.len() as u64,
@@ -635,6 +659,11 @@ pub(crate) async fn activate_workflow(
                 .map(|w| w.value.module_sha256)
         }) {
             super::module_retire::check_not_retired(cp.meta.view(), &sha)?;
+            // Phase 14 (14-01b, B1c): signatures for the activating tenant (14-19).
+            if let Some(ctx) = crate::p14::ctx_of(cp)? {
+                let tenant = split_qualified(&req.name).0;
+                crate::p14::activation_gate(&ctx, tenant, sha).await?;
+            }
         }
         let res = cp
             .meta

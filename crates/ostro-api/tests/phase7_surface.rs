@@ -21,6 +21,7 @@ async fn fake_with_workflow() -> FakeControlPlane {
     let cp = FakeControlPlane::new();
     let wasm = fake_module(&[("greet", 1)]);
     cp.upload_module(UploadModule {
+        signatures: Vec::new(),
         sha256: sha256_hex(&wasm),
         wasm,
         language: None,

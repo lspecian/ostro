@@ -78,6 +78,20 @@
 //! cluster's effective one (`[node] node_id` or the join marker's), written back into the
 //! configuration every later consumer reads.
 //!
+//! Phase 14 (14-01b, D-P14-33) has one seam, [`crate::p14`] (final after 14-01b):
+//! [`p14::wrap_clock`] at the clock construction; [`p14::build_ctx`] right after the cluster
+//! start (meta + clock) and before the bridge (its audit sink wraps the bridge's resolver)
+//! and the worker join service ([`p14::worker_event`]); [`p14::P14Ctx::attach_node`] after
+//! `Node::open`; [`p14::attach`] on the control plane (upload / version / activation gates,
+//! per-tenant registration, ingress admission); [`p14::authenticator`] into `ApiConfig`;
+//! inside `p11::wire` [`p14::fill_extensions`] (before the Phase 13 slot routing) and
+//! [`p14::wrap_ingress`] for REST, gRPC and `/ui` (with [`p14::ui_auth`] and
+//! [`p14::ui_scope_layer`]) while every in-process consumer keeps the routed instance;
+//! [`p14::start`] after [`p13::start`]; [`p14::start_triggers`] once the server runs (the
+//! routed instance and the node's roles, like the Phase 8 drivers; an error shuts the
+//! server down again); [`p14::before_shutdown`] first in [`ServerHandle::shutdown`]. The
+//! `[auth]` listener rule ([`ServerConfig::validate_auth`]) runs before anything starts.
+//!
 //! One injectable clock (Phase 10 F5): [`ServerOptions::clock`] (the system clock by
 //! default) is the single `Arc<dyn Clock>` handed to `InitCluster`'s timestamp,
 //! `NodeConfig.clock` and the services' [`crate::services::ServiceCtx::clock`].
@@ -119,6 +133,7 @@ use crate::executor::{EngineExecutor, ExecutorConfig, ExecutorHooks};
 use crate::leadership::MetaLeadership;
 use crate::p7::{self, P7Handles, P7Shared};
 use crate::p13::{self, P13Ctx, P13Init, P13Services};
+use crate::p14::{self, P14Ctx, P14Init, P14Services};
 use crate::retention::MetaPolicies;
 use crate::services::guest_logs::GuestLogSink;
 use crate::services::{ServiceCtx, Services};
@@ -347,6 +362,11 @@ async fn start_inner(
         == crate::tls::TlsProfile::Server;
     cfg.validate_time_skipping(server_profile)
         .map_err(|e| ServerError::Config(e.to_string()))?;
+    // Phase 14 (D-P14-4): `[auth] mode = "none"` on a public listener needs the opt-in.
+    cfg.validate_auth(server_profile)
+        .map_err(|e| ServerError::Config(e.to_string()))?;
+    // Phase 14 (14-10): the failpoints-only SkewClock wraps the seam clock (identity stub).
+    let clock = p14::wrap_clock(clock);
     let dev_clock = cfg
         .dev
         .time_skipping
@@ -400,6 +420,23 @@ async fn start_inner(
     let token_key = cluster.token_key();
     // Meta is shared (the bridge holds it weakly for presign key writes).
     let meta = Arc::clone(cluster.meta());
+    // Phase 14 (14-01b): the seam context (audit sink, quota view), before the bridge and
+    // the worker join service that report into it.
+    let p14_ctx = match p14::build_ctx(P14Init {
+        cfg: Arc::new(cfg.clone()),
+        meta: Arc::clone(&meta),
+        clock: Arc::clone(&clock),
+        node_id,
+        data_dir: data_dir.clone(),
+        level_max,
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            drop(meta);
+            abort_cluster(cluster).await;
+            return Err(ServerError::Config(format!("Phase 14: {e}")));
+        }
+    };
 
     // 2b. effects bridge (before the executor: every sink hands out its driver).
     let bridge = match BridgeServices::build(
@@ -413,12 +450,14 @@ async fn start_inner(
             node_id,
             clock: Arc::clone(&clock),
             public_base_url: cfg.public_base_url(local_addr),
+            audit: p14::audit_sink(&p14_ctx),
         },
     )
     .await
     {
         Ok(b) => b,
         Err(e) => {
+            drop(p14_ctx);
             drop(meta);
             abort_cluster(cluster).await;
             return Err(ServerError::Config(format!("effects bridge: {e}")));
@@ -453,6 +492,7 @@ async fn start_inner(
         Ok(rt) => Arc::new(rt),
         Err(e) => {
             bridge.shutdown().await;
+            drop(p14_ctx);
             drop(meta);
             abort_cluster(cluster).await;
             return Err(e.into());
@@ -479,6 +519,7 @@ async fn start_inner(
         Ok(p) => p,
         Err(e) => {
             bridge.shutdown().await;
+            drop(p14_ctx);
             drop(meta);
             abort_cluster(cluster).await;
             return Err(e.into());
@@ -487,6 +528,8 @@ async fn start_inner(
 
     // Phase 12 (D-P12-13): the worker protocol attaches to the always-bound listener.
     p7.cluster_listener = Some(cluster.execute_slot());
+    // Phase 14 (14-01b): worker join / renew / token revoke report to `p14::worker_event`.
+    p7.shared.join.attach_p14(&p14_ctx);
 
     // 4. node + dispatcher(EngineExecutor).
     let t = Instant::now(); // clock-exempt: startup timing
@@ -553,6 +596,7 @@ async fn start_inner(
     // Phase 13 (P13-F1 rule 6): the boot fence, immediately before any partition opens.
     if let Err(e) = cluster.boot_fence(level_max).await {
         bridge.shutdown().await;
+        drop(p14_ctx);
         drop(meta);
         abort_cluster(cluster).await;
         return Err(e);
@@ -561,6 +605,7 @@ async fn start_inner(
         Ok(n) => Arc::new(n),
         Err(e) => {
             bridge.shutdown().await;
+            drop(p14_ctx);
             drop(meta);
             abort_cluster(cluster).await;
             return Err(e.into());
@@ -580,6 +625,8 @@ async fn start_inner(
         PartitionSlot::Failed { .. } => None,
     });
     let ctl_blobs = blobs.clone();
+    // Phase 14 (14-01b): module bytes (signature re-verification) and the leadership share.
+    p14_ctx.attach_node(blobs.clone(), node.roles());
     let cfg = Arc::clone(&p7.config);
 
     // 4b. Services seam (P8-D21): every barrier is open and the leaders are recorded.
@@ -611,6 +658,7 @@ async fn start_inner(
             bridge.shutdown().await;
             cluster.stop_tasks().await;
             shutdown_node(node).await;
+            drop(p14_ctx);
             drop(meta);
             abort_cluster(cluster).await;
             return Err(e.into());
@@ -633,6 +681,8 @@ async fn start_inner(
         .with_leader_hints(cluster.leader_hints(&node))
         .with_module_push(cluster.module_push()),
     );
+    // Phase 14 (14-01b): the control-plane hooks (gates, registration, ingress admission).
+    p14::attach(&control, &p14_ctx);
     // Phase 13 (13-02): the seam context, the routed control plane (every consumer below
     // gets it), the cluster-listener services and the Phase 13 tasks.
     let p13_ctx = P13Ctx::new(P13Init {
@@ -649,6 +699,13 @@ async fn start_inner(
     inbound.install(&p13_ctx);
     cluster.attach_p13_services(p13::cluster_listener_services(&p13_ctx));
     let p13_services = p13::start(Arc::clone(&p13_ctx)).await;
+    // Phase 14 (14-01b): audit writer, bootstrap, reseal, quota view. A failure stops the
+    // server again once its handle exists (below).
+    let p14_started = p14::start(Arc::clone(&p14_ctx)).await;
+    // Phase 14 (14-32): the Kafka triggers start like the Phase 8 drivers, on the routed
+    // (unguarded) control plane and the node's roles.
+    let trigger_cp = Arc::clone(&routed);
+    let trigger_roles = node.roles();
     let fatal_rx = p13_ctx.fatal_watch();
     // Phase 10 (10-13): the idle detector and its API write counter, only with time
     // skipping on.
@@ -663,6 +720,8 @@ async fn start_inner(
     let mut api_cfg = ApiConfig {
         max_module_bytes: usize::try_from(cfg.api.max_module_bytes).unwrap_or(usize::MAX),
         max_request_bytes: usize::try_from(cfg.api.max_request_bytes).unwrap_or(usize::MAX),
+        // Phase 14 (14-03): bearer → principal (`AllowDev` in mode none).
+        authenticator: p14::authenticator(&p14_ctx),
         ..Default::default()
     };
     // Phase 8 controllers (08-10): one context, every slot filled.
@@ -687,7 +746,21 @@ async fn start_inner(
         &mut api_cfg,
         axum::Router::new(),
         &cfg,
-        &|ext| p13::fill_extensions(&p13_ctx, ext),
+        // Phase 14 (14-01b): the Phase 14 slots first, so the Phase 13 routing covers them.
+        &|ext| {
+            p14::fill_extensions(&p14_ctx, ext);
+            p13::fill_extensions(&p13_ctx, ext);
+        },
+        // Phase 14 (14-01b): REST, gRPC and `/ui` get the guarded instances; in-process
+        // consumers (`ControlCtx::routed`) keep the routed ones.
+        &|routed, ext| {
+            let ui_auth = p14::ui_auth(&p14_ctx);
+            crate::p11::ApiFront {
+                guarded: p14::wrap_ingress(&p14_ctx, routed, ext),
+                ui_layer: p14::ui_scope_layer(&p14_ctx, Arc::clone(&ui_auth)),
+                ui_auth,
+            }
+        },
     );
     drop(ctl);
     if cfg.telemetry.metrics {
@@ -738,7 +811,7 @@ async fn start_inner(
         "ostro server started"
     );
 
-    Ok(ServerHandle {
+    let mut handle = ServerHandle {
         local_addr,
         data_dir,
         cluster_id,
@@ -757,13 +830,45 @@ async fn start_inner(
         p7_handles: Some(p7_handles),
         p13: Some(p13_ctx),
         p13_services: Some(p13_services),
+        p14: Some(Arc::clone(&p14_ctx)),
+        p14_services: None,
         fatal_rx,
         client_endpoint,
         serve: Some(serve),
         done_rx,
         data_lock,
         tempdir,
-    })
+    };
+    // Phase 14 (14-01b): the services started above, then the triggers; either failure stops
+    // the running server again (the handle owns every part of it by now).
+    let fail = |what: &str, e: p14::P14Error| ServerError::Config(format!("{what}: {e}"));
+    match p14_started {
+        Ok(s) => handle.p14_services = Some(s),
+        Err(e) => {
+            drop(p14_ctx);
+            if let Err(se) = handle.shutdown().await {
+                warn!(error = %se, "shutdown after a Phase 14 startup failure");
+            }
+            return Err(fail("Phase 14 services", e));
+        }
+    }
+    match p14::start_triggers(&p14_ctx, trigger_cp, trigger_roles).await {
+        Ok(Some(task)) => {
+            if let Some(s) = handle.p14_services.as_mut() {
+                s.push(task);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            drop(p14_ctx);
+            if let Err(se) = handle.shutdown().await {
+                warn!(error = %se, "shutdown after a trigger startup failure");
+            }
+            return Err(fail("triggers", e));
+        }
+    }
+    drop(p14_ctx);
+    Ok(handle)
 }
 
 /// Take the exclusive advisory lock on `<data>/LOCK` (`flock(LOCK_EX|LOCK_NB)`); the
@@ -981,6 +1086,11 @@ pub struct ServerHandle {
     p13: Option<Arc<P13Ctx>>,
     /// Phase 13 background tasks.
     p13_services: Option<P13Services>,
+    /// Phase 14 seam context (14-01b): `before_shutdown` first, dropped with the Phase 13
+    /// context (it holds meta).
+    p14: Option<Arc<P14Ctx>>,
+    /// Phase 14 background tasks (audit writer, reseal, quota view, triggers).
+    p14_services: Option<P14Services>,
     /// Phase 13 fail-stop (running fence, removed node): `wait()` returns once it is set.
     fatal_rx: watch::Receiver<Option<String>>,
     /// How clients reach the client listener (scheme, address, fingerprint).
@@ -1150,8 +1260,14 @@ impl ServerHandle {
             dev_auto,
             p13,
             p13_services,
+            p14,
+            p14_services,
             ..
         } = self;
+        // Phase 14 (14-01b): flush the audit writer and coalescers first.
+        if let Some(ctx) = &p14 {
+            p14::before_shutdown(ctx).await;
+        }
         // Phase 13 (13-11): controlled shutdown first (hand off led partitions, transfer
         // meta leadership), while the node still serves.
         if let Some(ctx) = &p13 {
@@ -1181,6 +1297,11 @@ impl ServerHandle {
             s.stop().await;
         }
         drop(p13);
+        // Phase 14 tasks (incl. the trigger driver), then the context (it holds meta).
+        if let Some(s) = p14_services {
+            s.stop().await;
+        }
+        drop(p14);
         // Phase 7 tasks (stopped by `p7_shutdown` above).
         if let Some(h) = p7_handles {
             h.join().await;

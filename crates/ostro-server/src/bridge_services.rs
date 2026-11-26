@@ -40,6 +40,7 @@ use ostro_bridge::meta_view::MetaView as BridgeMetaView;
 use ostro_bridge::object::{ObjectConnector, PresignKeyStore};
 use ostro_bridge::outcome::{non_retryable, retryable};
 use ostro_bridge::ratelimit::RateLimiter;
+use ostro_bridge::secrets::Audited;
 use ostro_bridge::secrets::config::ProviderKind;
 use ostro_bridge::secrets::resolver::PRESIGN_PREFIX;
 use ostro_bridge::secrets::{
@@ -98,6 +99,9 @@ pub struct BridgeEnv {
     pub clock: Arc<dyn Clock>,
     /// Effective base of local presigned URLs ([`ServerConfig::public_base_url`]).
     pub public_base_url: String,
+    /// Phase 14 (14-01b): the audit sink (`p14::audit_sink`) the default resolver reports
+    /// secret access to (`Audited`, 14-18).
+    pub audit: Arc<dyn ostro_types::audit::AuditSink>,
 }
 
 impl std::fmt::Debug for BridgeEnv {
@@ -114,7 +118,7 @@ impl std::fmt::Debug for BridgeEnv {
 /// The node's effects bridge (see the module docs).
 pub struct BridgeServices {
     sealed: Option<SealedStore>,
-    resolver: SecretResolver,
+    resolver: Audited<SecretResolver>,
     object: Arc<ObjectConnector>,
     bridge: Arc<Bridge>,
     driver: Arc<ServerEffectDriver>,
@@ -126,7 +130,7 @@ impl std::fmt::Debug for BridgeServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BridgeServices")
             .field("sealing_key", &self.sealed.is_some())
-            .field("providers", &self.resolver.chain().names())
+            .field("providers", &self.resolver.inner().chain().names())
             .field("seam", &self.seam)
             .finish_non_exhaustive()
     }
@@ -380,7 +384,8 @@ impl BridgeServices {
 
         let svc = Arc::new(Self {
             sealed,
-            resolver,
+            // Phase 14 (14-01b): the default-tenant resolver behind the audit sink (14-18).
+            resolver: Audited::new(resolver, Arc::clone(&env.audit)),
             object,
             bridge,
             driver,
@@ -389,7 +394,7 @@ impl BridgeServices {
         });
         tracing::info!(
             sealing_key = svc.sealed.is_some(),
-            providers = ?svc.resolver.chain().names(),
+            providers = ?svc.resolver.inner().chain().names(),
             "effects bridge ready"
         );
         Ok(svc)
@@ -400,8 +405,9 @@ impl BridgeServices {
         self.sealed.as_ref()
     }
 
-    /// The default-tenant secret resolver (operator connection configs, presign keys).
-    pub fn resolver(&self) -> &SecretResolver {
+    /// The default-tenant secret resolver (operator connection configs, presign keys),
+    /// behind the audit sink (Phase 14, 14-18 records the access).
+    pub fn resolver(&self) -> &Audited<SecretResolver> {
         &self.resolver
     }
 

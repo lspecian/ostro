@@ -477,6 +477,7 @@ impl modules_server::Modules for GrpcModules {
         let res = self
             .cp
             .upload_module(domain::UploadModule {
+                signatures: Vec::new(),
                 sha256: r.sha256,
                 wasm: r.wasm.into(),
                 language: r.language,

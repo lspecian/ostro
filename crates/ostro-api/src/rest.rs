@@ -843,6 +843,7 @@ async fn upload_module(
     let wasm = body.map_err(|r| body_rejection(r.status(), r.body_text()))?;
     let res = cp
         .upload_module(domain::UploadModule {
+            signatures: Vec::new(),
             sha256,
             wasm,
             language: q.language,

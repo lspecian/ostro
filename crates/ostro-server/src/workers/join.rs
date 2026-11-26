@@ -61,6 +61,8 @@ pub struct JoinService {
     join_token_ttl: Duration,
     bound: OnceLock<Bound>,
     endpoints: RwLock<Vec<String>>,
+    /// Phase 14 (14-01b): join / renew / revoke are reported to `p14::worker_event`.
+    p14: OnceLock<Weak<crate::p14::P14Ctx>>,
 }
 
 /// A verified join token (the caller's `ApiToken` record).
@@ -79,7 +81,39 @@ impl JoinService {
             join_token_ttl: cfg.join_token_ttl.get(),
             bound: OnceLock::new(),
             endpoints: RwLock::new(Vec::new()),
+            p14: OnceLock::new(),
         }
+    }
+
+    /// Phase 14 (14-01b): report join / renew / token revoke (success and failure) to
+    /// `p14::worker_event` (audited by 14-18). The first call wins.
+    pub fn attach_p14(&self, ctx: &Arc<crate::p14::P14Ctx>) {
+        let _ = self.p14.set(Arc::downgrade(ctx));
+    }
+
+    fn report<T>(
+        &self,
+        action: crate::p14::WorkerAction,
+        token_id: String,
+        worker_id: Option<String>,
+        res: &Result<T, ApiError>,
+    ) {
+        let Some(ctx) = self.p14.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        let outcome = match res {
+            Ok(_) => ostro_types::audit::AuditOutcome::Ok,
+            Err(e) => ostro_types::audit::AuditOutcome::Failed(e.message.clone()),
+        };
+        crate::p14::worker_event(
+            &ctx,
+            crate::p14::WorkerAuditEvent {
+                action,
+                token_id,
+                worker_id,
+                outcome,
+            },
+        );
     }
 
     /// Bind the meta handle (proposals) and the injected clock (D-W26). The first call
@@ -223,6 +257,17 @@ impl JoinService {
 
     /// Revoke (delete) a join token. Unknown = NotFound.
     pub async fn revoke_token(&self, token_id: &str) -> Result<(), ApiError> {
+        let res = self.revoke_token_inner(token_id).await;
+        self.report(
+            crate::p14::WorkerAction::RevokeToken,
+            token_id.to_owned(),
+            None,
+            &res,
+        );
+        res
+    }
+
+    async fn revoke_token_inner(&self, token_id: &str) -> Result<(), ApiError> {
         let meta = self.meta_handle()?;
         for _ in 0..4 {
             let version = self.meta.read(|s| {
@@ -351,6 +396,26 @@ impl JoinService {
 
     /// Join a worker (`POST /v1/workers/join`).
     pub async fn join(&self, req: JoinRequest) -> Result<JoinResponse, ApiError> {
+        // The public id half of `<id>.<secret>` (never the secret).
+        let token_id = req
+            .token
+            .split_once('.')
+            .map(|(id, _)| id)
+            .filter(|id| id.starts_with(WORKER_TOKEN_PREFIX) && id.len() <= MAX_ID_LEN)
+            .unwrap_or_default()
+            .to_owned();
+        let worker_id = req.worker_id.clone();
+        let res = self.join_inner(req).await;
+        self.report(
+            crate::p14::WorkerAction::Join,
+            token_id,
+            Some(worker_id),
+            &res,
+        );
+        res
+    }
+
+    async fn join_inner(&self, req: JoinRequest) -> Result<JoinResponse, ApiError> {
         req.validate()?;
         if !valid_id(&req.worker_id, MAX_ID_LEN) {
             return Err(ApiError::invalid_argument(format!(
@@ -367,6 +432,22 @@ impl JoinService {
     /// Renew the certificate of the authenticated `token_id` / `worker_id`; `csr` is a PEM
     /// or DER PKCS#10 request.
     pub async fn renew(
+        &self,
+        token_id: &str,
+        worker_id: &str,
+        csr: &[u8],
+    ) -> Result<JoinResponse, ApiError> {
+        let res = self.renew_inner(token_id, worker_id, csr).await;
+        self.report(
+            crate::p14::WorkerAction::Renew,
+            token_id.to_owned(),
+            Some(worker_id.to_owned()),
+            &res,
+        );
+        res
+    }
+
+    async fn renew_inner(
         &self,
         token_id: &str,
         worker_id: &str,

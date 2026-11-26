@@ -2981,6 +2981,7 @@ mod tests {
 
     fn upload_req(wasm: bytes::Bytes) -> UploadModule {
         UploadModule {
+            signatures: Vec::new(),
             sha256: sha256_hex(&wasm),
             wasm,
             language: Some("rust".into()),

@@ -2273,6 +2273,7 @@ mod phase8 {
         let wasm = fake_module(&[("greet", 1)]);
         srv.cp
             .upload_module(ostro_api::domain::UploadModule {
+                signatures: Vec::new(),
                 sha256: sha256_hex(&wasm),
                 wasm,
                 language: None,
@@ -3763,6 +3764,7 @@ mod phase7 {
     async fn setup(cp: &FakeControlPlane) {
         let wasm = fake_module(&[("greet", 1)]);
         cp.upload_module(ostro_api::domain::UploadModule {
+            signatures: Vec::new(),
             sha256: sha256_hex(&wasm),
             wasm,
             language: None,
@@ -4820,6 +4822,7 @@ mod phase11 {
         let dyn_cp: &dyn ControlPlane = srv.cp.as_ref();
         dyn_cp
             .upload_module(ostro_api::domain::UploadModule {
+                signatures: Vec::new(),
                 sha256: sha256_hex(&wasm),
                 wasm,
                 language: None,
