@@ -1499,3 +1499,224 @@ fn phase13_env_overrides() {
     assert!(c.api.strict_reads);
     assert_eq!(c.modules.gc_grace.get(), Duration::from_secs(1800));
 }
+
+// --- Phase 14 (14-01b): [auth], [tenants], [audit], [security.modules], [[triggers.kafka]] ---
+
+const PHASE14_KEYS: &str = r#"
+[auth]
+mode = "token"
+allow_insecure_none = true
+bootstrap_token_file = "/etc/ostro/admin.token"
+default_token_ttl = "720h"
+ui_session_ttl = "1h"
+
+[tenants]
+metrics_label_limit = 50
+metrics_tenant_labels = true
+quota_share = "leadership"
+
+[audit]
+enabled = false
+dir = "/var/lib/ostro/audit"
+segment_bytes = 2097152
+queue = 128
+group_commit = "10ms"
+reserve_timeout = "1s"
+retention = "24h"
+max_bytes = 4194304
+secret_coalesce = "30s"
+auth_failure_coalesce = "15s"
+head_export_interval = "30m"
+otlp = false
+
+[security.modules]
+require_signed = true
+minisign_keys = ["RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"]
+cosign_keys = []
+
+[[triggers.kafka]]
+name = "orders"
+bootstrap = ["127.0.0.1:9092"]
+topics = ["orders", "refunds"]
+group_id = "ostro-orders"
+workflow = "process-order"
+max_in_flight = 64
+
+[triggers.kafka.tls]
+enabled = true
+server_name = "kafka.local"
+"#;
+
+#[test]
+fn phase14_defaults_in_both_profiles() {
+    use ostro_server::config::{AuthMode, QuotaShare};
+    let dev = ServerConfig::dev_defaults();
+    let server = ServerConfig::server_defaults();
+    assert_eq!(dev.auth.mode, AuthMode::None, "dev profile: no token");
+    assert_eq!(server.auth.mode, AuthMode::Token, "server profile: tokens");
+    for c in [dev, server] {
+        assert!(!c.auth.allow_insecure_none);
+        assert_eq!(c.auth.bootstrap_token_file, None);
+        assert_eq!(
+            c.auth.default_token_ttl.get(),
+            Duration::from_secs(2160 * 3600)
+        );
+        assert_eq!(c.auth.ui_session_ttl.get(), Duration::from_secs(8 * 3600));
+        assert_eq!(c.tenants.metrics_label_limit, 1000);
+        assert!(!c.tenants.metrics_tenant_labels);
+        assert_eq!(c.tenants.quota_share, QuotaShare::Leadership);
+        let a = &c.audit;
+        assert!(a.enabled);
+        assert_eq!(a.dir, None);
+        assert_eq!(a.segment_bytes, 67_108_864);
+        assert_eq!(a.queue, 4096);
+        assert_eq!(a.group_commit.get(), Duration::from_millis(5));
+        assert_eq!(a.reserve_timeout.get(), Duration::from_secs(2));
+        assert_eq!(a.retention.get(), Duration::from_secs(2160 * 3600));
+        assert_eq!(a.max_bytes, 10_737_418_240);
+        assert_eq!(a.secret_coalesce.get(), Duration::from_secs(60));
+        assert_eq!(a.auth_failure_coalesce.get(), Duration::from_secs(60));
+        assert_eq!(a.head_export_interval.get(), Duration::from_secs(3600));
+        assert!(a.otlp);
+        assert!(!c.security.modules.require_signed);
+        assert!(c.security.modules.minisign_keys.is_empty());
+        assert!(c.security.modules.cosign_keys.is_empty());
+        assert!(c.triggers.kafka.is_empty(), "no Kafka triggers by default");
+    }
+}
+
+#[test]
+fn phase14_keys_parse_and_round_trip_in_both_profiles() {
+    use ostro_server::config::AuthMode;
+    for base in both_profiles() {
+        let c = load_profile(base.clone(), PHASE14_KEYS).expect("phase 14 keys");
+        assert_eq!(c.auth.mode, AuthMode::Token);
+        assert!(c.auth.allow_insecure_none);
+        assert_eq!(
+            c.auth.bootstrap_token_file,
+            Some(PathBuf::from("/etc/ostro/admin.token"))
+        );
+        assert_eq!(
+            c.auth.default_token_ttl.get(),
+            Duration::from_secs(720 * 3600)
+        );
+        assert_eq!(c.auth.ui_session_ttl.get(), Duration::from_secs(3600));
+        assert_eq!(c.tenants.metrics_label_limit, 50);
+        assert!(c.tenants.metrics_tenant_labels);
+        assert!(!c.audit.enabled);
+        assert_eq!(c.audit.dir, Some(PathBuf::from("/var/lib/ostro/audit")));
+        assert_eq!(c.audit.segment_bytes, 2 * 1024 * 1024);
+        assert_eq!(c.audit.queue, 128);
+        assert_eq!(c.audit.group_commit.get(), Duration::from_millis(10));
+        assert_eq!(
+            c.audit.head_export_interval.get(),
+            Duration::from_secs(1800)
+        );
+        assert!(!c.audit.otlp);
+        assert!(c.security.modules.require_signed);
+        assert_eq!(c.security.modules.minisign_keys.len(), 1);
+        // The raw Kafka table: one entry, every key kept for 14-32's validation.
+        assert_eq!(c.triggers.kafka.len(), 1);
+        let t = c.triggers.kafka[0].to_json();
+        assert_eq!(t["name"], "orders");
+        assert_eq!(t["topics"], serde_json::json!(["orders", "refunds"]));
+        assert_eq!(t["max_in_flight"], 64);
+        assert_eq!(t["tls"]["enabled"], true);
+        assert_eq!(t["tls"]["server_name"], "kafka.local");
+        #[derive(serde::Deserialize)]
+        struct Typed {
+            name: String,
+            bootstrap: Vec<String>,
+        }
+        let typed: Typed = c.triggers.kafka[0].try_into_typed().expect("typed view");
+        assert_eq!(typed.name, "orders");
+        assert_eq!(typed.bootstrap, vec!["127.0.0.1:9092".to_owned()]);
+        // The Phase 8 [triggers] keys keep their defaults.
+        assert_eq!(
+            c.triggers.webhook_body_limit,
+            base.triggers.webhook_body_limit
+        );
+        // Printed and reloaded: identical (incl. the raw table and [security.modules]).
+        let s = c.to_toml_string();
+        for section in ["[auth]", "[tenants]", "[audit]", "[security]"] {
+            assert!(s.contains(section), "{section} in {s}");
+        }
+        let back = load_profile(base, &s).expect("reload printed config");
+        assert_eq!(back, c);
+    }
+}
+
+#[test]
+fn phase14_profile_prints_reload_identically() {
+    for base in both_profiles() {
+        let s = base.to_toml_string();
+        assert!(s.contains("kafka = []"), "{s}");
+        let back = load_profile(base.clone(), &s).expect("reload");
+        assert_eq!(back, base);
+    }
+}
+
+#[test]
+fn phase14_invalid_values_are_rejected_and_named() {
+    for base in both_profiles() {
+        for (body, needle) in [
+            ("[auth]\nmode = \"basic\"\n", "basic"),
+            ("[auth]\nbogus = 1\n", "bogus"),
+            (
+                "[auth]\ndefault_token_ttl = \"0s\"\n",
+                "auth.default_token_ttl",
+            ),
+            ("[tenants]\nquota_share = \"even\"\n", "even"),
+            (
+                "[tenants]\nmetrics_label_limit = 0\n",
+                "tenants.metrics_label_limit",
+            ),
+            ("[audit]\ngroup_commit = \"0s\"\n", "audit.group_commit"),
+            ("[audit]\nsegment_bytes = 1024\n", "audit.segment_bytes"),
+            (
+                "[audit]\nmax_bytes = 1048576\nsegment_bytes = 2097152\n",
+                "audit.max_bytes",
+            ),
+            ("[audit]\nqueue = 0\n", "audit.queue"),
+            ("[security.modules]\nrequire = true\n", "require"),
+            ("[security]\nother = 1\n", "other"),
+        ] {
+            let err = load_profile(base.clone(), body).expect_err(body);
+            assert!(err.contains(needle), "{body:?}: {err}");
+        }
+    }
+}
+
+#[test]
+fn phase14_server_profile_refuses_mode_none_on_a_public_listener() {
+    use ostro_server::config::AuthMode;
+    let mut c = ServerConfig::server_defaults();
+    c.auth.mode = AuthMode::None;
+    let err = c.validate_auth(true).expect_err("0.0.0.0 + none");
+    assert!(err.to_string().contains("allow_insecure_none"), "{err}");
+    // Dev profile, loopback, or the explicit opt-in pass; token mode always passes.
+    c.validate_auth(false).expect("dev profile");
+    c.auth.allow_insecure_none = true;
+    c.validate_auth(true).expect("explicit opt-in");
+    c.auth.allow_insecure_none = false;
+    c.api.listen = "127.0.0.1:7700".parse().unwrap();
+    c.validate_auth(true).expect("loopback");
+    let server = ServerConfig::server_defaults();
+    server.validate_auth(true).expect("token mode");
+}
+
+#[test]
+fn phase14_env_overrides() {
+    let c = load_toml_env(
+        "",
+        &env(&[
+            ("OSTRO_AUTH__MODE", "none"),
+            ("OSTRO_TENANTS__METRICS_TENANT_LABELS", "true"),
+            ("OSTRO_AUDIT__HEAD_EXPORT_INTERVAL", "15m"),
+        ]),
+    )
+    .expect("env overrides");
+    assert_eq!(c.auth.mode, ostro_server::config::AuthMode::None);
+    assert!(c.tenants.metrics_tenant_labels);
+    assert_eq!(c.audit.head_export_interval.get(), Duration::from_secs(900));
+}

@@ -37,6 +37,8 @@
 pub mod limits;
 pub mod policy_view;
 pub mod rate_limit;
+// Phase 14 (14-01b stub; 14-06): the tenant level above the queue level.
+pub mod tenant;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};

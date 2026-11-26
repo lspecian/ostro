@@ -70,6 +70,12 @@ pub const SECTIONS: &[&str] = &[
     // Phase 13 (D-P13-23, RESERVATIONS §11), parsed since 13-02. The other Phase 13 keys
     // live in `[cluster]`, `[api]` and `[workers]`.
     "modules",
+    // Phase 14 (D-P14-33, RESERVATIONS §11), parsed since 14-01b. `[security.modules]`
+    // lives inside `[security]`; `[[triggers.kafka]]` inside `[triggers]`.
+    "auth",
+    "tenants",
+    "audit",
+    "security",
 ];
 
 static PARSER: SpanParser = SpanParser::new();
@@ -451,6 +457,11 @@ pub struct ServerConfig {
     pub dev: DevSection,
     // Phase 13 section (D-P13-23, plan 13-02).
     pub modules: ModulesSection,
+    // Phase 14 sections (D-P14-33, plan 14-01b).
+    pub auth: AuthSection,
+    pub tenants: TenantsSection,
+    pub audit: AuditSection,
+    pub security: SecuritySection,
 }
 
 impl ServerConfig {
@@ -473,6 +484,8 @@ impl ServerConfig {
         // D-P11-17: the dev profile serves the UI because its listener is loopback
         // (`[ui] enabled` stays unset, so a printed config reloads identically on either
         // profile).
+        // Phase 14 (14-01b): `ostro dev` needs no token (`[auth] mode = "none"`).
+        c.auth.mode = AuthMode::None;
         c
     }
 
@@ -573,6 +586,8 @@ impl ServerConfig {
         self.validate_phase12()?;
         // Phase 13 (13-02).
         self.validate_phase13()?;
+        // Phase 14 (14-01b).
+        self.validate_phase14()?;
         Ok(())
     }
 
@@ -1135,8 +1150,9 @@ impl Default for BlobGcSection {
     }
 }
 
-/// `[triggers]`: webhook limits and cron catch-up (P8-D10..D12).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// `[triggers]`: webhook limits and cron catch-up (P8-D10..D12), and the Phase 14 Kafka
+/// topic-consumer triggers (`[[triggers.kafka]]`, D-P14-43).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TriggersSection {
     /// Maximum webhook body in bytes (default 1 MiB).
@@ -1145,6 +1161,10 @@ pub struct TriggersSection {
     pub webhook_tolerance: FriendlyDuration,
     /// Most missed cron fires replayed by catch-up `All` (default 100).
     pub cron_catchup_cap: u32,
+    /// Phase 14 (14-01b, D-P14-43): the `[[triggers.kafka]]` tables, kept raw (empty by
+    /// default). Field-level validation is 14-32's `p14::kafka::validate`, run by
+    /// `p14::start_triggers` before anything starts.
+    pub kafka: Vec<RawTable>,
 }
 
 impl Default for TriggersSection {
@@ -1153,6 +1173,7 @@ impl Default for TriggersSection {
             webhook_body_limit: MIB,
             webhook_tolerance: FriendlyDuration::from_secs(300),
             cron_catchup_cap: ostro_partition::leader::cron::CronConfig::default().catchup_cap,
+            kafka: Vec::new(),
         }
     }
 }
@@ -1986,6 +2007,278 @@ impl Default for ModulesSection {
             gc_grace: FriendlyDuration::from_secs(600),
             gc_protect_resumable: true,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Phase 14 (D-P14-33, RESERVATIONS §11; parsed since plan 14-01b)
+// ---------------------------------------------------------------------------------
+
+/// One raw `[[triggers.kafka]]` table (D-P14-43), held as the config crate's value so the
+/// owner (14-32, `p14::kafka::validate`) parses every field. Equality ignores where a value
+/// came from (file, environment, profile).
+#[derive(Clone, Debug)]
+pub struct RawTable(pub config::Value);
+
+impl RawTable {
+    /// Deserialize the table into its typed form (14-32).
+    pub fn try_into_typed<T: serde::de::DeserializeOwned>(&self) -> Result<T, ConfigError> {
+        self.0.clone().try_deserialize().map_err(ConfigError::from)
+    }
+
+    /// The table as JSON (equality, rendering).
+    pub fn to_json(&self) -> serde_json::Value {
+        fn conv(v: &config::Value) -> serde_json::Value {
+            use config::ValueKind as K;
+            match &v.kind {
+                K::Nil => serde_json::Value::Null,
+                K::Boolean(b) => serde_json::Value::Bool(*b),
+                K::I64(n) => serde_json::Value::from(*n),
+                K::U64(n) => serde_json::Value::from(*n),
+                K::I128(n) => i64::try_from(*n)
+                    .map(serde_json::Value::from)
+                    .unwrap_or_else(|_| serde_json::Value::String(n.to_string())),
+                K::U128(n) => u64::try_from(*n)
+                    .map(serde_json::Value::from)
+                    .unwrap_or_else(|_| serde_json::Value::String(n.to_string())),
+                K::Float(f) => serde_json::Number::from_f64(*f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                K::String(s) => serde_json::Value::String(s.clone()),
+                K::Table(t) => {
+                    serde_json::Value::Object(t.iter().map(|(k, v)| (k.clone(), conv(v))).collect())
+                }
+                K::Array(a) => serde_json::Value::Array(a.iter().map(conv).collect()),
+            }
+        }
+        conv(&self.0)
+    }
+}
+
+impl PartialEq for RawTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_json() == other.to_json()
+    }
+}
+
+impl Serialize for RawTable {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.to_json().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for RawTable {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        config::Value::deserialize(d).map(RawTable)
+    }
+}
+
+/// `[auth] mode` (D-P14-4).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// No authentication: every request is the dev principal (the `ostro dev` default).
+    None,
+    /// Bearer API tokens (the `ostro server` default).
+    #[default]
+    Token,
+}
+
+impl AuthMode {
+    /// Wire name: `none` or `token`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMode::None => "none",
+            AuthMode::Token => "token",
+        }
+    }
+}
+
+/// `[auth]` (D-P14-4/5, 14-03 / 14-21).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthSection {
+    /// `none` (dev profile) or `token` (server profile).
+    pub mode: AuthMode,
+    /// Let the server profile run `mode = "none"` on a non-loopback listener (default false).
+    pub allow_insecure_none: bool,
+    /// File holding the bootstrap admin bearer (14-03); unset = `OSTRO_BOOTSTRAP_TOKEN` or a
+    /// generated `<data>/admin.token`.
+    pub bootstrap_token_file: Option<PathBuf>,
+    /// Lifetime of a token created without `ttl` (default `2160h`).
+    pub default_token_ttl: FriendlyDuration,
+    /// UI session cookie lifetime (default `8h`, 14-21).
+    pub ui_session_ttl: FriendlyDuration,
+}
+
+impl Default for AuthSection {
+    fn default() -> Self {
+        Self {
+            mode: AuthMode::Token,
+            allow_insecure_none: false,
+            bootstrap_token_file: None,
+            default_token_ttl: FriendlyDuration::from_secs(2160 * 3600),
+            ui_session_ttl: FriendlyDuration::from_secs(8 * 3600),
+        }
+    }
+}
+
+/// `[tenants] quota_share` (D-P14-8): how a tenant quota is split across nodes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaShare {
+    /// `share(x) = max(1, ceil(x * led / P))` over the partitions this node leads (14-06).
+    #[default]
+    Leadership,
+}
+
+/// `[tenants]` (D-P14-8/9, 14-06 / 14-20).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TenantsSection {
+    /// Most distinct tenant label values per metric (default 1000).
+    pub metrics_label_limit: u32,
+    /// Label tenant metrics by tenant (default false).
+    pub metrics_tenant_labels: bool,
+    /// Quota split across nodes (default `leadership`).
+    pub quota_share: QuotaShare,
+}
+
+impl Default for TenantsSection {
+    fn default() -> Self {
+        Self {
+            metrics_label_limit: 1000,
+            metrics_tenant_labels: false,
+            quota_share: QuotaShare::Leadership,
+        }
+    }
+}
+
+/// `[audit]` (D-P14-11/12, 14-04 / 14-18).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditSection {
+    /// Write the audit journal (default true).
+    pub enabled: bool,
+    /// Journal directory; unset = `<data>/audit`.
+    pub dir: Option<PathBuf>,
+    /// Segment size in bytes (default 64 MiB).
+    pub segment_bytes: u64,
+    /// Writer queue depth (default 4096).
+    pub queue: u32,
+    /// Group-commit window (default `5ms`).
+    pub group_commit: FriendlyDuration,
+    /// Longest wait for a writer permit before 503 `audit_unavailable` (default `2s`).
+    pub reserve_timeout: FriendlyDuration,
+    /// Segment retention (default `2160h`).
+    pub retention: FriendlyDuration,
+    /// Journal size cap in bytes (default 10 GiB).
+    pub max_bytes: u64,
+    /// Secret-access coalescing window (default `60s`).
+    pub secret_coalesce: FriendlyDuration,
+    /// Authentication-failure coalescing window (default `60s`).
+    pub auth_failure_coalesce: FriendlyDuration,
+    /// Chain-head export period (default `1h`).
+    pub head_export_interval: FriendlyDuration,
+    /// Also export records as OTLP logs when telemetry is on (default true).
+    pub otlp: bool,
+}
+
+impl Default for AuditSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+            segment_bytes: 64 * MIB,
+            queue: 4096,
+            group_commit: FriendlyDuration::from_millis(5),
+            reserve_timeout: FriendlyDuration::from_secs(2),
+            retention: FriendlyDuration::from_secs(2160 * 3600),
+            max_bytes: 10 * 1024 * MIB,
+            secret_coalesce: FriendlyDuration::from_secs(60),
+            auth_failure_coalesce: FriendlyDuration::from_secs(60),
+            head_export_interval: FriendlyDuration::from_secs(3600),
+            otlp: true,
+        }
+    }
+}
+
+/// `[security.modules]` (D-P14-14/15, 14-19): the config seed of the module policy.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecurityModulesSection {
+    /// Require a valid signature on every upload and activation (default false).
+    pub require_signed: bool,
+    /// Trusted minisign public keys (key text or file paths).
+    pub minisign_keys: Vec<String>,
+    /// Trusted cosign public keys (PEM text or file paths).
+    pub cosign_keys: Vec<String>,
+}
+
+/// `[security]` (D-P14-14).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecuritySection {
+    /// `[security.modules]`.
+    pub modules: SecurityModulesSection,
+}
+
+impl ServerConfig {
+    /// Phase 14 value checks (`[auth]`, `[tenants]`, `[audit]`; 14-01b).
+    pub fn validate_phase14(&self) -> Result<(), ConfigError> {
+        let a = &self.audit;
+        for (key, d) in [
+            ("auth.default_token_ttl", self.auth.default_token_ttl),
+            ("auth.ui_session_ttl", self.auth.ui_session_ttl),
+            ("audit.group_commit", a.group_commit),
+            ("audit.reserve_timeout", a.reserve_timeout),
+            ("audit.retention", a.retention),
+            ("audit.head_export_interval", a.head_export_interval),
+        ] {
+            if d.get().is_zero() {
+                return Err(ConfigError::Invalid(format!("{key} must be non-zero")));
+            }
+        }
+        if a.segment_bytes < MIB {
+            return Err(ConfigError::Invalid(format!(
+                "audit.segment_bytes must be at least 1 MiB (got {})",
+                a.segment_bytes
+            )));
+        }
+        if a.max_bytes < a.segment_bytes {
+            return Err(ConfigError::Invalid(format!(
+                "audit.max_bytes ({}) must be at least audit.segment_bytes ({})",
+                a.max_bytes, a.segment_bytes
+            )));
+        }
+        if a.queue == 0 {
+            return Err(ConfigError::Invalid(
+                "audit.queue must be at least 1".into(),
+            ));
+        }
+        if self.tenants.metrics_label_limit == 0 {
+            return Err(ConfigError::Invalid(
+                "tenants.metrics_label_limit must be at least 1".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The `[auth]` listener rule (D-P14-4): the server profile refuses `mode = "none"` on a
+    /// non-loopback API listener unless `allow_insecure_none`. `server_profile`: the node
+    /// runs as `ostro server`. Called at startup (after CLI overrides).
+    pub fn validate_auth(&self, server_profile: bool) -> Result<(), ConfigError> {
+        if server_profile
+            && self.auth.mode == AuthMode::None
+            && !self.api.listen.ip().is_loopback()
+            && !self.auth.allow_insecure_none
+        {
+            return Err(ConfigError::Invalid(format!(
+                "[auth] mode = \"none\" on the non-loopback listener {} is refused by `ostro server`; use mode = \"token\", a loopback [api] listen, or set [auth] allow_insecure_none = true",
+                self.api.listen
+            )));
+        }
+        Ok(())
     }
 }
 

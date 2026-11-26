@@ -147,6 +147,9 @@ pub struct ServerControlPlane {
     /// by the server on a cluster node; unset = a keyed restart on a partition another node
     /// leads answers `not_leader` (single node, unit tests).
     pub(crate) remote_start: Arc<OnceLock<Arc<dyn crate::p13::keyed_start::RemoteStart>>>,
+    /// Phase 14 (14-01b, D-P14-33): the seam context, set once by `p14::attach`; read by
+    /// the control-plane hooks through `p14::ctx_of`. Weak: the server owns the context.
+    pub(crate) p14: crate::p14::CtxSlot,
 }
 
 /// Phase 12 (12-14, D-P12-22): module blob replication before the `Module` record.
@@ -234,6 +237,7 @@ impl ServerControlPlane {
             leader_hints: None,
             module_push: None,
             remote_start: Arc::new(OnceLock::new()),
+            p14: Arc::new(OnceLock::new()),
         }
     }
 

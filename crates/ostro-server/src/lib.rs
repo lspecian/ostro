@@ -48,6 +48,13 @@
 //! call sites in [`cluster`] (join marker, boot rule, both voter checks, boot fence) and
 //! [`server`] (routed control plane, API slots, cluster-listener services, background
 //! tasks, controlled shutdown); [`route`] holds the routing stubs (13-12 / 13-13).
+//!
+//! Phase 14 (14-01b, D-P14-33): [`p14`] is the single seam (final after 14-01b) with fixed
+//! call sites in [`server`] (context, clock, authenticator, guarded API/UI, services,
+//! triggers, shutdown), `control/{modules,runs,migrate,lifecycle,p11_rerun}.rs` (signature,
+//! version and activation gates, per-tenant registration, ingress admission), the bridge
+//! resolver and the worker join service; [`audit`] (14-04) and `flow::tenant` (14-06) are
+//! stubs until their plans.
 
 // Plan 14-01 (D-P14-37): dependencies of 14-05 (minisign-verify), 14-03/14-05/14-21
 // (aws-lc-rs) and 14-32 (ostro-kafka behind `kafka`), anchored until they are used.
@@ -56,6 +63,7 @@ use minisign_verify as _;
 #[cfg(feature = "kafka")]
 use ostro_kafka as _;
 
+pub mod audit;
 pub mod bridge_services;
 pub mod children;
 pub mod cluster;
@@ -76,6 +84,7 @@ pub mod meta_view;
 pub mod onfailure;
 pub mod p11;
 pub mod p13;
+pub mod p14;
 pub mod p7;
 pub mod rerun;
 pub mod retention;
