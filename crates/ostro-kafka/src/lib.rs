@@ -30,25 +30,20 @@ pub mod sasl;
 pub mod testkit;
 pub mod versions;
 
+pub use conn::{Backoff, Broker, Conn, ConnectOptions, MAX_FRAME, WireCheck};
+pub use versions::{ApiRange, ApiRequest, BrokerVersions, NegotiatedApi};
+
 // Dependencies declared by plan 14-01 (D-P14-37), anchored so cargo's unused-dependency lint
-// stays quiet until 14-31 / 14-34 consume them (owners delete the lines they use).
+// stays quiet until 14-34 consumes them (owners delete the lines they use). 14-31 uses
+// aws-lc-rs for SCRAM (HMAC, digest, PBKDF2, RNG), so `hmac` / `sha2` stay anchored.
 mod dep_anchors {
     use anyhow as _;
-    use aws_lc_rs as _;
-    use base64 as _;
     use flate2 as _;
     use hmac as _;
-    use kafka_protocol as _;
     use lz4_flex as _;
-    use rustls as _;
-    use rustls_native_certs as _;
-    use rustls_pki_types as _;
     use ruzstd as _;
     use sha2 as _;
     use snap as _;
-    use tokio as _;
-    use tokio_rustls as _;
-    use tracing as _;
 }
 
 #[cfg(test)]
@@ -250,18 +245,72 @@ impl KafkaError {
 #[derive(Debug)]
 pub struct Client {
     config: ClientConfig,
+    opts: std::sync::Arc<ConnectOptions>,
+    bootstrap: Broker,
 }
 
 impl Client {
-    /// Connect to the first reachable bootstrap broker and negotiate ApiVersions (14-31).
+    /// Connect to the first reachable bootstrap broker: TCP, TLS when configured, ApiVersions
+    /// negotiation, SASL when configured (14-31). Bootstrap addresses are tried in order once;
+    /// when all fail, a definitive error (TLS, SASL, protocol, unsupported version) is
+    /// preferred over socket errors and timeouts.
     pub async fn connect(config: ClientConfig) -> Result<Client, KafkaError> {
-        drop(config);
-        Err(KafkaError::Unimplemented("Client::connect (14-31)"))
+        if config.bootstrap.is_empty() {
+            return Err(KafkaError::Protocol(
+                "no bootstrap brokers configured".into(),
+            ));
+        }
+        let opts = std::sync::Arc::new(ConnectOptions::new(&config)?);
+        let mut definitive: Option<KafkaError> = None;
+        let mut last: Option<KafkaError> = None;
+        for addr in &config.bootstrap {
+            match Conn::open(addr, &opts).await {
+                Ok(conn) => {
+                    let bootstrap = Broker::from_conn(conn, std::sync::Arc::clone(&opts));
+                    return Ok(Client {
+                        config,
+                        opts,
+                        bootstrap,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(addr = %addr, error = %e, "kafka: bootstrap broker failed");
+                    if matches!(e, KafkaError::Io(_) | KafkaError::Timeout) {
+                        last = Some(e);
+                    } else if definitive.is_none() {
+                        definitive = Some(e);
+                    }
+                }
+            }
+        }
+        Err(definitive
+            .or(last)
+            .unwrap_or_else(|| KafkaError::Protocol("no bootstrap broker reachable".into())))
     }
 
     /// The configuration this client was built with.
     pub fn config(&self) -> &ClientConfig {
         &self.config
+    }
+
+    /// The connection options shared by every broker connection of this client.
+    pub fn connect_options(&self) -> &std::sync::Arc<ConnectOptions> {
+        &self.opts
+    }
+
+    /// The (reconnecting) bootstrap broker.
+    pub fn bootstrap(&self) -> &Broker {
+        &self.bootstrap
+    }
+
+    /// The ApiVersions negotiation table of the bootstrap broker (reconnects if needed).
+    pub async fn api_versions(&self) -> Result<Vec<NegotiatedApi>, KafkaError> {
+        Ok(self.bootstrap.conn().await?.versions().table())
+    }
+
+    /// Send one request to the bootstrap broker at the negotiated version.
+    pub async fn request<R: ApiRequest>(&self, req: &R) -> Result<R::Response, KafkaError> {
+        self.bootstrap.request(req).await
     }
 
     /// Partition indexes of `topic` (Metadata, 14-34).
