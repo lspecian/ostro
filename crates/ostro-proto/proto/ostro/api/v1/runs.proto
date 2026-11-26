@@ -150,6 +150,9 @@ message ListRunsRequest {
   ListOrder order = 10;
   // Only DLQ members (failed / timed-out runs not dismissed or requeued). Phase 11.
   bool dlq = 11;
+  // Tenant filter (Phase 14, 14-02; D23 tenant id, "_" = the default tenant). Forced to the
+  // caller's tenant for tenant principals (D-P14-38).
+  optional string tenant = 12;
 }
 
 // Order of a run listing. Phase 11 (11-09).

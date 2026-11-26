@@ -1,0 +1,286 @@
+// Phase 14 (14-02; D-P14-4/8/10/11/29): tenants, API tokens, the audit query and module
+// security policy. REST twins: /v1/tenants, /v1/auth/*, /v1/audit, /v1/security/modules/*,
+// POST /v1/modules/{sha}/signatures. Every message mirrors an `ostro_api::phase14` DTO.
+//
+// Secrets: the API token bearer appears only in `CreateTokenResponse` and
+// `RotateTokenResponse` (redacted from `Debug`); no message carries a secret hash.
+syntax = "proto3";
+
+package ostro.api.v1;
+
+import "ostro/api/v1/queues.proto";
+
+// ---- tenants (D-P14-8) ---------------------------------------------------------------
+
+service Tenants {
+  // Create a tenant (ALREADY_EXISTS if it exists).
+  rpc Create(CreateTenantRequest) returns (Tenant);
+  // One tenant (NOT_FOUND if absent).
+  rpc Get(GetTenantRequest) returns (Tenant);
+  // Every tenant, sorted by id.
+  rpc List(ListTenantsRequest) returns (ListTenantsResponse);
+  // Change quotas / weight (only the present fields).
+  rpc Update(UpdateTenantRequest) returns (Tenant);
+  // Suspend (idempotent).
+  rpc Suspend(SuspendTenantRequest) returns (Tenant);
+  // Resume (idempotent).
+  rpc Resume(ResumeTenantRequest) returns (Tenant);
+  // Delete a suspended, empty tenant (FAILED_PRECONDITION tenant_not_empty otherwise).
+  rpc Delete(DeleteTenantRequest) returns (DeleteTenantResponse);
+}
+
+// A tenant id and its quotas (absent = unlimited / default).
+message TenantSpec {
+  // ^[a-z0-9][a-z0-9-]{0,62}$ ("_" is never creatable).
+  string id = 1;
+  optional uint32 weight = 2;
+  optional uint32 max_concurrency = 3;
+  optional uint64 fuel_per_s = 4;
+  optional uint64 fuel_burst = 5;
+  optional uint64 memory_bytes = 6;
+  optional RateSpec event_rate = 7;
+}
+
+message Tenant {
+  TenantSpec spec = 1;
+  bool suspended = 2;
+  uint64 created_at_ms = 3;
+}
+
+message CreateTenantRequest {
+  TenantSpec spec = 1;
+}
+
+message GetTenantRequest {
+  string id = 1;
+}
+
+message ListTenantsRequest {}
+
+message ListTenantsResponse {
+  repeated Tenant tenants = 1;
+}
+
+// A quota change: the message present = change it; `value` absent = clear (unlimited).
+message QuotaU32 {
+  optional uint32 value = 1;
+}
+
+message QuotaU64 {
+  optional uint64 value = 1;
+}
+
+message QuotaRate {
+  optional RateSpec value = 1;
+}
+
+message UpdateTenantRequest {
+  string id = 1;
+  optional QuotaU32 weight = 2;
+  optional QuotaU32 max_concurrency = 3;
+  optional QuotaU64 fuel_per_s = 4;
+  optional QuotaU64 fuel_burst = 5;
+  optional QuotaU64 memory_bytes = 6;
+  optional QuotaRate event_rate = 7;
+}
+
+message SuspendTenantRequest {
+  string id = 1;
+}
+
+message ResumeTenantRequest {
+  string id = 1;
+}
+
+message DeleteTenantRequest {
+  string id = 1;
+}
+
+message DeleteTenantResponse {
+  string id = 1;
+  bool deleted = 2;
+}
+
+// ---- API tokens (D-P14-4) ------------------------------------------------------------
+
+service ApiTokens {
+  // Create a token; the bearer is in the response only.
+  rpc Create(CreateTokenRequest) returns (CreateTokenResponse);
+  // Tokens visible to the caller.
+  rpc List(ListTokensRequest) returns (ListTokensResponse);
+  // Revoke (idempotent; unknown = NOT_FOUND).
+  rpc Revoke(RevokeTokenRequest) returns (RevokeTokenResponse);
+  // Create a successor, optionally revoking the old token.
+  rpc Rotate(RotateTokenRequest) returns (RotateTokenResponse);
+  // The calling principal.
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+}
+
+// An API token as listed: never the secret, never its hash.
+message ApiToken {
+  // otk_...
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string scopes = 4;
+  // Absent = system scope.
+  optional string tenant = 5;
+  uint64 created_at_ms = 6;
+  // Absent = never expires.
+  optional uint64 expires_at_ms = 7;
+  string created_by = 8;
+  optional string rotated_from = 9;
+}
+
+message CreateTokenRequest {
+  string name = 1;
+  string description = 2;
+  repeated string scopes = 3;
+  optional string tenant = 4;
+  optional uint64 ttl_ms = 5;
+  bool no_expiry = 6;
+}
+
+message CreateTokenResponse {
+  ApiToken token = 1;
+  // ostro_otk_<16 base32>_<52 base32>; shown once.
+  string bearer = 2;
+}
+
+message ListTokensRequest {
+  // Tenant filter (system principals).
+  optional string tenant = 1;
+}
+
+message ListTokensResponse {
+  repeated ApiToken tokens = 1;
+}
+
+message RevokeTokenRequest {
+  string id = 1;
+}
+
+message RevokeTokenResponse {
+  string id = 1;
+  bool revoked = 2;
+}
+
+message RotateTokenRequest {
+  string id = 1;
+  bool revoke_old = 2;
+  optional uint64 ttl_ms = 3;
+}
+
+message RotateTokenResponse {
+  ApiToken token = 1;
+  // The successor's bearer; shown once.
+  string bearer = 2;
+}
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+  string token_id = 1;
+  optional string tenant = 2;
+  repeated string scopes = 3;
+  // token, dev, system, node or anonymous.
+  string kind = 4;
+}
+
+// ---- audit (D-P14-11) ----------------------------------------------------------------
+
+service Audit {
+  // Records matching the query, merged across members.
+  rpc Query(AuditQueryRequest) returns (AuditPage);
+}
+
+message AuditQueryRequest {
+  optional string tenant = 1;
+  optional string actor = 2;
+  // Exact or `prefix.*`.
+  optional string action = 3;
+  optional uint64 since_ms = 4;
+  optional uint64 until_ms = 5;
+  optional uint32 limit = 6;
+  optional string cursor = 7;
+}
+
+message AuditRecord {
+  uint64 seq = 1;
+  uint64 ts_ms = 2;
+  uint64 node = 3;
+  string actor = 4;
+  string actor_kind = 5;
+  optional string tenant = 6;
+  string action = 7;
+  string target = 8;
+  // ok, denied:<reason> or failed:<message>.
+  string outcome = 9;
+  optional string request_id = 10;
+  map<string, string> details = 11;
+  // Chain hash (hex).
+  string hash = 12;
+}
+
+message AuditPage {
+  repeated AuditRecord records = 1;
+  optional string cursor = 2;
+  repeated uint64 partial_nodes = 3;
+}
+
+// ---- module security (D-P14-10) ------------------------------------------------------
+
+service Security {
+  // The cluster policy.
+  rpc GetModulePolicy(GetModulePolicyRequest) returns (ModulePolicy);
+  // Replace the cluster policy.
+  rpc SetModulePolicy(SetModulePolicyRequest) returns (ModulePolicy);
+  // Add a cluster or tenant key.
+  rpc AddTrustedKey(AddTrustedKeyRequest) returns (ModulePolicy);
+  // Remove a key by id (NOT_FOUND if absent).
+  rpc RemoveTrustedKey(RemoveTrustedKeyRequest) returns (ModulePolicy);
+  // Verify and attach signatures to a stored module.
+  rpc AttachSignatures(AttachSignaturesRequest) returns (AttachSignaturesResponse);
+}
+
+message TrustedKey {
+  // minisign or cosign-p256.
+  string alg = 1;
+  string key_id = 2;
+  // A minisign public key line or a PEM SPKI.
+  string public_key = 3;
+  string comment = 4;
+  // Present = a tenant key.
+  optional string tenant = 5;
+}
+
+message ModulePolicy {
+  bool require_signed_modules = 1;
+  repeated TrustedKey trusted_keys = 2;
+}
+
+message GetModulePolicyRequest {}
+
+message SetModulePolicyRequest {
+  ModulePolicy policy = 1;
+}
+
+message AddTrustedKeyRequest {
+  TrustedKey key = 1;
+}
+
+message RemoveTrustedKeyRequest {
+  string key_id = 1;
+}
+
+message AttachSignaturesRequest {
+  // Lowercase hex sha256 of the stored module.
+  string sha256 = 1;
+  // Raw signature files (.minisig / cosign signature or bundle), each <= 8 KiB, at most 4.
+  repeated bytes signatures = 2;
+}
+
+message AttachSignaturesResponse {
+  string sha256 = 1;
+  repeated string key_ids = 2;
+}

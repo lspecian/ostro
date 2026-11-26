@@ -699,6 +699,7 @@ impl Client for GrpcClient {
                 language: Some("rust".to_owned()),
                 tenant: None,
                 name: None,
+                signatures: vec![],
             })
             .await
             .map_err(grpc_err)?
@@ -718,6 +719,7 @@ impl Client for GrpcClient {
                 language: Some("rust".to_owned()),
                 tenant: Some(tenant.to_owned()),
                 name: Some(name.to_owned()),
+                signatures: vec![],
             })
             .await
             .map_err(grpc_err)?

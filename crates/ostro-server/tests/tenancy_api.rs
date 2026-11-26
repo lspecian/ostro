@@ -177,6 +177,7 @@ async fn upload_registers_qualified_versions_with_module_name() {
             language: None,
             tenant: Some("beta".into()),
             name: None,
+            signatures: vec![],
         })
         .await
         .expect("grpc upload")
@@ -198,6 +199,7 @@ async fn upload_registers_qualified_versions_with_module_name() {
                 language: None,
                 tenant: tenant.map(str::to_owned),
                 name: name.map(str::to_owned),
+                signatures: vec![],
             })
             .await
             .expect_err("invalid");

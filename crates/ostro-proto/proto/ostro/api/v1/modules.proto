@@ -23,6 +23,10 @@ message UploadModuleRequest {
   // Deployed module name (Phase 14 F4, ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$), stored
   // tenant-qualified on every workflow version this upload registers.
   optional string name = 5;
+  // Phase 14 (14-02, D-P14-10): detached signature files (.minisig / cosign signature or
+  // bundle), each <= 8 KiB, at most 4; the gRPC twin of the repeatable
+  // `Ostro-Module-Signature` header. Empty = unsigned.
+  repeated bytes signatures = 6;
 }
 
 message UploadModuleResponse {

@@ -20,7 +20,8 @@ pub mod health {
 /// and the Phase 6 services `Secrets` and `Connectors` (`bridge.proto`), and the Phase 7
 /// services `Queues` (`queues.proto`) and `Workers` (`workers.proto`), and the Phase 11
 /// services `RunOps` and `Inventory` (`ops.proto`), and the Phase 13 services `Cluster` and
-/// `ModuleLifecycle` (`cluster.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
+/// `ModuleLifecycle` (`cluster.proto`), and the Phase 14 services `Tenants`, `ApiTokens`, `Audit`
+/// and `Security` (`security.proto`). JSON payloads travel as UTF-8 JSON in `bytes` fields named
 /// `*_json`; timestamps are Unix milliseconds in `*_at_ms` fields.
 pub mod api {
     /// Version 1 of the control-plane API.
@@ -73,8 +74,32 @@ pub mod api {
                     .finish()
             }
         }
+
+        // Phase 14 (14-02): API token bearers never reach `Debug` output.
+        impl std::fmt::Debug for CreateTokenResponse {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("CreateTokenResponse")
+                    .field("token", &self.token)
+                    .field("bearer", &"<redacted>")
+                    .finish()
+            }
+        }
+
+        impl std::fmt::Debug for RotateTokenResponse {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("RotateTokenResponse")
+                    .field("token", &self.token)
+                    .field("bearer", &"<redacted>")
+                    .finish()
+            }
+        }
     }
 }
+
+/// Every gRPC method of every compiled proto file as a full path
+/// (`/<package>.<Service>/<Method>`), sorted. Generated from the file descriptor set by
+/// `build.rs` (Phase 14, 14-02): ostro-api's authentication test checks each one.
+pub const GRPC_METHODS: &[&str] = include!(concat!(env!("OUT_DIR"), "/grpc_methods.rs"));
 
 /// `ostro.cluster.v1` node-to-node protocol (Phase 12, 12-02).
 ///

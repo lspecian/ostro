@@ -286,6 +286,7 @@ fn upload_req(sha: &str, wasm: Vec<u8>) -> pb::UploadModuleRequest {
         language: Some("rust".into()),
         tenant: None,
         name: None,
+        signatures: vec![],
     }
 }
 

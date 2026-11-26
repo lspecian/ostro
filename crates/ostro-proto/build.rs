@@ -24,12 +24,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (cluster listener only).
         "proto/ostro/api/v1/cluster.proto",
         "proto/ostro/cluster/v1/membership.proto",
+        // Phase 14 (14-02): Tenants, ApiTokens, Audit, Security.
+        "proto/ostro/api/v1/security.proto",
     ];
     for proto in PROTOS {
         println!("cargo:rerun-if-changed={proto}");
     }
     println!("cargo:rerun-if-changed=proto");
     let fds = protox::compile(PROTOS, ["proto/"])?;
+    // Phase 14 (14-02): every gRPC method of the descriptor set as a full path
+    // (`/<package>.<Service>/<Method>`), so ostro-api's authentication test can prove each
+    // one is either authenticated or on the unauthenticated list.
+    let mut methods = Vec::new();
+    for file in &fds.file {
+        let package = file.package.clone().unwrap_or_default();
+        for service in &file.service {
+            let svc = service.name.clone().unwrap_or_default();
+            for m in &service.method {
+                let name = m.name.clone().unwrap_or_default();
+                methods.push(format!("/{package}.{svc}/{name}"));
+            }
+        }
+    }
+    methods.sort();
+    let mut src = String::from("&[\n");
+    for m in &methods {
+        src.push_str(&format!("    {m:?},\n"));
+    }
+    src.push_str("]\n");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR")?);
+    std::fs::write(out.join("grpc_methods.rs"), src)?;
     // Phase 7 (07-11): messages carrying a join-token secret get a hand-written,
     // redacting `Debug` in src/lib.rs (D-W3: secrets never reach logs).
     tonic_prost_build::configure()
@@ -39,6 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Phase 13 (13-03): node join tokens.
             ".ostro.api.v1.JoinClusterRequest",
             ".ostro.api.v1.NodeTokenCreated",
+            // Phase 14 (14-02): API token bearers.
+            ".ostro.api.v1.CreateTokenResponse",
+            ".ostro.api.v1.RotateTokenResponse",
         ])
         .compile_fds(fds)?;
     Ok(())

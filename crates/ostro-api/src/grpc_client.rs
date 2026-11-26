@@ -454,6 +454,8 @@ impl ControlPlane for GrpcControlPlane {
                 language: req.language,
                 tenant: req.tenant,
                 name: req.name,
+                // Phase 14 (14-02): forwarded uploads keep their signatures.
+                signatures: req.signatures,
             }
         )?;
         Ok(domain::UploadModuleResult {
@@ -596,6 +598,7 @@ impl ControlPlane for GrpcControlPlane {
                 tags: req.tags,
                 order: list_order(req.order),
                 dlq: req.dlq,
+                tenant: None,
             }
         )?;
         Ok(domain::RunPage {
