@@ -22,6 +22,7 @@
      **Phase 11 end gate 2026-11-22 (11-18):** every Phase 11 ordinal in code was re-verified against this file (`11-18-rescheck.py`, output in 11-18-SUMMARY: every Cmd tag in code is `exists`; StartRun 40/41, JournalEvent.4, InvalidCode 29/30, meta ext 144/145 and `x_run_index` are in code; RESERVATIONS CHECK: PASS). Used rows read `exists (P11, <plan>)`: Cmd 45 `DlqUpdate`, StartRun 40/41, JournalEvent.4, InvalidCode 29/30, ext 144 `OnFailure` / 145 `DlqPolicy` and `x_run_index`. Unused P11 slots stay `reserved P11`: Cmd 46–49, StartRun 42–43, InvalidCode 31 (no `ReservedP11_31` placeholder is declared yet), ext 146–159, and the metric prefix `ostro_ui_`. The §11 Phase 11 names that shipped read `exists (P11, <plan>)`; 11-18 added the CLI verb row and `index_rebuilding`. **Not allocated (follow-up):** `RunInfo.retry_of` / `RunInfo.status_seq` and a `RunPage` order-fallback flag (header `X-Ostro-Order-Fallback`) need `ostro.api.v1` proto field numbers, and this file has no API-proto block to take them from; they are left to a later plan that adds such a block (no numbers invented).
      **Phase 12 end gate 2026-11-24 (12-18):** the P12 block re-verified against the final tree (output in 12-18-SUMMARY): MetaCommand is exactly 0–6 (`InitCluster`, `Put`, `Delete`, `SetPartitionLeader`, `ElectLeader`, `AlterIsr`, `ResignLeader`), the only registered ext tag in 80–95 is 80 (`EXT_ELECTION_INFO`), the `Cmd` oneof tags are 1–13, 20, 21, 27, 45 (no 41–42), and `MetaRecord`/`MetaKind` end at index 16 (no 26). Rows MetaCommand 4–6 and ext tag 80 flipped to `exists (P12)`; MetaCommand 7, ext tags 81–95, Cmd 41–42 and MetaRecord 26 are `reserved P12, unused`. Phase 12 allocated no other ordinal; §11 names unchanged.
      **Phase 13 gate 2026-11-24 (13-01):** the code was re-verified against this file before any Phase 13 code (`13-01-rescheck.py`, output in 13-01-SUMMARY): MetaCommand is exactly 0–6, nothing at Cmd 43–44, RejectReason ends at 15 `RunPaused`, no ext tag 96–111 (RESERVATIONS CHECK: PASS). Phase 13 allocations (D-P13-22): MetaCommand 7 `ReservedP12_7` placeholder + 8 `AlterReplicas`, Cmd 43 `RepinRun`, RejectReason 23 `ModuleMismatch` / 24 `RunBusy` (placeholders 16–22), ext tags 96–102, and the §11 Phase 13 names (D-P13-23).
+     **Phase 13 end 2026-11-26 (13-20):** re-checked against the code at the gate commit: MetaCommand 7 `ReservedP12_7` + 8 `AlterReplicas` (9–11 unused), Cmd 43 `RepinRun` (44 unused), RejectReason 16–22 placeholders + 23 `ModuleMismatch` / 24 `RunBusy`, ext tags 96–102 (`ext::EXT_*`; 103–111 unused) all exist and are flipped to `exists (P13)`; §11 Phase 13 names flipped, plus the rows added after 13-01 (`already_on_target`, `NodeOps.StartRestart`, `NodeOps.DeliverInbound`, `ostro-deadline-ms`, the non-mutant P13 failpoints incl. `gc::start_hold`, `module_active` / `not_supported_in_profile`, `OSTRO_P13_MUTANT` and the 13-19 tier-C env vars). No name changed during execution; the optional `ELECTION_REASON_HANDOFF` constant was not added (handoffs use `ELECTION_REASON_RESIGN`), so nothing is reserved for it.
    - `unallocated`: free for a later phase to claim per rule 2.
 
 Sources:
@@ -55,8 +56,8 @@ Sources:
 | 28–33 | spare | reserved P8 |
 | 34–40 | — (P9 fallback only if PF-F1/F2 had not landed pre-freeze) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) (unused at Phase 9 end; fallback not needed) |
 | 41–42 | — (contingency, expected use 0) | reserved P12, unused (F7 landed in 05-07; verified by 12-01, re-verified by 12-18: no Cmd tag 41–42 in code) |
-| 43 | RepinRun `{run_id bytes 1, from_sha bytes 2, to_sha bytes 3, expected_next_seq u64 4, requested_at_ms u64 5}` (`ostro migrate-runs`, D-P13-21) | planned P13 (13-01 shape, 13-17 apply) |
-| 44 | spare | reserved P13 |
+| 43 | RepinRun `{run_id bytes 1, from_sha bytes 2, to_sha bytes 3, expected_next_seq u64 4, requested_at_ms u64 5}` (`ostro migrate-runs`, D-P13-21) | exists (P13): shape 13-01, apply 13-17 (`apply/repin.rs`), proposed by `migrate-runs` |
+| 44 | spare | reserved P13, unused |
 | 45 | DlqUpdate `{run_id 1, op oneof {HookStarted 2, Dismissed 3, Requeued 4}, episode_completed_at_ms 5}` (research proposed 43, which is taken by P13 RepinRun) | exists (P11, 11-02; apply 11-08) |
 | 46–49 | spare | reserved P11 |
 | 50–63 | — | unallocated |
@@ -199,8 +200,8 @@ Rules:
 
 RejectReason 12–14 are absent in code at the Phase 7 gate (07-01, 2026-11-21: code ends at 11 `RunCompleted`). 07-03 declares `#[doc(hidden)] ReservedP6_12`, `ReservedP6_13`, `ReservedP6_14` if still absent (P-15 convention; never emitted, so never in the state hash) before `RunPaused` at 15. Nothing sits at 15–17.
 | 20–22 | — ; `#[doc(hidden)] ReservedP9_20..22` placeholders declared by 13-01 (never emitted; codes 36–38) | reserved P9, **unused** (PF-F1/F2 landed in Phase 5; fallback only) (unused at Phase 9 end; fallback not needed) |
-| 23 | ModuleMismatch (outcome code 39): `RepinRun` whose `from_sha` ≠ the run's `module_sha` | planned P13 (13-01) |
-| 24 | RunBusy (outcome code 40): `RepinRun` on a leased run | planned P13 (13-01) |
+| 23 | ModuleMismatch (outcome code 39): `RepinRun` whose `from_sha` ≠ the run's `module_sha` | exists (P13): declared 13-01, emitted 13-17 |
+| 24 | RunBusy (outcome code 40): `RepinRun` on a leased run | exists (P13): declared 13-01, emitted 13-17 |
 | 25+ | — | unallocated |
 
 ## 8. `InvalidCode` (declaration index; reported in Rejected(Invalid) detail)
@@ -291,8 +292,8 @@ Appending a `MetaCommand` variant changes no existing encoding and needs **no ME
 | 5 | AlterIsr | exists (P12) — shape 12-02, apply 12-05, proposed by the 12-11 ISR publisher and the controller |
 | 6 | ResignLeader | exists (P12) — shape 12-02, apply 12-05, proposed on a Failed leader (12-13) |
 | 7 | `#[doc(hidden)] ReservedP12_7 {}` (P-15 placeholder so `AlterReplicas` lands at index 8; never proposed, apply → `Invalid("reserved")`) | placeholder ReservedP12_7 (13-01); slot reserved P12, unused |
-| 8 | AlterReplicas `{partition u16, epoch u32, expected_isr_version u64, replicas Vec<u64>, isr Vec<u64>, min_insync u8, reassignment Option<Reassignment>}` (D-P13-12) | planned P13 (13-01 shape, 13-10 apply) |
-| 9–11 | spare | reserved P13 |
+| 8 | AlterReplicas `{partition u16, epoch u32, expected_isr_version u64, replicas Vec<u64>, isr Vec<u64>, min_insync u8, reassignment Option<Reassignment>}` (D-P13-12) | exists (P13): shape 13-01, apply 13-05/13-10, proposed by the 13-10 placement controller |
+| 9–11 | spare | reserved P13, unused |
 | 12+ | — | unallocated |
 
 Phase 12 holds no keyspaces, journal kinds, RejectReason/InvalidCode values or outbox kinds.
@@ -314,14 +315,14 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | 64–79 | reserved P9 | — (unused at Phase 9 end; fallback not needed) |
 | 80 | `PartitionAssignment` ElectionInfo `{reason u8: 0 Bootstrap 1 Startup 2 Failover 3 Resign 4 Offline, elected_at_ms u64, prev_leader u64}` | exists (P12) — `ext::EXT_ELECTION_INFO`, `ElectionInfo` (12-02), written by ElectLeader/ResignLeader apply |
 | 81–95 | spare (Member, PartitionAssignment, cluster) | reserved P12, unused (12-18: only tag 80 registered in code) |
-| 96 | `Member` NodeVersion `{ostro_version, level_min, level_max, wasmtime, event_codec_ver, wit_lines, reported_at_ms}` | planned P13 (13-01): `ext::EXT_NODE_VERSION`, postcard `NodeVersion{ostro_version: String, level_min: u32, level_max: u32, wasmtime: String, event_codec_ver: u32, wit_lines: Vec<String>, reported_at_ms: u64}` |
-| 97 | `Member` MemberState `{state: Joining/Active/Draining/Removed, changed_at_ms}` (tombstone; node ids never reused) | planned P13 (13-01): `ext::EXT_MEMBER_STATE`, postcard `MemberState{state: u8 (0 Joining, 1 Active, 2 Draining, 3 Removed), changed_at_ms: u64}` |
-| 98 | `ClusterInfo` ClusterVersion `{finalized, hold: Option<u32>, finalized_at_ms}` (the 1.0 binary must already read it; absent = baseline level) | planned P13 (13-01): `ext::EXT_CLUSTER_VERSION`, postcard `ClusterVersion{finalized: u32, hold: Option<u32>, finalized_at_ms: u64}` |
-| 99 | `ClusterInfo` ReplicationPolicy `{rf, min_insync, max_voters}` | planned P13 (13-01): `ext::EXT_REPLICATION_POLICY`, postcard `ReplicationPolicy{rf: u8, min_insync: u8, max_voters: u8}` |
-| 100 | `PartitionAssignment` Reassignment `{target, adding, removing, started_at_ms}` (KIP-455 shape) | planned P13 (13-01): `ext::EXT_REASSIGNMENT`, postcard `Reassignment{target: Vec<u64>, adding: Vec<u64>, removing: Vec<u64>, started_at_ms: u64}` |
-| 101 | `ModuleRecord` WitRequirement `{line, min_level}` | planned P13 (13-01): `ext::EXT_WIT_REQUIREMENT`, postcard `WitRequirement{line: String, min_level: u32}` |
-| 102 | `ModuleRecord` / `WorkflowVersion` Retired `{retired_at_ms}` | planned P13 (13-01): `ext::EXT_RETIRED`, postcard `Retired{retired_at_ms: u64}` |
-| 103–111 | spare | reserved P13 |
+| 96 | `Member` NodeVersion `{ostro_version, level_min, level_max, wasmtime, event_codec_ver, wit_lines, reported_at_ms}` | exists (P13; declared 13-01): `ext::EXT_NODE_VERSION`, postcard `NodeVersion{ostro_version: String, level_min: u32, level_max: u32, wasmtime: String, event_codec_ver: u32, wit_lines: Vec<String>, reported_at_ms: u64}` |
+| 97 | `Member` MemberState `{state: Joining/Active/Draining/Removed, changed_at_ms}` (tombstone; node ids never reused) | exists (P13; declared 13-01): `ext::EXT_MEMBER_STATE`, postcard `MemberState{state: u8 (0 Joining, 1 Active, 2 Draining, 3 Removed), changed_at_ms: u64}` |
+| 98 | `ClusterInfo` ClusterVersion `{finalized, hold: Option<u32>, finalized_at_ms}` (the 1.0 binary must already read it; absent = baseline level) | exists (P13; declared 13-01): `ext::EXT_CLUSTER_VERSION`, postcard `ClusterVersion{finalized: u32, hold: Option<u32>, finalized_at_ms: u64}` |
+| 99 | `ClusterInfo` ReplicationPolicy `{rf, min_insync, max_voters}` | exists (P13; declared 13-01): `ext::EXT_REPLICATION_POLICY`, postcard `ReplicationPolicy{rf: u8, min_insync: u8, max_voters: u8}` |
+| 100 | `PartitionAssignment` Reassignment `{target, adding, removing, started_at_ms}` (KIP-455 shape) | exists (P13; declared 13-01): `ext::EXT_REASSIGNMENT`, postcard `Reassignment{target: Vec<u64>, adding: Vec<u64>, removing: Vec<u64>, started_at_ms: u64}` |
+| 101 | `ModuleRecord` WitRequirement `{line, min_level}` | exists (P13; declared 13-01): `ext::EXT_WIT_REQUIREMENT`, postcard `WitRequirement{line: String, min_level: u32}` |
+| 102 | `ModuleRecord` / `WorkflowVersion` Retired `{retired_at_ms}` | exists (P13; declared 13-01): `ext::EXT_RETIRED`, postcard `Retired{retired_at_ms: u64}` |
+| 103–111 | spare | reserved P13, unused |
 | 112–143 | reserved P14 (ApiToken name/description/created_by/rotation link, ModuleRecord signature evidence + uploader tenants, ClusterInfo security policy, SealedSecret created/rotated, further Tenant knobs) | — |
 | 144 | `WorkflowPolicy` / `QueuePolicy` OnFailure | exists (P11, 11-12) |
 | 145 | DlqPolicy `{enabled, hook_catchup_ms}` | exists (P11, 11-12) |
@@ -439,25 +440,28 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Cert SAN URIs | `ostro://<cluster_id>/worker/<token_id>/<worker_id>` (join-issued), `ostro://<cluster_id>/worker/ext/<worker_id>` (external CA), `ostro://<cluster_id>/node/<node_id>` (node identity) | P7 (07-06 / 07-09) |
 | In-memory actions | `Action::RunPaused{run}`, `Action::RunResumed{run}` (informational, not persisted, not a RESERVATIONS space) | P7 (07-03) |
 | Note | `ostro-worker-proto` field numbers are versioned by `proto_version` inside that crate and are **not** a RESERVATIONS space | P7 (D-W2) |
-| gRPC services | `ostro.api.v1.Cluster`, `ostro.api.v1.ModuleLifecycle` (file `ostro/api/v1/cluster.proto`) (D-P13-23) | P13 (13-01 row; 13-03) |
-| gRPC services | `ostro.cluster.v1.Membership {Removed}`, `ostro.cluster.v1.NodeOps {HandOff, ModuleRefs}` (file `ostro/cluster/v1/membership.proto`) | P13 (13-01 row; 13-03) |
+| gRPC services | `ostro.api.v1.Cluster`, `ostro.api.v1.ModuleLifecycle` (file `ostro/api/v1/cluster.proto`) (D-P13-23) | exists (P13; 13-01 row; 13-03) |
+| gRPC services | `ostro.cluster.v1.Membership {Removed}`, `ostro.cluster.v1.NodeOps {HandOff, ModuleRefs}` (file `ostro/cluster/v1/membership.proto`) | exists (P13; 13-01 row; 13-03) |
 | Proto field | `ostro.api.v1.MigrateRunsReport.already_on_target = 6` (repeated string, additive; REST/OpenAPI `already_on_target`); `ostro_migrate_runs_total{outcome="already_on_target"}` | exists (P13, p13-follow) |
 | gRPC method | `ostro.cluster.v1.NodeOps.StartRestart` (messages `StartRestartRequest {partition 1, start_run 2, rate_limit 3, prefix_bound 4, lookup_only 5, workflow 6, idempotency_key 7}`, `StartRestartResponse {run_id 1, existing 2, rejected 3}`; appended to `membership.proto`, additive); metric `ostro_route_keyed_restarts_total{path}` | exists (P13, p13-follow) |
 | gRPC method | `ostro.cluster.v1.NodeOps.DeliverInbound` (messages `DeliverInboundRequest {partition 1, batch 2}` (batch = frozen partition `Command` bytes holding the `InboundBatch`), `DeliverInboundResponse {outcome 1, rejected 2}` (outcome = `ApplyOutcome::code`); appended to `membership.proto`, additive); metric `ostro_route_inbound_forwards_total{result}`; module `ostro_server::p13::inbound` (`ClusterRouter`, `InboundRoute`, `NodeInbound`) | exists (P13, p13-bugs2) |
-| REST paths | `POST /v1/cluster/{init,join,tokens,reassign,rebalance}`, `GET /v1/cluster/status`, `POST /v1/cluster/members/{id}/{remove,drain}`, `GET /v1/cluster/upgrade`, `POST /v1/cluster/upgrade/{finalize,hold,release}`, `POST /v1/runs/migrate`, `DELETE /v1/modules/{sha}`, `POST /v1/modules/gc` | P13 (13-01 row; 13-03) |
-| CLI verbs | `ostro cluster {init,join,remove,drain,status,token,reassign,rebalance,upgrade}`, `ostro migrate-runs`, `ostro modules {rm,gc}` | P13 (13-01 row; 13-02 / 13-16) |
-| Config keys | `[cluster]` `advertise`, `auto_finalize`, `join_timeout`, `join_orphan_timeout`, `promote_lag`, `handoff_grace`, `handoff_catchup_timeout`, `shutdown_handoff_timeout`, `leader_rebalance_interval`, `max_concurrent_moves`, `meta_max_message_bytes`; `[api]` `unkeyed_start_placement`, `strict_reads`, `lease_margin`; `[modules]` `gc_interval`, `gc_grace`, `gc_protect_resumable`; `[workers]` `version_policy` | P13 (13-01 row; 13-02) |
-| Failpoint prefixes | `member::`, `reassign::`, `route::`, `upgrade::`, `gc::`, `handoff::`, `migrate::` | P13 (13-01 row) |
-| Failpoints | `upgrade::mutant::emit_ungated`, `upgrade::mutant::reject_and_continue`, `member::mutant::skip_quorum_check`, `member::mutant::no_leave_joint`, `reassign::mutant::raise_min_insync_early`, `route::mutant::serve_without_lease`, `gc::mutant::single_scan`, `migrate::mutant::skip_seq_check` (names: `ostro_types::compat::MUTANTS`, D-P13-25) | names exist (P13, 13-01); sites planned P13 (owning plans) |
-| Metric prefixes | `ostro_cluster_`, `ostro_route_`, `ostro_module_gc_`, `ostro_migrate_` | P13 (13-01 row) |
-| Secret | `__ostro/cluster-ca` (cluster CA cert + key as a `SealedSecret`, plaintext-v0 until Phase 14, D-P13-10) | P13 (13-01 row; 13-09 / 13-16) |
-| Id prefix / token scope | `njt_` node join tokens, scope `node:join` (`ApiToken{id: "njt_<id>", scopes: ["node:join"]}`, D-P13-9) | P13 (13-01 row; 13-09) |
-| Data-dir file | `<data>/cluster-seeds.toml` `{node_id, cluster_id, seeds}` (durable join marker, written first by `ostro cluster join`, D-P13-9 / D-P13-29) | P13 (13-01 row; 13-09) |
-| Headers | `ostro-hop`, `ostro-partition`, `ostro-partitions`, `ostro-principal`, `ostro-consistency`, `ostro-read-after` | P13 (13-01 row; 13-03 / 13-12 / 13-13) |
-| Header | `ostro-deadline-ms` (REST remaining deadline in ms, the twin of `grpc-timeout`) | P13 (13-03) |
-| API error `details.reason` values | `feature_not_enabled`, `module_retired`, `module_gone`, `leader_changed` | P13 (13-01 row) |
-| Env vars | `OSTRO_TEST_LEVEL_MAX` (read only with `ostro-types/level-emulation`), `OSTRO_PREV_BIN`, `OSTRO_UPGRADE_ITERS`, `OSTRO_P13_REQUIRE_ALL` | P13 (13-01 row) |
-| Cargo features | `level-emulation` (crate `ostro-types`; enabled only through the failpoints chains of `ostro-server`, `ostro`, `ostro-repl-conformance`), `wit-next-fixture` (crate `ostro-engine`) | P13 (13-01 Task 2 manifests) |
+| REST paths | `POST /v1/cluster/{init,join,tokens,reassign,rebalance}`, `GET /v1/cluster/status`, `POST /v1/cluster/members/{id}/{remove,drain}`, `GET /v1/cluster/upgrade`, `POST /v1/cluster/upgrade/{finalize,hold,release}`, `POST /v1/runs/migrate`, `DELETE /v1/modules/{sha}`, `POST /v1/modules/gc` | exists (P13; 13-01 row; 13-03) |
+| CLI verbs | `ostro cluster {init,join,remove,drain,status,token,reassign,rebalance,upgrade}`, `ostro migrate-runs`, `ostro modules {rm,gc}` | exists (P13; 13-01 row; 13-02 / 13-16) |
+| Config keys | `[cluster]` `advertise`, `auto_finalize`, `join_timeout`, `join_orphan_timeout`, `promote_lag`, `handoff_grace`, `handoff_catchup_timeout`, `shutdown_handoff_timeout`, `leader_rebalance_interval`, `max_concurrent_moves`, `meta_max_message_bytes`; `[api]` `unkeyed_start_placement`, `strict_reads`, `lease_margin`; `[modules]` `gc_interval`, `gc_grace`, `gc_protect_resumable`; `[workers]` `version_policy` | exists (P13; 13-01 row; 13-02) |
+| Failpoint prefixes | `member::`, `reassign::`, `route::`, `upgrade::`, `gc::`, `handoff::`, `migrate::` | exists (P13; 13-01 row) |
+| Failpoints | `member::join_before_marker`, `member::join_after_marker`, `member::join_after_node_toml` (13-09), `member::init_after_ca` (13-16), `handoff::before_elect`, `handoff::after_elect` (13-11), `route::stale_view` (13-12), `gc::between_scans`, `gc::before_delete` (13-15), `gc::start_hold` (13-18; failpoints build, the start path: holds a start between its retired check and its submit for the start-during-GC race scenario) | exists (P13; recorded by 13-20) |
+| Failpoints | `upgrade::mutant::emit_ungated`, `upgrade::mutant::reject_and_continue`, `member::mutant::skip_quorum_check`, `member::mutant::no_leave_joint`, `reassign::mutant::raise_min_insync_early`, `route::mutant::serve_without_lease`, `gc::mutant::single_scan`, `migrate::mutant::skip_seq_check` (names: `ostro_types::compat::MUTANTS`, D-P13-25) | exists (P13): names 13-01, sites placed by the owning plans (13-04, 13-09, 13-10, 13-13, 13-15, 13-17), all eight biting in CI (13-18 matrix, 13-20 step) |
+| Metric prefixes | `ostro_cluster_`, `ostro_route_`, `ostro_module_gc_`, `ostro_migrate_` | exists (P13; 13-01 row; series listed in docs/cluster-operations.md §9) |
+| Secret | `__ostro/cluster-ca` (cluster CA cert + key as a `SealedSecret`, plaintext-v0 until Phase 14, D-P13-10) | exists (P13; 13-01 row; 13-09 / 13-16) |
+| Id prefix / token scope | `njt_` node join tokens, scope `node:join` (`ApiToken{id: "njt_<id>", scopes: ["node:join"]}`, D-P13-9) | exists (P13; 13-01 row; 13-09) |
+| Data-dir file | `<data>/cluster-seeds.toml` `{node_id, cluster_id, seeds}` (durable join marker, written first by `ostro cluster join`, D-P13-9 / D-P13-29) | exists (P13; 13-01 row; 13-09) |
+| Headers | `ostro-hop`, `ostro-partition`, `ostro-partitions`, `ostro-principal`, `ostro-consistency`, `ostro-read-after` | exists (P13; 13-01 row; 13-03 / 13-12 / 13-13) |
+| Header | `ostro-deadline-ms` (REST remaining deadline in ms, the twin of `grpc-timeout`) | exists (P13; 13-03) |
+| API error `details.reason` values | `feature_not_enabled` (every gate answers 409, D-13-18-1), `module_retired`, `module_gone`, `leader_changed` | exists (P13; 13-01 row) |
+| API error `details.reason` values | `module_active` (409: retire refused while a version of the module is active, 13-15), `not_supported_in_profile` (409: `ostro cluster init` under `dev` / `--ephemeral`, 13-16) | exists (P13; recorded by 13-20) |
+| Env vars | `OSTRO_TEST_LEVEL_MAX` (read only with `ostro-types/level-emulation`), `OSTRO_PREV_BIN`, `OSTRO_UPGRADE_ITERS`, `OSTRO_P13_REQUIRE_ALL` | exists (P13; 13-01 row) |
+| Env vars | `OSTRO_P13_MUTANT` (13-18: run one row of the P13 mutant matrix locally), `OSTRO_P13_REPORT_DIR`, `OSTRO_CAMPAIGN_TIMEBOX_S`, `OSTRO_SHUTDOWN_REPEATS`, `OSTRO_P13_CHILD_RUNS` (13-19 tier C; `OSTRO_CAMPAIGN_FAULTS` is shared with P5/P12) | exists (P13; recorded by 13-20) |
+| Cargo features | `level-emulation` (crate `ostro-types`; enabled only through the failpoints chains of `ostro-server`, `ostro`, `ostro-repl-conformance`), `wit-next-fixture` (crate `ostro-engine`) | exists (P13; 13-01 Task 2 manifests) |
 | Crates | `ostro-build` (hermetic project builds, templates, toolchain cache), `ostro-client` (Rust client library; Phase 10 moves `ostro-cli/src/client.rs` into it) (D-P10-19) | exists (P10, 10-01 row; 10-20 verified) |
 | Cargo features | `testing` (crate `ostro-client`: `TestEnv`); `polyglot` (crate `ostro-build` and the `ostro` binary crate; distinct from P9's `polyglot` on `ostro-conformance`, same name, separate crates) | exists (P10, 10-01 row; 10-20 verified) |
 | Dirs | `clients/python`, `clients/ts`, `clients/go`, `crates/ostro-build/templates/`, `deploy/build-image/`, project build output `target/ostro/` (never `./.ostro`) | exists (P10, 10-01 row; 10-20 verified) |
