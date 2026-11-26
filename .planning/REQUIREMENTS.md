@@ -313,7 +313,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | TRIG-01 | Phase 8 | Complete |
 | TRIG-02 | Phase 8 | Complete |
 | TRIG-03 | Phase 8 | Complete |
-| TRIG-04 | Phase 14 | Pending (14-31, 14-32) |
+| TRIG-04 | Phase 14 | Pending (14-31, 14-34, 14-32) |
 | FX-01 | Phase 6 | Complete |
 | FX-02 | Phase 6 | Complete |
 | FX-03 | Phase 6 | Complete |
