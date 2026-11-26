@@ -4,6 +4,8 @@
 **Domain:** tenant isolation, auth/scopes, quotas and fair dispatch, signed modules, audit, fuzzing, fault injection, benchmarks, release engineering
 **Confidence:** HIGH for the pre-freeze findings (all verified against the code at `9a79ca8` and the Phase 5–9 plans). MEDIUM for the outline of the rest of the phase (tool versions checked; designs not yet planned in detail).
 
+**Revision note (2026-11-26).** The user added two scope items to Phase 14 after this research: a Kafka-protocol topic-consumer trigger (P8-D11 changed) and whole-cluster restore from bottomless backups (D-P12-3 changed), plus small follow-ups. Their research and design decisions live in 14-DECISIONS.md (D-P14-42..D-P14-50, tool table rows for kafka-protocol, Apache Kafka and SeaweedFS), not in this document.
+
 **Scope note.** Most of this document is **pre-freeze findings**. Phase 5 plans 05-07 (meta encoding), 05-05 (WIT doc comments), 05-13 (API) and 05-20 (freeze flip) have not run yet. This research says what Phase 14 needs from the formats they freeze. The rest of Phase 14 (fuzzing, Jepsen-style runs, soak, benchmarks, distribution, docs) is outlined only, for later planning.
 
 <user_constraints>
@@ -16,7 +18,7 @@ No `14-CONTEXT.md` exists, because `/gsd:discuss-phase` has not run for Phase 14
   - After the freeze, any meta change is a **new `MetaRecord` variant appended in RESERVATIONS order, plus a `META_FORMAT` bump with decoders for every older format**. Fields are never added to existing meta structs.
   - WIT changes after the freeze go only through a new `0.1.N` package. Doc comments can't change either, because the freeze test checks bytes.
 - **Ordinals and reserved names** are allocated only from `.planning/RESERVATIONS.md`, through a docs-only commit before any code (rule 2).
-- **Environment.**
+- **Environment.** *(Superseded 2026-11-26 — see 14-DECISIONS D-P14-41: the microk8s `ostro-ci` namespace is approved for CI/tests/measurements through `ostro-k8s-ci` (never product deploys or helm installs); the orchestrator fast-forwards main to github.com/lspecian/ostro (executors still never push); executors follow the durable brief. The original 2026-11-19 wording is kept below for the record.)*
   - Don't use the reachable microk8s cluster.
   - No Docker locally (P8-D18): Docker-only legs are human_needed.
   - No git remotes and no pushes. Tags stay local.

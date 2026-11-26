@@ -101,6 +101,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **TRIG-01**: Operator can map `POST /hooks/{name}` to a workflow with signature verification (Stripe, GitHub, Slack, generic HMAC) and idempotency key extraction [FR-3.6]
 - [ ] **TRIG-02**: Operator can create cron schedules with timezone; each `(schedule, fire_time)` starts exactly once [FR-3.7]
 - [ ] **TRIG-03**: Cron schedules support overlap policy, catch-up after downtime, pause and trigger-now
+- [ ] **TRIG-04**: Kafka-protocol topic-consumer trigger: at-least-once consumption starts runs idempotently (keyed by topic/partition/offset or message key); consumer-group offsets are committed only after the run start is durable; pure-Rust client (no librdkafka/openssl); Chronik supported over the Kafka protocol [FR-3.10; added 2026-11-26, user decision P8-D11 changed]
 
 ### Effects, Connectors & Secrets
 
@@ -130,6 +131,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [ ] **BACK-02**: `ostro restore --from <bucket>` rebuilds a node with RPO ≤ segment seal interval; restored state hash matches
 - [ ] **BACK-03**: `ostro backup` / `ostro restore` to/from a local file [FR-2.8]
 - [ ] **BACK-04**: One snapshot format serves restore and (later) follower installation; journal trim rule coordinates with snapshots
+- [ ] **BACK-05**: `ostro restore` rebuilds a whole multi-node cluster (metadata + all partitions) from bottomless backups to a cross-partition consistent cut, then grows back with `ostro cluster join` [added 2026-11-26, user decision D-P12-3 changed]
 
 ### Run Operations & Retention
 
@@ -214,7 +216,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 - **V2-02**: Streaming progress output from runs
 - **V2-03**: Temporal-style updates and signal-with-start
 - **V2-04**: Query handlers (re-activating replay)
-- **V2-05**: Event bus / Kafka-Chronik triggers and produce connector [FR-3.10, FR-4.6]
+- **V2-05**: Event bus / produce connector [FR-4.6] (the Kafka/Chronik topic-consumer trigger moved to v1 as TRIG-04 on 2026-11-26)
 - **V2-06**: Polyglot connector components composed at build time [FR-4.7]
 - **V2-07**: Step-level placement hints [FR-5.6]
 - **V2-08**: WIT 0.2 on WASI 0.3 native async
@@ -311,6 +313,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | TRIG-01 | Phase 8 | Complete |
 | TRIG-02 | Phase 8 | Complete |
 | TRIG-03 | Phase 8 | Complete |
+| TRIG-04 | Phase 14 | Pending (14-31, 14-32) |
 | FX-01 | Phase 6 | Complete |
 | FX-02 | Phase 6 | Complete |
 | FX-03 | Phase 6 | Complete |
@@ -331,6 +334,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | BACK-02 | Phase 8 | Complete |
 | BACK-03 | Phase 8 | Complete |
 | BACK-04 | Phase 8 | Complete |
+| BACK-05 | Phase 14 | Pending (14-29, 14-30) |
 | OPS-01 | Phase 7 | Complete |
 | OPS-02 | Phase 11 | Complete (11-18 ops_e2e SC1: fix-and-rerun from s3 through the spawned binary, one completion per step, prefix identical; UI rerun preview + submit in ui_e2e; kill test rerun::before_rearm; rerun_api / rerun_rearm / apply_rerun; corpus rerun-fixed-from-step + rerun-rearmed-timer) |
 | OPS-03 | Phase 11 | Complete (11-18 ops_e2e SC2: ostro bulk retry + bulk rerun over a tag at rate 20, snapshot bound = exactly one op per matched run, ops spread after the burst; kill test bulk::after_op resumes without duplicate cancels; bulk_ops 13; UI bulk create/cancel in ui_e2e) |
@@ -381,10 +385,10 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | QA-05 | Phase 14 | Pending |
 
 **Coverage:**
-- v1 requirements: 136 total
-- Mapped to phases: 136
+- v1 requirements: 138 total
+- Mapped to phases: 138
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-11-18*
-*Last updated: 2026-11-18 after roadmap creation (14 phases)*
+*Last updated: 2026-11-26: TRIG-04 and BACK-05 added to Phase 14 (user decisions of 2026-11-26)*
