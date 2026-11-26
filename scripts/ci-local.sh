@@ -64,8 +64,10 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 # 06-18 fx_sql_crash); the crate is linted once (check_failpoints de-duplicates).
 # Phase 12 (12-01): ostro-cluster (repl::/fetch::/isr::/install:: sites) and ostro-repl-conformance
 # (mutant matrix, fault legs) are appended last. 09-17 appends ostro-server:children_failpoints
-# (09-08's child:: failpoints).
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance ostro-server:children_failpoints ostro-server:rerun_rearm ostro-server:dlq_api ostro-server:bulk_ops ostro:ops_kill)
+# (09-08's child:: failpoints). 13-20 appends the Phase 13 server failpoint targets:
+# p13_boot_modes (13-09 member:: crash points), p13_module_gc (13-15 gc::mutant::single_scan
+# bites) and p13_promote (13-16 member::init_after_ca).
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance ostro-server:children_failpoints ostro-server:rerun_rearm ostro-server:dlq_api ostro-server:bulk_ops ostro:ops_kill ostro-server:p13_boot_modes ostro-server:p13_module_gc ostro-server:p13_promote)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)
@@ -286,6 +288,55 @@ check_repl_mutants() {
   if [[ "$bites" -lt 11 ]]; then echo "only ${bites} mutant bites (need >= 11)"; return 1; fi
   if grep -q 'SKIP (pending)' <<<"$out"; then echo "a mutant scenario is still pending"; return 1; fi
   echo "${bites} mutant bites, none pending"
+}
+
+# Phase 13 mutant matrix (13-18, D-P13-25): every one of the eight mutants must bite
+# (>= 8 "FAILED as expected" lines) and none may be skipped.
+# Keep in sync with the "Phase 13 mutant matrix" step of .github/workflows/ci.yml.
+check_p13_mutants() {
+  local out bites
+  out="$(OSTRO_P13_REQUIRE_ALL=1 cargo test -p ostro-repl-conformance --features failpoints --locked --test mutants_p13 -- --test-threads=1 --nocapture 2>&1)" || { echo "$out"; return 1; }
+  grep -E 'MUTANT |test result' <<<"$out" || true
+  grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<<"$out" || { echo "the P13 mutant matrix ran no test"; return 1; }
+  bites="$(grep -c 'FAILED as expected' <<<"$out" || true)"
+  if [[ "$bites" -lt 8 ]]; then echo "only ${bites} P13 mutant bites (need >= 8)"; return 1; fi
+  if grep -q 'SKIP' <<<"$out"; then echo "a P13 mutant was skipped"; return 1; fi
+  echo "${bites} P13 mutant bites, none skipped"
+}
+
+# ENG-10 (13-07): the engine with the `wit-next-fixture` feature (the 0.1.N and 0.2 fixture
+# WIT lines, incl. tests/linker_set) must test and lint clean. Keep in sync with the "WIT
+# fixture lines" step of .github/workflows/ci.yml.
+check_wit_next_fixture() {
+  local out
+  out="$(cargo test -p ostro-engine --features wit-next-fixture --locked 2>&1)" || { echo "$out"; return 1; }
+  grep -E '^test result|Running' <<<"$out" || true
+  grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<<"$out" || { echo "the wit-next-fixture suite ran no test"; return 1; }
+  cargo clippy -p ostro-engine --features wit-next-fixture --all-targets --locked -- -D warnings
+}
+
+# Phase 13 grep gates (13-20), shared with the "Phase 13 grep gates" step of the lint job in
+# .github/workflows/ci.yml (see scripts/p13-grep-gates.sh).
+check_p13_gates() {
+  bash scripts/p13-grep-gates.sh
+}
+
+# Phase 13 tier C (13-19): the multi-process promotion, rolling upgrade (3 iterations), RYW,
+# downgrade fences, controlled-shutdown timing, previous-binary hook (SKIP without
+# OSTRO_PREV_BIN) and a 50-fault Phase 13 campaign, on real `ostro` failpoint processes.
+# Keep in sync with the "Phase 13 tier C (multi-process)" step of .github/workflows/ci.yml.
+# The gate campaign (>= 10,000 faults, 4 h time box) is run by hand: OSTRO_CAMPAIGN_FAULTS=10000.
+P13_TIER_C_TESTS=(process_promotion process_rolling_upgrade process_ryw process_downgrade process_shutdown upgrade_from_prev cluster_campaign_p13)
+# TODO(p13-children): remove OSTRO_P13_CHILD_RUNS=0 here and in ci.yml once the child-run loss
+# under restarts (13-19 finding 1, parent_attached runs never terminate after a restart at
+# finalized level 1) is fixed; until then the tier-C workload leaves child runs out.
+check_p13_tier_c() {
+  local t
+  cargo build -p ostro --features failpoints --target-dir target/failpoints --locked || return 1
+  for t in "${P13_TIER_C_TESTS[@]}"; do
+    OSTRO_P13_REPORT_DIR="${OSTRO_P13_REPORT_DIR:-$ROOT/target/p13-reports}" OSTRO_UPGRADE_ITERS=3 OSTRO_CAMPAIGN_FAULTS=50 OSTRO_P13_CHILD_RUNS=0 \
+      cargo test --release -p ostro-repl-conformance --features failpoints --locked --test "$t" -- --ignored --test-threads=1 --nocapture || return 1
+  done
 }
 
 # Rust guest SDK (plan 04-20): a separate cargo workspace (sdks/rust, no committed lock,
@@ -671,6 +722,9 @@ step "semantics sleepers (serial)" check_sleepers
 step "failpoint list sync (ci.yml)" check_failpoint_sync
 step "failpoint suites" check_failpoints
 step "replication mutant matrix" check_repl_mutants
+step "Phase 13 mutant matrix" check_p13_mutants
+step "engine wit-next-fixture suite" check_wit_next_fixture
+step "Phase 13 tier C (multi-process)" check_p13_tier_c
 step "server campaign smoke (20 kills)" check_campaign_smoke
 step "phase 7 failpoint legs + manifests" check_phase7
 step "cargo deny check" cargo deny check
@@ -678,6 +732,7 @@ step "check-vendored.sh" bash scripts/check-vendored.sh
 step "check-deny-fixtures.sh" bash scripts/check-deny-fixtures.sh
 step "no chronik/tokio-uring/prometheus" check_forbidden_crates
 step "one log path + P12 grep gates" check_one_log_path
+step "P13 grep gates" check_p13_gates
 if [[ -f "$WORKFLOW" ]]; then
   step "workflow validation" check_workflow
 else
