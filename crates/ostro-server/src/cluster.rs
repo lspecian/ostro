@@ -250,13 +250,50 @@ where
 
 /// A late-bound gRPC fallback of the cluster listener (Phase 13 services, attached after the
 /// control plane exists and detached before the node shuts down).
-#[derive(Clone, Default)]
-struct LateRoutes(Arc<arc_swap::ArcSwapOption<Routes>>);
+///
+/// p13-children: every request is annotated with the caller's node identity
+/// ([`PeerIdentity::identify`]) before it reaches the Phase 13 services. Membership and
+/// `NodeOps` (`HandOff`, `StartRestart`, `DeliverInbound`, ...) call
+/// `authz::require_node`, which reads only the annotation; the Phase 12 services get it
+/// from their own interceptor, but these routes had none, so over mTLS TCP every call
+/// answered `UNAUTHENTICATED` ("cluster services require a node certificate") and only the
+/// in-memory transport (which inserts `PeerNode` itself) worked. Cross-node outbox delivery
+/// (child starts, child completions) therefore stalled whenever the source and target
+/// partitions had different leaders (13-19 finding 1).
+#[derive(Clone)]
+struct LateRoutes {
+    routes: Arc<arc_swap::ArcSwapOption<Routes>>,
+    identity: PeerIdentity,
+}
 
 impl LateRoutes {
-    fn set(&self, routes: Option<Routes>) {
-        self.0.store(routes.map(Arc::new));
+    fn new(identity: PeerIdentity) -> Self {
+        Self {
+            routes: Arc::default(),
+            identity,
+        }
     }
+
+    fn set(&self, routes: Option<Routes>) {
+        self.routes.store(routes.map(Arc::new));
+    }
+}
+
+/// `req` with the caller's node identity annotated ([`PeerIdentity::identify`]: the
+/// verified peer certificate becomes `PeerNode` or `PeerRejected`; a `PeerNode` already set
+/// by an in-memory transport is kept).
+fn identified(
+    identity: &PeerIdentity,
+    req: axum::http::Request<axum::body::Body>,
+) -> axum::http::Request<axum::body::Body> {
+    let (mut parts, body) = req.into_parts();
+    let mut probe = axum::http::Request::new(());
+    *probe.extensions_mut() = std::mem::take(&mut parts.extensions);
+    let mut t = tonic::Request::from_http(probe);
+    identity.identify(&mut t);
+    let (_, extensions, ()) = t.into_parts();
+    parts.extensions = extensions;
+    axum::http::Request::from_parts(parts, body)
 }
 
 impl tonic::codegen::Service<axum::http::Request<axum::body::Body>> for LateRoutes {
@@ -272,9 +309,10 @@ impl tonic::codegen::Service<axum::http::Request<axum::body::Body>> for LateRout
     }
 
     fn call(&mut self, req: axum::http::Request<axum::body::Body>) -> Self::Future {
-        match self.0.load_full() {
+        match self.routes.load_full() {
             Some(routes) => {
                 let mut routes = (*routes).clone();
+                let req = identified(&self.identity, req);
                 Box::pin(async move {
                     tonic::codegen::Service::<axum::http::Request<axum::body::Body>>::call(
                         &mut routes,
@@ -546,7 +584,7 @@ impl ClusterServices {
         let limit = tuning.replication_message_limit();
         let meta_max_message =
             usize::try_from(cfg.cluster.meta_max_message_bytes).unwrap_or(usize::MAX);
-        let p13_routes = LateRoutes::default();
+        let p13_routes = LateRoutes::new(identity.clone());
         let routes = Routes::new(repl_service::replication_server(
             replication.clone(),
             identity.clone(),
