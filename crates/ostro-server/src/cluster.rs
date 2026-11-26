@@ -731,10 +731,7 @@ impl ClusterServices {
             }
             let st = meta.raft().status();
             p13::voter_check(
-                &p13::ConfView {
-                    voters: st.voters,
-                    learners: st.learners,
-                },
+                &p13::joiner::live_conf_view(st.voters, &st.learners, &st.learners_next),
                 cfg,
                 p13::members_known(data_dir, Some(meta.view())),
                 VoterCheckPhase::PostReady,

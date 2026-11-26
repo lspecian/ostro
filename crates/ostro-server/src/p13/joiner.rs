@@ -349,6 +349,21 @@ fn configured_voters(cfg: &ServerConfig) -> Vec<u64> {
 
 static DRIFT_LOGGED: AtomicBool = AtomicBool::new(false);
 
+/// The live configuration as [`voter_check`] sees it: `learners_next` (a voter being
+/// demoted to learner in a joint configuration; raft lists it neither among the incoming
+/// voters nor among the learners until the joint state is left) counts as a learner.
+/// Without it, a static node restarted while the voter policy demoted it was refused as
+/// "removed (tombstone)" (Phase 13 gate campaign, p13-campaign).
+pub fn live_conf_view(voters: Vec<u64>, learners: &[u64], learners_next: &[u64]) -> ConfView {
+    let mut l: Vec<u64> = learners.iter().chain(learners_next).copied().collect();
+    l.sort_unstable();
+    l.dedup();
+    ConfView {
+        voters,
+        learners: l,
+    }
+}
+
 /// Both meta voter checks (D-P13-29a).
 pub fn voter_check(
     view: &ConfView,
@@ -898,6 +913,30 @@ async fn http_post_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_voter_being_demoted_in_joint_consensus_is_not_removed() {
+        let mut cfg = ServerConfig::server_defaults();
+        cfg.node.node_id = 2;
+        // Joint: incoming voters {1, 3, 22}, outgoing {2, 3, 22}, learners_next {2}.
+        let without = ConfView {
+            voters: vec![1, 3, 22],
+            learners: vec![],
+        };
+        assert!(matches!(
+            voter_check(&without, &cfg, true, VoterCheckPhase::PostReady),
+            Err(BootError::NodeRemoved { node_id: 2 })
+        ));
+        let view = live_conf_view(vec![1, 3, 22], &[], &[2]);
+        assert_eq!(view.learners, vec![2]);
+        assert!(voter_check(&view, &cfg, true, VoterCheckPhase::PostReady).is_ok());
+        // A node in no set at all is still refused.
+        let gone = live_conf_view(vec![1, 3, 22], &[4], &[5]);
+        assert!(matches!(
+            voter_check(&gone, &cfg, true, VoterCheckPhase::PostReady),
+            Err(BootError::NodeRemoved { node_id: 2 })
+        ));
+    }
 
     #[test]
     fn marker_round_trips() {

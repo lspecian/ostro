@@ -361,9 +361,12 @@ pub fn probe_meta(meta_dir: &Path) -> Result<MetaProbe, BootError> {
             .get(at + 4..at + 4 + cs_len)
             .ok_or_else(|| bad("state: truncated".into()))?;
         let cs = ConfState::decode(cs).map_err(|e| bad(format!("state: {e}")))?;
+        // A voter being demoted in a joint configuration (`learners_next`) is still in it.
+        let mut learners = cs.learners;
+        learners.extend(cs.learners_next);
         probe.conf = Some(ConfStateView {
             voters: cs.voters,
-            learners: cs.learners,
+            learners,
         });
     }
     let mut snapshot_index = 0;
@@ -378,9 +381,11 @@ pub fn probe_meta(meta_dir: &Path) -> Result<MetaProbe, BootError> {
             if probe.conf.as_ref().is_none_or(|c| c.voters.is_empty())
                 && let Some(cs) = &meta.conf_state
             {
+                let mut learners = cs.learners.clone();
+                learners.extend(cs.learners_next.iter().copied());
                 probe.conf = Some(ConfStateView {
                     voters: cs.voters.clone(),
-                    learners: cs.learners.clone(),
+                    learners,
                 });
             }
         }
