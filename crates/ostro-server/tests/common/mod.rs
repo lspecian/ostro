@@ -484,6 +484,9 @@ pub fn server_config(dir: &Path, opts: &ServerOpts) -> ServerConfig {
     cfg.node.data_dir = dir.to_path_buf();
     cfg.node.partitions = opts.partitions;
     cfg.node.ephemeral = opts.ephemeral;
+    // Phase 14 (14-03): the server profile authenticates bearers; these loopback test
+    // servers keep the pre-Phase-14 open API (Phase 14 tests opt into token mode).
+    cfg.auth.mode = ostro_server::config::AuthMode::None;
     cfg
 }
 

@@ -473,6 +473,8 @@ mod tests {
         cfg.cluster.listen = "127.0.0.1:0".parse().expect("addr");
         cfg.node.data_dir = dir.path().to_path_buf();
         cfg.node.partitions = 1;
+        // Phase 14 (14-03): this loopback test server keeps the open API.
+        cfg.auth.mode = crate::config::AuthMode::None;
         cfg.runs.retention = FriendlyDuration(Duration::from_secs(1));
         cfg.blob_gc.enabled = false;
         cfg.snapshots.enabled = true;

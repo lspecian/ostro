@@ -669,7 +669,9 @@ impl P7Cluster {
             .env(
                 "OSTRO_CLUSTER__LISTEN",
                 format!("127.0.0.1:{}", self.cluster_port),
-            );
+            )
+            // Phase 14 (14-03): loopback test servers keep the open API.
+            .env("OSTRO_AUTH__MODE", "none");
         for (k, v) in &self.opts.env {
             cmd.env(k, v);
         }

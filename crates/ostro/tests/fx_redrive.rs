@@ -280,7 +280,9 @@ impl Node {
             .arg("--listen")
             .arg("127.0.0.1:0")
             // 07-09: ephemeral loopback cluster listener (server default 0.0.0.0:7701).
-            .env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0");
+            .env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0")
+            // Phase 14 (14-03): loopback test servers keep the open API.
+            .env("OSTRO_AUTH__MODE", "none");
         match failpoints {
             Some(fp) => cmd.env("FAILPOINTS", fp),
             None => cmd.env_remove("FAILPOINTS"),

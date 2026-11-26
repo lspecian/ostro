@@ -392,6 +392,8 @@ fn joiner_never_bootstraps(c: &mut InProcCluster) -> BoxFuture<'_, ScenarioResul
         // Cut the joined node off from every member, then boot it with a short join_timeout.
         c.net().faults().isolate(id);
         let mut cfg = ostro_server::config::ServerConfig::server_defaults();
+        // Phase 14 (14-03): harness clusters keep the open API (token mode is opt-in).
+        cfg.auth.mode = ostro_server::config::AuthMode::None;
         cfg.api.listen = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         cfg.cluster.listen = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         cfg.node.data_dir = data_dir.clone();

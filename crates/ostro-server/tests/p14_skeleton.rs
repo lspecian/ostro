@@ -135,12 +135,9 @@ async fn seam_links_and_every_stub_passes_through() {
     services.stop().await;
     assert!(c.shutdown.is_cancelled());
 
-    // The authenticator answers the dev principal (AllowDev) until 14-03.
-    let p = p14::authenticator(&c)
-        .authenticate(None)
-        .await
-        .expect("authenticate");
-    assert_eq!(p.kind, PrincipalKind::Dev);
+    // 14-03: token mode (the server profile) authenticates against meta: no bearer → 401.
+    let res = p14::authenticator(&c).authenticate(None).await;
+    assert_eq!(res, Err(ostro_api::auth::AuthError::Missing));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

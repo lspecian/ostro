@@ -34,6 +34,8 @@ pub fn single(dir: &Path, partitions: u16) -> ServerConfig {
     cfg.cluster.listen = "127.0.0.1:0".parse().expect("addr");
     cfg.node.data_dir = dir.to_path_buf();
     cfg.node.partitions = partitions;
+    // Phase 14 (14-03): loopback test clusters keep the open API (token mode is opt-in).
+    cfg.auth.mode = ostro_server::config::AuthMode::None;
     cfg
 }
 

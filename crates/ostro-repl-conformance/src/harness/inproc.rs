@@ -222,6 +222,8 @@ impl InProcCluster {
         cfg.api.listen = SocketAddr::from(([127, 0, 0, 1], 0));
         cfg.cluster.listen = SocketAddr::from(([127, 0, 0, 1], 0));
         cfg.node.data_dir = self.root.path().join(format!("node{id}"));
+        // Phase 14 (14-03): harness clusters keep the open API (token mode is opt-in).
+        cfg.auth.mode = ostro_server::config::AuthMode::None;
         cfg.node.partitions = spec.partitions;
         cfg.node.node_id = id;
         cfg.cluster.cluster_id = Some(self.cluster_id.clone());
@@ -302,6 +304,8 @@ impl InProcCluster {
     ) -> ServerConfig {
         let mut cfg = ServerConfig::server_defaults();
         cfg.api.listen = api;
+        // Phase 14 (14-03): harness clusters keep the open API (token mode is opt-in).
+        cfg.auth.mode = ostro_server::config::AuthMode::None;
         cfg.cluster.listen = SocketAddr::from(([127, 0, 0, 1], 0));
         if advertise {
             cfg.cluster.advertise = vec![format!("mem://{id}")];

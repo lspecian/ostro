@@ -294,6 +294,8 @@ pub fn server(cwd: &Path, args: &[&str]) -> Command {
     // 07-09: the server profile's cluster listener defaults to 0.0.0.0:7701; spawned test
     // servers use an ephemeral loopback port so they never collide.
     cmd.env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0");
+    // Phase 14 (14-03): loopback test servers keep the open API (token mode is opt-in).
+    cmd.env("OSTRO_AUTH__MODE", "none");
     cmd.current_dir(cwd).arg("server").args(args);
     cmd
 }

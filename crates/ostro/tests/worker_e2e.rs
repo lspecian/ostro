@@ -972,6 +972,7 @@ mod listener {
             .arg("--config")
             .arg(&cfg)
             .env("OSTRO_CLUSTER__LISTEN", format!("127.0.0.1:{cluster_port}"))
+            .env("OSTRO_AUTH__MODE", "none")
             .env("RUST_LOG", "info");
         let mut p = Proc::spawn(cmd);
         let ready = tokio::task::block_in_place(|| p.wait_stdout(P7_T, p7::TlsReady::parse));
@@ -1219,6 +1220,7 @@ mod listener {
             .arg("--config")
             .arg(&cfg)
             .env("OSTRO_CLUSTER__LISTEN", "127.0.0.1:0")
+            .env("OSTRO_AUTH__MODE", "none")
             .env("RUST_LOG", "info");
         let mut srv = Proc::spawn(cmd);
         // In acme mode the ready line may come before a certificate is installed (no

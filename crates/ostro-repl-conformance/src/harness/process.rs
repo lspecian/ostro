@@ -530,6 +530,8 @@ impl ProcCluster {
         let ip = IpAddr::V4(node_ip(self.r, id));
         let mut cfg = ServerConfig::server_defaults();
         cfg.api.listen = SocketAddr::new(ip, 0);
+        // Phase 14 (14-03): harness clusters keep the open API (token mode is opt-in).
+        cfg.auth.mode = ostro_server::config::AuthMode::None;
         cfg.cluster.listen = SocketAddr::new(ip, CLUSTER_PORT);
         // The node certificate's SANs are `[cluster] advertise` plus loopback (12-14): the
         // proxied peers dial this node's own 127.r.r.i, so it must be advertised.
@@ -1172,6 +1174,8 @@ impl P13Harness for ProcCluster {
         let data_dir = self.root().join(format!("join{k}"));
         let mut cfg = ServerConfig::server_defaults();
         cfg.api.listen = api_addr;
+        // Phase 14 (14-03): harness clusters keep the open API (token mode is opt-in).
+        cfg.auth.mode = ostro_server::config::AuthMode::None;
         cfg.cluster.listen = SocketAddr::new(IpAddr::V4(ip), CLUSTER_PORT);
         cfg.cluster.advertise = vec![ip.to_string()];
         cfg.cluster.cluster_id = Some(self.cluster_id.clone());
