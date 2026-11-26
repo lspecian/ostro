@@ -125,7 +125,13 @@ mod tests {
         assert_eq!(v.expose(), VALUE);
         // Reserved names keep the inner resolver's rules.
         assert!(audited.resolve_reserved("acme/x").await.is_err());
-        assert!(audited.resolve_reserved("__ostro/presign/c").await.unwrap().is_none());
+        assert!(
+            audited
+                .resolve_reserved("__ostro/presign/c")
+                .await
+                .unwrap()
+                .is_none()
+        );
         // Nothing is recorded before 14-18.
         assert!(sink.0.lock().unwrap().is_empty());
         assert_eq!(audited.inner().chain().names(), ["fixed"]);

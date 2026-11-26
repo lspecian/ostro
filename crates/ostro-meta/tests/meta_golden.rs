@@ -455,10 +455,21 @@ fn p14_ext_golden_lines_round_trip_through_the_typed_helpers() {
     assert_eq!(created_by, "otk_golden");
     let sigs = get_module_signatures(&ext).unwrap().unwrap();
     assert_eq!(sigs.sigs[0].key_fingerprint, [0x5a; 32]);
-    assert_eq!(get_module_uploaders(&ext).unwrap().unwrap().tenants, ["_", "acme"]);
-    assert!(get_security_policy(&ext).unwrap().unwrap().require_signed_modules);
     assert_eq!(
-        get_tenant_security(&ext).unwrap().unwrap().require_signed_modules,
+        get_module_uploaders(&ext).unwrap().unwrap().tenants,
+        ["_", "acme"]
+    );
+    assert!(
+        get_security_policy(&ext)
+            .unwrap()
+            .unwrap()
+            .require_signed_modules
+    );
+    assert_eq!(
+        get_tenant_security(&ext)
+            .unwrap()
+            .unwrap()
+            .require_signed_modules,
         Some(true)
     );
     assert_eq!(

@@ -692,7 +692,10 @@ mod phase14_tests {
             ],
             [1, 2, 3]
         );
-        assert_eq!([AUTH_MODE_UNSET, AUTH_MODE_NONE, AUTH_MODE_TOKEN], [0, 1, 2]);
+        assert_eq!(
+            [AUTH_MODE_UNSET, AUTH_MODE_NONE, AUTH_MODE_TOKEN],
+            [0, 1, 2]
+        );
         for t in P14_EXT_TAGS {
             assert!(!P13_EXT_TAGS.contains(&t));
         }
@@ -718,7 +721,10 @@ mod phase14_tests {
         assert_eq!(get_security_policy(&ext).unwrap(), Some(sp));
         assert_eq!(get_tenant_security(&ext).unwrap(), Some(ts));
         assert_eq!(get_secret_times(&ext).unwrap(), Some(st));
-        assert_eq!(get_retired(&ext).unwrap(), Some(Retired { retired_at_ms: 3 }));
+        assert_eq!(
+            get_retired(&ext).unwrap(),
+            Some(Retired { retired_at_ms: 3 })
+        );
         assert_eq!(ext_get(&ext, 143), Some(&[0xbe, 0xef][..]));
         let tags: Vec<u32> = ext_entries(&ext).unwrap().iter().map(|e| e.tag).collect();
         assert_eq!(tags, [15, 102, 112, 113, 114, 115, 116, 117, 143]);
@@ -727,7 +733,10 @@ mod phase14_tests {
         more.sigs.push(ModuleSig::default());
         let replaced = put_module_signatures(&ext, &more).unwrap();
         assert_eq!(get_module_signatures(&replaced).unwrap(), Some(more));
-        assert_eq!(ext_get(&replaced, EXT_SECRET_TIMES), ext_get(&ext, EXT_SECRET_TIMES));
+        assert_eq!(
+            ext_get(&replaced, EXT_SECRET_TIMES),
+            ext_get(&ext, EXT_SECRET_TIMES)
+        );
         assert_eq!(ext_get(&replaced, 143), Some(&[0xbe, 0xef][..]));
         // Absent = None.
         assert_eq!(get_security_policy(&[]).unwrap(), None);

@@ -437,7 +437,11 @@ mod tests {
         (ErrorCode::Internal, 500, tonic::Code::Internal),
         (ErrorCode::Unimplemented, 501, tonic::Code::Unimplemented),
         (ErrorCode::RateLimited, 429, tonic::Code::ResourceExhausted),
-        (ErrorCode::Unauthenticated, 401, tonic::Code::Unauthenticated),
+        (
+            ErrorCode::Unauthenticated,
+            401,
+            tonic::Code::Unauthenticated,
+        ),
         (
             ErrorCode::PermissionDenied,
             403,
@@ -578,7 +582,10 @@ mod tests {
         assert_eq!(e.grpc_code(), tonic::Code::Unauthenticated);
         let res = e.into_response();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(res.headers()[axum::http::header::WWW_AUTHENTICATE], "Bearer");
+        assert_eq!(
+            res.headers()[axum::http::header::WWW_AUTHENTICATE],
+            "Bearer"
+        );
 
         let e = ApiError::missing_scope("cancel_run", "operate");
         assert_eq!(e.code, ErrorCode::PermissionDenied);
@@ -587,7 +594,11 @@ mod tests {
         assert_eq!(e.grpc_code(), tonic::Code::PermissionDenied);
         let res = e.into_response();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
-        assert!(res.headers().get(axum::http::header::WWW_AUTHENTICATE).is_none());
+        assert!(
+            res.headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .is_none()
+        );
 
         let e = ApiError::permission_denied(reason::FORBIDDEN_TENANT, "tenant field names acme");
         assert_eq!(e.http_status().as_u16(), 403);

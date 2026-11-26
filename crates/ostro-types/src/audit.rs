@@ -281,7 +281,10 @@ mod tests {
             ActorKind::Anonymous,
         ];
         let names: Vec<_> = all.iter().map(|k| k.as_str()).collect();
-        assert_eq!(names, ["token", "system", "worker", "node", "dev", "anonymous"]);
+        assert_eq!(
+            names,
+            ["token", "system", "worker", "node", "dev", "anonymous"]
+        );
         for k in all {
             let v = postcard::to_stdvec(&k).unwrap();
             assert_eq!(postcard::from_bytes::<ActorKind>(&v).unwrap(), k);
