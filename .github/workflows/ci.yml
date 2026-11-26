@@ -318,6 +318,7 @@ jobs:
           cargo test -p ostro-server --features failpoints --test p13_boot_modes --locked -- --test-threads=1
           cargo test -p ostro-server --features failpoints --test p13_module_gc --locked -- --test-threads=1
           cargo test -p ostro-server --features failpoints --test p13_promote --locked -- --test-threads=1
+          cargo test -p ostro-server --features failpoints --test audit_journal --locked -- --test-threads=1
       - if: matrix.name == 'linux-x86_64-gnu'
         name: Replication mutant matrix
         # keep in sync with check_repl_mutants in scripts/ci-local.sh (12-18): every
