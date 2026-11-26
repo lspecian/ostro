@@ -17,7 +17,8 @@
 //!   after 0.3–1.5 s; a chaos-proxy partition between two static nodes held 0.5–2 s; a
 //!   follower restarted with `wal::write=return`, then `kill -9`ed and restarted clean;
 //! - Phase 13: **join** a node (`ostro cluster join`), **drain + remove** the newest joined
-//!   node (it is then stopped for good), a **graceful handoff storm** (SIGTERM restarts of
+//!   node (it is `kill -9`ed for good once the meta leader's configuration no longer lists
+//!   it, 60 s bound, else a harness failure), a **graceful handoff storm** (SIGTERM restarts of
 //!   the busiest leader, twice), **meta leader transfer** (SIGTERM restart of the meta
 //!   leader: its controlled shutdown hands the meta leadership off), and a **rolling
 //!   restart**: every node SIGTERMed and restarted in turn, at an emulated level.
@@ -71,6 +72,8 @@ const TEST: &str = "cluster_campaign_p13";
 const BATCH: usize = 10;
 const HEAL_LIMIT: Duration = Duration::from_secs(180);
 const RUN_T: Duration = Duration::from_secs(120);
+/// Bound on a removed node leaving the meta configuration (leader's view) before its kill.
+const LEAVE_CONF_T: Duration = Duration::from_secs(60);
 /// Joined nodes alive at once (a join beyond it drains + removes instead).
 const MAX_JOINED: usize = 2;
 
@@ -186,6 +189,42 @@ impl Campaign {
             format!(
                 "cluster not healthy within {HEAL_LIMIT:?} after {at}: {all:?}; live {:?}",
                 live(&self.c)
+            ),
+        ))
+    }
+
+    /// Wait (bounded by [`LEAVE_CONF_T`]) until the meta leader's status lists `id` in
+    /// neither the voters, the learners nor the outgoing voters; sampling meanwhile.
+    async fn wait_out_of_conf(&mut self, id: u64) -> Result<(), ScenarioFailure> {
+        let t = Instant::now(); // clock-exempt: test timeout
+        let mut last = None;
+        while t.elapsed() < LEAVE_CONF_T {
+            if let Some(node) = meta_leader(&self.c).await
+                && node != id
+                && let Some(v) = status(&self.c, node).await
+                && let Ok(s) = StatusSample::from_json(self.t0.elapsed(), node, &v)
+            {
+                let st = &s.status;
+                let out = !st.voters.contains(&id)
+                    && !st.learners.contains(&id)
+                    && !st.voters_outgoing.contains(&id);
+                last = Some((
+                    node,
+                    st.voters.clone(),
+                    st.learners.clone(),
+                    st.voters_outgoing.clone(),
+                ));
+                self.samples.push(s);
+                if out {
+                    return Ok(());
+                }
+            }
+            tools::pause(Duration::from_millis(50)).await;
+        }
+        Err(f(
+            "harness",
+            format!(
+                "removed node {id} still in the meta configuration {LEAVE_CONF_T:?} after its tombstone (last leader status (node, voters, learners, outgoing): {last:?})"
             ),
         ))
     }
@@ -333,6 +372,11 @@ impl Campaign {
                     .await
                     .map_err(|e| f("membership", format!("remove n{id}: {e}")))?;
                 self.removed.insert(id);
+                // `remove` returns once the tombstone is visible; the conf change that takes
+                // the node out of the configuration follows on a later driver tick. Kill it
+                // only after the leader's configuration no longer lists it, so its own
+                // persisted ConfState is not frozen between the two.
+                self.wait_out_of_conf(id).await?;
                 let _ = self.c.kill9(id).await;
                 format!("drain + remove n{id}")
             }

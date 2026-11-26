@@ -16,8 +16,9 @@
 //!   voter cannot be drained / removed while a conf change is pending or the configuration
 //!   is joint, or when no other live Active voter would remain (13-06 handover).
 //! - [`service`]: `Membership.Removed` (node identities only): stops this node when the
-//!   notice names it and the local view confirms it (Removed, or out of a non-empty
-//!   configuration).
+//!   notice names it and the local view confirms it (its Member record is Removed AND it
+//!   is no longer an incoming voter or learner in the local configuration; a removed node
+//!   that never applied the final conf change keeps running).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
