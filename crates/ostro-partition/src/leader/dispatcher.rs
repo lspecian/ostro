@@ -49,6 +49,9 @@
 //!    probed again until that bump, so a queue whose every entry is paused costs nothing
 //!    per loop turn and never spins. (If the flow control's `changed()` channel is
 //!    closed, held entries are released at every round instead.)
+//!    `TenantBlocked{until}` (Phase 14, D-P14-14: a tenant quota or suspension) takes the
+//!    entry's tenant out of the fair ring (`FairQueues::block_tenant`) until `until` or the
+//!    next [`FlowControl::changed`] bump; other tenants go on, nothing is failed.
 //! 2. [`Placement::reserve`]: `Granted(r)` commits the flow permit (W2: the charge becomes
 //!    final only now), takes the entry and starts the grant with the permit and the
 //!    reservation in the lease; `Blocked` drops (rolls back) the permit and parks the queue
@@ -607,6 +610,12 @@ impl Entry {
         }
     }
 
+    /// The fair scheduler's tenant (Phase 14, D-P14-14: `tenant`, else the qualified
+    /// workflow's prefix, else the default tenant).
+    fn tenant_key(&self) -> &str {
+        super::fair::tenant_key(self.tenant.as_deref(), &self.workflow)
+    }
+
     fn fair(&self, run: RunId) -> FairEntry {
         FairEntry {
             queue: self.queue.clone(),
@@ -713,7 +722,7 @@ impl State {
         if e.ready_at_ms > now_ms {
             self.delayed.insert((e.ready_at_ms, run));
         } else {
-            self.fair.insert(e.fair(run));
+            self.fair.insert_in(e.tenant_key(), e.fair(run));
         }
         self.entries.insert(run, e);
     }
@@ -734,7 +743,7 @@ impl State {
             }
             self.delayed.pop_first();
             if let Some(e) = self.entries.get(&run) {
-                self.fair.insert(e.fair(run));
+                self.fair.insert_in(e.tenant_key(), e.fair(run));
             }
         }
     }
@@ -1202,6 +1211,10 @@ impl Dispatcher {
             let w = self.flow.queue_weight(&q);
             self.st.fair.set_weight(&q, w);
         }
+        let flow = &self.flow;
+        self.st
+            .fair
+            .refresh_tenant_weights(&|t: &str| flow.tenant_weight(t));
         let now = self.now_ms();
         while let Some(c) = self.st.fair.next_candidate(now) {
             let Some(e) = self.st.entries.get(&c.run) else {
@@ -1255,6 +1268,16 @@ impl Dispatcher {
                 } => {
                     // Only this workflow waits; the rest of the queue goes on (07-05 fix).
                     self.st.fair.hold(&c);
+                    continue;
+                }
+                Admit::TenantBlocked { until_ms } => {
+                    // Phase 14 (D-P14-14): the tenant leaves the ring until `until` or the
+                    // next `changed()` bump; other tenants go on.
+                    if let Some(t) = self.st.fair.tenant_of(&c.run).map(str::to_owned) {
+                        self.st
+                            .fair
+                            .block_tenant(&t, until_ms.map(|u| u.max(now + 1)));
+                    }
                     continue;
                 }
             };

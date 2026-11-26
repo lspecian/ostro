@@ -44,6 +44,11 @@ pub enum Admit {
     /// only this entry (until the next `changed()` bump) and the rest of the queue is
     /// still served.
     Paused { scope: PauseScope },
+    /// Phase 14 (D-P14-14): the entry's tenant is at a quota (concurrency, memory, fuel
+    /// debt) or suspended. The dispatcher takes the tenant out of the fair ring until
+    /// `until_ms` (clock ms; a fuel refill) or the next `changed()` bump; its entries stay
+    /// queued (quotas delay, they never fail).
+    TenantBlocked { until_ms: Option<u64> },
 }
 
 /// What an [`Admit::Paused`] covers.
@@ -130,6 +135,11 @@ pub trait FlowControl: Send + Sync + 'static {
     fn admit(&self, e: &EntryView<'_>, now_ms: u64) -> Admit;
     /// DRR quantum of `queue` (`QueuePolicy.weight`, default 1; always >= 1).
     fn queue_weight(&self, queue: &str) -> u32;
+    /// DRR quantum of `tenant` (`Tenant.weight`, default 1; Phase 14, D-P14-14). The
+    /// scheduler clamps it to `1..=10_000`.
+    fn tenant_weight(&self, _tenant: &str) -> u32 {
+        1
+    }
     /// Bumped whenever a blocked entry may have become admissible.
     fn changed(&self) -> watch::Receiver<u64>;
 }

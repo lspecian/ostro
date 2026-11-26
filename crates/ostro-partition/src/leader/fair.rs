@@ -177,9 +177,10 @@ struct Queue {
 /// Where a run is filed: `(queue, priority, key, ready_at, first_activation)`.
 type Loc = (String, i32, String, u64, bool);
 
-/// Weighted DRR across queues, strict priority bands, round robin across keys.
+/// One tenant's selection (the Phase 7 selector, unchanged): weighted DRR across queues,
+/// strict priority bands, round robin across keys.
 #[derive(Debug, Default)]
-pub struct FairQueues {
+struct QueueSet {
     queues: BTreeMap<String, Queue>,
     index: BTreeMap<RunId, Loc>,
     weights: BTreeMap<String, u32>,
@@ -203,22 +204,9 @@ pub struct FairQueues {
     gate_until: BTreeSet<(u64, String, Option<String>)>,
 }
 
-impl FairQueues {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Number of entries.
-    pub fn len(&self) -> usize {
-        self.index.len() + self.held.len()
-    }
-
+impl QueueSet {
     pub fn is_empty(&self) -> bool {
         self.index.is_empty() && self.held.is_empty()
-    }
-
-    pub fn contains(&self, run: &RunId) -> bool {
-        self.index.contains_key(run) || self.held.contains_key(run)
     }
 
     /// Entries per non-empty queue (held entries included).
@@ -756,12 +744,514 @@ impl FairQueues {
     pub fn any_parked(&self) -> bool {
         !self.parked_queues.is_empty() || !self.parked_keys.is_empty()
     }
+}
 
-    /// Drop every entry (held ones too) and park (weights stay).
+/// Bounds of a tenant's DRR quantum (W16): a stored weight of 0 or an absurd value can
+/// never stall or starve the tenant ring.
+pub const TENANT_WEIGHT_MIN: u32 = 1;
+/// Upper bound of a tenant's DRR quantum (W16).
+pub const TENANT_WEIGHT_MAX: u32 = 10_000;
+
+/// The tenant level's weight lookup (D-P14-14): the DRR quantum of a tenant
+/// (`Tenant.weight`, default 1), clamped to [`TENANT_WEIGHT_MIN`]..=[`TENANT_WEIGHT_MAX`]
+/// by the scheduler.
+pub trait TenantPolicy {
+    fn tenant_weight(&self, tenant: &str) -> u32;
+}
+
+impl<F: Fn(&str) -> u32> TenantPolicy for F {
+    fn tenant_weight(&self, tenant: &str) -> u32 {
+        self(tenant)
+    }
+}
+
+/// The fair-scheduler tenant of an entry (D-P14-14, P14-F9): `tenant` when set (the
+/// default tenant's spellings `""` and `_` are `""`), else the D23 tenant prefix of a
+/// qualified `workflow` (`<tenant>/<name>`), else `""` (the default tenant).
+pub fn tenant_key<'a>(tenant: Option<&'a str>, workflow: &'a str) -> &'a str {
+    match tenant {
+        Some("" | "_") => "",
+        Some(t) => t,
+        None => match workflow.split_once('/') {
+            Some((t, _)) if is_tenant_id(t) => t,
+            _ => "",
+        },
+    }
+}
+
+/// D23 tenant-id grammar `^[a-z0-9][a-z0-9-]{0,62}$` (ostro-meta's `is_tenant_id`; this
+/// crate does not depend on ostro-meta).
+fn is_tenant_id(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 63
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// Weighted DRR across tenants (D-P14-14), then per tenant the Phase 7 selector (weighted
+/// DRR across queues, strict priority bands, round robin across keys).
+///
+/// **Tenant level.** The tenant whose turn it is may serve up to its quantum
+/// ([`Self::set_tenant_weight`] / [`Self::refresh_tenant_weights`], clamped to
+/// `1..=10_000`, default 1) entries before the turn passes to the next tenant with queued
+/// entries in name order (the default tenant `""` first). A blocked tenant
+/// ([`Self::block_tenant`], from `Admit::TenantBlocked`) leaves the ring until
+/// [`Self::release_tenant`], its `until_ms` ([`Self::unpark_due`]) or the next flow-control
+/// `changed()` bump ([`Self::release_held`] / [`Self::unpark_all`]); like a skipped queue,
+/// it loses the rest of its turn only when another tenant's entry is taken.
+///
+/// **One tenant** (every entry inserted with [`Self::insert`], or all with the same
+/// tenant): the order is exactly the Phase 7 order.
+///
+/// Queue-, key- and gate-level calls (`skip_queue`, `park_queue`, `park_key`,
+/// `gate_first`, `gate_first_key` and the unpark/ungate calls) apply to every tenant's
+/// selector: queue and key limits, pauses and placement are node-wide.
+#[derive(Debug, Default)]
+pub struct FairQueues {
+    /// Per-tenant selectors (kept while leading; a tenant's selector keeps its Phase 7
+    /// turn state when it runs empty, so one tenant behaves exactly like Phase 7).
+    sets: BTreeMap<String, QueueSet>,
+    /// Tenant of every queued or held entry.
+    tenant_of: BTreeMap<RunId, String>,
+    /// Queue weights (seed of a new tenant's selector).
+    weights: BTreeMap<String, u32>,
+    /// Tenant quanta other than 1.
+    tenant_weights: BTreeMap<String, u32>,
+    /// The tenant whose turn it is and the picks left in the turn.
+    turn: Option<(String, u64)>,
+    /// Node-wide queue/key state that seeds a new tenant's selector (so a tenant that
+    /// appears after a skip / park behaves as if it had been there): queues skipped this
+    /// round, placement-parked queues, parked keys -> `until_ms`.
+    skipped: BTreeSet<String>,
+    parked_queues: BTreeSet<String>,
+    parked_keys: BTreeMap<(String, String), Option<u64>>,
+    /// Blocked tenants -> `until_ms`.
+    blocked: BTreeMap<String, Option<u64>>,
+    /// Timed tenant blocks `(until_ms, tenant)`.
+    block_until: BTreeSet<(u64, String)>,
+}
+
+impl FairQueues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn set_mut(&mut self, tenant: &str) -> &mut QueueSet {
+        if !self.sets.contains_key(tenant) {
+            let mut set = QueueSet {
+                weights: self.weights.clone(),
+                skipped: self.skipped.clone(),
+                parked_queues: self.parked_queues.clone(),
+                ..QueueSet::default()
+            };
+            for ((q, k), until) in &self.parked_keys {
+                set.park_key(q, k, *until);
+            }
+            self.sets.insert(tenant.to_owned(), set);
+        }
+        self.sets.get_mut(tenant).expect("inserted above")
+    }
+
+    /// Number of entries (held ones included).
+    pub fn len(&self) -> usize {
+        self.tenant_of.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tenant_of.is_empty()
+    }
+
+    pub fn contains(&self, run: &RunId) -> bool {
+        self.tenant_of.contains_key(run)
+    }
+
+    /// The tenant `run` is filed under.
+    pub fn tenant_of(&self, run: &RunId) -> Option<&str> {
+        self.tenant_of.get(run).map(String::as_str)
+    }
+
+    /// Tenants with queued or held entries.
+    pub fn tenant_names(&self) -> Vec<String> {
+        self.sets
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(t, _)| t.clone())
+            .collect()
+    }
+
+    /// Entries per non-empty queue (held entries included).
+    pub fn per_queue_counts(&self) -> BTreeMap<String, usize> {
+        let mut out = BTreeMap::new();
+        for s in self.sets.values() {
+            for (q, n) in s.per_queue_counts() {
+                *out.entry(q).or_default() += n;
+            }
+        }
+        out
+    }
+
+    /// Names of the non-empty queues.
+    pub fn queue_names(&self) -> Vec<String> {
+        let names: BTreeSet<String> = self.sets.values().flat_map(QueueSet::queue_names).collect();
+        names.into_iter().collect()
+    }
+
+    /// Oldest `ready_at_ms` per non-empty queue (held entries included).
+    pub fn per_queue_oldest(&self) -> BTreeMap<String, u64> {
+        let mut out: BTreeMap<String, u64> = BTreeMap::new();
+        for s in self.sets.values() {
+            for (q, at) in s.per_queue_oldest() {
+                out.entry(q)
+                    .and_modify(|o| *o = (*o).min(at))
+                    .or_insert(at);
+            }
+        }
+        out
+    }
+
+    /// Entries per non-empty queue that flow control did not hold back in the last round
+    /// (Phase 7 rules per tenant; every entry of a blocked tenant is held back).
+    pub fn per_queue_unblocked(&self) -> BTreeMap<String, usize> {
+        let mut out: BTreeMap<String, usize> = BTreeMap::new();
+        for (t, s) in &self.sets {
+            let blocked = self.blocked.contains_key(t);
+            for (q, n) in s.per_queue_unblocked() {
+                *out.entry(q).or_default() += if blocked { 0 } else { n };
+            }
+        }
+        out
+    }
+
+    /// DRR quantum of `queue` (clamped to >= 1), in every tenant.
+    pub fn set_weight(&mut self, queue: &str, weight: u32) {
+        let w = weight.max(1);
+        if w == 1 {
+            self.weights.remove(queue);
+        } else {
+            self.weights.insert(queue.to_owned(), w);
+        }
+        for s in self.sets.values_mut() {
+            s.set_weight(queue, w);
+        }
+    }
+
+    #[cfg(test)]
+    fn weight(&self, queue: &str) -> u64 {
+        u64::from(self.weights.get(queue).copied().unwrap_or(1))
+    }
+
+    /// DRR quantum of `tenant`, clamped to `1..=10_000` (W16).
+    pub fn set_tenant_weight(&mut self, tenant: &str, weight: u32) {
+        let w = weight.clamp(TENANT_WEIGHT_MIN, TENANT_WEIGHT_MAX);
+        if w == 1 {
+            self.tenant_weights.remove(tenant);
+        } else {
+            self.tenant_weights.insert(tenant.to_owned(), w);
+        }
+    }
+
+    /// Re-read the quantum of every tenant with entries from `policy`.
+    pub fn refresh_tenant_weights(&mut self, policy: &dyn TenantPolicy) {
+        for t in self.tenant_names() {
+            let w = policy.tenant_weight(&t);
+            self.set_tenant_weight(&t, w);
+        }
+    }
+
+    /// The (clamped) DRR quantum of `tenant`.
+    pub fn tenant_weight(&self, tenant: &str) -> u64 {
+        u64::from(self.tenant_weights.get(tenant).copied().unwrap_or(1))
+    }
+
+    /// File `e` under the default tenant (replacing an earlier entry of the same run).
+    pub fn insert(&mut self, e: FairEntry) {
+        self.insert_in("", e);
+    }
+
+    /// File `e` under `tenant` (replacing an earlier entry of the same run).
+    pub fn insert_in(&mut self, tenant: &str, e: FairEntry) {
+        self.remove(&e.run);
+        self.tenant_of.insert(e.run, tenant.to_owned());
+        self.set_mut(tenant).insert(e);
+    }
+
+    /// Remove `run` (queued or held); returns its entry.
+    pub fn remove(&mut self, run: &RunId) -> Option<FairEntry> {
+        let t = self.tenant_of.remove(run)?;
+        let e = self.sets.get_mut(&t).and_then(|s| s.remove(run));
+        if !self.has_queued(&t) {
+            self.release_tenant(&t);
+        }
+        e
+    }
+
+    /// Whether `tenant` has entries in the selection (held ones not counted).
+    fn has_queued(&self, tenant: &str) -> bool {
+        self.sets.get(tenant).is_some_and(|s| !s.queues.is_empty())
+    }
+
+    /// Tenant names with queued entries in turn order: the current turn's tenant first,
+    /// then by name, wrapping.
+    fn turn_order(&self) -> Vec<String> {
+        let queued = |(t, s): (&String, &QueueSet)| (!s.queues.is_empty()).then(|| t.clone());
+        match self.turn.as_ref().map(|(t, _)| t.clone()) {
+            Some(start) => self
+                .sets
+                .range::<String, _>((Bound::Included(&start), Bound::Unbounded))
+                .chain(
+                    self.sets
+                        .range::<String, _>((Bound::Unbounded, Bound::Excluded(&start))),
+                )
+                .filter_map(queued)
+                .collect(),
+            None => self.sets.iter().filter_map(queued).collect(),
+        }
+    }
+
+    /// The next entry to try (due at `now_ms`), or `None` once every tenant is blocked or
+    /// has nothing servable. Does not remove it and does not move a turn: call
+    /// [`Self::take`] after admission and placement, or skip / park / block what held it.
+    pub fn next_candidate(&mut self, now_ms: u64) -> Option<Candidate> {
+        for t in self.turn_order() {
+            if self.blocked.contains_key(&t) {
+                continue;
+            }
+            if let Some(c) = self.sets.get_mut(&t).and_then(|s| s.next_candidate(now_ms)) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    /// Remove the candidate (it was granted) and charge its tenant, queue and key one pick.
+    pub fn take(&mut self, c: &Candidate) -> Option<FairEntry> {
+        let t = self.tenant_of.get(&c.run)?.clone();
+        let e = self.sets.get_mut(&t)?.take(c)?;
+        self.tenant_of.remove(&c.run);
+        // Served out of turn (the turn's tenant was blocked or had nothing servable).
+        if self.turn.as_ref().is_none_or(|(cur, _)| *cur != t) {
+            self.turn = Some((t.clone(), self.tenant_weight(&t)));
+        }
+        let pass = match &mut self.turn {
+            Some((_, left)) => {
+                *left = left.saturating_sub(1);
+                *left == 0
+            }
+            None => false,
+        };
+        if pass || !self.has_queued(&t) {
+            self.pass_turn(&t);
+        }
+        if !self.has_queued(&t) {
+            self.release_tenant(&t);
+        }
+        Some(e)
+    }
+
+    /// Give the turn to the tenant with queued entries after `tenant` (name order,
+    /// wrapping; `tenant` itself when it is the only one).
+    fn pass_turn(&mut self, tenant: &str) {
+        let queued = |(t, s): (&String, &QueueSet)| (!s.queues.is_empty()).then(|| t.clone());
+        let next = self
+            .sets
+            .range::<str, _>((Bound::Excluded(tenant), Bound::Unbounded))
+            .find_map(queued)
+            .or_else(|| self.sets.iter().find_map(queued));
+        self.turn = next.map(|n| {
+            let w = self.tenant_weight(&n);
+            (n, w)
+        });
+    }
+
+    /// Start a new dispatch round: queues skipped in the last round are tried again.
+    pub fn begin_round(&mut self) {
+        self.skipped.clear();
+        for s in self.sets.values_mut() {
+            s.begin_round();
+        }
+    }
+
+    /// Skip `queue` for the rest of the round (`QueueBlocked`, `Paused`).
+    pub fn skip_queue(&mut self, queue: &str) {
+        self.skipped.insert(queue.to_owned());
+        for s in self.sets.values_mut() {
+            s.skip_queue(queue);
+        }
+    }
+
+    /// Hold the candidate out of the selection until [`Self::release_held`] (its workflow
+    /// is paused).
+    pub fn hold(&mut self, c: &Candidate) {
+        if let Some(t) = self.tenant_of.get(&c.run).cloned()
+            && let Some(s) = self.sets.get_mut(&t)
+        {
+            s.hold(c);
+        }
+    }
+
+    /// Put every held entry back into the selection and release every blocked tenant (a
+    /// flow-control `changed()` bump).
+    pub fn release_held(&mut self) {
+        for s in self.sets.values_mut() {
+            s.release_held();
+        }
+        self.release_tenants();
+    }
+
+    /// Whether any entry is held.
+    pub fn has_held(&self) -> bool {
+        self.sets.values().any(QueueSet::has_held)
+    }
+
+    /// Skip `queue` until [`Self::unpark_queues`] (placement had no capacity).
+    pub fn park_queue(&mut self, queue: &str) {
+        self.parked_queues.insert(queue.to_owned());
+        for s in self.sets.values_mut() {
+            s.park_queue(queue);
+        }
+    }
+
+    /// Park `key` of `queue` until `until_ms` (`None` = until [`Self::unpark_all`]).
+    pub fn park_key(&mut self, queue: &str, key: &str, until_ms: Option<u64>) {
+        self.parked_keys
+            .insert((queue.to_owned(), key.to_owned()), until_ms);
+        for s in self.sets.values_mut() {
+            s.park_key(queue, key, until_ms);
+        }
+    }
+
+    /// Unpark keys, lift gates and release tenant blocks whose `until_ms` passed.
+    pub fn unpark_due(&mut self, now_ms: u64) {
+        self.parked_keys
+            .retain(|_, until| until.is_none_or(|u| u > now_ms));
+        for s in self.sets.values_mut() {
+            s.unpark_due(now_ms);
+        }
+        while let Some((at, t)) = self.block_until.first().cloned() {
+            if at > now_ms {
+                break;
+            }
+            self.release_tenant(&t);
+        }
+    }
+
+    /// Earliest `until_ms` of a parked key, a first-activation gate or a tenant block.
+    pub fn next_unpark_at(&self) -> Option<u64> {
+        self.sets
+            .values()
+            .filter_map(QueueSet::next_unpark_at)
+            .chain(self.block_until.first().map(|(at, _)| *at))
+            .min()
+    }
+
+    /// Hold back the first activations of `queue` until `until_ms` or
+    /// [`Self::ungate_all`].
+    pub fn gate_first(&mut self, queue: &str, until_ms: u64) {
+        for s in self.sets.values_mut() {
+            s.gate_first(queue, until_ms);
+        }
+    }
+
+    /// Hold back the first activations of `key` of `queue` until `until_ms` or
+    /// [`Self::ungate_all`].
+    pub fn gate_first_key(&mut self, queue: &str, key: &str, until_ms: u64) {
+        for s in self.sets.values_mut() {
+            s.gate_first_key(queue, key, until_ms);
+        }
+    }
+
+    /// Lift every first-activation gate (a flow-control `changed()` bump).
+    pub fn ungate_all(&mut self) {
+        for s in self.sets.values_mut() {
+            s.ungate_all();
+        }
+    }
+
+    /// Whether `queue`'s first activations are gated (in any tenant).
+    pub fn is_first_gated(&self, queue: &str) -> bool {
+        self.sets.values().any(|s| s.is_first_gated(queue))
+    }
+
+    /// Unpark every queue (a placement `changed()` bump).
+    pub fn unpark_queues(&mut self) {
+        self.parked_queues.clear();
+        for s in self.sets.values_mut() {
+            s.unpark_queues();
+        }
+    }
+
+    /// Unpark every key (a flow-control `changed()` bump).
+    pub fn unpark_keys(&mut self) {
+        self.parked_keys.clear();
+        for s in self.sets.values_mut() {
+            s.unpark_keys();
+        }
+    }
+
+    /// Unpark every queue and key, lift every gate, release every held entry and every
+    /// blocked tenant.
+    pub fn unpark_all(&mut self) {
+        self.parked_queues.clear();
+        self.parked_keys.clear();
+        for s in self.sets.values_mut() {
+            s.unpark_all();
+        }
+        self.release_tenants();
+    }
+
+    /// Whether any queue is parked (placement had no capacity).
+    pub fn has_parked_queues(&self) -> bool {
+        !self.parked_queues.is_empty() || self.sets.values().any(QueueSet::has_parked_queues)
+    }
+
+    /// Whether any queue or key is parked.
+    pub fn any_parked(&self) -> bool {
+        !self.parked_queues.is_empty() || self.sets.values().any(QueueSet::any_parked)
+    }
+
+    /// Take `tenant` out of the ring until [`Self::release_tenant`], `until_ms` (clock ms;
+    /// `None` = until the next `changed()` bump) or [`Self::unpark_all`]
+    /// (`Admit::TenantBlocked`). Its entries stay queued (held, never failed); a later
+    /// block replaces the deadline.
+    pub fn block_tenant(&mut self, tenant: &str, until_ms: Option<u64>) {
+        self.release_tenant(tenant);
+        if !self.has_queued(tenant) {
+            return;
+        }
+        self.blocked.insert(tenant.to_owned(), until_ms);
+        if let Some(u) = until_ms {
+            self.block_until.insert((u, tenant.to_owned()));
+        }
+    }
+
+    /// Put `tenant` back into the ring.
+    pub fn release_tenant(&mut self, tenant: &str) {
+        if let Some(Some(u)) = self.blocked.remove(tenant) {
+            self.block_until.remove(&(u, tenant.to_owned()));
+        }
+    }
+
+    /// Put every blocked tenant back into the ring.
+    pub fn release_tenants(&mut self) {
+        self.blocked.clear();
+        self.block_until.clear();
+    }
+
+    /// Whether `tenant` is blocked.
+    pub fn is_tenant_blocked(&self, tenant: &str) -> bool {
+        self.blocked.contains_key(tenant)
+    }
+
+    /// Drop every entry (held ones too), park and block (queue and tenant weights stay).
     pub fn clear(&mut self) {
         let weights = std::mem::take(&mut self.weights);
+        let tenant_weights = std::mem::take(&mut self.tenant_weights);
         *self = Self {
             weights,
+            tenant_weights,
             ..Self::default()
         };
     }
