@@ -477,7 +477,7 @@ Plans:
 - [x] 13-16-PLAN.md — Online `ostro cluster init` promotion + ostro-client + CLI verbs (cluster, migrate-runs, modules rm/gc) (wave 6; CLUS-05..07) — 2026-11-25 (f0f1590, c884c47, 23e8974, 3b978c0, 652c46e, e8ee29c)
 - [x] 13-17-PLAN.md — RepinRun apply (hot-parked runs busy) + migrate-runs with dry-run replay + module_gone (wave 5; CLUS-07)
 - [x] 13-18-PLAN.md — Tier-B suite green x3 incl. cross-feature scenarios (drain, emulated rolling upgrade) + Phase 13 mutant matrix (wave 7; all) — 2026-11-25 (a621fac, a20b197, 17b9cc2, eeac96f, f60613e, 50e2a37, 2266645, 2ad100f, 8f0f633, d259ce7, 563538c, d7b82a2); oracle changes HELD on wip/13-18-oracles (user approval needed)
-- [ ] 13-19-PLAN.md — Tier C: promotion, emulated rolling upgrade, RYW, downgrade fences, shutdown timing, OSTRO_PREV_BIN hook, campaign smoke (wave 8; all)
+- [x] 13-19-PLAN.md — Tier C: promotion, emulated rolling upgrade, RYW, downgrade fences, shutdown timing, OSTRO_PREV_BIN hook, campaign smoke (wave 8; all) — 2026-11-26 (0f8ed72, 0c971db, 55c053d, 478e54d); 500-fault campaign PASS; OPEN: child runs lost under restarts (13-19 finding 1)
 - [ ] 13-20-PLAN.md — PHASE GATE: P13 mutant matrix + fixture suite required in CI, grep gates, measurements in a pinned report dir, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (wave 9; all)
 **Research flag**: Raft transport on tonic 0.14
 
