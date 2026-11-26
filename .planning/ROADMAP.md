@@ -478,7 +478,7 @@ Plans:
 - [x] 13-17-PLAN.md — RepinRun apply (hot-parked runs busy) + migrate-runs with dry-run replay + module_gone (wave 5; CLUS-07)
 - [x] 13-18-PLAN.md — Tier-B suite green x3 incl. cross-feature scenarios (drain, emulated rolling upgrade) + Phase 13 mutant matrix (wave 7; all) — 2026-11-25 (a621fac, a20b197, 17b9cc2, eeac96f, f60613e, 50e2a37, 2266645, 2ad100f, 8f0f633, d259ce7, 563538c, d7b82a2); oracle changes HELD on wip/13-18-oracles (user approval needed)
 - [x] 13-19-PLAN.md — Tier C: promotion, emulated rolling upgrade, RYW, downgrade fences, shutdown timing, OSTRO_PREV_BIN hook, campaign smoke (wave 8; all) — 2026-11-26 (0f8ed72, 0c971db, 55c053d, 478e54d); 500-fault campaign PASS; OPEN: child runs lost under restarts (13-19 finding 1)
-- [ ] 13-20-PLAN.md — PHASE GATE: P13 mutant matrix + fixture suite required in CI, grep gates, measurements in a pinned report dir, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (wave 9; all)
+- [x] 13-20-PLAN.md — PHASE GATE: P13 mutant matrix + fixture suite required in CI, grep gates, measurements in a pinned report dir, docs, RESERVATIONS flip, REQUIREMENTS, VALIDATION (wave 9; all) — 2026-11-26 (9055589, fd7b9df, 26ece7e, 52290de, 7942813 + docs); plan check green at 7942813 after flake re-runs; mutants 8/8; tier C 7/7 child runs on; campaign HUMAN_NEEDED at 1,110 faults; phase verification pending
 **Research flag**: Raft transport on tonic 0.14
 
 ### Phase 14: Multi-Tenancy, Security & 1.0 Release

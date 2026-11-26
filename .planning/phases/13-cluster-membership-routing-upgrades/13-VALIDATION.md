@@ -1,9 +1,9 @@
 ---
 phase: 13
 slug: cluster-membership-routing-upgrades
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: gate-run (phase verification pending)
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-11-19
 ---
 
@@ -94,61 +94,61 @@ All commands run from the plan's worktree `$WT=/tmp/ostro-wt-13-NN` with `CARGO_
 
 | Task ID | Plan | Wave | Requirements | Task | Automated command(s) | Status |
 |---------|------|------|--------------|------|----------------------|--------|
-| 13-01-01 | 01 | 1 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Phase 12 (+9–11) completion gate, seam signatures, route inventory, reservations check, RESERVATIONS rows, decisions in STATE.md | `grep / doc checks` | ⬜ pending |
-| 13-01-02 | 01 | 1 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Manifests + features (first), then contracts: compat registry, RepinRun + AlterReplicas shapes, ext structs 96–102, RejectReasons, HandoffControl, ostro-cluster contracts + stubs, LinkerSet stub, ostro_api::phase13 + RequestMeta | `cargo deny check`; `--features failpoints`; `-p ostro-types -p ostro-meta -p ostro-cluster --lib -p ostro-api --lib`; `-p ostro-partition --test rebuild_digest` | ⬜ pending |
-| 13-02-01 | 02 | 2 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | p13 seam with fixed call sites (both voter checks, boot rule, fence, routing wrap, start, shutdown) + config keys | `-p ostro-server --test config -p ostro-server -p ostro` | ⬜ pending |
-| 13-02-02 | 02 | 2 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Client/CLI stubs + P13Harness trait + stub oracle/scenario/mutant modules | `-p ostro-repl-conformance --test p13_skeleton -p ostro-cli -p ostro-client` | ⬜ pending |
-| 13-03-01 | 03 | 3 | API-08, CLUS-05, CLUS-06, CLUS-07 | Protos: ostro.api.v1 Cluster + ModuleLifecycle, ostro.cluster.v1 Membership + NodeOps, worker Hello feature_level | `-p ostro-proto --test p13_wire`; `-p ostro-worker-proto --test wire` | ⬜ pending |
-| 13-03-02 | 03 | 3 | API-08, CLUS-05, CLUS-06, CLUS-07 | REST + gRPC adapters for ClusterApi / ModuleLifecycleApi, RequestMeta parse/emit, fakes, OpenAPI | `-p ostro-api --test phase13_routes`; `-p ostro-api` | ⬜ pending |
-| 13-03-03 | 03 | 3 | API-08, CLUS-05, CLUS-06, CLUS-07 | Production GrpcControlPlane (ControlPlane + every extension trait) with metadata propagation and lossless errors | `-p ostro-api --test grpc_client_parity` | ⬜ pending |
-| 13-04-01 | 04 | 2 | CLUS-06 | Gate core (require, LevelSource, finalize_decision pure) + finalizer, hold/release/finalize | `-p ostro-cluster --test upgrade_finalize`; `-p ostro-cluster --test compat_mutants --features failpoints` | ⬜ pending |
-| 13-04-02 | 04 | 2 | CLUS-06 | Fail-stop on unknown input in partition apply (unknown tag, unknown fields, emulated level); the MetaSm half is 13-05 (plan check B6) | `-p ostro-partition --test apply_newer_format`; `-p ostro-partition --test apply_newer_format --features failpoints`; `-p ostro-partition --test format_corpus`; `-p ostro-partition --test rebuild_digest` | ⬜ pending |
-| 13-04-03 | 04 | 2 | CLUS-06 | NodeVersion advertiser, boot fence (before Node::open), running fence, level emulation wiring | `-p ostro-cluster --test compat` | ⬜ pending |
-| 13-05-01 | 05 | 2 | CLUS-05, CLUS-06, API-08 | Driver FatalApply + MetaSm fail-stop, TransferLeader, ReadIndex, RaftStatus progress/conf state, remedy text + membership tests | `-p ostro-meta --test newer_command`; `-p ostro-raft-driver` | ⬜ pending |
-| 13-05-02 | 05 | 2 | CLUS-05, CLUS-06, API-08 | MetaHandle surface (read_index_barrier, transfer_leader, conf changes, conf_state, raft_status) | `-p ostro-meta --test membership_handle`; `-p ostro-meta` | ⬜ pending |
-| 13-05-03 | 05 | 2 | CLUS-05, CLUS-06, API-08 | MetaPeer decode limit + snapshot failure reporting + lease anchor, large-snapshot learner test | `-p ostro-cluster --test meta_peer_large`; `-p ostro-cluster --test meta_peer` | ⬜ pending |
-| 13-06-01 | 06 | 2 | CLUS-05 | Reconciler (RED → GREEN) with proptest-state-machine model | `-p ostro-cluster --test reconcile_model` | ⬜ pending |
-| 13-06-02 | 06 | 2 | CLUS-05 | Placement planner, reassignment state machine, leader balancer (RED → GREEN) with models | `placement_model reassign_model` | ⬜ pending |
-| 13-07-01 | 07 | 2 | ENG-10 | Fixture builders + LinkerSet for the 0.1 line, WIT_0_1_LATEST, JOURNAL_IFACE fix, select() with introduced_in | `-p ostro-engine --test linker_set`; `-p ostro-engine --test replay_corpus` | ⬜ pending |
-| 13-07-02 | 07 | 2 | ENG-10 | Test-only 0.2 line (fixture package + bindgen module), side-by-side selection, cache key by line | `-p ostro-engine --test linker_set --features wit-next-fixture`; `-p ostro-engine` | ⬜ pending |
-| 13-08-01 | 08 | 3 | CLUS-05, CLUS-06, CLUS-07, API-08 | P13Harness for InProcCluster and ProcCluster (single start, init, add_node via join, remove, drain, upgrade at an emulated level, status) | `-p ostro-repl-conformance --test p13_harness_smoke`; `-p ostro-repl-conformance --test harness_smoke` | ⬜ pending |
-| 13-08-02 | 08 | 3 | CLUS-05, CLUS-06, CLUS-07, API-08 | Phase 13 oracles (RYW checker, membership, upgrade, GC) with damaged-input self-tests | `-p ostro-repl-conformance --test p13_oracle_selftest` | ⬜ pending |
-| 13-09-01 | 09 | 4 | CLUS-05 | Dynamic address book + server-side join handshake (tokens, id allocation/resume, CSR signing, CA secret) + Member self-upsert RMW | `-p ostro-cluster --test address_book_dynamic`; `-p ostro-server --test p13_join` | ⬜ pending |
-| 13-09-02 | 09 | 4 | CLUS-05 | Joiner (marker-first), boot_mode, both voter checks, five crash tests | `-p ostro-server --test p13_boot_modes --features failpoints` | ⬜ pending |
-| 13-09-03 | 09 | 4 | CLUS-05 | Reconciler driver, removal/drain with tombstones, orphan-joiner GC, Membership.Removed, status, mutants + tier-B membership scenarios | `-p ostro-cluster --test membership_driver`; `-p ostro-cluster --test membership_mutants --features failpoints`; `-p ostro-repl-conformance --test membership` | ⬜ pending |
-| 13-10-01 | 10 | 5 | CLUS-05, CLUS-06 | AlterReplicas apply in meta (validation tables, isr_version CAS, ext 100 verbatim) | `-p ostro-meta --test alter_replicas`; `-p ostro-meta` | ⬜ pending |
-| 13-10-02 | 10 | 5 | CLUS-05, CLUS-06 | Placement controller (RF raise, Draining evacuation, explicit reassign/cancel, balancer) + mutant | `-p ostro-cluster --test placement_controller`; `-p ostro-cluster --test reassign_mutants --features failpoints` | ⬜ pending |
-| 13-10-03 | 10 | 5 | CLUS-05, CLUS-06 | Tier-B reassignment scenarios under load | `-p ostro-repl-conformance --test reassign` | ⬜ pending |
-| 13-11-01 | 11 | 4 | CLUS-06, CLUS-05 | Partition quiescing: admission off, in-flight wait, hot-wait eviction, abort | `-p ostro-partition --test handoff`; `-p ostro-partition --test dispatcher`; `-p ostro-server` | ⬜ pending |
-| 13-11-02 | 11 | 4 | CLUS-06, CLUS-05 | LocalHandoff executor, NodeOps handoff client, controlled shutdown | `-p ostro-cluster --test handoff_executor` | ⬜ pending |
-| 13-11-03 | 11 | 4 | CLUS-06, CLUS-05 | Tier-B handoff and controlled-shutdown scenarios | `-p ostro-repl-conformance --test handoff` | ⬜ pending |
-| 13-12-01 | 12 | 4 | API-08 | Route table + RoutedControlPlane core (owner resolution, local vs forward, hop limit, NotLeader retry, unkeyed placement + pin) | `-p ostro-server --test p13_routing_unit` | ⬜ pending |
-| 13-12-02 | 12 | 4 | API-08 | Fan-out, extension-trait wrapping, node-only ostro.api.v1 on the cluster listener, deadline/principal propagation | `-p ostro-server --test p13_routing_unit`; `-p ostro-server` | ⬜ pending |
-| 13-12-03 | 12 | 4 | API-08 | Tier-B routing scenarios (parity through every node, NotLeader retry, offline 503, unkeyed placement, fan-out, hop limit, internal consumers) | `-p ostro-repl-conformance --test routing`; `-p ostro-repl-conformance --test routing --features failpoints` | ⬜ pending |
-| 13-13-01 | 13 | 5 | API-08 | Lease check, meta barrier, consistency tokens, strict reads + mutant | `-p ostro-server --test p13_consistency_unit`; `-p ostro-server --test p13_consistency_unit --features failpoints`; `-p ostro-cluster --test controller_lease_wait` | ⬜ pending |
-| 13-13-02 | 13 | 5 | API-08 | Per-term RunWatchers re-subscribe + LeaderChanged wake | `-p ostro-server --test p13_watch`; `-p ostro-server` | ⬜ pending |
-| 13-13-03 | 13 | 5 | API-08 | Tier-B RYW scenarios with the session checker (moves, failover, zombie incl. asymmetric, tokens, await across handoff) | `-p ostro-repl-conformance --test ryw`; `-p ostro-repl-conformance --test ryw --features failpoints` | ⬜ pending |
-| 13-14-01 | 14 | 4 | CLUS-06, ENG-10 | Worker version advertisement, admission policy, compatibility predicate in placement, GoAway on node drain | `-p ostro-server --test worker_compat`; `-p ostro-server --test worker_session` | ⬜ pending |
-| 13-14-02 | 14 | 4 | CLUS-06, ENG-10 | Upload gate (WitRequirement ext 101, feature_not_enabled, mixed lines) + AOT pre-warm | `p13_upload_gate p13_prewarm` | ⬜ pending |
-| 13-14-03 | 14 | 4 | CLUS-06, ENG-10 | Tier-B version-gate scenarios (auto-finalize, hold, manual finalize, gated upload, downgrade before/after finalize) | `-p ostro-repl-conformance --test version_gate` | ⬜ pending |
-| 13-15-01 | 15 | 4 | CLUS-07 | Retire + refusal rules + ModuleRefsSource over led partitions | `-p ostro-server --test p13_module_retire` | ⬜ pending |
-| 13-15-02 | 15 | 4 | CLUS-07 | GC service with grace + two-pass scan through every partition leader + mutant | `-p ostro-server --test p13_module_gc`; `-p ostro-server --test p13_module_gc --features failpoints` | ⬜ pending |
-| 13-15-03 | 15 | 4 | CLUS-07 | Tier-B module GC scenarios | `-p ostro-repl-conformance --test module_gc` | ⬜ pending |
-| 13-16-01 | 16 | 6 | CLUS-05, CLUS-06, CLUS-07 | Online promotion (`cluster init`) | `-p ostro-server --test p13_promote`; `-p ostro-server --test p13_promote --features failpoints` | ⬜ pending |
-| 13-16-02 | 16 | 6 | CLUS-05, CLUS-06, CLUS-07 | ostro-client cluster module + CLI verbs (cluster, migrate-runs, modules rm/gc) | `-p ostro-client --test cluster_contract`; `-p ostro-cli --test p13_cli`; `-p ostro` | ⬜ pending |
-| 13-16-03 | 16 | 6 | CLUS-05, CLUS-06, CLUS-07 | Tier-B promotion scenario under load | `-p ostro-repl-conformance --test promotion` | ⬜ pending |
-| 13-17-01 | 17 | 5 | CLUS-07 | RepinRun apply (ModuleMismatch, SeqMismatch, RunBusy) + digest coverage | `-p ostro-partition --test apply_repin`; `-p ostro-partition --test rebuild_digest` | ⬜ pending |
-| 13-17-02 | 17 | 5 | CLUS-07 | migrate_runs (per-leader dry-run replay, gated submission, report) + executor module_gone + mutant | `migrate_runs p13_module_gone`; `-p ostro-server --test migrate_runs --features failpoints` | ⬜ pending |
-| 13-17-03 | 17 | 5 | CLUS-07 | Tier-B migrate-runs scenarios | `-p ostro-repl-conformance --test migrate`; `-p ostro-repl-conformance --test migrate --features failpoints` | ⬜ pending |
-| 13-18-01 | 18 | 7 | CLUS-05, CLUS-06, CLUS-07, API-08 | Cross-feature integration scenarios + fixes | `-p ostro-repl-conformance --test integration_p13`; `-p ostro-repl-conformance --test integration_p13 --features failpoints`; `-p ostro-repl-conformance --test regressions_p13` | ⬜ pending |
-| 13-18-02 | 18 | 7 | CLUS-05, CLUS-06, CLUS-07, API-08 | Full tier-B suite green ×3 (Phase 12 + Phase 13) | `-p ostro-repl-conformance` | ⬜ pending |
-| 13-18-03 | 18 | 7 | CLUS-05, CLUS-06, CLUS-07, API-08 | Phase 13 mutant matrix (eight mutants, REQUIRE_ALL) | `-p ostro-repl-conformance --test mutants_p13 --features failpoints` | ⬜ pending |
-| 13-19-01 | 19 | 8 | CLUS-05, CLUS-06, CLUS-07, API-08 | Tier-C promotion, rolling upgrade, RYW (scenario library + three tests) | `process_promotion process_ryw`; `-p ostro-repl-conformance --test process_rolling_upgrade --features failpoints` | ⬜ pending |
-| 13-19-02 | 19 | 8 | CLUS-05, CLUS-06, CLUS-07, API-08 | Tier-C downgrade fences, controlled-shutdown timing, env-gated real N−1 test | `process_downgrade process_shutdown upgrade_from_prev` | ⬜ pending |
-| 13-19-03 | 19 | 8 | CLUS-05, CLUS-06, CLUS-07, API-08 | Phase 13 cluster campaign smoke (membership + upgrade faults) | `-p ostro-repl-conformance --test cluster_campaign_p13 --features failpoints` | ⬜ pending |
-| 13-20-01 | 20 | 9 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Hard CI gates (P13 mutant matrix, fixture suite, grep gates) + full gate run + final tier-C measurements | `--features failpoints`; `-p ostro-repl-conformance --test mutants_p13 --features failpoints` | ⬜ pending |
-| 13-20-02 | 20 | 9 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Documentation | `grep / doc checks` | ⬜ pending |
-| 13-20-03 | 20 | 9 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | RESERVATIONS flip, REQUIREMENTS ticks, 13-VALIDATION.md, STATE and DECISIONS | `grep / doc checks` | ⬜ pending |
+| 13-01-01 | 01 | 1 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Phase 12 (+9–11) completion gate, seam signatures, route inventory, reservations check, RESERVATIONS rows, decisions in STATE.md | `grep / doc checks` | ✅ green |
+| 13-01-02 | 01 | 1 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Manifests + features (first), then contracts: compat registry, RepinRun + AlterReplicas shapes, ext structs 96–102, RejectReasons, HandoffControl, ostro-cluster contracts + stubs, LinkerSet stub, ostro_api::phase13 + RequestMeta | `cargo deny check`; `--features failpoints`; `-p ostro-types -p ostro-meta -p ostro-cluster --lib -p ostro-api --lib`; `-p ostro-partition --test rebuild_digest` | ✅ green |
+| 13-02-01 | 02 | 2 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | p13 seam with fixed call sites (both voter checks, boot rule, fence, routing wrap, start, shutdown) + config keys | `-p ostro-server --test config -p ostro-server -p ostro` | ✅ green |
+| 13-02-02 | 02 | 2 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Client/CLI stubs + P13Harness trait + stub oracle/scenario/mutant modules | `-p ostro-repl-conformance --test p13_skeleton -p ostro-cli -p ostro-client` | ✅ green |
+| 13-03-01 | 03 | 3 | API-08, CLUS-05, CLUS-06, CLUS-07 | Protos: ostro.api.v1 Cluster + ModuleLifecycle, ostro.cluster.v1 Membership + NodeOps, worker Hello feature_level | `-p ostro-proto --test p13_wire`; `-p ostro-worker-proto --test wire` | ✅ green |
+| 13-03-02 | 03 | 3 | API-08, CLUS-05, CLUS-06, CLUS-07 | REST + gRPC adapters for ClusterApi / ModuleLifecycleApi, RequestMeta parse/emit, fakes, OpenAPI | `-p ostro-api --test phase13_routes`; `-p ostro-api` | ✅ green |
+| 13-03-03 | 03 | 3 | API-08, CLUS-05, CLUS-06, CLUS-07 | Production GrpcControlPlane (ControlPlane + every extension trait) with metadata propagation and lossless errors | `-p ostro-api --test grpc_client_parity` | ✅ green |
+| 13-04-01 | 04 | 2 | CLUS-06 | Gate core (require, LevelSource, finalize_decision pure) + finalizer, hold/release/finalize | `-p ostro-cluster --test upgrade_finalize`; `-p ostro-cluster --test compat_mutants --features failpoints` | ✅ green |
+| 13-04-02 | 04 | 2 | CLUS-06 | Fail-stop on unknown input in partition apply (unknown tag, unknown fields, emulated level); the MetaSm half is 13-05 (plan check B6) | `-p ostro-partition --test apply_newer_format`; `-p ostro-partition --test apply_newer_format --features failpoints`; `-p ostro-partition --test format_corpus`; `-p ostro-partition --test rebuild_digest` | ✅ green |
+| 13-04-03 | 04 | 2 | CLUS-06 | NodeVersion advertiser, boot fence (before Node::open), running fence, level emulation wiring | `-p ostro-cluster --test compat` | ✅ green |
+| 13-05-01 | 05 | 2 | CLUS-05, CLUS-06, API-08 | Driver FatalApply + MetaSm fail-stop, TransferLeader, ReadIndex, RaftStatus progress/conf state, remedy text + membership tests | `-p ostro-meta --test newer_command`; `-p ostro-raft-driver` | ✅ green |
+| 13-05-02 | 05 | 2 | CLUS-05, CLUS-06, API-08 | MetaHandle surface (read_index_barrier, transfer_leader, conf changes, conf_state, raft_status) | `-p ostro-meta --test membership_handle`; `-p ostro-meta` | ✅ green |
+| 13-05-03 | 05 | 2 | CLUS-05, CLUS-06, API-08 | MetaPeer decode limit + snapshot failure reporting + lease anchor, large-snapshot learner test | `-p ostro-cluster --test meta_peer_large`; `-p ostro-cluster --test meta_peer` | ✅ green |
+| 13-06-01 | 06 | 2 | CLUS-05 | Reconciler (RED → GREEN) with proptest-state-machine model | `-p ostro-cluster --test reconcile_model` | ✅ green |
+| 13-06-02 | 06 | 2 | CLUS-05 | Placement planner, reassignment state machine, leader balancer (RED → GREEN) with models | `placement_model reassign_model` | ✅ green |
+| 13-07-01 | 07 | 2 | ENG-10 | Fixture builders + LinkerSet for the 0.1 line, WIT_0_1_LATEST, JOURNAL_IFACE fix, select() with introduced_in | `-p ostro-engine --test linker_set`; `-p ostro-engine --test replay_corpus` | ✅ green |
+| 13-07-02 | 07 | 2 | ENG-10 | Test-only 0.2 line (fixture package + bindgen module), side-by-side selection, cache key by line | `-p ostro-engine --test linker_set --features wit-next-fixture`; `-p ostro-engine` | ✅ green |
+| 13-08-01 | 08 | 3 | CLUS-05, CLUS-06, CLUS-07, API-08 | P13Harness for InProcCluster and ProcCluster (single start, init, add_node via join, remove, drain, upgrade at an emulated level, status) | `-p ostro-repl-conformance --test p13_harness_smoke`; `-p ostro-repl-conformance --test harness_smoke` | ✅ green |
+| 13-08-02 | 08 | 3 | CLUS-05, CLUS-06, CLUS-07, API-08 | Phase 13 oracles (RYW checker, membership, upgrade, GC) with damaged-input self-tests | `-p ostro-repl-conformance --test p13_oracle_selftest` | ✅ green |
+| 13-09-01 | 09 | 4 | CLUS-05 | Dynamic address book + server-side join handshake (tokens, id allocation/resume, CSR signing, CA secret) + Member self-upsert RMW | `-p ostro-cluster --test address_book_dynamic`; `-p ostro-server --test p13_join` | ✅ green |
+| 13-09-02 | 09 | 4 | CLUS-05 | Joiner (marker-first), boot_mode, both voter checks, five crash tests | `-p ostro-server --test p13_boot_modes --features failpoints` | ✅ green |
+| 13-09-03 | 09 | 4 | CLUS-05 | Reconciler driver, removal/drain with tombstones, orphan-joiner GC, Membership.Removed, status, mutants + tier-B membership scenarios | `-p ostro-cluster --test membership_driver`; `-p ostro-cluster --test membership_mutants --features failpoints`; `-p ostro-repl-conformance --test membership` | ✅ green |
+| 13-10-01 | 10 | 5 | CLUS-05, CLUS-06 | AlterReplicas apply in meta (validation tables, isr_version CAS, ext 100 verbatim) | `-p ostro-meta --test alter_replicas`; `-p ostro-meta` | ✅ green |
+| 13-10-02 | 10 | 5 | CLUS-05, CLUS-06 | Placement controller (RF raise, Draining evacuation, explicit reassign/cancel, balancer) + mutant | `-p ostro-cluster --test placement_controller`; `-p ostro-cluster --test reassign_mutants --features failpoints` | ✅ green |
+| 13-10-03 | 10 | 5 | CLUS-05, CLUS-06 | Tier-B reassignment scenarios under load | `-p ostro-repl-conformance --test reassign` | ✅ green |
+| 13-11-01 | 11 | 4 | CLUS-06, CLUS-05 | Partition quiescing: admission off, in-flight wait, hot-wait eviction, abort | `-p ostro-partition --test handoff`; `-p ostro-partition --test dispatcher`; `-p ostro-server` | ✅ green |
+| 13-11-02 | 11 | 4 | CLUS-06, CLUS-05 | LocalHandoff executor, NodeOps handoff client, controlled shutdown | `-p ostro-cluster --test handoff_executor` | ✅ green |
+| 13-11-03 | 11 | 4 | CLUS-06, CLUS-05 | Tier-B handoff and controlled-shutdown scenarios | `-p ostro-repl-conformance --test handoff` | ✅ green |
+| 13-12-01 | 12 | 4 | API-08 | Route table + RoutedControlPlane core (owner resolution, local vs forward, hop limit, NotLeader retry, unkeyed placement + pin) | `-p ostro-server --test p13_routing_unit` | ✅ green |
+| 13-12-02 | 12 | 4 | API-08 | Fan-out, extension-trait wrapping, node-only ostro.api.v1 on the cluster listener, deadline/principal propagation | `-p ostro-server --test p13_routing_unit`; `-p ostro-server` | ✅ green |
+| 13-12-03 | 12 | 4 | API-08 | Tier-B routing scenarios (parity through every node, NotLeader retry, offline 503, unkeyed placement, fan-out, hop limit, internal consumers) | `-p ostro-repl-conformance --test routing`; `-p ostro-repl-conformance --test routing --features failpoints` | ✅ green |
+| 13-13-01 | 13 | 5 | API-08 | Lease check, meta barrier, consistency tokens, strict reads + mutant | `-p ostro-server --test p13_consistency_unit`; `-p ostro-server --test p13_consistency_unit --features failpoints`; `-p ostro-cluster --test controller_lease_wait` | ✅ green |
+| 13-13-02 | 13 | 5 | API-08 | Per-term RunWatchers re-subscribe + LeaderChanged wake | `-p ostro-server --test p13_watch`; `-p ostro-server` | ✅ green |
+| 13-13-03 | 13 | 5 | API-08 | Tier-B RYW scenarios with the session checker (moves, failover, zombie incl. asymmetric, tokens, await across handoff) | `-p ostro-repl-conformance --test ryw`; `-p ostro-repl-conformance --test ryw --features failpoints` | ✅ green |
+| 13-14-01 | 14 | 4 | CLUS-06, ENG-10 | Worker version advertisement, admission policy, compatibility predicate in placement, GoAway on node drain | `-p ostro-server --test worker_compat`; `-p ostro-server --test worker_session` | ✅ green |
+| 13-14-02 | 14 | 4 | CLUS-06, ENG-10 | Upload gate (WitRequirement ext 101, feature_not_enabled, mixed lines) + AOT pre-warm | `p13_upload_gate p13_prewarm` | ✅ green |
+| 13-14-03 | 14 | 4 | CLUS-06, ENG-10 | Tier-B version-gate scenarios (auto-finalize, hold, manual finalize, gated upload, downgrade before/after finalize) | `-p ostro-repl-conformance --test version_gate` | ✅ green |
+| 13-15-01 | 15 | 4 | CLUS-07 | Retire + refusal rules + ModuleRefsSource over led partitions | `-p ostro-server --test p13_module_retire` | ✅ green |
+| 13-15-02 | 15 | 4 | CLUS-07 | GC service with grace + two-pass scan through every partition leader + mutant | `-p ostro-server --test p13_module_gc`; `-p ostro-server --test p13_module_gc --features failpoints` | ✅ green |
+| 13-15-03 | 15 | 4 | CLUS-07 | Tier-B module GC scenarios | `-p ostro-repl-conformance --test module_gc` | ✅ green |
+| 13-16-01 | 16 | 6 | CLUS-05, CLUS-06, CLUS-07 | Online promotion (`cluster init`) | `-p ostro-server --test p13_promote`; `-p ostro-server --test p13_promote --features failpoints` | ✅ green |
+| 13-16-02 | 16 | 6 | CLUS-05, CLUS-06, CLUS-07 | ostro-client cluster module + CLI verbs (cluster, migrate-runs, modules rm/gc) | `-p ostro-client --test cluster_contract`; `-p ostro-cli --test p13_cli`; `-p ostro` | ✅ green |
+| 13-16-03 | 16 | 6 | CLUS-05, CLUS-06, CLUS-07 | Tier-B promotion scenario under load | `-p ostro-repl-conformance --test promotion` | ✅ green |
+| 13-17-01 | 17 | 5 | CLUS-07 | RepinRun apply (ModuleMismatch, SeqMismatch, RunBusy) + digest coverage | `-p ostro-partition --test apply_repin`; `-p ostro-partition --test rebuild_digest` | ✅ green |
+| 13-17-02 | 17 | 5 | CLUS-07 | migrate_runs (per-leader dry-run replay, gated submission, report) + executor module_gone + mutant | `migrate_runs p13_module_gone`; `-p ostro-server --test migrate_runs --features failpoints` | ✅ green |
+| 13-17-03 | 17 | 5 | CLUS-07 | Tier-B migrate-runs scenarios | `-p ostro-repl-conformance --test migrate`; `-p ostro-repl-conformance --test migrate --features failpoints` | ✅ green |
+| 13-18-01 | 18 | 7 | CLUS-05, CLUS-06, CLUS-07, API-08 | Cross-feature integration scenarios + fixes | `-p ostro-repl-conformance --test integration_p13`; `-p ostro-repl-conformance --test integration_p13 --features failpoints`; `-p ostro-repl-conformance --test regressions_p13` | ✅ green |
+| 13-18-02 | 18 | 7 | CLUS-05, CLUS-06, CLUS-07, API-08 | Full tier-B suite green ×3 (Phase 12 + Phase 13) | `-p ostro-repl-conformance` | ✅ green |
+| 13-18-03 | 18 | 7 | CLUS-05, CLUS-06, CLUS-07, API-08 | Phase 13 mutant matrix (eight mutants, REQUIRE_ALL) | `-p ostro-repl-conformance --test mutants_p13 --features failpoints` | ✅ green |
+| 13-19-01 | 19 | 8 | CLUS-05, CLUS-06, CLUS-07, API-08 | Tier-C promotion, rolling upgrade, RYW (scenario library + three tests) | `process_promotion process_ryw`; `-p ostro-repl-conformance --test process_rolling_upgrade --features failpoints` | ✅ green |
+| 13-19-02 | 19 | 8 | CLUS-05, CLUS-06, CLUS-07, API-08 | Tier-C downgrade fences, controlled-shutdown timing, env-gated real N−1 test | `process_downgrade process_shutdown upgrade_from_prev` | ✅ green |
+| 13-19-03 | 19 | 8 | CLUS-05, CLUS-06, CLUS-07, API-08 | Phase 13 cluster campaign smoke (membership + upgrade faults) | `-p ostro-repl-conformance --test cluster_campaign_p13 --features failpoints` | ✅ green |
+| 13-20-01 | 20 | 9 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Hard CI gates (P13 mutant matrix, fixture suite, grep gates) + full gate run + final tier-C measurements | `--features failpoints`; `-p ostro-repl-conformance --test mutants_p13 --features failpoints` | ✅ green |
+| 13-20-02 | 20 | 9 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | Documentation | `grep / doc checks` | ✅ green |
+| 13-20-03 | 20 | 9 | CLUS-05, CLUS-06, CLUS-07, ENG-10, API-08 | RESERVATIONS flip, REQUIREMENTS ticks, 13-VALIDATION.md, STATE and DECISIONS | `grep / doc checks` | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -168,14 +168,14 @@ All commands run from the plan's worktree `$WT=/tmp/ostro-wt-13-NN` with `CARGO_
 
 ## Wave 0 Requirements
 
-- [ ] `ostro_types::compat` (levels, Feature registry, MUTANTS), ext structs 96–102, RepinRun/AlterReplicas shapes — 13-01
-- [ ] `P13Harness` trait, stub scenario/oracle modules, `tests/p13_skeleton.rs` — 13-01
-- [ ] Harness implementations (tiers B/C) + Phase 13 oracles with self-tests — 13-08
-- [ ] `crates/ostro-cluster/tests/{reconcile_model,placement_model,reassign_model}.rs` — 13-06
-- [ ] `vendor/ostro-raft-driver/src/membership_tests.rs` — 13-05
-- [ ] `crates/ostro-engine/tests/linker_set.rs` + `wit-next-fixture` + fixture builders — 13-07
-- [ ] `crates/ostro-partition/tests/apply_newer_format.rs`, `crates/ostro-meta/tests/newer_command.rs` — 13-04
-- [ ] Tier-C scenarios `process_promotion`, `process_rolling_upgrade`, `process_ryw` — 13-19
+- [x] `ostro_types::compat` (levels, Feature registry, MUTANTS), ext structs 96–102, RepinRun/AlterReplicas shapes — 13-01
+- [x] `P13Harness` trait, stub scenario/oracle modules, `tests/p13_skeleton.rs` — 13-01
+- [x] Harness implementations (tiers B/C) + Phase 13 oracles with self-tests — 13-08
+- [x] `crates/ostro-cluster/tests/{reconcile_model,placement_model,reassign_model}.rs` — 13-06
+- [x] `vendor/ostro-raft-driver/src/membership_tests.rs` — 13-05
+- [x] `crates/ostro-engine/tests/linker_set.rs` + `wit-next-fixture` + fixture builders — 13-07
+- [x] `crates/ostro-partition/tests/apply_newer_format.rs`, `crates/ostro-meta/tests/newer_command.rs` — 13-04
+- [x] Tier-C scenarios `process_promotion`, `process_rolling_upgrade`, `process_ryw` — 13-19
 
 ---
 
@@ -187,17 +187,59 @@ All commands run from the plan's worktree `$WT=/tmp/ostro-wt-13-NN` with `CARGO_
 | Native-Linux timings (handoff, controlled shutdown, promotion time-to-RF-3, first-activation p99, lease vs strict read latency) | CLUS-05, CLUS-06, API-08 | WSL2 numbers are advisory (D15) | Re-run 13-19 tests on native Linux NVMe, 8 vCPU |
 | Cluster campaign to 10,000 faults if the 4 h box is exceeded | QA-01 | Time box on WSL2 | `OSTRO_CAMPAIGN_FAULTS=10000 … --test cluster_campaign_p13 -- --ignored` on the native machine |
 | Remote CI legs (aarch64, macOS) | all | No git remote yet (FOUND-05) | Push and confirm the P13 mutant matrix and fixture steps are green |
-| User review of D-P13-4 (auto-finalize) and D-P13-15 (lease reads by default; strict_reads opt-in) | CLUS-06, API-08 | Adopted defaults, user may override | Read 13-DECISIONS.md; 13-13 records the strict_reads latency |
+| ~~User review of D-P13-4 and D-P13-15~~ | CLUS-06, API-08 | **Decided 2026-11-26: both confirmed** | - |
 
 ---
 
+## Gate Evidence (13-20, 2026-11-26)
+
+All runs on the user-approved microk8s `ostro-ci` namespace (`ostro-k8s-ci`, native Linux, Dell nodes dell-1/dell-2 shared with other executors; dell-3 never used). Logs under `target/k8s-ci-logs/`.
+
+| Gate command | Commit | Result | Evidence |
+|---|---|---|---|
+| 1. full ci-local with musl (`ostro-k8s-ci --parallel`) | 9055589 | every step PASS except `cargo test` / `musl zigbuild test`: both red only on ostro-partition `trim_safety` (6) and `snapshot_tail` "node open timed out" under load; cargo fail-fast then skipped the rest of each shard. Re-run at 9055589 with `--no-fail-fast` (slot 1): both tests alone PASS, the whole test2 shard PASS, the whole musl2 shard PASS | `20261126-065142-par-9055589a-*.log`, `20261126-085958-s1-9055589a-cmd.log` |
+| 1. full ci-local with musl, final code commit (after d33fce7) | 7942813 | every step PASS except `cargo test`: red only on ostro-partition `cron_driver::catch_up_skip_advances_the_watermark_without_runs` ("timed out after 10s", test2 pod at 27 GiB peak); re-run: PASS (cron_driver alone PASS; whole test2 shard with --no-fail-fast PASS, 373 test binaries ok; 20261126-104011-s0-7942813b-cmd.log) | `20261126-091656-par-7942813b-*.log` |
+| 2. P13 mutant matrix (`OSTRO_P13_REQUIRE_ALL=1`) | 9055589, 7942813 | 8 of 8 bite, 0 SKIP (521 s / 929 s step) | lint logs above |
+| 3. Phase 12 mutant matrix | 9055589, 7942813 | PASS (>= 11 bites) | fp2 logs |
+| 4. engine `wit-next-fixture` test + clippy | 9055589, 7942813 | PASS | lint logs |
+| P13 grep gates (`scripts/p13-grep-gates.sh`, negative self-test in 13-20-SUMMARY) + P12 gates | 9055589, 7942813 | PASS | lint logs |
+| failpoint suites incl. `ostro-server:p13_boot_modes` (9), `p13_module_gc` (8), `p13_promote` (4) | 9055589, 7942813 | PASS | fp3 logs |
+| musl binary size | 7942813 | 57.7 MB (< 60 MB) | musl1 log |
+| 5./6. tier C (ci-local step, `OSTRO_UPGRADE_ITERS=3`, campaign 50) | 9055589 (child runs off), 7942813 (child runs **on**) | all seven PASS both times; 7942813: rolling upgrade x3 7907 runs 0 lost, promotion time-to-RF-3 3.0 s, RYW 0 violations, downgrade fences, shutdown, campaign 50 (1597 acks, membership + upgrade oracles pass), `upgrade_from_prev` SKIP | lint logs |
+| 7. Phase 13 campaign, `OSTRO_CAMPAIGN_FAULTS=10000`, 4 h box | b47721e (child runs off) | **HUMAN_NEEDED: reached 1,110 faults** (all phase A, finalized 1) in 3 h 38 min with every batch disk check green; then `/dev/shm` in the pod filled up (fjall "No space left on device"), node 1 could not restart and the harness aborted before the final oracles. Not an oracle failure. 13-19's 500-fault run (478e54d) and the orchestrator's 500-fault run with child runs on (151,150 acks, after d33fce7) passed every oracle | `20261126-065118-s0-b47721e0-cmd.log` |
+| 8. real N-1 (`OSTRO_PREV_BIN`) | - | human_needed (no release tag) | - |
+
+### Measurements (7942813, tier C, 4-CPU lint pod on dell-1, under CI load)
+
+| measurement | p50 | p99 | n |
+|---|---|---|---|
+| rolling upgrade: SIGTERM -> exit | 666 ms | 781 ms | 9 |
+| rolling upgrade: restart -> ready | 768 ms | 851 ms | 9 |
+| rolling upgrade: handoff unavailability per partition per restart | 276 ms | 2.00 s | 36 |
+| first activation through a restarted node (AOT pre-warm) | 464 ms | 522 ms | 36 |
+| baseline, same 20 ms link delay | 455 ms | 1.69 s | 36 |
+| finalization after the last restart | 552 ms | 569 ms | 3 |
+| shutdown: SIGTERM -> exit | 216 ms | 1.51 s | 10 |
+| shutdown: unavailability, partitions led / followed | 650 / 642 ms | 1.37 / 1.09 s | 25 / 15 |
+| promotion: time-to-RF-3 from the first join | 2.99 s | - | 1 |
+| promotion: failover after kill -9 of node 1 | 1.31 s | - | 1 |
+| RYW (9000 ops): read / write | 3.2 / 6.5 ms | 20.6 / 21.2 ms | - |
+
+### human_needed
+
+- Phase 13 campaign beyond 1,110 faults (needs more `/dev/shm` / a disk-backed proc root, or retention that trims under the campaign; logs did not trim, `floor=0`), ideally at a commit with d33fce7 and child runs on.
+- Real previous-binary rolling upgrade (`OSTRO_PREV_BIN`) after the first release tag.
+- Quiet-node re-measurement (all numbers above were taken on shared, loaded nodes).
+- Remote GitHub CI legs (aarch64, macOS) for the new steps after a push.
+- Deferred: controlled-shutdown follower-ISR stall (p13-bugs2 bug 4); joined-node chaos-proxy routing in tier C.
+
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 60 s at task level
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 60 s at task level
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** 13-20 gate run 2026-11-26 (evidence below); phase verification by the orchestrator

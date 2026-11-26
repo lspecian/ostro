@@ -50,7 +50,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **ENG-07**: Modules are AOT-compiled at deploy in a bounded compile pool; artefacts cached on disk keyed by sha256 + Wasmtime compatibility hash + Ostro version, HMAC-verified before load
 - [x] **ENG-08**: `InstancePre` + pooling allocator instantiate warm modules within NFR targets; pool sizing is configurable and fails clearly under address-space limits
 - [x] **ENG-09**: Activation model: hot-wait for short effects, otherwise evict (drop Store) and replay on re-dispatch; resident Wasm memory is bounded by a node budget with LRU eviction
-- [ ] **ENG-10**: The host links WIT `0.1.x` (and later `0.2.x`) side by side, selected by the component's imports
+- [x] **ENG-10**: The host links WIT `0.1.x` (and later `0.2.x`) side by side, selected by the component's imports
 
 ### WIT Contract (ostro:runtime@0.1.0)
 
@@ -94,7 +94,7 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **API-05**: Client can signal, cancel (graceful), terminate, and retry runs [FR-3.4]
 - [x] **API-06**: Client can long-poll a run result [FR-3.5]
 - [x] **API-07**: Client can complete a callback/await token [WIT-04]
-- [ ] **API-08**: Any node forwards requests to the owning partition leader; reads observe the caller's prior writes
+- [x] **API-08**: Any node forwards requests to the owning partition leader; reads observe the caller's prior writes
 
 ### Triggers
 
@@ -190,9 +190,9 @@ Sources: `docs/02-prd.md` (FR/NFR IDs in brackets) amended by `.planning/researc
 - [x] **CLUS-02**: Partition logs replicate by follower-pull Fetch over the cluster listener; HW = min(LEO over ISR); leader epochs validated on every fetch; divergent tails truncated (incl. in object storage)
 - [x] **CLUS-03**: Partition leaders are elected only from the published ISR; writes stop when ISR < `min_insync_replicas`
 - [x] **CLUS-04**: Followers apply committed entries (hot standby) and can bootstrap from a snapshot; leader failover p99 < 10 s
-- [ ] **CLUS-05**: Multi-voter metadata Raft (3/5 nodes) with membership changes; `ostro cluster init/join/remove`; a single node is promoted to a cluster without export [FR-0.4]
-- [ ] **CLUS-06**: Rolling upgrade across one minor version without draining runs; workers advertise WIT/engine versions and receive compatible activations only [FR-6.5]
-- [ ] **CLUS-07**: Module GC is reference-counted against non-terminal runs; `ostro migrate-runs` re-pins runs only after a passing dry-run replay
+- [x] **CLUS-05**: Multi-voter metadata Raft (3/5 nodes) with membership changes; `ostro cluster init/join/remove`; a single node is promoted to a cluster without export [FR-0.4]
+- [x] **CLUS-06**: Rolling upgrade across one minor version without draining runs; workers advertise WIT/engine versions and receive compatible activations only [FR-6.5]
+- [x] **CLUS-07**: Module GC is reference-counted against non-terminal runs; `ostro migrate-runs` re-pins runs only after a passing dry-run replay
 
 ### Distribution
 
@@ -277,7 +277,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | ENG-07 | Phase 3 | Complete |
 | ENG-08 | Phase 3 | Complete |
 | ENG-09 | Phase 3 | Complete |
-| ENG-10 | Phase 13 | Pending |
+| ENG-10 | Phase 13 | Complete (13-07 d665ecd/41557c7: LinkerSet by WIT major line, WIT_0_1_LATEST, tests/linker_set incl. the test-only 0.2 line and a 0.1.0 guest on a 0.1.N host; 13-14: upload gate 409 feature_not_enabled + ext 101 (p13_upload_gate, version_gate gated_upload_refused_before_finalize); 13-20 9055589: `cargo test -p ostro-engine --features wit-next-fixture` + clippy and the journal@0.1.0 grep gate required in ci-local + ci.yml; plan check step 'engine wit-next-fixture suite' PASS (target/k8s-ci-logs/20261126-065142-par-9055589a-lint.log)) |
 | WIT-01 | Phase 3 | Complete |
 | WIT-02 | Phase 3 | Complete |
 | WIT-03 | Phase 3 | Complete |
@@ -309,7 +309,7 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | API-05 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
 | API-06 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
 | API-07 | Phase 5 | Complete (server proven over REST + gRPC: 05-13 lifecycle_api) |
-| API-08 | Phase 13 | Pending |
+| API-08 | Phase 13 | Complete (13-12 0522ca1/883b132: routing parity through every node, hop limit, 503 Retry-After (routing scenarios); 13-13: lease reads, ReadIndex meta barrier, tokens, strict_reads, 0 stale reads over ~8,800 tier-B ops; p13-follow 5a0c246 keyed restarts on the target leader; p13-bugs2 767d3ee cross-node child delivery; tier C process_ryw 9000 ops, 0 RYW violations through a SIGTERM move, kill -9 failover and a proxy zombie at 478e54d, 9055589 and 7942813 (target/k8s-ci-logs/20261126-065142-par-9055589a-lint.log); route::mutant::serve_without_lease bites in the required P13 matrix (8/8, 13-20)) |
 | TRIG-01 | Phase 8 | Complete |
 | TRIG-02 | Phase 8 | Complete |
 | TRIG-03 | Phase 8 | Complete |
@@ -372,9 +372,9 @@ Deferred to 1.x / later. Tracked, not in the current roadmap.
 | CLUS-02 | Phase 12 | Complete (12-16 red run 29/29 green, 0 pending: hw_is_min_over_isr, isr_slow_follower_shrinks, fetch_with_stale_epoch_fenced (12-18 aaa5eab harness fix), leader_dies_with_unreplicated_writes, isolated_leader_rejoin_truncates, two_quick_leader_changes_truncate, remote_chain_equals_committed_prefix, remote_chain_never_above_hw; 12-15 fdb8bb8 cluster_repair; 12-17 f5c281b process_leader_dies_with_unreplicated_writes, 12-18 gate 10/10 (target/p12-gate/12-18-process_divergence.log); 12-18 campaign: see 12-18-SUMMARY) |
 | CLUS-03 | Phase 12 | Complete (12-05 46928ae elect_leader apply tables; 12-10 65db628 controller tests; 12-16 failover_elects_isr_member, whole_isr_dead_goes_offline, writes_stop_below_min_insync green with the election::isr_only audit of every proposed ElectLeader; unclean_election and ignore_min_insync mutants bite (12-18 gate log)) |
 | CLUS-04 | Phase 12 | Complete (12-16 followers_are_hot_standbys, empty_node_bootstraps_from_snapshot, node_behind_log_start_reinstalls, install_stream_cut_resumes; 12-12 e95c298 install_crash 3 x 20 iterations; 12-18 failover_p99 200 iterations incl. 67 controller faults: p99 5.44 s < 10 s, every run resumed (target/failover-p99/report.txt); RF=1 one path: one_path_rf1_hw_through_tracker + rf1_bypass mutant + grep gates; native-Linux p99/benchmark human_needed (12-VALIDATION)) |
-| CLUS-05 | Phase 13 | Pending |
-| CLUS-06 | Phase 13 | Pending |
-| CLUS-07 | Phase 13 | Pending |
+| CLUS-05 | Phase 13 | Complete (13-05 driver membership tests (TransferLeader, ReadIndex, FatalApply); 13-06 reconcile_model; 13-09 membership scenarios + p13_boot_modes crash tests (a required failpoint suite since 13-20); 13-10 reassign scenarios; 13-16 promotion + p13_promote; tier C process_promotion PASS at 478e54d, 9055589 and 7942813 (init, 2 joins, RF 3 in 2.9 s, kill -9 node 1, 361 runs, 0 lost; target/k8s-ci-logs/20261126-065142-par-9055589a-lint.log); campaign membership oracles pass (13-19 500 faults, 13-20 gate run in 13-20-SUMMARY); skip_quorum_check, no_leave_joint, raise_min_insync_early bite (8/8 matrix)) |
+| CLUS-06 | Phase 13 | Complete (13-04 gate/finalizer/fences + fail-stop (db09626); 13-14 worker compat (worker_compat 6/6, version_policy, GoAway) + version_gate scenarios; 13-11 controlled shutdown; tier C at 7942813 (after the p13-children fix d33fce7, child runs ON): process_rolling_upgrade OSTRO_UPGRADE_ITERS=3 PASS, 7907 acknowledged runs, 0 lost, 0 duplicate journal entries, upgrade oracles pass with 84-105 uncompacted meta entries; process_downgrade fences PASS; first activation after restart p50 464 ms vs baseline 455 ms (target/k8s-ci-logs/20261126-091656-par-7942813b-lint.log); emit_ungated / reject_and_continue bite (8/8 matrix). Real N-1 run (OSTRO_PREV_BIN) human_needed until the first release tag) |
+| CLUS-07 | Phase 13 | Complete (13-15 module retire + two-scan GC (p13_module_gc incl. the single_scan mutant, a required failpoint suite since 13-20) + module_gc scenarios; 13-17 RepinRun apply + migrate_runs + migrate scenarios (diverging_runs_never_repinned, concurrent_growth_seq_mismatch) + module_gone; p13-follow 86b4a6d already_on_target; tier C migrate v1 -> v3 after finalization in each rolling-upgrade iteration (target/k8s-ci-logs/20261126-065142-par-9055589a-lint.log); gc::mutant::single_scan and migrate::mutant::skip_seq_check bite (8/8 matrix)) |
 | DIST-01 | Phase 14 | Pending |
 | DIST-02 | Phase 14 | Pending |
 | DIST-03 | Phase 14 | Pending |
