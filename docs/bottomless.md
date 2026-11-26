@@ -223,8 +223,9 @@ two or more members it writes heads only: no manifest, no meta snapshot, no `LOC
 (`fence::acquire_if_single_member`). Floors and remote retention then run per led partition
 right after its head moved.
 
-**Restore of a cluster bucket is refused.** Cluster-wide restore is deferred to Phase 13/14
-(D-P12-3): partitions led by different nodes have no common instant, so no single manifest names
+**Restore of a cluster bucket is refused.** Cluster-wide restore is deferred (D-P12-3; on
+2026-11-26 the user moved whole-cluster restore from bottomless backups into 1.0, to be planned
+in Phase 14): partitions led by different nodes have no common instant, so no single manifest names
 a consistent cut. `ostro restore` on a bucket with `p/<pppp>/head` objects but no
 `manifest/current` fails before writing anything:
 

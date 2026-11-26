@@ -206,8 +206,16 @@ artefact is deleted, logged at warn and recompiled. Modules are fetched once per
 the WIT packages. `proto_version` and the event codec are always checked; with
 `[workers] require_same_version = true` (default) the ostro and Wasmtime versions must equal the
 server's (one constant, `ostro_engine::cache::WASMTIME_VERSION`). A mismatch is answered with
-`GoAway{"version mismatch: ..."}` and the worker exits non-zero without retrying. Mixed N/N-1
-fleets are Phase 13's.
+`GoAway{"version mismatch: ..."}` and the worker exits non-zero without retrying.
+
+**Phase 13 (13-14, D-P13-18): `[workers] version_policy`.** `Hello` also carries
+`feature_level`. The default `compatible` admits mixed N/N−1 fleets: proto and event codec must
+match and the worker level must be ≥ max(1, finalized − 1); the ostro / Wasmtime versions are
+not compared. `exact` keeps the checks above (with `require_same_version`). GoAway reasons:
+`version mismatch: ...`, `version too old: ...` (also sent after a finalization leaves a session
+below the floor) and `node_draining` (the server node is draining or removed). Placement only
+offers an activation to a worker that has the module's WIT line and level. Details:
+`docs/compat.md` §6.
 
 ## 11. Operating notes
 

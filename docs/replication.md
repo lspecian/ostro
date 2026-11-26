@@ -1,4 +1,4 @@
-# Replicated partition logs (Phase 12)
+# Replicated partition logs (Phase 12; membership and routing: Phase 13)
 
 Operator and design reference for Ostro's replication: CLUS-01..04, decisions D-P12-1..27
 (`.planning/phases/12-replicated-partition-logs/12-DECISIONS.md`). The research behind it is
@@ -16,10 +16,11 @@ meta-first exactly like a cluster (placement, then an `ElectLeader` term, then
 
 **Metadata.** A static multi-voter Raft group (the meta log, `crates/ostro-meta`) holds the
 partition assignments: `{replicas, leader, epoch, isr, isr_version, min_insync}` plus the
-election info (ext tag 80). Voters are this node plus `[[cluster.peers]]` (3 or 5 nodes). Raft
+election info (ext tag 80). In a static cluster the voters are this node plus `[[cluster.peers]]`
+(3 or 5 nodes); with dynamic membership (Phase 13, §9) the meta configuration is authoritative. Raft
 traffic runs over `ostro.cluster.v1.MetaPeer` on the cluster listener (mTLS). The metadata
 leader also runs the **controller**: bootstrap placement, liveness, elections. Joining and
-removing members is Phase 13 (CLUS-05, D-P12-2).
+removing members is Phase 13's dynamic membership (CLUS-05; §9 and `docs/cluster-operations.md`).
 
 **Follower pull.** Followers fetch from the leader with `Replication.Fetch` (long poll,
 `fetch_max_wait`). A response carries the leader's envelopes byte for byte (followers never
@@ -135,7 +136,8 @@ fetch_max_bytes = "8MiB"
 **Identity checks (D-P12-14, D-P12-16).** `node_id` and `cluster_id` are written to
 `node.toml` at the first boot, before meta starts; a later mismatch is fatal. A non-blank meta
 log whose voters differ from this node plus the configured peers is fatal ("grow via
-Phase 13"). A wiped meta directory over existing partition data fail-stops with a remedy
+Phase 13") **as long as no `Member` record exists**; once dynamic membership is in use, the
+meta configuration is authoritative and drift from `[[cluster.peers]]` is logged once (§9). A wiped meta directory over existing partition data fail-stops with a remedy
 message instead of bootstrapping a new cluster. After meta is ready the Raft voters must equal
 the configured set and `ClusterInfo.cluster_id` must equal the bound id.
 
@@ -146,8 +148,8 @@ ISR through the normal expand rule once they have caught up. `rf` and `min_insyn
 changing them later does not re-place existing partitions.
 
 **Existing single nodes.** A data directory that was already running as a single node (epoch
-≥ 1, replicas `[n]`) is never re-placed when peers are added to its config. Growing a node into
-a cluster is Phase 13 (`ostro cluster init`, dynamic membership).
+≥ 1, replicas `[n]`) is never re-placed when peers are added to its config. Grow it with
+`ostro cluster init` and `ostro cluster join` instead (§9, `docs/cluster-operations.md`).
 
 **Tuned defaults.** The 12-17 sweep (`target/failover-p99/sweep.txt`) ran
 `meta_election_tick ∈ {10, 6, 4} × session_timeout ∈ {3 s, 2 s}`, 60 failover iterations plus a
@@ -211,7 +213,8 @@ refused with 503 at the self-demotion; it never commits (the HW cannot advance w
 followers, and the ISR can only change through meta, which it cannot reach), and after the heal
 it is on no replica's log. The failover harness's client follows the cut-off leader's self-hint
 for reads, which is why the "catch-up and re-grant" step shows about 2.4 s for those iterations.
-Reads are not linearizable in Phase 12; ReadIndex and leader leases are Phase 13 (13-03).
+Phase 12 reads were not linearizable. Phase 13 serves partition reads under a leader lease and
+meta reads behind a ReadIndex barrier (read-your-writes, `docs/cluster-operations.md` §6).
 
 ## 4. `GET /v1/admin/replication`
 
@@ -253,8 +256,10 @@ is measured by this node; nothing is assumed.
 A partition-scoped request on a node that does not lead the partition (follower, offline, taking
 over, self-demoted) returns `UNAVAILABLE` (HTTP 503, gRPC `UNAVAILABLE`) with details
 `{"reason": "not_leader", "partition": p, "leader": n | null, "leader_addr": "host:port" | null}`.
-Ostro does not forward requests (API-08 is Phase 13). Acknowledgements pending at a demotion
-fail with the same error.
+Since Phase 13 (API-08) a client never sees `not_leader` for a routable request: any node
+forwards it to the leader (one hop) and answers 503 `Retry-After: 1` only when the re-route
+fails (`docs/cluster-operations.md` §5). Acknowledgements pending at a demotion still fail with
+this error or the retryable `leader_changed` (handoff write fence).
 
 A request that was in flight when the leader failed has an **indeterminate outcome**: it may or
 may not have committed (research OQ5). Retrying is safe:
@@ -272,14 +277,17 @@ a node hints at itself: a cut-off old leader may still see itself as leader).
 Phase 12 appends MetaCommand variants 4-6 and ext tag 80; it changes no existing apply
 semantics (D-P12-17, P13-F1). **Downgrading a data directory from a Phase 12 binary to a
 pre-Phase-12 binary is unsupported**: the older binary would reject-and-continue on
-`ElectLeader`. The feature-level gate and fail-stop on unknown variants are Phase 13 (13-02).
+`ElectLeader`. From Phase 13 on, the feature-level gate, fail-stop on unknown commands and the
+boot / running fences make N/N−1 rolling upgrades safe: `docs/compat.md`,
+`docs/upgrade-runbook.md`.
 
 ## 7. Bottomless and restore in a cluster
 
 Only a partition's leader uploads its chunks, still capped at the HW. Each partition has an
 epoch-fenced head object `p/<pppp>/head`; a new leader repairs a divergent remote tail before its
 first upload. `LOCK` and `manifest/current` are written only while the cluster has exactly one
-member. **Cluster-wide restore is deferred** (D-P12-3, Phase 13/14): `ostro restore` refuses a
+member. **Cluster-wide restore is deferred** (D-P12-3; the user moved whole-cluster restore into
+1.0 on 2026-11-26, planned for Phase 14): `ostro restore` refuses a
 bucket that has per-partition heads but no manifest. Details: `docs/bottomless.md`
 § "Cluster mode".
 
@@ -326,3 +334,66 @@ each break one rule: `isr_from_assignment`, `hw_leader_leo`, `count_nondurable_l
 scenarios without it (must pass) and with it (must fail on the target oracle): 11 tier-B pairs.
 `count_nondurable_leo` bites on tier C (`process_mutants`). With `OSTRO_REPL_REQUIRE_ALL=1` (set
 by `scripts/ci-local.sh` and CI) a skipped or non-biting mutant fails the build.
+
+### 8.1 Phase 13 tests
+
+Tier B adds `P13Harness` (single-node start, `add_node` through the real join flow, `remove`,
+`drain`, `upgrade(node, level)`) and the per-plan scenario files (`membership`, `reassign`,
+`handoff`, `routing`, `ryw`, `version_gate`, `module_gc`, `migrate`, `promotion`,
+`integration_p13`, `regressions_p13`, `cross_node_children`). The Phase 13 mutant matrix
+(`tests/mutants_p13.rs`, eight mutants, see `docs/compat.md` §9) runs only when
+`OSTRO_P13_REQUIRE_ALL=1` (CI) or `OSTRO_P13_MUTANT=<name>` (one row) is set.
+
+Tier C (13-19), all `#[ignore]`, release mode, `--test-threads=1`, failpoint binary
+(`cargo build -p ostro --features failpoints --target-dir target/failpoints`):
+`process_promotion`, `process_rolling_upgrade`, `process_ryw`, `process_downgrade`,
+`process_shutdown`, `upgrade_from_prev`, `cluster_campaign_p13`. CI runs them in the step
+"Phase 13 tier C (multi-process)" with three upgrade iterations and a 50-fault campaign; the
+gate campaign (≥ 10,000 faults, 4 h time box) is run by hand.
+
+| variable | default | meaning |
+|---|---|---|
+| `OSTRO_P13_REPORT_DIR` | `/tmp/ostro-p13-reports` (absolute) | each test writes `<dir>/<test>/report.txt` |
+| `OSTRO_UPGRADE_ITERS` | 1 (gate and CI: 3) | rolling upgrade iterations |
+| `OSTRO_CAMPAIGN_FAULTS` | 50 (smoke ≥ 500, gate ≥ 10,000) | Phase 13 campaign faults |
+| `OSTRO_CAMPAIGN_TIMEBOX_S` | 14400 (4 h) | no new fault after this; the report carries `HUMAN_NEEDED` |
+| `OSTRO_SHUTDOWN_REPEATS` | 10 | `process_shutdown` SIGTERMs |
+| `OSTRO_PREV_BIN` | unset (SKIP) | previous release binary for a real N−1 upgrade (human_needed until the first release tag) |
+| `OSTRO_P13_CHILD_RUNS` | on | `0` leaves cross-partition child runs out of the workload (CI sets it while 13-19 finding 1 is open); every report names the mode |
+| `OSTRO_TEST_LEVEL_MAX` | unset | level emulation (`docs/compat.md` §7) |
+| `OSTRO_FAILPOINT_BIN`, `OSTRO_PROC_ROOT`, `OSTRO_PROC_KEEP` | — | existing harness variables (binary path, process root, keep dirs) |
+
+The static-cluster tier-C tests (rolling upgrade, RYW, downgrade, shutdown, campaign) start at
+`OSTRO_TEST_LEVEL_MAX=1` so chaos-proxy faults reach every link (D-13-19-1); joined nodes dial
+peers directly, so proxy faults do not reach their links yet (open).
+
+## 9. Phase 13: dynamic membership, reassignment, handoff
+
+- **Membership is meta-driven.** Each node has a `Member` record (ext 96 `NodeVersion`,
+  ext 97 `MemberState`). Once any member record exists, `[[cluster.peers]]` is a seed list only:
+  configured addresses stay pinned (drift logged once), ids that are not configured follow their
+  member record. A learner-first reconciler on the meta leader grows and shrinks the voter set
+  with joint `ConfChangeV2`s (odd voter counts, `max_voters` = 5). Joining uses a node join token
+  and the CA-hash pin; removal leaves a tombstone forever. See `docs/cluster-operations.md`
+  §1-2.
+- **`AlterReplicas` (MetaCommand 8).** Replica-set changes are one meta command CAS'd on
+  `isr_version` (the frozen field name now covers replica-set changes too). Apply requires
+  `epoch == current`, `isr_version == expected`, `leader ∈ replicas` (unless offline),
+  `isr ⊆ replicas`, `leader ∈ isr` (unless 0) and `1 ≤ min_insync ≤ |isr|`; it bumps
+  `isr_version` and writes ext 100 (the in-flight reassignment) from the command. Epoch-0
+  partitions are refused. The controller drives Expand → CatchUp → LeaderMove → Shrink
+  (`docs/cluster-operations.md` §3). Gated at level 2.
+- **Graceful handoff.** A leader moves a partition to an ISR member by quiescing it, fencing
+  submissions with `leader_changed`, waiting until the target's durable LEO equals its own, then
+  `ElectLeader{epoch + 1}` with reason RESIGN; handoff elections keep the ISR unchanged.
+  SIGTERM in cluster mode hands off every led partition first (controlled shutdown). Known
+  limitation: followed partitions stall for about a session timeout because the leaving node is
+  not removed from their ISR first (deferred; `docs/cluster-operations.md` §4).
+- **Routing and RYW.** Any node accepts any request (one hop); partition reads are served under
+  a leader lease, meta reads behind ReadIndex (`docs/cluster-operations.md` §5-6). Outbox
+  batches for another leader's partition (children, run-to-run messages) are delivered with
+  `NodeOps.DeliverInbound`; keyed restarts start on the target leader through
+  `NodeOps.StartRestart`.
+- **Promotion.** `ostro cluster init` turns a running single node into a cluster online; RF
+  rises to the policy as nodes join (13-19: time-to-RF-3 3.8 s after the first join).
+

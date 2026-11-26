@@ -314,8 +314,9 @@ The external system completes it with `POST /v1/tokens/complete`
   replay fine on the new code (their unqueried `patch_marker` is skipped). A journal from
   before the patch, replayed by code without the old branch, fails with nondeterminism
   (the run ends `failed`, resumable).
-- There is **no API to re-pin a running run** to another module before Phase 13's
-  migrate-runs; Phase 5 proves in-flight patching with a test-only override.
+- Since Phase 13, `ostro migrate-runs` re-pins running runs to another workflow version, but
+  only runs whose own journal replays cleanly against the target (`docs/upgrade-runbook.md`
+  §3); Phase 5 proves in-flight patching with a test-only override.
 
 **Proven by:** `crates/ostro-engine/tests/patching.rs::v1_journal_replayed_by_v2_takes_old_path`,
 `patching.rs::fresh_v2_takes_new_path_with_one_marker`,

@@ -70,7 +70,7 @@ The three instance gauges are published when each activation starts and ends.
 
 | Series | Type | Labels | Unit | Meaning | Source | Plan |
 |---|---|---|---|---|---|---|
-| `ostro_dlq_total` | C | `reason` (`nondeterminism`, `protocol_violation`, `fuel_exhausted`, `timeout`, `memory_exceeded`, `stack_overflow`, `guest_exit`, `trap`, `no_module`, `module_not_found`, `module_invalid`, `bad_run_record`, `other`) | runs | Runs the executor failed for an attempt-level or module-level reason. These runs are kept for `RetryRun` (D1). A workflow's own `RunFailed` is not counted. | `ostro-server` `services/run_spans.rs` | 08-16 |
+| `ostro_dlq_total` | C | `reason` (`nondeterminism`, `protocol_violation`, `fuel_exhausted`, `timeout`, `memory_exceeded`, `stack_overflow`, `guest_exit`, `trap`, `no_module`, `module_not_found`, `module_invalid`, `module_gone` (Phase 13: the module's metadata record was deleted by module GC), `bad_run_record`, `other`) | runs | Runs the executor failed for an attempt-level or module-level reason. These runs are kept for `RetryRun` (D1). A workflow's own `RunFailed` is not counted. | `ostro-server` `services/run_spans.rs` | 08-16 |
 
 **Where DLQ is counted.** No DLQ rows are written yet. The `dlq` keyspace exists, but
 Phase 11 adds the rows. A run is dead-lettered when the executor's `fail_run` stores
@@ -154,6 +154,15 @@ and every row names a series that exists in the code. The blob GC series are the
 | `ostro_effect_completed_total` | C | `kind`, `outcome` | effects | Effect outcomes. | `driver.rs` | 06 |
 | `ostro_effect_attach_total` | C | — | effects | Effect starts attached to a task that was already running. | `driver.rs` | 06 |
 | `ostro_effect_rate_limited_total` | C | `target` (configured egress target key) | effects | Effects failed with `rate_limited` after `max_wait`. | `ostro-bridge` `ratelimit.rs` | 06 |
+
+## Cluster, routing, module GC, migrate (Phase 13)
+
+`ostro_cluster_*` (voters, learners, conf changes, moves, reassignments, meta snapshot size,
+AOT pre-warm `ostro_cluster_prewarm_modules_total{result}`), `ostro_route_*` (requests,
+forward latency, lease rejections, read barrier latency, `ostro_route_keyed_restarts_total{path}`,
+`ostro_route_inbound_forwards_total{result}`), `ostro_module_gc_{deleted,kept}_total` and
+`ostro_migrate_runs_total{outcome}` (outcomes include `already_on_target`). The table with
+every series is in `docs/cluster-operations.md` §9.
 
 ## Matches of `ostro_[a-z_]+` that are not series
 

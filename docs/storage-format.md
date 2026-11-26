@@ -489,7 +489,7 @@ Every golden above is pinned as an append-only prefix by `crates/ostro-types/tes
 
 ### 14.6 Mixed-version and downgrade rules (Phase 13 P13-F1)
 
-These rules govern how a binary treats data written by a newer one. The rule text is frozen now; the code lands in Phase 13.
+These rules govern how a binary treats data written by a newer one. The rule text was frozen in 05-20; **all six rules are implemented since Phase 13** (feature levels `LEVEL_MIN = 1`, `LEVEL = 2`; see §19 and `docs/compat.md`).
 
 1. New commands, fields, ext tags and versioned formats are emitted only when the cluster's **finalized feature level** (meta `ClusterInfo` ext tag 98) allows them.
 2. An unknown `Cmd` tag, unknown fields in a command or record, or an unknown `MetaCommand` variant → **fail-stop**, never reject-and-continue. The partition or meta replica halts with a clear "newer data, upgrade the binary" error.
@@ -690,3 +690,38 @@ A tag, workflow or tenant containing `0x00` gets no row of that kind. **Marker:*
 ### System tags (constants: plan 11-02)
 
 `__ostro/rerun_from=<seq>` (`RERUN_FROM_TAG`, the rerun lineage, decimal seq) and `__ostro/on_failure_of=<run>` (`ON_FAILURE_OF_TAG`, an on-failure hook run) are stored in `RunRecord.tags` like any other tag (no format change; tag limits of §12 apply). The prefix `__ostro/` (`SYSTEM_TAG_PREFIX`) is reserved: the API refuses user-supplied tags that start with it.
+
+## 19. Phase 13 additions (post-freeze, behavioural notes; no byte format changed)
+
+Every ordinal comes from the Phase 13 block of `.planning/RESERVATIONS.md` (D-P13-22). No existing encoding changed: the v0.1 format corpus rebuilds unchanged and every `commands.txt` golden re-encodes byte-identically (the fail-stop detector relies on it). The additions follow §14.2 and §14.6.
+
+### 19.1 P13-F1 rules as implemented (§14.6)
+
+Levels: `LEVEL_MIN = 1` (the frozen v0.1 formats plus Phase 12's MetaCommands 4–6 and ext tag 80) and `LEVEL = 2` (everything below except the machinery tags). Rule 1: every emitter of a level-2 novelty calls `compat::require(feature, level_max)` against the finalized level (ext 98). Rule 2: a partition command whose prost re-encoding is shorter than its bytes, or a non-empty command without a known oneof tag, makes the partition halt with `StoreError::NewerFormat` before the state batch commits (`applied` does not advance); `MetaSm::apply` returns `FatalApply` for an undecodable non-empty entry and the vendored driver halts before `applied` advances; genuinely empty partition bytes stay `Rejected(Invalid(Empty))`. Rule 3: nothing is written above the finalized level. Rule 4: no existing command's apply changed. Rule 5: ext tag contents are never validated at apply time (`AlterReplicas` writes ext 100 from the command verbatim). Rule 6: the boot fence runs after meta catch-up and before `Node::open`; a running fence fail-stops a node that later sees a finalized level above its `level_max`.
+
+### 19.2 `Cmd 43 RepinRun` (13-17, CLUS-07, D-P13-21)
+
+`RepinRun{run_id, from_sha, to_sha, expected_next_seq, requested_at_ms}` (tag 43; 44 spare) moves a non-terminal run to another module. Gated at level 2 (`Feature::RepinRun`). Apply check order: validation (run id, both shas 32 bytes) → `RunNotFound` → `RunTerminal` → `RunRecord.module_sha ≠ from_sha` → **RejectReason 23 `ModuleMismatch`** (outcome code 39) → `next_seq ≠ expected_next_seq` → existing `SeqMismatch{expected: next_seq}` → a leased run (status `Running`, the running row exists) → **RejectReason 24 `RunBusy`** (outcome code 40) → accept: `RunRecord.module_sha = to_sha`, nothing else changes. The journal is untouched, so a repinned run replays its own history on the new module (the replay check passed before submission). Indices 16–22 below `ModuleMismatch` are held by the `#[doc(hidden)]` placeholders `ReservedP7_16`, `ReservedP7_17`, `ReservedP8_18`, `ReservedP8_19`, `ReservedP9_20..22` (never emitted). P13-F3: `run-info.module-hash` reports the current `module_sha`, so it may change after a repin (logs and metrics only).
+
+### 19.3 MetaCommand 8 `AlterReplicas` (13-10, D-P13-12)
+
+`AlterReplicas{partition, epoch, expected_isr_version, replicas, isr, min_insync, reassignment: Option<Reassignment>}` at postcard index 8; index 7 is the `#[doc(hidden)] ReservedP12_7` placeholder (apply → `Invalid("reserved")`), 9–11 spare. Apply requires `epoch == current` (and ≠ 0), `isr_version == expected_isr_version`, `leader ∈ replicas` unless offline, `isr ⊆ replicas`, `leader ∈ isr` unless 0, `1 ≤ min_insync ≤ |isr|`; it then sets replicas / ISR / min_insync, bumps `isr_version` (the frozen field name also covers replica-set changes) and writes or clears ext 100 from the command. Gated at level 2.
+
+### 19.4 Meta ext tags 96–102
+
+TLV values (postcard, §14.2 meta rule); unknown tags preserved and ignored. Tags 96–99 are the gate's own machinery and are written at every level (`docs/compat.md` §1); 100–102 are gated at level 2; 103–111 reserved P13, unused.
+
+| tag | record | value struct |
+|---|---|---|
+| 96 `NodeVersion` | `Member` | `{ostro_version: String, level_min: u32, level_max: u32, wasmtime: String, event_codec_ver: u32, wit_lines: Vec<String>, reported_at_ms: u64}` |
+| 97 `MemberState` | `Member` | `{state: u8 (joining / active / draining / removed; unknown kept), changed_at_ms: u64}`; absent = active |
+| 98 `ClusterVersion` | `ClusterInfo` | `{finalized: u32, hold: Option<u32>, finalized_at_ms: u64}`; absent = `LEVEL_MIN`; undecodable reads as `LEVEL_MIN` and is never overwritten by the finalizer |
+| 99 `ReplicationPolicy` | `ClusterInfo` | `{rf: u8, min_insync: u8, max_voters: u8}`; absent = the Phase 12 bootstrap seeds as placed |
+| 100 `Reassignment` | partition assignment | `{target: Vec<u64>, adding: Vec<u64>, removing: Vec<u64>, started_at_ms: u64}` |
+| 101 `WitRequirement` | `Module` | `{line: String, min_level: u32}`; written only for non-baseline modules (absent = `{"0.1", 1}`) |
+| 102 `Retired` | `Module`, `WorkflowVersion` | `{retired_at_ms: u64}` |
+
+### 19.5 Data directory (13-09)
+
+`<data>/cluster-seeds.toml` (`{node_id, cluster_id, seeds}`) is the durable join marker, written first by `ostro cluster join` (tmp, fsync, rename, dir fsync); with blank meta it makes the node a joiner. The joined certificate set lives under `<data>/tls/joined/{ca.pem,node.pem,node.key}` (Phase 7's `<data>/tls/node.{crt,key}` are untouched). `node.toml` is completed from the marker when missing.
+
