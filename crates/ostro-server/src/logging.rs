@@ -91,6 +91,9 @@ struct OtelLayers {
     generation: u64,
     spans: Option<SpanLayer>,
     logs: Option<LogBridge>,
+    /// The logger provider behind `logs` (direct LogRecord producers: the audit export,
+    /// 14-04).
+    provider: Option<SdkLoggerProvider>,
 }
 
 /// The installed layers. Each generation is leaked (`&'static`): `downcast_raw` hands
@@ -123,10 +126,17 @@ pub(crate) fn install_otel_layers(
         generation,
         spans: spans.map(|t| tracing_opentelemetry::layer().with_tracer(t)),
         logs: logs.map(OpenTelemetryTracingBridge::new),
+        provider: logs.cloned(),
     }));
     *SLOT.write().unwrap_or_else(PoisonError::into_inner) = Some(layers);
     ACTIVE.store(true, Ordering::Release);
     generation
+}
+
+/// The OTLP logger provider of the installed generation (`None` while OTLP logs are off):
+/// producers that build their own LogRecords (the audit export, 14-04) emit through it.
+pub(crate) fn otel_logger_provider() -> Option<SdkLoggerProvider> {
+    current().and_then(|l| l.provider.clone())
 }
 
 /// Empty the slot if it still holds `generation` (a later server's layers stay).
