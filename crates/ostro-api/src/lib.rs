@@ -23,6 +23,8 @@ pub mod phase13;
 pub mod phase13_adapters;
 // Phase 14 (14-01): TenantsApi / ApiTokensApi / AuditApi / SecurityApi + domain types.
 pub mod phase14;
+// Phase 14 (14-02): REST + gRPC adapters of the Phase 14 slots, signature carriage.
+pub mod phase14_adapters;
 pub mod phase7;
 pub mod phase8;
 pub mod request_meta;
@@ -35,10 +37,6 @@ pub use openapi::openapi;
 /// `ostro.cluster.v1` messages (`p13/node_ops.rs`) without a manifest change.
 pub use ostro_proto as proto;
 pub use phase8::ApiExtensions;
-
-// Plan 14-01 (D-P14-37): `base64` for Ostro-Module-Signature decoding (14-02), anchored until
-// it is used.
-use base64 as _;
 
 use ostro_proto::api::v1::{
     connectors_server::ConnectorsServer, modules_server::ModulesServer,
@@ -207,7 +205,9 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
     // Phase 11 (11-09): RunOps / Inventory for the slots that are present.
     let grpc = phase11::add_grpc_services(grpc, &ext, cfg.max_request_bytes);
     // Phase 13 (13-03): Cluster / ModuleLifecycle for the slots that are present.
-    let grpc = phase13_adapters::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
+    let grpc = phase13_adapters::add_grpc_services(grpc, &ext, cfg.max_request_bytes);
+    // Phase 14 (14-02): Tenants / ApiTokens / Audit / Security for the slots that are present.
+    let grpc = phase14_adapters::add_grpc_services(grpc, &ext, cfg.max_request_bytes)
         .into_axum_router()
         .layer(axum::middleware::map_response(grpc::map_size_limit_status));
     // The local presign route (06-08) sits outside the API middleware stack below: API
@@ -228,6 +228,7 @@ pub fn router_with(cp: Arc<dyn ControlPlane>, cfg: ApiConfig, ext: ApiExtensions
         .layer(axum::Extension(opts))
         .merge(phase11::router(ext.clone()))
         .merge(phase13_adapters::router(ext.clone()))
+        .merge(phase14_adapters::router(ext.clone()))
         .merge(phase8::router(ext))
         // Route-level limits (the module upload, the hook body) are inner layers and win
         // over this one.

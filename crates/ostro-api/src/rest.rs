@@ -396,6 +396,8 @@ pub struct ListRunsQuery {
     pub limit: Option<u32>,
     /// Token from a previous page.
     pub page_token: Option<String>,
+    /// Tenant filter (`^[a-z0-9][a-z0-9-]{0,62}$`, `_` = the default tenant; Phase 14).
+    pub tenant: Option<String>,
 }
 
 /// Run listing row.
@@ -663,7 +665,7 @@ pub fn rfc3339_ms(ms: u64) -> String {
         .unwrap_or_default()
 }
 
-fn parse_rfc3339_ms(field: &str, s: &str) -> Result<u64, ApiError> {
+pub(crate) fn parse_rfc3339_ms(field: &str, s: &str) -> Result<u64, ApiError> {
     let ts: jiff::Timestamp = s.parse().map_err(|e| {
         ApiError::invalid_argument(format!("{field}: not an RFC 3339 timestamp ({e})"))
     })?;
@@ -819,6 +821,7 @@ pub(crate) fn if_match_version(headers: &HeaderMap) -> Result<Option<u64>, ApiEr
     tag = "modules",
     params(
         ("sha256" = String, Path, description = "Lowercase hex sha256 of the body"),
+        ("Ostro-Module-Signature" = Option<String>, Header, description = "Repeatable (at most 4): base64 of a detached .minisig or cosign signature / bundle, at most 8 KiB decoded (Phase 14, D-P14-10)"),
         UploadModuleQuery,
     ),
     request_body(
@@ -829,6 +832,7 @@ pub(crate) fn if_match_version(headers: &HeaderMap) -> Result<Option<u64>, ApiEr
         (status = 201, description = "Module stored", body = UploadModuleResponse),
         (status = 200, description = "Module already existed", body = UploadModuleResponse),
         (status = 400, description = "sha256 mismatch or invalid module", body = ErrorBody),
+        (status = 403, description = "Signed modules are required (details.reason = signature_required)", body = ErrorBody),
         (status = 409, description = "Workflow version registered by another module", body = ErrorBody),
         (status = 413, description = "Module exceeds api.max_module_bytes", body = ErrorBody),
     )
@@ -837,13 +841,15 @@ async fn upload_module(
     State(cp): State<Arc<dyn ControlPlane>>,
     Path(sha256): Path<String>,
     q: Result<Query<UploadModuleQuery>, QueryRejection>,
+    // Phase 14 (14-02): decoded before the body is read (400 signature_invalid).
+    sigs: crate::phase14_adapters::ModuleSignatures,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
     let q = query(q)?;
     let wasm = body.map_err(|r| body_rejection(r.status(), r.body_text()))?;
     let res = cp
         .upload_module(domain::UploadModule {
-            signatures: Vec::new(),
+            signatures: sigs.0,
             sha256,
             wasm,
             language: q.language,
@@ -1131,6 +1137,7 @@ async fn list_runs(
             tags,
             order: q.order.unwrap_or_default().into(),
             dlq: q.dlq.unwrap_or(false),
+            tenant: crate::phase14_adapters::check::tenant_filter(q.tenant)?,
         })
         .await?;
     Ok(Json(RunListResponse {
@@ -2186,7 +2193,7 @@ async fn put_presigned_object(
 /// Register `umr` at `axum_path` (a `{*wildcard}` path) while documenting it under the
 /// OpenAPI path its `#[utoipa::path]` names (`{name}` style): utoipa-axum would
 /// otherwise mount the documented single-segment path.
-fn wildcard_routes<S: Clone + Send + Sync + 'static>(
+pub(crate) fn wildcard_routes<S: Clone + Send + Sync + 'static>(
     mut router: OpenApiRouter<S>,
     (schemas, paths, method_router): utoipa_axum::router::UtoipaMethodRouter<S>,
     axum_path: &str,
@@ -2935,6 +2942,10 @@ fn phase10_routes(r: OpenApiRouter<CpState>) -> OpenApiRouter<CpState> {
         (name = "dev", description = "Dev clock / time skipping; REST-only, only with `ostro dev --ephemeral --time-skipping` (Phase 10)"),
         (name = "tooling", description = "Server-side module replay; REST-only (Phase 10)"),
         (name = "cluster", description = "Cluster membership, placement and upgrades (Phase 13)"),
+        (name = "tenants", description = "Tenants and their quotas (Phase 14)"),
+        (name = "auth", description = "API tokens and the calling principal (Phase 14)"),
+        (name = "audit", description = "The audit log (Phase 14)"),
+        (name = "security", description = "Module signing policy, trusted keys and signatures (Phase 14)"),
         (name = "health", description = "Liveness and readiness"),
         (name = "meta", description = "API document and UI shell"),
     )

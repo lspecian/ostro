@@ -632,6 +632,7 @@ const EXPECTED_UNAUTHENTICATED_REST: &[(&str, &str)] = &[
     ("get", "/healthz"),
     ("get", "/readyz"),
     ("post", "/hooks/{name}"),
+    ("post", "/hooks/{tenant}/{name}"),
     ("post", "/v1/workers/join"),
     ("post", "/v1/cluster/join"),
     ("get", "/v1/objects/{connection}/{key}"),

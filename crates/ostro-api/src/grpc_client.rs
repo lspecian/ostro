@@ -598,7 +598,7 @@ impl ControlPlane for GrpcControlPlane {
                 tags: req.tags,
                 order: list_order(req.order),
                 dlq: req.dlq,
-                tenant: None,
+                tenant: req.tenant,
             }
         )?;
         Ok(domain::RunPage {

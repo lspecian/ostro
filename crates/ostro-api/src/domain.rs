@@ -639,6 +639,10 @@ pub struct ListRunsRequest {
     pub order: ListOrder,
     /// Only DLQ members (failed or timed-out runs not dismissed or requeued, D-P11-11).
     pub dlq: bool,
+    /// Phase 14 (14-02; D-P14-38): tenant filter (D23 tenant id, `_` = the default tenant);
+    /// `None` = every tenant visible to the caller. The server forces it to a tenant
+    /// principal's own tenant (14-16).
+    pub tenant: Option<String>,
 }
 
 /// Order of a run listing (D-P11-10).

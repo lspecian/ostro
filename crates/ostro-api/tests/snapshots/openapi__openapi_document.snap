@@ -35,7 +35,8 @@ expression: pretty
           "303": {
             "description": "The embedded UI is enabled: Location /ui/"
           }
-        }
+        },
+        "security": []
       }
     },
     "/healthz": {
@@ -56,7 +57,8 @@ expression: pretty
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/hooks/{name}": {
@@ -123,7 +125,95 @@ expression: pretty
               }
             }
           }
-        }
+        },
+        "security": []
+      }
+    },
+    "/hooks/{tenant}/{name}": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "Deliver a tenant's webhook (Phase 14, D-P14-29): the delivery goes to the webhook named\n`<tenant>/<name>`. Both parts follow the D23 grammar (tenant\n`^[a-z0-9][a-z0-9-]{0,62}$`, name `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; 400 otherwise).\nVerified like `POST /hooks/{name}`; no other authentication.",
+        "operationId": "deliver_tenant_hook",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Webhook name within the tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw payload, verified byte-for-byte",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HookPayload"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/HookPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Delivered (the body depends on the action)"
+          },
+          "202": {
+            "description": "Accepted"
+          },
+          "400": {
+            "description": "Invalid tenant or webhook name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid signature"
+          },
+          "404": {
+            "description": "Unknown webhook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Body exceeds triggers.webhook_body_limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": []
       }
     },
     "/openapi.json": {
@@ -171,7 +261,8 @@ expression: pretty
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/v1/admin/backup": {
@@ -204,6 +295,351 @@ expression: pretty
           },
           "503": {
             "description": "Backup not available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Query the audit log (merged across members).",
+        "operationId": "query_audit",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Inclusive lower bound: Unix ms or RFC 3339.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "description": "Exclusive upper bound: Unix ms or RFC 3339.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant filter (forced for tenant principals).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Action filter (exact or `prefix.*`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor",
+            "in": "query",
+            "description": "Actor filter (token id).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (server-capped).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Cursor from the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of records, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Audit API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Journal unavailable (details.reason = audit_unavailable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/tokens": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "List API tokens (never secrets).",
+        "operationId": "list_tokens",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant filter (system principals).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tokens visible to the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "API tokens not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Create an API token. The bearer is in this response only.",
+        "operationId": "create_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid scopes, tenant or lifetime",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "API tokens not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/tokens/{id}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Revoke an API token (idempotent).",
+        "operationId": "revoke_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Token id (otk_…)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenRevoked"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown token, or API tokens not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/tokens/{id}/rotate": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Rotate an API token: a successor, optionally revoking the old one. The new bearer is in\nthis response only.",
+        "operationId": "rotate_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Token id (otk_…)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The successor (Cache-Control: no-store)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown token, or API tokens not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/whoami": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "The calling principal.",
+        "operationId": "whoami",
+        "responses": {
+          "200": {
+            "description": "The caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "API tokens not enabled",
             "content": {
               "application/json": {
                 "schema": {
@@ -519,7 +955,8 @@ expression: pretty
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/v1/cluster/members/{id}/drain": {
@@ -1861,6 +2298,18 @@ expression: pretty
             }
           },
           {
+            "name": "Ostro-Module-Signature",
+            "in": "header",
+            "description": "Repeatable (at most 4): base64 of a detached .minisig or cosign signature / bundle, at most 8 KiB decoded (Phase 14, D-P14-10)",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "language",
             "in": "query",
             "description": "Source language hint (\"rust\", \"python\", \"typescript\").",
@@ -1927,6 +2376,16 @@ expression: pretty
           },
           "400": {
             "description": "sha256 mismatch or invalid module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed modules are required (details.reason = signature_required)",
             "content": {
               "application/json": {
                 "schema": {
@@ -2081,6 +2540,68 @@ expression: pretty
         }
       }
     },
+    "/v1/modules/{sha}/signatures": {
+      "post": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Verify and attach signatures to a stored module.",
+        "operationId": "attach_signatures",
+        "parameters": [
+          {
+            "name": "sha",
+            "in": "path",
+            "description": "Lowercase hex sha256 of an uploaded module",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachSignaturesBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Key ids now attached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachSignaturesResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid sha or signature (details.reason = signature_invalid)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown module, or security API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/objects/{connection}/{key}": {
       "get": {
         "tags": [
@@ -2155,7 +2676,8 @@ expression: pretty
           "404": {
             "description": "Unknown object"
           }
-        }
+        },
+        "security": []
       },
       "put": {
         "tags": [
@@ -2241,7 +2763,8 @@ expression: pretty
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/v1/partitions": {
@@ -2856,6 +3379,15 @@ expression: pretty
             "name": "page_token",
             "in": "query",
             "description": "Token from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant",
+            "in": "query",
+            "description": "Tenant filter (`^[a-z0-9][a-z0-9-]{0,62}$`, `_` = the default tenant; Phase 14).",
             "required": false,
             "schema": {
               "type": "string"
@@ -4373,6 +4905,555 @@ expression: pretty
         }
       }
     },
+    "/v1/security/modules/keys": {
+      "post": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Add a trusted signing key (cluster-wide, or a tenant key).",
+        "operationId": "add_trusted_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrustedKeySpec"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The policy with the key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModulePolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Security API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Key id exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/security/modules/keys/{key_id}": {
+      "delete": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Remove a trusted signing key.",
+        "operationId": "remove_trusted_key",
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "description": "Key id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy without the key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModulePolicy"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown key, or security API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/security/modules/policy": {
+      "get": {
+        "tags": [
+          "security"
+        ],
+        "summary": "The cluster module-signing policy.",
+        "operationId": "get_module_policy",
+        "responses": {
+          "200": {
+            "description": "The policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModulePolicy"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Security API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Replace the cluster module-signing policy.",
+        "operationId": "set_module_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModulePolicy"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModulePolicy"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Security API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tenants": {
+      "get": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "List tenants.",
+        "operationId": "list_tenants",
+        "responses": {
+          "200": {
+            "description": "Every tenant, sorted by id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantListResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tenants API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Create a tenant.",
+        "operationId": "create_tenant",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantSpec"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or quota",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Tenants API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Tenant exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tenants/{id}": {
+      "get": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Get a tenant.",
+        "operationId": "get_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown tenant, or tenants API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Delete a suspended, empty tenant.",
+        "operationId": "delete_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDeleted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown tenant, or tenants API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not suspended or not empty (details.reason = tenant_not_empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Change a tenant's quotas / weight (only the present fields).",
+        "operationId": "update_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id or quota",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown tenant, or tenants API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tenants/{id}/resume": {
+      "post": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Resume a tenant (idempotent).",
+        "operationId": "resume_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown tenant, or tenants API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tenants/{id}/suspend": {
+      "post": {
+        "tags": [
+          "tenants"
+        ],
+        "summary": "Suspend a tenant (idempotent).",
+        "operationId": "suspend_tenant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown tenant, or tenants API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tokens/complete": {
       "post": {
         "tags": [
@@ -4780,7 +5861,8 @@ expression: pretty
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/v1/workers/tokens": {
@@ -5499,6 +6581,160 @@ expression: pretty
               "null"
             ],
             "description": "Separate replication listener, if any."
+          }
+        }
+      },
+      "AttachSignaturesBody": {
+        "type": "object",
+        "description": "`POST /v1/modules/{sha}/signatures` body.",
+        "required": [
+          "signatures"
+        ],
+        "properties": {
+          "signatures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Base64 signature files (`.minisig`, cosign signature or bundle), ≤ 8 KiB decoded, ≤ 4."
+          }
+        }
+      },
+      "AttachSignaturesResult": {
+        "type": "object",
+        "description": "`POST /v1/modules/{sha}/signatures` answer.",
+        "required": [
+          "sha256",
+          "key_ids"
+        ],
+        "properties": {
+          "key_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Key ids now attached (ext 113)."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Module sha256."
+          }
+        }
+      },
+      "AuditPage": {
+        "type": "object",
+        "description": "`GET /v1/audit` answer.",
+        "required": [
+          "records",
+          "partial_nodes"
+        ],
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Cursor for the next page, `None` at the end."
+          },
+          "partial_nodes": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "description": "Members that did not answer the fan-out (the page is partial)."
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditRecordView"
+            },
+            "description": "Records, oldest first."
+          }
+        }
+      },
+      "AuditRecordView": {
+        "type": "object",
+        "description": "One journal record as served (merged across nodes by `(ts_ms, node, seq)`).",
+        "required": [
+          "seq",
+          "ts_ms",
+          "node",
+          "actor",
+          "actor_kind",
+          "action",
+          "target",
+          "outcome",
+          "details",
+          "hash"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Action."
+          },
+          "actor": {
+            "type": "string",
+            "description": "Actor id."
+          },
+          "actor_kind": {
+            "type": "string",
+            "description": "Actor kind."
+          },
+          "details": {
+            "type": "object",
+            "description": "Extra fields.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "hash": {
+            "type": "string",
+            "description": "Chain hash (hex)."
+          },
+          "node": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Node id.",
+            "minimum": 0
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`ok`, `denied:<reason>` or `failed:<message>`."
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Request id."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Journal sequence on its node.",
+            "minimum": 0
+          },
+          "target": {
+            "type": "string",
+            "description": "Target."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant."
+          },
+          "ts_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Record time (Unix ms).",
+            "minimum": 0
           }
         }
       },
@@ -6259,6 +7495,51 @@ expression: pretty
           }
         }
       },
+      "CreateTokenRequest": {
+        "type": "object",
+        "description": "`POST /v1/auth/tokens` body.",
+        "required": [
+          "name",
+          "scopes"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Free-form description."
+          },
+          "name": {
+            "type": "string",
+            "description": "Operator-chosen name."
+          },
+          "no_expiry": {
+            "type": "boolean",
+            "description": "No expiry at all (admin only)."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "API scopes (`admin`, `deploy`, `operate`, `trigger`, `read`)."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant (`None` = system scope: only with `admin` or `read`)."
+          },
+          "ttl_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Lifetime; `None` = `[auth] default_token_ttl`.",
+            "minimum": 0
+          }
+        }
+      },
       "CreateWorkerTokenRequest": {
         "type": "object",
         "description": "`POST /v1/workers/tokens` body (optional).",
@@ -6274,6 +7555,24 @@ expression: pretty
           }
         },
         "additionalProperties": false
+      },
+      "CreatedToken": {
+        "type": "object",
+        "description": "Create / rotate answer: the only time the bearer is shown.",
+        "required": [
+          "info",
+          "bearer"
+        ],
+        "properties": {
+          "bearer": {
+            "type": "string",
+            "description": "`ostro_otk_<16 base32>_<52 base32>`."
+          },
+          "info": {
+            "$ref": "#/components/schemas/TokenInfo",
+            "description": "The stored token."
+          }
+        }
       },
       "DeletedDto": {
         "type": "object",
@@ -7354,6 +8653,26 @@ expression: pretty
               "null"
             ],
             "description": "Continuation token."
+          }
+        }
+      },
+      "ModulePolicy": {
+        "type": "object",
+        "description": "`GET|PUT /v1/security/modules/policy`.",
+        "required": [
+          "require_signed_modules"
+        ],
+        "properties": {
+          "require_signed_modules": {
+            "type": "boolean",
+            "description": "Signed modules required cluster-wide."
+          },
+          "trusted_keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrustedKeySpec"
+            },
+            "description": "Cluster-wide trusted keys."
           }
         }
       },
@@ -8651,6 +9970,25 @@ expression: pretty
           }
         }
       },
+      "RotateTokenRequest": {
+        "type": "object",
+        "description": "`POST /v1/auth/tokens/{id}/rotate` body.",
+        "properties": {
+          "revoke_old": {
+            "type": "boolean",
+            "description": "Revoke the old token once the new one exists."
+          },
+          "ttl_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Lifetime of the new token; `None` = the old token's remaining policy.",
+            "minimum": 0
+          }
+        }
+      },
       "RunByDto": {
         "oneOf": [
           {
@@ -9571,6 +10909,199 @@ expression: pretty
         },
         "additionalProperties": false
       },
+      "TenantDeleted": {
+        "type": "object",
+        "description": "`DELETE /v1/tenants/{id}`.",
+        "required": [
+          "id",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "description": "Always true."
+          },
+          "id": {
+            "type": "string",
+            "description": "The tenant id."
+          }
+        }
+      },
+      "TenantInfo": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TenantSpec",
+            "description": "Quotas and id."
+          },
+          {
+            "type": "object",
+            "required": [
+              "suspended",
+              "created_at_ms"
+            ],
+            "properties": {
+              "created_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Creation time (Unix ms).",
+                "minimum": 0
+              },
+              "suspended": {
+                "type": "boolean",
+                "description": "Suspended tenants are refused at ingress and held at dispatch."
+              }
+            }
+          }
+        ],
+        "description": "A tenant as stored."
+      },
+      "TenantListResponse": {
+        "type": "object",
+        "description": "`GET /v1/tenants`.",
+        "required": [
+          "tenants"
+        ],
+        "properties": {
+          "tenants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TenantInfo"
+            },
+            "description": "Tenants sorted by id."
+          }
+        }
+      },
+      "TenantPatch": {
+        "type": "object",
+        "description": "`PATCH /v1/tenants/{id}` body: only the present fields change. `Some(None)` clears a quota\n(unlimited); absent keeps it.",
+        "properties": {
+          "event_rate": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RateSpecDto",
+                "description": "New event rate."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fuel_burst": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "New fuel burst.",
+            "minimum": 0
+          },
+          "fuel_per_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "New fuel refill.",
+            "minimum": 0
+          },
+          "max_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "New concurrency cap.",
+            "minimum": 0
+          },
+          "memory_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "New memory reservation.",
+            "minimum": 0
+          },
+          "weight": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "New weight.",
+            "minimum": 0
+          }
+        }
+      },
+      "TenantSpec": {
+        "type": "object",
+        "description": "`POST /v1/tenants` body: a new tenant and its quotas (unset = unlimited).",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "event_rate": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RateSpecDto",
+                "description": "Starts / signals / token completions / webhook deliveries."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fuel_burst": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Fuel bucket size.",
+            "minimum": 0
+          },
+          "fuel_per_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Fuel refill per second.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Tenant id `^[a-z0-9][a-z0-9-]{0,62}$` (`_` is never creatable)."
+          },
+          "max_concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Leased activations at once.",
+            "minimum": 0
+          },
+          "memory_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Instance memory reserved at grant.",
+            "minimum": 0
+          },
+          "weight": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "DRR weight (clamped to `[1, 10000]`, default 1).",
+            "minimum": 0
+          }
+        }
+      },
       "TerminateResponseDto": {
         "type": "object",
         "description": "Terminate result.",
@@ -9586,6 +11117,106 @@ expression: pretty
           "status": {
             "$ref": "#/components/schemas/RunStatusDto",
             "description": "Status afterwards (`terminated`)."
+          }
+        }
+      },
+      "TokenInfo": {
+        "type": "object",
+        "description": "An API token as listed. Never carries the secret or its hash.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "scopes",
+          "created_at_ms",
+          "created_by"
+        ],
+        "properties": {
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Creation time (Unix ms).",
+            "minimum": 0
+          },
+          "created_by": {
+            "type": "string",
+            "description": "Creator (ext 112)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Description (ext 112)."
+          },
+          "expires_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Expiry (Unix ms), `None` = never.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "`otk_…` id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Name (ext 112)."
+          },
+          "rotated_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Predecessor when rotated (ext 112)."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Scopes."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant (`None` = system scope)."
+          }
+        }
+      },
+      "TokenListResponse": {
+        "type": "object",
+        "description": "`GET /v1/auth/tokens`.",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TokenInfo"
+            },
+            "description": "Tokens (never secrets or hashes)."
+          }
+        }
+      },
+      "TokenRevoked": {
+        "type": "object",
+        "description": "`DELETE /v1/auth/tokens/{id}`.",
+        "required": [
+          "id",
+          "revoked"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The token id."
+          },
+          "revoked": {
+            "type": "boolean",
+            "description": "Always true (idempotent)."
           }
         }
       },
@@ -9613,6 +11244,40 @@ expression: pretty
           "run_id": {
             "type": "string",
             "description": "The started (or deduplicated) run."
+          }
+        }
+      },
+      "TrustedKeySpec": {
+        "type": "object",
+        "description": "A trusted signing key on the wire.",
+        "required": [
+          "alg",
+          "key_id",
+          "public_key"
+        ],
+        "properties": {
+          "alg": {
+            "type": "string",
+            "description": "`minisign` or `cosign-p256`."
+          },
+          "comment": {
+            "type": "string",
+            "description": "Operator comment."
+          },
+          "key_id": {
+            "type": "string",
+            "description": "Key id (minisign key id hex / cosign hint)."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "Public key: a minisign public key line or a PEM SPKI."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Some(t)` = a tenant key (accepted for that tenant's uploads only)."
           }
         }
       },
@@ -9936,6 +11601,39 @@ expression: pretty
           }
         }
       },
+      "WhoAmI": {
+        "type": "object",
+        "description": "`GET /v1/auth/whoami`.",
+        "required": [
+          "token_id",
+          "scopes",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`token`, `dev`, `system`, `node` or `anonymous`."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Scopes."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tenant (`None` = system scope)."
+          },
+          "token_id": {
+            "type": "string",
+            "description": "Token id or `dev` / `system`."
+          }
+        }
+      },
       "WorkerInfo": {
         "type": "object",
         "description": "A connected worker.",
@@ -10204,8 +11902,21 @@ expression: pretty
           }
         }
       }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "ostro_otk_<id>_<secret>",
+        "description": "API token (`Authorization: Bearer ostro_otk_…`); every route except health, metrics, the UI, webhooks, join and presigned objects"
+      }
     }
   },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
   "tags": [
     {
       "name": "modules",
@@ -10270,6 +11981,22 @@ expression: pretty
     {
       "name": "cluster",
       "description": "Cluster membership, placement and upgrades (Phase 13)"
+    },
+    {
+      "name": "tenants",
+      "description": "Tenants and their quotas (Phase 14)"
+    },
+    {
+      "name": "auth",
+      "description": "API tokens and the calling principal (Phase 14)"
+    },
+    {
+      "name": "audit",
+      "description": "The audit log (Phase 14)"
+    },
+    {
+      "name": "security",
+      "description": "Module signing policy, trusted keys and signatures (Phase 14)"
     },
     {
       "name": "health",

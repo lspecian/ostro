@@ -24,7 +24,60 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
         doc.merge(crate::phase13_adapters::join_routes().split_for_parts().1);
         // Phase 6 (06-08): the presign route, mounted outside the API middleware.
         doc.merge(crate::rest::object_routes().split_for_parts().1);
+        // Phase 14 (14-02): tenants, API tokens, audit, security paths and schemas.
+        doc.merge(crate::phase14_adapters::api_routes().split_for_parts().1);
+        bearer_security(&mut doc);
         doc
     })
     .clone()
+}
+
+/// Phase 14 (14-02): the `bearerAuth` scheme (HTTP bearer, `ostro_otk_…`) required globally,
+/// with an explicit empty `security` on every unauthenticated operation
+/// ([`crate::authn_layer::classify`]).
+fn bearer_security(doc: &mut utoipa::openapi::OpenApi) {
+    use utoipa::openapi::security::{
+        HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme,
+    };
+    doc.components
+        .get_or_insert_with(utoipa::openapi::Components::new)
+        .add_security_scheme(
+            "bearerAuth",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("ostro_otk_<id>_<secret>")
+                    .description(Some(
+                        "API token (`Authorization: Bearer ostro_otk_…`); every route except \
+                         health, metrics, the UI, webhooks, join and presigned objects",
+                    ))
+                    .build(),
+            ),
+        );
+    doc.security = Some(vec![SecurityRequirement::new(
+        "bearerAuth",
+        Vec::<String>::new(),
+    )]);
+    for (path, item) in doc.paths.paths.iter_mut() {
+        let concrete: String = path
+            .split('/')
+            .map(|seg| if seg.starts_with('{') { "x" } else { seg })
+            .collect::<Vec<_>>()
+            .join("/");
+        let ops = [
+            (axum::http::Method::GET, &mut item.get),
+            (axum::http::Method::PUT, &mut item.put),
+            (axum::http::Method::POST, &mut item.post),
+            (axum::http::Method::DELETE, &mut item.delete),
+            (axum::http::Method::PATCH, &mut item.patch),
+        ];
+        for (method, op) in ops {
+            if let Some(op) = op
+                && crate::authn_layer::classify(&method, &concrete)
+                    != crate::authn_layer::RouteAuth::Authenticate
+            {
+                op.security = Some(Vec::new());
+            }
+        }
+    }
 }

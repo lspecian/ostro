@@ -101,6 +101,8 @@ struct State {
     last_list_runs: Option<ListRunsRequest>,
     /// Phase 11: failed runs hidden from `dlq = true` listings (dismissed / requeued).
     dlq_hidden: BTreeSet<String>,
+    /// Phase 14 (14-02): the signatures of the last upload past the sha check.
+    last_upload_signatures: Vec<Vec<u8>>,
 }
 
 impl State {
@@ -457,6 +459,11 @@ impl FakeControlPlane {
             .collect()
     }
 
+    /// Test helper (Phase 14): the signatures of the last upload past the sha check.
+    pub fn last_upload_signatures(&self) -> Vec<Vec<u8>> {
+        self.lock().last_upload_signatures.clone()
+    }
+
     /// Test helper: signals delivered to a run, in order.
     pub fn signals(&self, run_id: &str) -> Vec<(String, serde_json::Value)> {
         self.lock().signals.get(run_id).cloned().unwrap_or_default()
@@ -574,6 +581,7 @@ impl ControlPlane for FakeControlPlane {
         let mut st = self.lock();
         st.uploads
             .push((req.sha256.clone(), req.tenant.clone(), req.name.clone()));
+        st.last_upload_signatures = req.signatures.clone();
         if let Some(existing) = st.modules.get(&req.sha256) {
             return Ok(UploadModuleResult {
                 module: existing.clone(),
@@ -870,7 +878,14 @@ impl ControlPlane for FakeControlPlane {
                         && !dismissed.contains(&r.run_id))
             })
             .filter(|r| req.created_after_ms.is_none_or(|a| r.created_at_ms >= a))
-            .filter(|r| req.created_before_ms.is_none_or(|b| r.created_at_ms < b));
+            .filter(|r| req.created_before_ms.is_none_or(|b| r.created_at_ms < b))
+            // Phase 14 (14-02): `_` = the default tenant (no tenant on the run).
+            .filter(|r| {
+                req.tenant.as_ref().is_none_or(|t| {
+                    let run = r.tenant.as_deref().filter(|t| !t.is_empty()).unwrap_or("_");
+                    run == t
+                })
+            });
         let runs: Vec<RunSummary> = it.by_ref().take(limit).map(summary_of).collect();
         let next_page_token = if it.next().is_some() {
             runs.last().map(|r| r.run_id.clone())
@@ -2907,6 +2922,614 @@ mod p13 {
                 }
             }
             Ok(out)
+        }
+    }
+}
+
+/// In-memory Phase 14 traits (tenants, API tokens, audit, module security), 14-02.
+pub use p14::{FakeAudit, FakeP14, FakeSecurity, FakeTenants, FakeTokens};
+
+mod p14 {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    use crate::error::{ApiError, ErrorCode, reason};
+    use crate::phase8::ApiExtensions;
+    use crate::phase14::*;
+
+    use super::{FAKE_EPOCH_MS, FAKE_TICK_MS};
+
+    /// Per-method error injection shared by the four fakes.
+    #[derive(Default)]
+    struct Errors(BTreeMap<String, ApiError>);
+
+    impl Errors {
+        fn check(&self, method: &str) -> Result<(), ApiError> {
+            match self.0.get(method) {
+                Some(e) => Err(e.clone()),
+                None => Ok(()),
+            }
+        }
+
+        fn set(&mut self, method: &str, err: Option<ApiError>) {
+            match err {
+                Some(e) => self.0.insert(method.to_owned(), e),
+                None => self.0.remove(method),
+            };
+        }
+    }
+
+    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[derive(Default)]
+    struct TenantState {
+        clock: u64,
+        tenants: BTreeMap<String, TenantInfo>,
+        errors: Errors,
+    }
+
+    /// In-memory [`TenantsApi`]: create (409 when it exists), get / update / suspend /
+    /// resume (404 when absent), delete (409 `tenant_not_empty` unless suspended and
+    /// marked empty with [`FakeTenants::set_empty`]; new tenants are empty).
+    /// [`FakeTenants::fail`] makes a method answer an error.
+    #[derive(Default)]
+    pub struct FakeTenants {
+        state: Mutex<TenantState>,
+        non_empty: Mutex<std::collections::BTreeSet<String>>,
+    }
+
+    impl FakeTenants {
+        /// No tenants.
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// Make `method` (a [`TenantsApi`] method name) answer `err` (`None` clears it).
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            lock(&self.state).errors.set(method, err);
+        }
+
+        /// Mark a tenant as owning resources (delete answers `tenant_not_empty`).
+        pub fn set_empty(&self, id: &str, empty: bool) {
+            let mut s = lock(&self.non_empty);
+            if empty {
+                s.remove(id);
+            } else {
+                s.insert(id.to_owned());
+            }
+        }
+
+        /// Fill `ext.tenants` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.tenants = Some(Arc::clone(self) as Arc<dyn TenantsApi>);
+        }
+
+        fn with<T>(
+            &self,
+            method: &str,
+            id: &str,
+            f: impl FnOnce(&mut TenantInfo) -> T,
+        ) -> Result<T, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check(method)?;
+            let t = st
+                .tenants
+                .get_mut(id)
+                .ok_or_else(|| ApiError::not_found(format!("tenant {id} not found")))?;
+            Ok(f(t))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TenantsApi for FakeTenants {
+        async fn create_tenant(&self, spec: TenantSpec) -> Result<TenantInfo, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("create_tenant")?;
+            if st.tenants.contains_key(&spec.id) {
+                return Err(ApiError::conflict(format!("tenant {} exists", spec.id)));
+            }
+            st.clock += 1;
+            let info = TenantInfo {
+                spec,
+                suspended: false,
+                created_at_ms: FAKE_EPOCH_MS + st.clock * FAKE_TICK_MS,
+            };
+            st.tenants.insert(info.spec.id.clone(), info.clone());
+            Ok(info)
+        }
+
+        async fn get_tenant(&self, id: String) -> Result<TenantInfo, ApiError> {
+            self.with("get_tenant", &id, |t| t.clone())
+        }
+
+        async fn list_tenants(&self) -> Result<Vec<TenantInfo>, ApiError> {
+            let st = lock(&self.state);
+            st.errors.check("list_tenants")?;
+            Ok(st.tenants.values().cloned().collect())
+        }
+
+        async fn update_tenant(&self, id: String, p: TenantPatch) -> Result<TenantInfo, ApiError> {
+            self.with("update_tenant", &id, |t| {
+                let s = &mut t.spec;
+                if let Some(v) = p.weight {
+                    s.weight = v;
+                }
+                if let Some(v) = p.max_concurrency {
+                    s.max_concurrency = v;
+                }
+                if let Some(v) = p.fuel_per_s {
+                    s.fuel_per_s = v;
+                }
+                if let Some(v) = p.fuel_burst {
+                    s.fuel_burst = v;
+                }
+                if let Some(v) = p.memory_bytes {
+                    s.memory_bytes = v;
+                }
+                if let Some(v) = p.event_rate {
+                    s.event_rate = v;
+                }
+                t.clone()
+            })
+        }
+
+        async fn suspend_tenant(&self, id: String) -> Result<TenantInfo, ApiError> {
+            self.with("suspend_tenant", &id, |t| {
+                t.suspended = true;
+                t.clone()
+            })
+        }
+
+        async fn resume_tenant(&self, id: String) -> Result<TenantInfo, ApiError> {
+            self.with("resume_tenant", &id, |t| {
+                t.suspended = false;
+                t.clone()
+            })
+        }
+
+        async fn delete_tenant(&self, id: String) -> Result<(), ApiError> {
+            let non_empty = lock(&self.non_empty).contains(&id);
+            let mut st = lock(&self.state);
+            st.errors.check("delete_tenant")?;
+            let t = st
+                .tenants
+                .get(&id)
+                .ok_or_else(|| ApiError::not_found(format!("tenant {id} not found")))?;
+            if !t.suspended || non_empty {
+                return Err(
+                    ApiError::conflict(format!("tenant {id} must be suspended and empty"))
+                        .with_details(serde_json::json!({ "reason": reason::TENANT_NOT_EMPTY })),
+                );
+            }
+            st.tenants.remove(&id);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TokenState {
+        clock: u64,
+        next: u64,
+        tokens: BTreeMap<String, (TokenInfo, bool)>,
+        errors: Errors,
+    }
+
+    /// In-memory [`ApiTokensApi`]: ids `otk_<16 base32>` from a counter, bearer
+    /// `ostro_otk_<id>_<52 chars>`; revoked tokens are hidden from `list_tokens`,
+    /// `revoke_token` is idempotent, unknown ids answer 404.
+    /// `whoami` answers the current [`crate::auth::current`] principal.
+    #[derive(Default)]
+    pub struct FakeTokens {
+        state: Mutex<TokenState>,
+    }
+
+    impl FakeTokens {
+        /// No tokens.
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// Make `method` (an [`ApiTokensApi`] method name) answer `err`.
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            lock(&self.state).errors.set(method, err);
+        }
+
+        /// Fill `ext.api_tokens` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.api_tokens = Some(Arc::clone(self) as Arc<dyn ApiTokensApi>);
+        }
+
+        fn mint(
+            st: &mut TokenState,
+            name: String,
+            description: String,
+            scopes: Vec<String>,
+            tenant: Option<String>,
+            ttl_ms: Option<u64>,
+            rotated_from: Option<String>,
+        ) -> CreatedToken {
+            st.next += 1;
+            st.clock += 1;
+            let now = FAKE_EPOCH_MS + st.clock * FAKE_TICK_MS;
+            let id16 = format!("{:a>16}", base32(st.next));
+            let id = format!("otk_{id16}");
+            let info = TokenInfo {
+                id: id.clone(),
+                name,
+                description,
+                scopes,
+                tenant,
+                created_at_ms: now,
+                expires_at_ms: ttl_ms.map(|t| now + t),
+                created_by: crate::auth::current().token_id,
+                rotated_from,
+            };
+            st.tokens.insert(id, (info.clone(), false));
+            CreatedToken {
+                info,
+                bearer: format!("ostro_otk_{id16}_{}", "s".repeat(52)),
+            }
+        }
+    }
+
+    /// Lowercase RFC 4648 base32 digits of `n` (no padding).
+    fn base32(mut n: u64) -> String {
+        const A: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+        let mut out = Vec::new();
+        loop {
+            out.push(A[(n % 32) as usize]);
+            n /= 32;
+            if n == 0 {
+                break;
+            }
+        }
+        out.reverse();
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    #[async_trait::async_trait]
+    impl ApiTokensApi for FakeTokens {
+        async fn create_token(&self, r: CreateTokenRequest) -> Result<CreatedToken, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("create_token")?;
+            if r.scopes.is_empty() {
+                return Err(ApiError::invalid_argument("scopes is required"));
+            }
+            crate::auth::ScopeSet::parse(&r.scopes).map_err(ApiError::invalid_argument)?;
+            let ttl = if r.no_expiry {
+                None
+            } else {
+                Some(r.ttl_ms.unwrap_or(90 * 24 * 3_600_000))
+            };
+            Ok(Self::mint(
+                &mut st,
+                r.name,
+                r.description,
+                r.scopes,
+                r.tenant,
+                ttl,
+                None,
+            ))
+        }
+
+        async fn list_tokens(&self, tenant: Option<String>) -> Result<Vec<TokenInfo>, ApiError> {
+            let st = lock(&self.state);
+            st.errors.check("list_tokens")?;
+            Ok(st
+                .tokens
+                .values()
+                .filter(|(_, revoked)| !revoked)
+                .map(|(t, _)| t)
+                .filter(|t| tenant.is_none() || t.tenant == tenant)
+                .cloned()
+                .collect())
+        }
+
+        async fn revoke_token(&self, id: String) -> Result<(), ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("revoke_token")?;
+            match st.tokens.get_mut(&id) {
+                Some((_, revoked)) => {
+                    *revoked = true;
+                    Ok(())
+                }
+                None => Err(ApiError::not_found(format!("token {id} not found"))),
+            }
+        }
+
+        async fn rotate_token(
+            &self,
+            id: String,
+            r: RotateTokenRequest,
+        ) -> Result<CreatedToken, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("rotate_token")?;
+            let (old, revoked) = st
+                .tokens
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| ApiError::not_found(format!("token {id} not found")))?;
+            if revoked {
+                return Err(ApiError::precondition_failed(format!(
+                    "token {id} is revoked"
+                )));
+            }
+            let ttl = r.ttl_ms.or(old
+                .expires_at_ms
+                .map(|e| e.saturating_sub(old.created_at_ms)));
+            let created = Self::mint(
+                &mut st,
+                old.name.clone(),
+                old.description.clone(),
+                old.scopes.clone(),
+                old.tenant.clone(),
+                ttl,
+                Some(id.clone()),
+            );
+            if r.revoke_old
+                && let Some((_, revoked)) = st.tokens.get_mut(&id)
+            {
+                *revoked = true;
+            }
+            Ok(created)
+        }
+
+        async fn whoami(&self) -> Result<WhoAmI, ApiError> {
+            lock(&self.state).errors.check("whoami")?;
+            let p = crate::auth::current();
+            Ok(WhoAmI {
+                token_id: p.token_id,
+                tenant: p.tenant,
+                scopes: p.scopes.to_strings(),
+                kind: p.kind.as_str().to_owned(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct AuditState {
+        records: Vec<AuditRecordView>,
+        errors: Errors,
+    }
+
+    /// In-memory [`AuditApi`] over records added with [`FakeAudit::push`]: filters by
+    /// tenant, actor, action (exact or `prefix.*`), `[since, until)`; pages of `limit`
+    /// (default 100) with the next index as cursor (`bad cursor` is 400).
+    #[derive(Default)]
+    pub struct FakeAudit {
+        state: Mutex<AuditState>,
+    }
+
+    impl FakeAudit {
+        /// No records.
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// Make `query` answer `err` (e.g. 503 `audit_unavailable`).
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            lock(&self.state).errors.set(method, err);
+        }
+
+        /// Append a record (its `seq` is set to its position).
+        pub fn push(&self, mut r: AuditRecordView) {
+            let mut st = lock(&self.state);
+            r.seq = st.records.len() as u64;
+            st.records.push(r);
+        }
+
+        /// Fill `ext.audit` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.audit = Some(Arc::clone(self) as Arc<dyn AuditApi>);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuditApi for FakeAudit {
+        async fn query(&self, q: AuditQuery) -> Result<AuditPage, ApiError> {
+            let st = lock(&self.state);
+            st.errors.check("query")?;
+            let start = match &q.cursor {
+                Some(c) => c
+                    .parse::<usize>()
+                    .map_err(|_| ApiError::invalid_argument("bad cursor"))?,
+                None => 0,
+            };
+            let limit = q.limit.unwrap_or(100).clamp(1, 1000) as usize;
+            let action_ok = |a: &str| match &q.action {
+                None => true,
+                Some(f) => match f.strip_suffix('*') {
+                    Some(prefix) => a.starts_with(prefix),
+                    None => a == f,
+                },
+            };
+            let mut it = st
+                .records
+                .iter()
+                .skip(start)
+                .filter(|r| q.tenant.is_none() || r.tenant == q.tenant)
+                .filter(|r| q.actor.as_ref().is_none_or(|a| &r.actor == a))
+                .filter(|r| action_ok(&r.action))
+                .filter(|r| q.since_ms.is_none_or(|s| r.ts_ms >= s))
+                .filter(|r| q.until_ms.is_none_or(|u| r.ts_ms < u));
+            let records: Vec<AuditRecordView> = it.by_ref().take(limit).cloned().collect();
+            let cursor = match (it.next(), records.last()) {
+                (Some(_), Some(last)) => Some((last.seq + 1).to_string()),
+                _ => None,
+            };
+            Ok(AuditPage {
+                records,
+                cursor,
+                partial_nodes: vec![],
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct SecurityState {
+        policy: ModulePolicy,
+        modules: BTreeMap<String, Vec<String>>,
+        errors: Errors,
+    }
+
+    /// In-memory [`SecurityApi`]: the policy, keys (409 on a duplicate id, 404 on removing
+    /// an unknown one) and per-module key ids. `attach_signatures` needs a module added with
+    /// [`FakeSecurity::add_module`] (404 otherwise) and records one key id per signature:
+    /// `fake-<n>` where `n` is the signature's decoded length.
+    #[derive(Default)]
+    pub struct FakeSecurity {
+        state: Mutex<SecurityState>,
+    }
+
+    impl FakeSecurity {
+        /// Signing not required, no keys, no modules.
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// Make `method` (a [`SecurityApi`] method name) answer `err`.
+        pub fn fail(&self, method: &str, err: Option<ApiError>) {
+            lock(&self.state).errors.set(method, err);
+        }
+
+        /// Register a stored module.
+        pub fn add_module(&self, sha256: &str) {
+            lock(&self.state)
+                .modules
+                .entry(sha256.to_owned())
+                .or_default();
+        }
+
+        /// Key ids attached to a module.
+        pub fn key_ids(&self, sha256: &str) -> Vec<String> {
+            lock(&self.state)
+                .modules
+                .get(sha256)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        /// Fill `ext.security` with this fake.
+        pub fn install(self: &Arc<Self>, ext: &mut ApiExtensions) {
+            ext.security = Some(Arc::clone(self) as Arc<dyn SecurityApi>);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SecurityApi for FakeSecurity {
+        async fn get_module_policy(&self) -> Result<ModulePolicy, ApiError> {
+            let st = lock(&self.state);
+            st.errors.check("get_module_policy")?;
+            Ok(st.policy.clone())
+        }
+
+        async fn set_module_policy(&self, p: ModulePolicy) -> Result<ModulePolicy, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("set_module_policy")?;
+            st.policy = p;
+            Ok(st.policy.clone())
+        }
+
+        async fn add_trusted_key(&self, k: TrustedKeySpec) -> Result<ModulePolicy, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("add_trusted_key")?;
+            if !matches!(k.alg.as_str(), "minisign" | "cosign-p256") {
+                return Err(ApiError::invalid_argument(format!(
+                    "alg {:?}: expected minisign or cosign-p256",
+                    k.alg
+                )));
+            }
+            if st.policy.trusted_keys.iter().any(|t| t.key_id == k.key_id) {
+                return Err(ApiError::conflict(format!("key {} exists", k.key_id)));
+            }
+            st.policy.trusted_keys.push(k);
+            Ok(st.policy.clone())
+        }
+
+        async fn remove_trusted_key(&self, key_id: String) -> Result<ModulePolicy, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("remove_trusted_key")?;
+            let before = st.policy.trusted_keys.len();
+            st.policy.trusted_keys.retain(|k| k.key_id != key_id);
+            if st.policy.trusted_keys.len() == before {
+                return Err(ApiError::not_found(format!("key {key_id} not found")));
+            }
+            Ok(st.policy.clone())
+        }
+
+        async fn attach_signatures(
+            &self,
+            r: AttachSignaturesRequest,
+        ) -> Result<AttachSignaturesResult, ApiError> {
+            use base64::Engine;
+            let mut st = lock(&self.state);
+            st.errors.check("attach_signatures")?;
+            let ids: Vec<String> = r
+                .signatures
+                .iter()
+                .map(|s| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(s)
+                        .map(|b| format!("fake-{}", b.len()))
+                        .map_err(|_| {
+                            ApiError::new(ErrorCode::InvalidArgument, "signature is not base64")
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            let m = st
+                .modules
+                .get_mut(&r.sha256)
+                .ok_or_else(|| ApiError::not_found(format!("module {} not found", r.sha256)))?;
+            for id in &ids {
+                if !m.contains(id) {
+                    m.push(id.clone());
+                }
+            }
+            Ok(AttachSignaturesResult {
+                sha256: r.sha256,
+                key_ids: m.clone(),
+            })
+        }
+    }
+
+    /// The four Phase 14 fakes together.
+    #[derive(Clone)]
+    pub struct FakeP14 {
+        /// Tenants.
+        pub tenants: Arc<FakeTenants>,
+        /// API tokens.
+        pub tokens: Arc<FakeTokens>,
+        /// Audit.
+        pub audit: Arc<FakeAudit>,
+        /// Module security.
+        pub security: Arc<FakeSecurity>,
+    }
+
+    impl FakeP14 {
+        /// Fresh fakes.
+        pub fn new() -> Self {
+            FakeP14 {
+                tenants: FakeTenants::new(),
+                tokens: FakeTokens::new(),
+                audit: FakeAudit::new(),
+                security: FakeSecurity::new(),
+            }
+        }
+
+        /// Fill the four Phase 14 slots of `ext`.
+        pub fn install(&self, ext: &mut ApiExtensions) {
+            self.tenants.install(ext);
+            self.tokens.install(ext);
+            self.audit.install(ext);
+            self.security.install(ext);
+        }
+    }
+
+    impl Default for FakeP14 {
+        fn default() -> Self {
+            Self::new()
         }
     }
 }

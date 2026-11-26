@@ -292,6 +292,7 @@ impl TryFrom<pb::ListRunsRequest> for domain::ListRunsRequest {
             tags,
             order,
             dlq: r.dlq,
+            tenant: crate::phase14_adapters::check::tenant_filter(r.tenant)?,
         })
     }
 }
@@ -467,6 +468,8 @@ impl modules_server::Modules for GrpcModules {
         request: Request<pb::UploadModuleRequest>,
     ) -> Result<Response<pb::UploadModuleResponse>, Status> {
         let r = request.into_inner();
+        // Phase 14 (14-02): the signature limits of the REST header, before anything else.
+        crate::phase14_adapters::check::signatures(&r.signatures).map_err(to_status)?;
         if r.wasm.len() > self.max_module_bytes {
             return Err(to_status(ApiError::payload_too_large(format!(
                 "module is {} bytes, api.max_module_bytes is {}",
@@ -477,7 +480,7 @@ impl modules_server::Modules for GrpcModules {
         let res = self
             .cp
             .upload_module(domain::UploadModule {
-                signatures: Vec::new(),
+                signatures: r.signatures,
                 sha256: r.sha256,
                 wasm: r.wasm.into(),
                 language: r.language,

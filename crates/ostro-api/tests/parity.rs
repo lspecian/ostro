@@ -5196,3 +5196,785 @@ fn rest_only_exclusions_are_exactly_the_phase10_tooling_routes() {
         assert!(desc.contains("REST-only"), "{method} {path}: {desc}");
     }
 }
+
+/// Phase 14 (14-02): every Tenants / ApiTokens / Audit / Security operation, the upload
+/// signature carriage and the run-list tenant filter through REST and gRPC against fresh
+/// `FakeP14` fakes, with identical transcripts; plus the error mapping 401 ↔
+/// UNAUTHENTICATED, 403 ↔ PERMISSION_DENIED, 404 ↔ NOT_FOUND, 409 ↔ ALREADY_EXISTS,
+/// 412 ↔ FAILED_PRECONDITION and 503 ↔ UNAVAILABLE (`audit_unavailable`).
+mod phase14 {
+    use super::*;
+    use base64::Engine;
+    use ostro_api::ApiError;
+    use ostro_api::auth::{AuthError, Authenticator, Principal};
+    use ostro_api::fake::FakeP14;
+    use ostro_api::phase14::*;
+    use ostro_proto::api::v1::{
+        api_tokens_client::ApiTokensClient, audit_client::AuditClient,
+        security_client::SecurityClient, tenants_client::TenantsClient,
+    };
+
+    const SHA: &str = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
+
+    fn b64(b: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(b)
+    }
+
+    /// Rejects every bearer (401 parity).
+    struct DenyAll;
+
+    #[async_trait::async_trait]
+    impl Authenticator for DenyAll {
+        async fn authenticate(&self, _b: Option<&str>) -> Result<Principal, AuthError> {
+            Err(AuthError::Invalid)
+        }
+    }
+
+    struct P14Server {
+        addr: SocketAddr,
+        cp: Arc<FakeControlPlane>,
+        fakes: FakeP14,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for P14Server {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn serve_p14(deny: bool) -> P14Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let cp = Arc::new(FakeControlPlane::new());
+        let fakes = FakeP14::new();
+        fakes.security.add_module(SHA);
+        for (i, (tenant, action)) in [(None, "deploy"), (Some("acme"), "token.create")]
+            .into_iter()
+            .enumerate()
+        {
+            fakes.audit.push(AuditRecordView {
+                ts_ms: 10 + i as u64,
+                actor: "dev".into(),
+                tenant: tenant.map(str::to_owned),
+                action: action.into(),
+                outcome: "ok".into(),
+                details: [("k".to_owned(), "v".to_owned())].into(),
+                ..AuditRecordView::default()
+            });
+        }
+        let mut ext = ostro_api::ApiExtensions::default();
+        fakes.install(&mut ext);
+        let mut c = cfg();
+        if deny {
+            c.authenticator = Arc::new(DenyAll);
+        }
+        let dyn_cp: Arc<dyn ControlPlane> = cp.clone();
+        let app = ostro_api::router_with(dyn_cp, c, ext);
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        P14Server {
+            addr,
+            cp,
+            fakes,
+            task,
+        }
+    }
+
+    fn js<T: serde::Serialize>(v: T) -> Value {
+        serde_json::to_value(v).expect("json")
+    }
+
+    trait P14Client {
+        async fn create_tenant(&mut self, spec: Value) -> Out;
+        async fn get_tenant(&mut self, id: &str) -> Out;
+        async fn list_tenants(&mut self) -> Out;
+        async fn update_tenant(&mut self, id: &str, patch: Value) -> Out;
+        async fn suspend_tenant(&mut self, id: &str) -> Out;
+        async fn resume_tenant(&mut self, id: &str) -> Out;
+        async fn delete_tenant(&mut self, id: &str) -> Out;
+        async fn create_token(&mut self, req: Value) -> Out;
+        async fn list_tokens(&mut self, tenant: Option<&str>) -> Out;
+        async fn revoke_token(&mut self, id: &str) -> Out;
+        async fn rotate_token(&mut self, id: &str, revoke_old: bool) -> Out;
+        async fn whoami(&mut self) -> Out;
+        async fn audit(
+            &mut self,
+            tenant: Option<&str>,
+            action: Option<&str>,
+            limit: Option<u32>,
+        ) -> Out;
+        async fn get_policy(&mut self) -> Out;
+        async fn set_policy(&mut self, p: Value) -> Out;
+        async fn add_key(&mut self, k: Value) -> Out;
+        async fn remove_key(&mut self, id: &str) -> Out;
+        async fn attach(&mut self, sha: &str, sigs: Vec<Vec<u8>>) -> Out;
+        async fn upload_signed(&mut self, sigs: Vec<Vec<u8>>) -> Out;
+        async fn list_runs_tenant(&mut self, tenant: &str) -> Out;
+    }
+
+    impl P14Client for RestClient {
+        async fn create_tenant(&mut self, spec: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/tenants", self.base))
+                        .json(&spec),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<TenantInfo>(v).expect("dto")))
+        }
+        async fn get_tenant(&mut self, id: &str) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/tenants/{id}", self.base)))
+                .await?;
+            Ok(js(serde_json::from_value::<TenantInfo>(v).expect("dto")))
+        }
+        async fn list_tenants(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/tenants", self.base)))
+                .await?;
+            Ok(v["tenants"].clone())
+        }
+        async fn update_tenant(&mut self, id: &str, patch: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .patch(format!("{}/v1/tenants/{id}", self.base))
+                        .json(&patch),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<TenantInfo>(v).expect("dto")))
+        }
+        async fn suspend_tenant(&mut self, id: &str) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/tenants/{id}/suspend", self.base)),
+            )
+            .await
+        }
+        async fn resume_tenant(&mut self, id: &str) -> Out {
+            self.send(
+                self.http
+                    .post(format!("{}/v1/tenants/{id}/resume", self.base)),
+            )
+            .await
+        }
+        async fn delete_tenant(&mut self, id: &str) -> Out {
+            self.send(self.http.delete(format!("{}/v1/tenants/{id}", self.base)))
+                .await
+        }
+        async fn create_token(&mut self, req: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/auth/tokens", self.base))
+                        .json(&req),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<CreatedToken>(v).expect("dto")))
+        }
+        async fn list_tokens(&mut self, tenant: Option<&str>) -> Out {
+            let q = tenant.map(|t| format!("?tenant={t}")).unwrap_or_default();
+            let r = self.http.get(format!("{}/v1/auth/tokens{q}", self.base));
+            Ok(self.send(r).await?["tokens"].clone())
+        }
+        async fn revoke_token(&mut self, id: &str) -> Out {
+            self.send(
+                self.http
+                    .delete(format!("{}/v1/auth/tokens/{id}", self.base)),
+            )
+            .await
+        }
+        async fn rotate_token(&mut self, id: &str, revoke_old: bool) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/auth/tokens/{id}/rotate", self.base))
+                        .json(&json!({ "revoke_old": revoke_old })),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<CreatedToken>(v).expect("dto")))
+        }
+        async fn whoami(&mut self) -> Out {
+            self.send(self.http.get(format!("{}/v1/auth/whoami", self.base)))
+                .await
+        }
+        async fn audit(
+            &mut self,
+            tenant: Option<&str>,
+            action: Option<&str>,
+            limit: Option<u32>,
+        ) -> Out {
+            let mut q: Vec<String> = Vec::new();
+            if let Some(t) = tenant {
+                q.push(format!("tenant={t}"));
+            }
+            if let Some(a) = action {
+                q.push(format!("action={a}"));
+            }
+            if let Some(l) = limit {
+                q.push(format!("limit={l}"));
+            }
+            let v = self
+                .send(
+                    self.http
+                        .get(format!("{}/v1/audit?{}", self.base, q.join("&"))),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<AuditPage>(v).expect("dto")))
+        }
+        async fn get_policy(&mut self) -> Out {
+            self.send(
+                self.http
+                    .get(format!("{}/v1/security/modules/policy", self.base)),
+            )
+            .await
+        }
+        async fn set_policy(&mut self, p: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .put(format!("{}/v1/security/modules/policy", self.base))
+                        .json(&p),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<ModulePolicy>(v).expect("dto")))
+        }
+        async fn add_key(&mut self, k: Value) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/security/modules/keys", self.base))
+                        .json(&k),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<ModulePolicy>(v).expect("dto")))
+        }
+        async fn remove_key(&mut self, id: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .delete(format!("{}/v1/security/modules/keys/{id}", self.base)),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<ModulePolicy>(v).expect("dto")))
+        }
+        async fn attach(&mut self, sha: &str, sigs: Vec<Vec<u8>>) -> Out {
+            let body = json!({ "signatures": sigs.iter().map(|s| b64(s)).collect::<Vec<_>>() });
+            self.send(
+                self.http
+                    .post(format!("{}/v1/modules/{sha}/signatures", self.base))
+                    .json(&body),
+            )
+            .await
+        }
+        async fn upload_signed(&mut self, sigs: Vec<Vec<u8>>) -> Out {
+            let wasm = fake_module(&[("p14", 1)]);
+            let sha = sha256_hex(&wasm);
+            let mut r = self
+                .http
+                .put(format!("{}/v1/modules/{sha}", self.base))
+                .header("content-type", "application/wasm")
+                .body(wasm.to_vec());
+            for s in &sigs {
+                r = r.header("Ostro-Module-Signature", b64(s));
+            }
+            let v = self.send(r).await?;
+            Ok(json!({ "created": v["created"] }))
+        }
+        async fn list_runs_tenant(&mut self, tenant: &str) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .get(format!("{}/v1/runs?tenant={tenant}", self.base)),
+                )
+                .await?;
+            Ok(json!(v["runs"].as_array().map_or(0, Vec::len)))
+        }
+    }
+
+    struct P14Grpc {
+        tenants: TenantsClient<Channel>,
+        tokens: ApiTokensClient<Channel>,
+        audit: AuditClient<Channel>,
+        security: SecurityClient<Channel>,
+        modules: ModulesClient<Channel>,
+        runs: RunsClient<Channel>,
+    }
+
+    impl P14Grpc {
+        async fn connect(addr: SocketAddr) -> Self {
+            let ch = Channel::from_shared(format!("http://{addr}"))
+                .expect("uri")
+                .connect()
+                .await
+                .expect("h2c connect");
+            P14Grpc {
+                tenants: TenantsClient::new(ch.clone()),
+                tokens: ApiTokensClient::new(ch.clone()),
+                audit: AuditClient::new(ch.clone()),
+                security: SecurityClient::new(ch.clone()),
+                modules: ModulesClient::new(ch.clone()),
+                runs: RunsClient::new(ch),
+            }
+        }
+    }
+
+    fn tenant_out(t: pb::Tenant) -> Value {
+        js(TenantInfo::try_from(t).expect("tenant"))
+    }
+
+    impl P14Client for P14Grpc {
+        async fn create_tenant(&mut self, spec: Value) -> Out {
+            let spec: TenantSpec = serde_json::from_value(spec).expect("spec");
+            let t = self
+                .tenants
+                .create(pb::CreateTenantRequest {
+                    spec: Some(spec.into()),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(tenant_out(t.into_inner()))
+        }
+        async fn get_tenant(&mut self, id: &str) -> Out {
+            let t = self
+                .tenants
+                .get(pb::GetTenantRequest { id: id.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(tenant_out(t.into_inner()))
+        }
+        async fn list_tenants(&mut self) -> Out {
+            let r = self
+                .tenants
+                .list(pb::ListTenantsRequest {})
+                .await
+                .map_err(grpc_err)?
+                .into_inner();
+            Ok(Value::Array(
+                r.tenants.into_iter().map(tenant_out).collect(),
+            ))
+        }
+        async fn update_tenant(&mut self, id: &str, patch: Value) -> Out {
+            let patch: TenantPatch = serde_json::from_value(patch).expect("patch");
+            let t = self
+                .tenants
+                .update(ostro_api::phase14_adapters::patch_to_proto(
+                    id.into(),
+                    patch,
+                ))
+                .await
+                .map_err(grpc_err)?;
+            Ok(tenant_out(t.into_inner()))
+        }
+        async fn suspend_tenant(&mut self, id: &str) -> Out {
+            let t = self
+                .tenants
+                .suspend(pb::SuspendTenantRequest { id: id.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(tenant_out(t.into_inner()))
+        }
+        async fn resume_tenant(&mut self, id: &str) -> Out {
+            let t = self
+                .tenants
+                .resume(pb::ResumeTenantRequest { id: id.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(tenant_out(t.into_inner()))
+        }
+        async fn delete_tenant(&mut self, id: &str) -> Out {
+            let r = self
+                .tenants
+                .delete(pb::DeleteTenantRequest { id: id.into() })
+                .await
+                .map_err(grpc_err)?
+                .into_inner();
+            Ok(json!({ "id": r.id, "deleted": r.deleted }))
+        }
+        async fn create_token(&mut self, req: Value) -> Out {
+            let req: CreateTokenRequest = serde_json::from_value(req).expect("req");
+            let r = self
+                .tokens
+                .create(pb::CreateTokenRequest::from(req))
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(CreatedToken::try_from(r.into_inner()).expect("created")))
+        }
+        async fn list_tokens(&mut self, tenant: Option<&str>) -> Out {
+            let r = self
+                .tokens
+                .list(pb::ListTokensRequest {
+                    tenant: tenant.map(str::to_owned),
+                })
+                .await
+                .map_err(grpc_err)?
+                .into_inner();
+            Ok(js(r
+                .tokens
+                .into_iter()
+                .map(TokenInfo::from)
+                .collect::<Vec<_>>()))
+        }
+        async fn revoke_token(&mut self, id: &str) -> Out {
+            let r = self
+                .tokens
+                .revoke(pb::RevokeTokenRequest { id: id.into() })
+                .await
+                .map_err(grpc_err)?
+                .into_inner();
+            Ok(json!({ "id": r.id, "revoked": r.revoked }))
+        }
+        async fn rotate_token(&mut self, id: &str, revoke_old: bool) -> Out {
+            let r = self
+                .tokens
+                .rotate(pb::RotateTokenRequest {
+                    id: id.into(),
+                    revoke_old,
+                    ttl_ms: None,
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(CreatedToken::try_from(r.into_inner()).expect("rotated")))
+        }
+        async fn whoami(&mut self) -> Out {
+            let r = self
+                .tokens
+                .who_am_i(pb::WhoAmIRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(WhoAmI::from(r.into_inner())))
+        }
+        async fn audit(
+            &mut self,
+            tenant: Option<&str>,
+            action: Option<&str>,
+            limit: Option<u32>,
+        ) -> Out {
+            let r = self
+                .audit
+                .query(pb::AuditQueryRequest {
+                    tenant: tenant.map(str::to_owned),
+                    action: action.map(str::to_owned),
+                    limit,
+                    ..Default::default()
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(AuditPage::from(r.into_inner())))
+        }
+        async fn get_policy(&mut self) -> Out {
+            let r = self
+                .security
+                .get_module_policy(pb::GetModulePolicyRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(ModulePolicy::from(r.into_inner())))
+        }
+        async fn set_policy(&mut self, p: Value) -> Out {
+            let p: ModulePolicy = serde_json::from_value(p).expect("policy");
+            let r = self
+                .security
+                .set_module_policy(pb::SetModulePolicyRequest {
+                    policy: Some(p.into()),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(ModulePolicy::from(r.into_inner())))
+        }
+        async fn add_key(&mut self, k: Value) -> Out {
+            let k: TrustedKeySpec = serde_json::from_value(k).expect("key");
+            let r = self
+                .security
+                .add_trusted_key(pb::AddTrustedKeyRequest {
+                    key: Some(k.into()),
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(ModulePolicy::from(r.into_inner())))
+        }
+        async fn remove_key(&mut self, id: &str) -> Out {
+            let r = self
+                .security
+                .remove_trusted_key(pb::RemoveTrustedKeyRequest { key_id: id.into() })
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(ModulePolicy::from(r.into_inner())))
+        }
+        async fn attach(&mut self, sha: &str, sigs: Vec<Vec<u8>>) -> Out {
+            let r = self
+                .security
+                .attach_signatures(pb::AttachSignaturesRequest {
+                    sha256: sha.into(),
+                    signatures: sigs,
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(AttachSignaturesResult::from(r.into_inner())))
+        }
+        async fn upload_signed(&mut self, sigs: Vec<Vec<u8>>) -> Out {
+            let wasm = fake_module(&[("p14", 1)]);
+            let r = self
+                .modules
+                .upload(pb::UploadModuleRequest {
+                    sha256: sha256_hex(&wasm),
+                    wasm: wasm.to_vec(),
+                    language: None,
+                    tenant: None,
+                    name: None,
+                    signatures: sigs,
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(json!({ "created": r.into_inner().created }))
+        }
+        async fn list_runs_tenant(&mut self, tenant: &str) -> Out {
+            let r = self
+                .runs
+                .list(pb::ListRunsRequest {
+                    tenant: Some(tenant.into()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(grpc_err)?;
+            Ok(json!(r.into_inner().runs.len()))
+        }
+    }
+
+    async fn scenario<C: P14Client>(c: &mut C, s: &P14Server) -> Vec<(String, Out)> {
+        let mut t: Vec<(String, Out)> = Vec::new();
+        macro_rules! step_v {
+            ($name:expr, $e:expr) => {{
+                let out = $e;
+                t.push(($name.to_string(), out.clone()));
+                out
+            }};
+        }
+        macro_rules! step {
+            ($name:expr, $e:expr) => {{
+                let out = $e;
+                t.push(($name.to_string(), out));
+            }};
+        }
+        // Tenants.
+        step!(
+            "create",
+            c.create_tenant(
+                json!({"id": "acme", "weight": 3, "event_rate": {"limit": 5, "period_ms": 1000}})
+            )
+            .await
+        );
+        step!(
+            "create dup (409)",
+            c.create_tenant(json!({"id": "acme"})).await
+        );
+        step!(
+            "create bad id (400)",
+            c.create_tenant(json!({"id": "Acme"})).await
+        );
+        step!("get", c.get_tenant("acme").await);
+        step!("get missing (404)", c.get_tenant("nope").await);
+        step!(
+            "update",
+            c.update_tenant("acme", json!({"max_concurrency": 7, "weight": 4}))
+                .await
+        );
+        step!("list", c.list_tenants().await);
+        step!(
+            "delete active (409 tenant_not_empty)",
+            c.delete_tenant("acme").await
+        );
+        step!("suspend", c.suspend_tenant("acme").await);
+        step!("resume", c.resume_tenant("acme").await);
+        step!("suspend again", c.suspend_tenant("acme").await);
+        step!("delete", c.delete_tenant("acme").await);
+        step!("list empty", c.list_tenants().await);
+        // Tokens.
+        let created = step_v!(
+            "create token",
+            c.create_token(
+                json!({"name": "ci", "scopes": ["deploy"], "tenant": "acme", "ttl_ms": 60000})
+            )
+            .await
+        );
+        let id = ok_field(&created, "create token", &["info", "id"]);
+        let id = id.as_str().expect("id").to_owned();
+        step!(
+            "create token bad scope (400)",
+            c.create_token(json!({"name": "x", "scopes": ["root"]}))
+                .await
+        );
+        step!("list tokens", c.list_tokens(None).await);
+        step!("list tokens acme", c.list_tokens(Some("acme")).await);
+        step!(
+            "list tokens bad tenant (400)",
+            c.list_tokens(Some("A")).await
+        );
+        step!("rotate", c.rotate_token(&id, true).await);
+        step!("rotate revoked (412)", c.rotate_token(&id, false).await);
+        step!("revoke", c.revoke_token(&id).await);
+        step!("revoke missing (404)", c.revoke_token("otk_missing").await);
+        step!("whoami", c.whoami().await);
+        // Audit.
+        step!("audit all", c.audit(None, None, None).await);
+        step!(
+            "audit acme token.*",
+            c.audit(Some("acme"), Some("token.*"), None).await
+        );
+        step!("audit page", c.audit(None, None, Some(1)).await);
+        s.fakes.audit.fail(
+            "query",
+            Some(
+                ApiError::unavailable("journal down")
+                    .with_details(json!({"reason": "audit_unavailable"})),
+            ),
+        );
+        step!("audit unavailable (503)", c.audit(None, None, None).await);
+        s.fakes.audit.fail("query", None);
+        // Security.
+        step!("policy", c.get_policy().await);
+        step!(
+            "set policy",
+            c.set_policy(json!({"require_signed_modules": true})).await
+        );
+        step!(
+            "add key",
+            c.add_key(
+                json!({"alg": "minisign", "key_id": "k1", "public_key": "RWQ", "comment": "c"})
+            )
+            .await
+        );
+        step!(
+            "add tenant key",
+            c.add_key(
+                json!({"alg": "cosign-p256", "key_id": "k2", "public_key": "PEM", "tenant": "acme"})
+            )
+            .await
+        );
+        step!(
+            "add dup key (409)",
+            c.add_key(json!({"alg": "minisign", "key_id": "k1", "public_key": "x"}))
+                .await
+        );
+        step!("remove key", c.remove_key("k1").await);
+        step!("remove missing key (404)", c.remove_key("k1").await);
+        step!(
+            "attach",
+            c.attach(SHA, vec![b"sig-one".to_vec(), vec![2; 8192]])
+                .await
+        );
+        step!(
+            "attach unknown module (404)",
+            c.attach(&"0".repeat(64), vec![b"s".to_vec()]).await
+        );
+        step!(
+            "attach bad sha (400)",
+            c.attach("nothex", vec![b"s".to_vec()]).await
+        );
+        step!(
+            "attach too many (400)",
+            c.attach(SHA, vec![b"s".to_vec(); 5]).await
+        );
+        step!(
+            "attach too large (400)",
+            c.attach(SHA, vec![vec![1; 8193]]).await
+        );
+        step!("attach none (400)", c.attach(SHA, vec![]).await);
+        s.fakes.security.fail(
+            "get_module_policy",
+            Some(ApiError::permission_denied("missing_scope", "needs admin")),
+        );
+        step!("policy denied (403)", c.get_policy().await);
+        s.fakes.security.fail("get_module_policy", None);
+        // Upload signatures and the list filter.
+        step!(
+            "upload signed",
+            c.upload_signed(vec![b"m1".to_vec(), b"m2".to_vec()]).await
+        );
+        assert_eq!(
+            s.cp.last_upload_signatures(),
+            vec![b"m1".to_vec(), b"m2".to_vec()]
+        );
+        step!(
+            "upload 5 signatures (400)",
+            c.upload_signed(vec![b"m".to_vec(); 5]).await
+        );
+        step!("list runs tenant", c.list_runs_tenant("acme").await);
+        assert_eq!(
+            s.cp.last_list_runs().expect("listed").tenant.as_deref(),
+            Some("acme")
+        );
+        step!(
+            "list runs bad tenant (400)",
+            c.list_runs_tenant("A_B").await
+        );
+        t
+    }
+
+    #[tokio::test]
+    async fn rest_and_grpc_transcripts_are_equal() {
+        let rs = serve_p14(false).await;
+        let gs = serve_p14(false).await;
+        let mut rest = RestClient::new(rs.addr);
+        let mut grpc = P14Grpc::connect(gs.addr).await;
+        let a = scenario(&mut rest, &rs).await;
+        let b = scenario(&mut grpc, &gs).await;
+        assert_eq!(a.len(), b.len());
+        for ((name, ra), (_, gb)) in a.iter().zip(&b) {
+            assert_eq!(ra, gb, "step {name:?}: REST vs gRPC");
+        }
+        // The expected error codes, once (the transcripts are equal).
+        let code = |n: &str| {
+            a.iter()
+                .find(|(s, _)| s == n)
+                .unwrap_or_else(|| panic!("{n}"))
+                .1
+                .clone()
+                .expect_err(n)
+                .0
+        };
+        assert_eq!(code("create dup (409)"), ErrorCode::Conflict);
+        assert_eq!(code("get missing (404)"), ErrorCode::NotFound);
+        assert_eq!(code("rotate revoked (412)"), ErrorCode::PreconditionFailed);
+        assert_eq!(code("audit unavailable (503)"), ErrorCode::Unavailable);
+        assert_eq!(code("policy denied (403)"), ErrorCode::PermissionDenied);
+        assert_eq!(code("attach too many (400)"), ErrorCode::InvalidArgument);
+        let reason = |n: &str| {
+            a.iter()
+                .find(|(s, _)| s == n)
+                .unwrap()
+                .1
+                .clone()
+                .expect_err(n)
+                .1
+                .expect("details")["reason"]
+                .clone()
+        };
+        assert_eq!(
+            reason("delete active (409 tenant_not_empty)"),
+            "tenant_not_empty"
+        );
+        assert_eq!(reason("audit unavailable (503)"), "audit_unavailable");
+        assert_eq!(reason("attach too large (400)"), "signature_invalid");
+        assert_eq!(reason("upload 5 signatures (400)"), "signature_invalid");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_maps_to_401_and_unauthenticated() {
+        let s = serve_p14(true).await;
+        let mut rest = RestClient::new(s.addr);
+        let mut grpc = P14Grpc::connect(s.addr).await;
+        let r = rest.whoami().await.expect_err("401");
+        let g = grpc.whoami().await.expect_err("UNAUTHENTICATED");
+        assert_eq!(r, g);
+        assert_eq!(r.0, ErrorCode::Unauthenticated);
+        assert_eq!(r.1.expect("details")["reason"], "unauthenticated");
+        let r = rest.list_tenants().await.expect_err("401");
+        let g = grpc.list_tenants().await.expect_err("UNAUTHENTICATED");
+        assert_eq!(r, g);
+    }
+}

@@ -823,6 +823,9 @@ fn list_request(
             CursorMode::Scan => ListOrder::Oldest,
         },
         dlq: f.dlq,
+        // Phase 14 (14-02 field): bulk selection keeps its pre-tenant filter; tenant scoping of
+        // bulk jobs is 14-16's.
+        tenant: None,
     }
 }
 

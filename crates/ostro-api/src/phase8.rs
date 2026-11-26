@@ -526,7 +526,8 @@ pub struct HookPayload(#[allow(dead_code)] Vec<u8>);
 /// A webhook delivery as received: the raw body and headers, nothing parsed.
 #[derive(Clone, Debug)]
 pub struct HookRequest {
-    /// The `{name}` path segment (grammar-checked).
+    /// The `{name}` path segment (grammar-checked), or `<tenant>/<name>` for
+    /// `POST /hooks/{tenant}/{name}` (D23-checked; Phase 14).
     pub name: String,
     /// Request headers.
     pub headers: HeaderMap,
@@ -1352,8 +1353,20 @@ async fn deliver_hook(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<HookResponse, ApiError> {
-    let api = ext.hooks()?;
+    ext.hooks()?;
     validate_resource_name("webhook", &name)?;
+    deliver_named(&ext, name, headers, body).await
+}
+
+/// One delivery to the webhook `name` (plain, or `<tenant>/<name>` from
+/// [`deliver_tenant_hook`]; both validated by the caller).
+async fn deliver_named(
+    ext: &ApiExtensions,
+    name: String,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<HookResponse, ApiError> {
+    let api = ext.hooks()?;
     let body = body.map_err(|r| {
         if r.status() == StatusCode::PAYLOAD_TOO_LARGE {
             ApiError::payload_too_large(format!(
@@ -1370,6 +1383,48 @@ async fn deliver_hook(
         body,
     })
     .await
+}
+
+/// Deliver a tenant's webhook (Phase 14, D-P14-29): the delivery goes to the webhook named
+/// `<tenant>/<name>`. Both parts follow the D23 grammar (tenant
+/// `^[a-z0-9][a-z0-9-]{0,62}$`, name `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; 400 otherwise).
+/// Verified like `POST /hooks/{name}`; no other authentication.
+#[utoipa::path(
+    post,
+    path = "/hooks/{tenant}/{name}",
+    tag = "webhooks",
+    params(
+        ("tenant" = String, Path, description = "Tenant id"),
+        ("name" = String, Path, description = "Webhook name within the tenant"),
+    ),
+    request_body(
+        description = "Raw payload, verified byte-for-byte",
+        content((HookPayload = "application/json"), (HookPayload = "application/octet-stream")),
+    ),
+    responses(
+        (status = 200, description = "Delivered (the body depends on the action)"),
+        (status = 202, description = "Accepted"),
+        (status = 400, description = "Invalid tenant or webhook name", body = ErrorBody),
+        (status = 401, description = "Missing or invalid signature"),
+        (status = 404, description = "Unknown webhook", body = ErrorBody),
+        (status = 413, description = "Body exceeds triggers.webhook_body_limit", body = ErrorBody),
+    )
+)]
+async fn deliver_tenant_hook(
+    State(ext): State<ExtState>,
+    Path((tenant, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<HookResponse, ApiError> {
+    ext.hooks()?;
+    let qualified = format!("{tenant}/{name}");
+    if tenant.contains('/') || name.contains('/') {
+        return Err(ApiError::invalid_argument(
+            "webhook: tenant and name may not contain '/'",
+        ));
+    }
+    crate::phase11::validate_qualified_name("webhook", &qualified)?;
+    deliver_named(&ext, qualified, headers, body).await
 }
 
 /// A run's recent guest log lines (non-durable, P8-D16).
@@ -1438,6 +1493,8 @@ pub fn api_routes(hook_body_limit: usize) -> OpenApiRouter<ExtState> {
         .routes(routes!(list_webhooks, create_webhook))
         .routes(routes!(get_webhook, update_webhook, delete_webhook))
         .routes(routes!(deliver_hook).layer(DefaultBodyLimit::max(hook_body_limit)))
+        // Phase 14 (14-02): tenant webhooks, same body limit.
+        .routes(routes!(deliver_tenant_hook).layer(DefaultBodyLimit::max(hook_body_limit)))
         .routes(routes!(run_logs))
         .routes(routes!(backup))
 }
