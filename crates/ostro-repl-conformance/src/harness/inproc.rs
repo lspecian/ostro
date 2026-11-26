@@ -554,6 +554,35 @@ pub(crate) async fn p13_post(
     }
 }
 
+/// Whether a membership write answered the retryable "busy" refusal: HTTP 503 with error
+/// code `unavailable` (e.g. "a metadata membership change is in progress; retry in a
+/// moment" while a joined voter is still moving through joint consensus).
+pub(crate) fn membership_busy(st: reqwest::StatusCode, body: &Value) -> bool {
+    st == reqwest::StatusCode::SERVICE_UNAVAILABLE && body["error"]["code"] == "unavailable"
+}
+
+/// [`p13_post`] for a membership write (drain / remove): a [`membership_busy`] answer is
+/// retried every 200 ms within [`MEMBERSHIP_T`], as the error asks; any other answer is
+/// returned as it is.
+pub(crate) async fn p13_post_membership(
+    api: &ApiClient,
+    path: &str,
+    body: &Value,
+) -> Result<Value, HarnessError> {
+    // clock-exempt: test timeout
+    let deadline = tokio::time::Instant::now() + MEMBERSHIP_T;
+    loop {
+        let (st, v) = api.post_json(path, body).await?;
+        if st.is_success() {
+            return Ok(v);
+        }
+        if !membership_busy(st, &v) || tokio::time::Instant::now() >= deadline {
+            return Err(http_error("POST", path, st, &v));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// `GET path`; the 2xx body, else [`http_error`].
 pub(crate) async fn p13_get(api: &ApiClient, path: &str) -> Result<Value, HarnessError> {
     let (st, v) = api.get_json(path).await?;
@@ -590,7 +619,7 @@ pub(crate) async fn remove_and_wait(
     force: bool,
 ) -> Result<(), HarnessError> {
     let path = format!("/v1/cluster/members/{id}/remove");
-    p13_post(api, &path, &json!({ "force": force })).await?;
+    p13_post_membership(api, &path, &json!({ "force": force })).await?;
     // clock-exempt: test timeout
     let deadline = tokio::time::Instant::now() + MEMBERSHIP_T;
     loop {
@@ -718,7 +747,7 @@ impl P13Harness for InProcCluster {
         let via = self
             .running_node(Some(id))
             .or_else(|_| self.running_node(None))?;
-        p13_post(
+        p13_post_membership(
             &self.client(via),
             &format!("/v1/cluster/members/{id}/drain"),
             &json!({}),
@@ -1328,4 +1357,29 @@ pub fn read_meta_log(meta_dir: &Path) -> Result<MetaLogDump, HarnessError> {
         snapshot_state,
         state,
     })
+}
+
+#[cfg(test)]
+mod membership_retry_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_503_unavailable_answer_is_retried() {
+        let busy = json!({"error": {"code": "unavailable",
+            "message": "a metadata membership change is in progress; retry in a moment"}});
+        assert!(membership_busy(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            &busy
+        ));
+        let only_voter = json!({"error": {"code": "precondition_failed", "message": "x"}});
+        assert!(!membership_busy(
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            &only_voter
+        ));
+        assert!(!membership_busy(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            &only_voter
+        ));
+        assert!(!membership_busy(reqwest::StatusCode::NOT_FOUND, &busy));
+    }
 }

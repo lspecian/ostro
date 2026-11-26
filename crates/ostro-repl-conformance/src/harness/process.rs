@@ -78,7 +78,8 @@ use tempfile::TempDir;
 use super::certs::TestPki;
 use super::chaos_proxy::{ChaosProxy, Link};
 use super::inproc::{
-    MEMBERSHIP_T, free_addr, node_token, p13_get, p13_post, read_meta_log, remove_and_wait,
+    MEMBERSHIP_T, free_addr, node_token, p13_get, p13_post, p13_post_membership, read_meta_log,
+    remove_and_wait,
 };
 use super::p13::{NodeOpts, P13Harness};
 use super::{ApiClient, ClusterHarness, ClusterSpec, DataDirView, HarnessError, MetaLogEntry};
@@ -1274,7 +1275,7 @@ impl P13Harness for ProcCluster {
         let via = self
             .running_node(Some(id))
             .or_else(|_| self.running_node(None))?;
-        p13_post(
+        p13_post_membership(
             &self.client(via),
             &format!("/v1/cluster/members/{id}/drain"),
             &serde_json::json!({}),
