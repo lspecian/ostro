@@ -30,8 +30,16 @@
 //!   [`ExhaustPolicy`](crate::executor::ExhaustPolicy): `on_retries_exhausted` of the
 //!   workflow policy wins over the queue's; `1` (pause) pauses, `0`/unset fails.
 //!
+//! - Phase 14 (14-06, D-P14-14): after the pauses and before the queue limits, the
+//!   entry's tenant ([`tenant::TenantFlow`]: suspension, concurrency, memory, fuel debt on
+//!   the leadership share) → `TenantBlocked{until}`; the tenant charge rides on the same
+//!   permit (committed, rolled back and released with it). `tenant_weight(t)` =
+//!   `Tenant.weight`. The quota view comes from the Phase 14 context ([`install`]); its
+//!   changes bump `changed()`. [`NodeFlow`] also charges each activation's fuel
+//!   ([`ExhaustPolicy::charge_fuel`]).
+//!
 //! Metrics: `ostro_flow_admit_total{queue,result}` (`result` = `admitted`,
-//! `queue_blocked`, `key_blocked`, `paused`) and `ostro_flow_throttled_total{queue}` (a
+//! `queue_blocked`, `key_blocked`, `paused`, `tenant_blocked`) and `ostro_flow_throttled_total{queue}` (a
 //! throttle held back a first activation).
 
 pub mod limits;
@@ -93,6 +101,8 @@ pub struct NodeFlow {
     inner: Arc<Inner>,
     default_weight: AtomicU32,
     watcher: AtomicBool,
+    /// Phase 14 (14-06): the tenant level.
+    tenants: tenant::TenantFlow,
 }
 
 impl NodeFlow {
@@ -118,6 +128,7 @@ impl NodeFlow {
             }),
             default_weight: AtomicU32::new(cfg.default_queue_weight.max(1)),
             watcher: AtomicBool::new(false),
+            tenants: tenant::TenantFlow::new(),
         }
     }
 
@@ -144,6 +155,42 @@ impl NodeFlow {
     /// Activations of `queue` holding a flow charge now (tests, diagnostics).
     pub fn running(&self, queue: &str) -> u32 {
         self.inner.counters().running(queue)
+    }
+
+    /// The tenant level (Phase 14, 14-06).
+    pub fn tenants(&self) -> &tenant::TenantFlow {
+        &self.tenants
+    }
+
+    /// Enforce `view`'s tenant quotas and bump `changed()` on every view change until
+    /// `shutdown` (Phase 14, 14-06; called by [`install`]). The first view wins.
+    pub fn install_quotas(
+        &self,
+        view: Arc<crate::p14::quota_view::TenantQuotaView>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) {
+        if self.tenants.view().is_some() {
+            return;
+        }
+        let mut rx = view.subscribe();
+        self.tenants.install(view);
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let inner = Arc::clone(&self.inner);
+        rt.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    r = rx.changed() => {
+                        if r.is_err() {
+                            break;
+                        }
+                        inner.bump();
+                    }
+                }
+            }
+        });
     }
 
     /// Activations of `(queue, key)` holding a flow charge now.
@@ -222,17 +269,34 @@ impl NodeFlow {
         });
     }
 
-    fn permit(&self, charge: Charge, limited: bool) -> FlowPermit {
+    fn permit(&self, charge: Charge, limited: bool, tenant: tenant::TenantPermit) -> FlowPermit {
         let (rb_inner, rel_inner) = (Arc::clone(&self.inner), Arc::clone(&self.inner));
         let rb_charge = charge.clone();
+        // The tenant charge (14-06) is rolled back / released with the flow charge.
+        let limited = limited || tenant.capacity_limited();
+        let rb_tenant = Arc::new(Mutex::new(Some(tenant)));
+        let rel_tenant = Arc::clone(&rb_tenant);
         FlowPermit::new(move || {
             let now = rb_inner.now_ms();
             rb_inner.counters().rollback(&rb_charge, now);
+            drop(
+                rb_tenant
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take(),
+            );
             rb_inner.bump();
         })
         .with_release(move || {
             let now = rel_inner.now_ms();
             rel_inner.counters().release(&charge, now);
+            if let Some(mut t) = rel_tenant
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+            {
+                t.commit();
+            }
             if limited {
                 rel_inner.bump();
             }
@@ -281,6 +345,18 @@ impl FlowControl for NodeFlow {
                 scope: PauseScope::Workflow,
             };
         }
+        // Phase 14 (14-06): the tenant level, above the queue level.
+        let t = ostro_partition::leader::fair::tenant_key(e.tenant, e.workflow);
+        let tp = match self
+            .tenants
+            .admit(t, self.tenants.instance_memory(), now_ms)
+        {
+            tenant::Admit::Granted(tp) => tp,
+            tenant::Admit::Blocked { until, .. } => {
+                count(e.queue, "tenant_blocked");
+                return Admit::TenantBlocked { until_ms: until };
+            }
+        };
         let p = p.as_deref();
         let req = AdmitReq {
             queue: e.queue,
@@ -301,7 +377,7 @@ impl FlowControl for NodeFlow {
         match r {
             Ok(charge) => {
                 count(e.queue, "admitted");
-                Admit::Yes(self.permit(charge, limited))
+                Admit::Yes(self.permit(charge, limited, tp))
             }
             Err(Block::QueueConcurrency) => {
                 count(e.queue, "queue_blocked");
@@ -339,6 +415,10 @@ impl FlowControl for NodeFlow {
             .max(1)
     }
 
+    fn tenant_weight(&self, tenant: &str) -> u32 {
+        self.tenants.weight(tenant)
+    }
+
     fn changed(&self) -> watch::Receiver<u64> {
         self.inner.changed.subscribe()
     }
@@ -362,6 +442,12 @@ impl ExhaustPolicy for NodeFlow {
             ExhaustAction::Fail
         }
     }
+
+    fn charge_fuel(&self, record: &RunRecord, consumed: u64) {
+        let t =
+            ostro_partition::leader::fair::tenant_key(record.tenant.as_deref(), &record.workflow);
+        self.tenants.charge_fuel(t, consumed, self.inner.now_ms());
+    }
 }
 
 /// Install the node's flow control into the dispatcher configuration: the `[flow]` section
@@ -370,6 +456,11 @@ pub fn install(ctx: &P7Ctx, cfg: &mut DispatcherConfig) {
     let flow = &ctx.shared.flow;
     flow.configure(&ctx.config.flow, Arc::clone(&ctx.clock));
     flow.spawn_watcher(ctx.shutdown.clone());
+    // Phase 14 (14-06): the tenant quota view of the Phase 14 context (attached to the
+    // join service before the dispatcher configuration is built).
+    if let Some(p14) = ctx.shared.join.p14() {
+        flow.install_quotas(Arc::clone(&p14.quotas), ctx.shutdown.clone());
+    }
     cfg.flow = Some(Arc::clone(flow) as Arc<dyn FlowControl>);
     cfg.gauges = Some(Arc::clone(&ctx.shared.gauges));
 }

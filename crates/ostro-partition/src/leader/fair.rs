@@ -904,9 +904,7 @@ impl FairQueues {
         let mut out: BTreeMap<String, u64> = BTreeMap::new();
         for s in self.sets.values() {
             for (q, at) in s.per_queue_oldest() {
-                out.entry(q)
-                    .and_modify(|o| *o = (*o).min(at))
-                    .or_insert(at);
+                out.entry(q).and_modify(|o| *o = (*o).min(at)).or_insert(at);
             }
         }
         out

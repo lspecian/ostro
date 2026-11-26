@@ -422,7 +422,8 @@ mod phase7 {
 
         /// Forget a key park (no refile).
         fn unpark_key_record(&mut self, queue: &str, key: &str) {
-            if let Some(Some(until)) = self.parked_keys.remove(&(queue.to_owned(), key.to_owned())) {
+            if let Some(Some(until)) = self.parked_keys.remove(&(queue.to_owned(), key.to_owned()))
+            {
                 self.park_until
                     .remove(&(until, queue.to_owned(), key.to_owned()));
             }
@@ -746,7 +747,6 @@ mod phase7 {
             };
         }
     }
-
 }
 
 fn rid(i: u64) -> RunId {
@@ -803,7 +803,11 @@ enum Op {
     /// Ask for the next candidate at `now` and answer it as the dispatcher does: take it
     /// (granted), hold it (workflow paused), skip or park its queue, park its key, or
     /// gate its queue's / key's first activations (`until` for timed answers).
-    Next { now: u64, answer: u8, until: u64 },
+    Next {
+        now: u64,
+        answer: u8,
+        until: u64,
+    },
     UnparkDue(u64),
     BeginRound,
     ReleaseHeld,
@@ -811,7 +815,10 @@ enum Op {
     UnparkQueues,
     UnparkKeys,
     UnparkAll,
-    Weight { q: u8, w: u32 },
+    Weight {
+        q: u8,
+        w: u32,
+    },
     Clear,
 }
 
@@ -840,7 +847,11 @@ fn qn(q: u8) -> String {
 }
 
 fn kn(k: u8) -> String {
-    if k == 0 { String::new() } else { format!("k{k}") }
+    if k == 0 {
+        String::new()
+    } else {
+        format!("k{k}")
+    }
 }
 
 proptest! {
@@ -1002,7 +1013,9 @@ fn weights_one_two_four_interleave_exactly() {
     let order = picks(&mut f, 14, u64::MAX);
     assert_eq!(
         order,
-        ["a", "b", "b", "c", "c", "c", "c", "a", "b", "b", "c", "c", "c", "c"],
+        [
+            "a", "b", "b", "c", "c", "c", "c", "a", "b", "b", "c", "c", "c", "c"
+        ],
     );
 }
 
@@ -1125,7 +1138,11 @@ fn queue_weights_still_apply_inside_a_tenant() {
 fn tenant_key_rules() {
     assert_eq!(tenant_key(Some("acme"), "acme/wf"), "acme");
     assert_eq!(tenant_key(Some("acme"), "wf"), "acme");
-    assert_eq!(tenant_key(None, "acme/wf"), "acme", "P14-F9: qualified workflow");
+    assert_eq!(
+        tenant_key(None, "acme/wf"),
+        "acme",
+        "P14-F9: qualified workflow"
+    );
     assert_eq!(tenant_key(None, "wf"), "");
     assert_eq!(tenant_key(Some(""), "wf"), "");
     assert_eq!(tenant_key(Some("_"), "acme/wf"), "");

@@ -94,6 +94,11 @@ pub trait ActivationSink: Send + Sync {
     fn handles_guest_logs(&self) -> bool {
         false
     }
+
+    /// The fuel this activation consumed (Phase 14, 14-06: per-tenant fuel quotas charge
+    /// it). Called once per activation whose store was configured, after the guest call
+    /// ended and before the activation returns. The default ignores it.
+    fn fuel_consumed(&self, _fuel: u64) {}
 }
 
 /// One live guest log line, as handed from the engine to [`ActivationSink::guest_log`].

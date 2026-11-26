@@ -339,6 +339,9 @@ pub enum ExhaustAction {
 /// `on_retries_exhausted`, workflow policy over queue policy).
 pub trait ExhaustPolicy: Send + Sync {
     fn on_exhausted(&self, record: &ostro_partition::store::values::RunRecord) -> ExhaustAction;
+    /// Phase 14 (14-06, D-P14-14): the fuel one activation of `record` consumed, charged
+    /// to its tenant's fuel bucket when the activation ended. Default: ignored.
+    fn charge_fuel(&self, _record: &ostro_partition::store::values::RunRecord, _consumed: u64) {}
 }
 
 /// The engine-backed dispatcher executor.
@@ -480,6 +483,26 @@ impl EngineExecutor {
 
     pub fn config(&self) -> &ExecutorConfig {
         &self.cfg
+    }
+
+    /// Phase 14 (14-06): charge `consumed` fuel of one ended activation of `record` to its
+    /// tenant (through the [`ExhaustPolicy`], i.e. the node flow).
+    pub(crate) fn charge_fuel(
+        &self,
+        record: &ostro_partition::store::values::RunRecord,
+        consumed: u64,
+    ) {
+        if let Some(p) = &self.exhaust {
+            p.charge_fuel(record, consumed);
+        }
+    }
+
+    /// Phase 14 (14-06): a remote activation ended. The worker's `Done` carries no fuel
+    /// (14-01), so the activation's fuel limit (`engine.activation_fuel`, an upper bound)
+    /// is charged.
+    pub(crate) fn charge_remote_fuel(&self, record: &ostro_partition::store::values::RunRecord) {
+        let limit = self.runtime.engine().config().activation_fuel;
+        self.charge_fuel(record, limit);
     }
 
     /// 13-17: `Some(message)` when module `sha` has no metadata record (module GC deleted
@@ -694,6 +717,8 @@ struct EngineSink {
     cancel: CancellationToken,
     gate: Option<Arc<Semaphore>>,
     engine_end: AtomicU64,
+    /// Fuel the activation consumed (14-06; `u64::MAX` = not reported).
+    fuel: AtomicU64,
 }
 
 #[async_trait::async_trait]
@@ -742,6 +767,10 @@ impl ActivationSink for EngineSink {
 
     fn effect_driver(&self) -> Option<Arc<dyn ostro_engine::EffectDriver>> {
         self.inner.effect_driver()
+    }
+
+    fn fuel_consumed(&self, fuel: u64) {
+        self.fuel.store(fuel, Ordering::Release);
     }
 }
 
@@ -953,6 +982,7 @@ impl EngineExecutor {
             cancel: cancel.clone(),
             gate: self.hooks.gate(token.n),
             engine_end: AtomicU64::new(end),
+            fuel: AtomicU64::new(u64::MAX),
         });
         self.hooks.activations.fetch_add(1, Ordering::Relaxed);
         let act = Activate {
@@ -974,6 +1004,11 @@ impl EngineExecutor {
             ),
         )
         .await;
+        // Phase 14 (14-06): the activation ended; charge its fuel to the tenant.
+        let fuel = esink.fuel.load(Ordering::Acquire);
+        if fuel != u64::MAX {
+            self.charge_fuel(record, fuel);
+        }
         if sink.is_terminal() || cancel.is_cancelled() {
             return (Some(outcome), ExecOutcome::Released);
         }

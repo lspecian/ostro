@@ -91,6 +91,12 @@ impl JoinService {
         let _ = self.p14.set(Arc::downgrade(ctx));
     }
 
+    /// The attached Phase 14 context, while it is alive (14-06: `flow::install` takes the
+    /// tenant quota view from it).
+    pub(crate) fn p14(&self) -> Option<Arc<crate::p14::P14Ctx>> {
+        self.p14.get().and_then(Weak::upgrade)
+    }
+
     fn report<T>(
         &self,
         action: crate::p14::WorkerAction,

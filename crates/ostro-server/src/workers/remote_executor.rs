@@ -602,6 +602,8 @@ impl RemoteRunner {
         let Some(done) = done else {
             return (None, ExecOutcome::Released, true);
         };
+        // Phase 14 (14-06): the remote activation ended; charge its fuel (limit fallback).
+        engine.charge_remote_fuel(&record);
         let outcome = match WireOutcome::decode(&done.outcome) {
             Ok(w) => w.into_engine(),
             Err(e) => ActivationOutcome::AttemptFailed(AttemptFailure::ProtocolViolation(format!(

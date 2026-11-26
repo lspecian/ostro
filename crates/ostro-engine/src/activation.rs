@@ -282,6 +282,10 @@ impl ActivationSink for MeteredSink {
     fn handles_guest_logs(&self) -> bool {
         self.inner.handles_guest_logs()
     }
+
+    fn fuel_consumed(&self, fuel: u64) {
+        self.inner.fuel_consumed(fuel);
+    }
 }
 
 /// Run one activation and report its outcome via `sink.done` exactly once.
@@ -471,8 +475,10 @@ async fn execute(
     // Nothing live was committed: replay ended with the guest call.
     meter.replay_ended(rt.clock().now_unix_nanos()); // clock-exempt: replay duration metric
     if let Some(left) = fuel_left {
+        let consumed = cfg.activation_fuel.saturating_sub(left);
         metrics::counter!("ostro_fuel_consumed_total", "workflow" => workflow.clone())
-            .increment(cfg.activation_fuel.saturating_sub(left));
+            .increment(consumed);
+        meter.fuel_consumed(consumed);
     }
     if let ActivationOutcome::AttemptFailed(f) = &outcome {
         tracing::warn!(reason = f.reason_code(), detail = %f.dlq_reason(), "activation attempt failed");
