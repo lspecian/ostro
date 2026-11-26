@@ -6,6 +6,8 @@
 //! "Zeroized" covers Ostro-owned buffers only: hyper/rustls internals and `HeaderValue`
 //! bytes are outside our control.
 
+// Phase 14 (14-01 stub, 14-18): the audited resolver wrapper.
+pub mod audited;
 pub mod config;
 pub mod grants;
 pub mod providers;
@@ -15,6 +17,7 @@ pub mod sealed;
 pub mod template;
 pub mod value;
 
+pub use audited::Audited;
 pub use config::SecretsConfig;
 pub use grants::{GrantError, GrantSpec, check_grant};
 pub use providers::chain::ProviderChain;

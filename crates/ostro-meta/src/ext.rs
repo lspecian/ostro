@@ -458,6 +458,291 @@ typed_ext!(
 );
 typed_ext!(get_retired, put_retired, EXT_RETIRED, Retired);
 
+// ---- Phase 14 (14-01, RESERVATIONS §10b tags 112–117; D-P14-28) -------------------------------
+//
+// Same rules as the Phase 13 block: positional postcard, frozen once shipped, unknown tags kept
+// by the typed `put_*` helpers, never decoded at apply (05-20 rule 5). Emitted only after
+// `ostro_types::compat::require` for the matching `Feature::*Ext` (introduced at `LEVEL`).
+
+/// `ApiToken` ApiTokenMeta (tag 112).
+pub const EXT_API_TOKEN_META: u32 = 112;
+/// `ModuleRecord` ModuleSignatures (tag 113): signature evidence with key fingerprints.
+pub const EXT_MODULE_SIGNATURES: u32 = 113;
+/// `ModuleRecord` ModuleUploaders (tag 114).
+pub const EXT_MODULE_UPLOADERS: u32 = 114;
+/// `ClusterInfo` SecurityPolicy (tag 115): the cluster-wide signed-module / auth policy.
+pub const EXT_SECURITY_POLICY: u32 = 115;
+/// `Tenant` TenantSecurity (tag 116): per-tenant tightening of the security policy.
+pub const EXT_TENANT_SECURITY: u32 = 116;
+/// `SealedSecret` SecretTimes (tag 117).
+pub const EXT_SECRET_TIMES: u32 = 117;
+
+/// Every Phase 14 tag, ascending (118–143 stay spare).
+pub const P14_EXT_TAGS: [u32; 6] = [
+    EXT_API_TOKEN_META,
+    EXT_MODULE_SIGNATURES,
+    EXT_MODULE_UPLOADERS,
+    EXT_SECURITY_POLICY,
+    EXT_TENANT_SECURITY,
+    EXT_SECRET_TIMES,
+];
+
+/// [`ModuleSig::alg`] / [`TrustedKey::alg`]: minisign legacy `Ed` (pure Ed25519).
+pub const SIG_ALG_MINISIGN_ED: u8 = 1;
+/// [`ModuleSig::alg`] / [`TrustedKey::alg`]: minisign prehashed `ED` (Ed25519 over BLAKE2b-512).
+pub const SIG_ALG_MINISIGN_ED_PREHASHED: u8 = 2;
+/// [`ModuleSig::alg`] / [`TrustedKey::alg`]: cosign keyed ECDSA P-256 / SHA-256.
+pub const SIG_ALG_COSIGN_P256: u8 = 3;
+
+/// [`SecurityPolicy::auth_mode`]: unset (the node config decides).
+pub const AUTH_MODE_UNSET: u8 = 0;
+/// [`SecurityPolicy::auth_mode`]: `[auth] mode = "none"`.
+pub const AUTH_MODE_NONE: u8 = 1;
+/// [`SecurityPolicy::auth_mode`]: `[auth] mode = "token"`.
+pub const AUTH_MODE_TOKEN: u8 = 2;
+
+/// Descriptive fields of an API token (tag 112). Never holds the secret or its hash.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiTokenMeta {
+    /// Operator-chosen name.
+    pub name: String,
+    /// Free-form description.
+    pub description: String,
+    /// Token id (or `system` / `bootstrap`) of the creator.
+    pub created_by: String,
+    /// The token this one was rotated from, if any.
+    pub rotated_from: Option<String>,
+}
+
+/// One persisted module signature (inside tag 113).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleSig {
+    /// One of the `SIG_ALG_*` constants (unknown values are kept as-is).
+    pub alg: u8,
+    /// `sha256(alg ‖ public_key)` of the key that verified the signature (D-P14-10 B1(c)):
+    /// activation and version gates re-verify over the blob with a key of this fingerprint.
+    pub key_fingerprint: [u8; 32],
+    /// Signature key id (minisign 8-byte key id, cosign key hint bytes).
+    pub key_id: Vec<u8>,
+    /// Raw signature bytes.
+    pub sig: Vec<u8>,
+    /// When the signature was attached (Unix ms).
+    pub added_at_ms: u64,
+    /// Token id (or `system`) that attached it.
+    pub added_by: String,
+}
+
+/// Signature evidence of a module (tag 113).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleSignatures {
+    /// Every accepted signature, in the order attached.
+    pub sigs: Vec<ModuleSig>,
+}
+
+/// Tenants that uploaded a module (tag 114).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleUploaders {
+    /// Uploader tenant ids (`_` = default tenant), sorted, unique.
+    pub tenants: Vec<String>,
+}
+
+/// A trusted signing key (inside tags 115 and 116).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedKey {
+    /// One of the `SIG_ALG_*` constants.
+    pub alg: u8,
+    /// Key id (minisign key id, cosign key hint).
+    pub key_id: Vec<u8>,
+    /// Public key bytes (raw Ed25519 32 bytes, or SPKI DER for P-256).
+    pub public_key: Vec<u8>,
+    /// Operator comment.
+    pub comment: String,
+}
+
+/// Cluster-wide security policy (tag 115, `ClusterInfo`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityPolicy {
+    /// Uploads and activations need a valid signature by a trusted key.
+    pub require_signed_modules: bool,
+    /// Cluster-wide trusted keys.
+    pub trusted_keys: Vec<TrustedKey>,
+    /// One of the `AUTH_MODE_*` constants.
+    pub auth_mode: u8,
+}
+
+/// Per-tenant tightening of the security policy (tag 116, `Tenant`). It can only tighten:
+/// `Some(false)` never relaxes a cluster requirement.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantSecurity {
+    /// `Some(true)` requires signed modules for this tenant.
+    pub require_signed_modules: Option<bool>,
+    /// Extra keys accepted for this tenant's own uploads.
+    pub trusted_keys: Vec<TrustedKey>,
+}
+
+/// Creation / rotation times of a sealed secret (tag 117, `SealedSecret`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretTimes {
+    /// When the secret was first stored (Unix ms).
+    pub created_at_ms: u64,
+    /// When the value was last replaced (Unix ms), if ever.
+    pub rotated_at_ms: Option<u64>,
+}
+
+typed_ext!(
+    get_api_token_meta,
+    put_api_token_meta,
+    EXT_API_TOKEN_META,
+    ApiTokenMeta
+);
+typed_ext!(
+    get_module_signatures,
+    put_module_signatures,
+    EXT_MODULE_SIGNATURES,
+    ModuleSignatures
+);
+typed_ext!(
+    get_module_uploaders,
+    put_module_uploaders,
+    EXT_MODULE_UPLOADERS,
+    ModuleUploaders
+);
+typed_ext!(
+    get_security_policy,
+    put_security_policy,
+    EXT_SECURITY_POLICY,
+    SecurityPolicy
+);
+typed_ext!(
+    get_tenant_security,
+    put_tenant_security,
+    EXT_TENANT_SECURITY,
+    TenantSecurity
+);
+typed_ext!(
+    get_secret_times,
+    put_secret_times,
+    EXT_SECRET_TIMES,
+    SecretTimes
+);
+
+#[cfg(test)]
+mod phase14_tests {
+    use super::*;
+
+    /// Shared with the meta golden (`tests/meta_golden.rs` renders the same values).
+    fn samples() -> (
+        ApiTokenMeta,
+        ModuleSignatures,
+        ModuleUploaders,
+        SecurityPolicy,
+        TenantSecurity,
+        SecretTimes,
+    ) {
+        let key = TrustedKey {
+            alg: SIG_ALG_MINISIGN_ED,
+            key_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            public_key: vec![0xab; 32],
+            comment: "release key".into(),
+        };
+        (
+            ApiTokenMeta {
+                name: "ci".into(),
+                description: "deploys from CI".into(),
+                created_by: "otk_aaaaaaaaaaaaaaaa".into(),
+                rotated_from: Some("otk_bbbbbbbbbbbbbbbb".into()),
+            },
+            ModuleSignatures {
+                sigs: vec![ModuleSig {
+                    alg: SIG_ALG_COSIGN_P256,
+                    key_fingerprint: [0x5a; 32],
+                    key_id: b"hint".to_vec(),
+                    sig: vec![0x30, 0x45, 0x02],
+                    added_at_ms: 1_700_000_000_000,
+                    added_by: "system".into(),
+                }],
+            },
+            ModuleUploaders {
+                tenants: vec!["_".into(), "acme".into()],
+            },
+            SecurityPolicy {
+                require_signed_modules: true,
+                trusted_keys: vec![key.clone()],
+                auth_mode: AUTH_MODE_TOKEN,
+            },
+            TenantSecurity {
+                require_signed_modules: Some(true),
+                trusted_keys: vec![key],
+            },
+            SecretTimes {
+                created_at_ms: 5,
+                rotated_at_ms: Some(9),
+            },
+        )
+    }
+
+    #[test]
+    fn p14_tags_are_the_registered_block() {
+        assert_eq!(P14_EXT_TAGS, [112, 113, 114, 115, 116, 117]);
+        assert_eq!(
+            [
+                SIG_ALG_MINISIGN_ED,
+                SIG_ALG_MINISIGN_ED_PREHASHED,
+                SIG_ALG_COSIGN_P256
+            ],
+            [1, 2, 3]
+        );
+        assert_eq!([AUTH_MODE_UNSET, AUTH_MODE_NONE, AUTH_MODE_TOKEN], [0, 1, 2]);
+        for t in P14_EXT_TAGS {
+            assert!(!P13_EXT_TAGS.contains(&t));
+        }
+    }
+
+    #[test]
+    fn every_p14_value_roundtrips_and_keeps_unknown_tags() {
+        let (tm, ms, mu, sp, ts, st) = samples();
+        // A newer binary's tag inside the P14 spare range (143) and a P13 tag survive.
+        let mut ext = ext_put(&[], EXT_TAG_TEST, &[1]).unwrap();
+        ext = put_retired(&ext, &Retired { retired_at_ms: 3 }).unwrap();
+        ext = ext_put(&ext, 143, &[0xbe, 0xef]).unwrap();
+        ext = put_api_token_meta(&ext, &tm).unwrap();
+        ext = put_module_signatures(&ext, &ms).unwrap();
+        ext = put_module_uploaders(&ext, &mu).unwrap();
+        ext = put_security_policy(&ext, &sp).unwrap();
+        ext = put_tenant_security(&ext, &ts).unwrap();
+        ext = put_secret_times(&ext, &st).unwrap();
+        ext_validate(&ext).unwrap();
+        assert_eq!(get_api_token_meta(&ext).unwrap(), Some(tm));
+        assert_eq!(get_module_signatures(&ext).unwrap(), Some(ms.clone()));
+        assert_eq!(get_module_uploaders(&ext).unwrap(), Some(mu));
+        assert_eq!(get_security_policy(&ext).unwrap(), Some(sp));
+        assert_eq!(get_tenant_security(&ext).unwrap(), Some(ts));
+        assert_eq!(get_secret_times(&ext).unwrap(), Some(st));
+        assert_eq!(get_retired(&ext).unwrap(), Some(Retired { retired_at_ms: 3 }));
+        assert_eq!(ext_get(&ext, 143), Some(&[0xbe, 0xef][..]));
+        let tags: Vec<u32> = ext_entries(&ext).unwrap().iter().map(|e| e.tag).collect();
+        assert_eq!(tags, [15, 102, 112, 113, 114, 115, 116, 117, 143]);
+        // Replacing one value keeps the others byte for byte.
+        let mut more = ms;
+        more.sigs.push(ModuleSig::default());
+        let replaced = put_module_signatures(&ext, &more).unwrap();
+        assert_eq!(get_module_signatures(&replaced).unwrap(), Some(more));
+        assert_eq!(ext_get(&replaced, EXT_SECRET_TIMES), ext_get(&ext, EXT_SECRET_TIMES));
+        assert_eq!(ext_get(&replaced, 143), Some(&[0xbe, 0xef][..]));
+        // Absent = None.
+        assert_eq!(get_security_policy(&[]).unwrap(), None);
+    }
+
+    #[test]
+    fn module_sig_carries_a_32_byte_fingerprint() {
+        let (_, ms, ..) = samples();
+        let bytes = postcard::to_stdvec(&ms.sigs[0]).unwrap();
+        // alg (1 byte) then the fixed 32-byte fingerprint (no length prefix).
+        assert_eq!(bytes[0], SIG_ALG_COSIGN_P256);
+        assert_eq!(&bytes[1..33], &[0x5a; 32]);
+    }
+}
+
 #[cfg(test)]
 mod phase13_tests {
     use super::*;

@@ -31,11 +31,18 @@ pub enum ErrorCode {
     /// `RESOURCE_EXHAUSTED` with [`ErrorCode::PayloadTooLarge`]; clients tell them apart with
     /// [`ErrorCode::from_grpc_code_and_details`].
     RateLimited,
+    /// Phase 14 (14-01, D-P14-6): missing, malformed, unknown or expired credentials. HTTP
+    /// 401 with `WWW-Authenticate: Bearer`, gRPC `UNAUTHENTICATED`.
+    Unauthenticated,
+    /// Phase 14 (14-01, D-P14-3/7/10/14): authenticated but not allowed (missing scope,
+    /// foreign tenant field, suspended tenant, signature required). HTTP 403, gRPC
+    /// `PERMISSION_DENIED`; `details.reason` says which.
+    PermissionDenied,
 }
 
 impl ErrorCode {
     /// Every code, in declaration order.
-    pub const ALL: [ErrorCode; 9] = [
+    pub const ALL: [ErrorCode; 11] = [
         ErrorCode::InvalidArgument,
         ErrorCode::NotFound,
         ErrorCode::Conflict,
@@ -45,6 +52,8 @@ impl ErrorCode {
         ErrorCode::Internal,
         ErrorCode::Unimplemented,
         ErrorCode::RateLimited,
+        ErrorCode::Unauthenticated,
+        ErrorCode::PermissionDenied,
     ];
 
     /// snake_case wire name (REST `error.code`).
@@ -59,6 +68,8 @@ impl ErrorCode {
             ErrorCode::Internal => "internal",
             ErrorCode::Unimplemented => "unimplemented",
             ErrorCode::RateLimited => "rate_limited",
+            ErrorCode::Unauthenticated => "unauthenticated",
+            ErrorCode::PermissionDenied => "permission_denied",
         }
     }
 
@@ -74,6 +85,8 @@ impl ErrorCode {
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::Unimplemented => StatusCode::NOT_IMPLEMENTED,
             ErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::Unauthenticated => StatusCode::UNAUTHORIZED,
+            ErrorCode::PermissionDenied => StatusCode::FORBIDDEN,
         }
     }
 
@@ -89,6 +102,8 @@ impl ErrorCode {
             ErrorCode::Internal => tonic::Code::Internal,
             ErrorCode::Unimplemented => tonic::Code::Unimplemented,
             ErrorCode::RateLimited => tonic::Code::ResourceExhausted,
+            ErrorCode::Unauthenticated => tonic::Code::Unauthenticated,
+            ErrorCode::PermissionDenied => tonic::Code::PermissionDenied,
         }
     }
 
@@ -144,6 +159,27 @@ pub mod reason {
     pub const TOKEN_ALREADY_COMPLETED: &str = "token_already_completed";
     /// The await token is malformed or fails verification. 400.
     pub const TOKEN_INVALID: &str = "token_invalid";
+    // Phase 14 (14-01; RESERVATIONS §11, D-P14-29).
+    /// No, a malformed, an unknown, a revoked or an expired bearer. 401.
+    pub const UNAUTHENTICATED: &str = "unauthenticated";
+    /// The principal lacks the scope the method needs. 403.
+    pub const MISSING_SCOPE: &str = "missing_scope";
+    /// A tenant principal named another tenant in a request field (D-P14-38). 403.
+    pub const FORBIDDEN_TENANT: &str = "forbidden_tenant";
+    /// The principal's tenant is suspended. 403.
+    pub const TENANT_SUSPENDED: &str = "tenant_suspended";
+    /// The tenant's `event_rate` GCRA refused the request. 429.
+    pub const TENANT_EVENT_RATE: &str = "tenant_event_rate";
+    /// Tenant delete refused: it still owns versions, runs, tokens or secrets. 409.
+    pub const TENANT_NOT_EMPTY: &str = "tenant_not_empty";
+    /// Signed modules are required and the upload / activation has no valid evidence. 403.
+    pub const SIGNATURE_REQUIRED: &str = "signature_required";
+    /// A signature was supplied and does not verify. 400.
+    pub const SIGNATURE_INVALID: &str = "signature_invalid";
+    /// No audit permit within `[audit] reserve_timeout`: not executed. 503.
+    pub const AUDIT_UNAVAILABLE: &str = "audit_unavailable";
+    /// The audit record failed after the action executed (`details.executed = true`). 500.
+    pub const AUDIT_COMMIT_FAILED: &str = "audit_commit_failed";
 }
 
 /// Control-plane error: code, human message and optional structured details.
@@ -270,6 +306,29 @@ impl ApiError {
             .with_details(serde_json::json!({ "reason": reason::TOKEN_INVALID }))
     }
 
+    /// Phase 14: 401 `unauthenticated` (the message never echoes the credential).
+    pub fn unauthenticated(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::Unauthenticated, message)
+            .with_details(serde_json::json!({ "reason": reason::UNAUTHENTICATED }))
+    }
+
+    /// Phase 14: 403 with `details.reason = reason` (e.g. [`reason::MISSING_SCOPE`]).
+    pub fn permission_denied(reason: &str, message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::PermissionDenied, message)
+            .with_details(serde_json::json!({ "reason": reason }))
+    }
+
+    /// Phase 14: 403 `missing_scope` naming the scope the method needs.
+    pub fn missing_scope(method: &str, scope: &str) -> Self {
+        Self::new(
+            ErrorCode::PermissionDenied,
+            format!("{method} needs the {scope:?} scope"),
+        )
+        .with_details(
+            serde_json::json!({ "reason": reason::MISSING_SCOPE, "method": method, "scope": scope }),
+        )
+    }
+
     /// `details.reason`, when present.
     pub fn reason(&self) -> Option<&str> {
         self.details.as_ref()?.get("reason")?.as_str()
@@ -341,6 +400,13 @@ impl IntoResponse for ApiError {
             res.headers_mut()
                 .insert(axum::http::header::RETRY_AFTER, secs.into());
         }
+        // Phase 14 (D-P14-6): a 401 names the scheme (RFC 6750).
+        if self.code == ErrorCode::Unauthenticated {
+            res.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static("Bearer"),
+            );
+        }
         res
     }
 }
@@ -349,7 +415,7 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
 
-    const TABLE: [(ErrorCode, u16, tonic::Code); 9] = [
+    const TABLE: [(ErrorCode, u16, tonic::Code); 11] = [
         (
             ErrorCode::InvalidArgument,
             400,
@@ -371,6 +437,12 @@ mod tests {
         (ErrorCode::Internal, 500, tonic::Code::Internal),
         (ErrorCode::Unimplemented, 501, tonic::Code::Unimplemented),
         (ErrorCode::RateLimited, 429, tonic::Code::ResourceExhausted),
+        (ErrorCode::Unauthenticated, 401, tonic::Code::Unauthenticated),
+        (
+            ErrorCode::PermissionDenied,
+            403,
+            tonic::Code::PermissionDenied,
+        ),
     ];
 
     #[test]
@@ -496,5 +568,37 @@ mod tests {
         assert_eq!(res.headers()[axum::http::header::RETRY_AFTER], "1");
         let res = ApiError::unavailable("x").into_response();
         assert!(res.headers().get(axum::http::header::RETRY_AFTER).is_none());
+    }
+
+    #[test]
+    fn auth_codes_map_to_401_and_403() {
+        let e = ApiError::unauthenticated("missing bearer");
+        assert_eq!(e.code.as_str(), "unauthenticated");
+        assert_eq!(e.reason(), Some(reason::UNAUTHENTICATED));
+        assert_eq!(e.grpc_code(), tonic::Code::Unauthenticated);
+        let res = e.into_response();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(res.headers()[axum::http::header::WWW_AUTHENTICATE], "Bearer");
+
+        let e = ApiError::missing_scope("cancel_run", "operate");
+        assert_eq!(e.code, ErrorCode::PermissionDenied);
+        assert_eq!(e.reason(), Some(reason::MISSING_SCOPE));
+        assert_eq!(e.details.as_ref().unwrap()["scope"], "operate");
+        assert_eq!(e.grpc_code(), tonic::Code::PermissionDenied);
+        let res = e.into_response();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert!(res.headers().get(axum::http::header::WWW_AUTHENTICATE).is_none());
+
+        let e = ApiError::permission_denied(reason::FORBIDDEN_TENANT, "tenant field names acme");
+        assert_eq!(e.http_status().as_u16(), 403);
+        assert_eq!(e.reason(), Some("forbidden_tenant"));
+        assert_eq!(
+            ErrorCode::from_grpc_code(tonic::Code::Unauthenticated),
+            ErrorCode::Unauthenticated
+        );
+        assert_eq!(
+            ErrorCode::from_http_status(StatusCode::FORBIDDEN),
+            ErrorCode::PermissionDenied
+        );
     }
 }

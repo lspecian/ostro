@@ -766,6 +766,14 @@ pub struct ApiExtensions {
     pub cluster: Option<Arc<dyn crate::phase13::ClusterApi>>,
     /// Phase 13 module retire / GC / migrate-runs (13-01 slot; routes from 13-03).
     pub module_lifecycle: Option<Arc<dyn crate::phase13::ModuleLifecycleApi>>,
+    /// Phase 14 tenants (14-01 slot; routes from 14-02, implementation 14-17).
+    pub tenants: Option<Arc<dyn crate::phase14::TenantsApi>>,
+    /// Phase 14 API tokens (14-01 slot; routes from 14-02, implementation 14-17).
+    pub api_tokens: Option<Arc<dyn crate::phase14::ApiTokensApi>>,
+    /// Phase 14 audit query (14-01 slot; routes from 14-02, implementation 14-18).
+    pub audit: Option<Arc<dyn crate::phase14::AuditApi>>,
+    /// Phase 14 module security (14-01 slot; routes from 14-02, implementation 14-19).
+    pub security: Option<Arc<dyn crate::phase14::SecurityApi>>,
 }
 
 impl Default for ApiExtensions {
@@ -782,6 +790,10 @@ impl Default for ApiExtensions {
             inventory: None,
             cluster: None,
             module_lifecycle: None,
+            tenants: None,
+            api_tokens: None,
+            audit: None,
+            security: None,
         }
     }
 }
@@ -799,6 +811,10 @@ impl std::fmt::Debug for ApiExtensions {
             .field("inventory", &self.inventory.is_some())
             .field("cluster", &self.cluster.is_some())
             .field("module_lifecycle", &self.module_lifecycle.is_some())
+            .field("tenants", &self.tenants.is_some())
+            .field("api_tokens", &self.api_tokens.is_some())
+            .field("audit", &self.audit.is_some())
+            .field("security", &self.security.is_some())
             .finish()
     }
 }

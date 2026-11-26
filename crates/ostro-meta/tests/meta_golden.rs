@@ -352,7 +352,119 @@ fn render() -> String {
         "snapshot full {}\n",
         hex(&encode_snapshot(&full_state()))
     ));
+    // 14-01: one appended line per Phase 14 ext value struct (tags 112-117, postcard).
+    for (name, _tag, bytes) in golden_p14_ext() {
+        out.push_str(&format!("ext {name} {}\n", hex(&bytes)));
+    }
     out
+}
+
+/// Phase 14 ext values (D-P14-28), one per tag 112-117: `(name, tag, postcard(value))`.
+fn golden_p14_ext() -> Vec<(&'static str, u32, Vec<u8>)> {
+    use ostro_meta::ext::*;
+    let key = TrustedKey {
+        alg: SIG_ALG_MINISIGN_ED,
+        key_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        public_key: vec![0xab; 32],
+        comment: "release key".into(),
+    };
+    let enc = |v: &dyn erased::Enc| v.enc();
+    vec![
+        (
+            "api_token_meta",
+            EXT_API_TOKEN_META,
+            enc(&ApiTokenMeta {
+                name: "ci".into(),
+                description: "deploys from CI".into(),
+                created_by: "otk_golden".into(),
+                rotated_from: Some("otk_golden_old".into()),
+            }),
+        ),
+        (
+            "module_signatures",
+            EXT_MODULE_SIGNATURES,
+            enc(&ModuleSignatures {
+                sigs: vec![ModuleSig {
+                    alg: SIG_ALG_MINISIGN_ED,
+                    key_fingerprint: [0x5a; 32],
+                    key_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                    sig: vec![0xcd; 64],
+                    added_at_ms: 1_700_000_000_000,
+                    added_by: "otk_golden".into(),
+                }],
+            }),
+        ),
+        (
+            "module_uploaders",
+            EXT_MODULE_UPLOADERS,
+            enc(&ModuleUploaders {
+                tenants: vec!["_".into(), "acme".into()],
+            }),
+        ),
+        (
+            "security_policy",
+            EXT_SECURITY_POLICY,
+            enc(&SecurityPolicy {
+                require_signed_modules: true,
+                trusted_keys: vec![key.clone()],
+                auth_mode: AUTH_MODE_TOKEN,
+            }),
+        ),
+        (
+            "tenant_security",
+            EXT_TENANT_SECURITY,
+            enc(&TenantSecurity {
+                require_signed_modules: Some(true),
+                trusted_keys: vec![key],
+            }),
+        ),
+        (
+            "secret_times",
+            EXT_SECRET_TIMES,
+            enc(&SecretTimes {
+                created_at_ms: 1_700_000_000_000,
+                rotated_at_ms: Some(1_700_000_100_000),
+            }),
+        ),
+    ]
+}
+
+/// Object-safe postcard encoding for the heterogeneous golden list.
+mod erased {
+    pub trait Enc {
+        fn enc(&self) -> Vec<u8>;
+    }
+    impl<T: serde::Serialize> Enc for T {
+        fn enc(&self) -> Vec<u8> {
+            postcard::to_stdvec(self).unwrap()
+        }
+    }
+}
+
+#[test]
+fn p14_ext_golden_lines_round_trip_through_the_typed_helpers() {
+    use ostro_meta::ext::*;
+    let tags: Vec<u32> = golden_p14_ext().iter().map(|(_, t, _)| *t).collect();
+    assert_eq!(tags, P14_EXT_TAGS);
+    let mut ext = Vec::new();
+    for (name, tag, bytes) in golden_p14_ext() {
+        assert_eq!(golden_line("ext", name), bytes, "{name}");
+        ext = ostro_meta::ext::ext_put(&ext, tag, &bytes).unwrap();
+    }
+    let ApiTokenMeta { created_by, .. } = get_api_token_meta(&ext).unwrap().unwrap();
+    assert_eq!(created_by, "otk_golden");
+    let sigs = get_module_signatures(&ext).unwrap().unwrap();
+    assert_eq!(sigs.sigs[0].key_fingerprint, [0x5a; 32]);
+    assert_eq!(get_module_uploaders(&ext).unwrap().unwrap().tenants, ["_", "acme"]);
+    assert!(get_security_policy(&ext).unwrap().unwrap().require_signed_modules);
+    assert_eq!(
+        get_tenant_security(&ext).unwrap().unwrap().require_signed_modules,
+        Some(true)
+    );
+    assert_eq!(
+        get_secret_times(&ext).unwrap().unwrap().rotated_at_ms,
+        Some(1_700_000_100_000)
+    );
 }
 
 /// With `OSTRO_BLESS=1`, rewrite the golden file (atomically) and return true.

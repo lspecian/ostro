@@ -38,16 +38,44 @@ pub enum Feature {
     WitRequirementExt,
     /// `ModuleRecord` / `WorkflowVersion` ext tag 102 (Retired).
     RetiredExt,
+    /// Phase 14 (D-P14-28): `ApiToken` ext tag 112 (ApiTokenMeta).
+    ApiTokenMetaExt,
+    /// Phase 14: `ModuleRecord` ext tag 113 (ModuleSignatures).
+    ModuleSignaturesExt,
+    /// Phase 14: `ModuleRecord` ext tag 114 (ModuleUploaders).
+    ModuleUploadersExt,
+    /// Phase 14: `ClusterInfo` ext tag 115 (SecurityPolicy).
+    SecurityPolicyExt,
+    /// Phase 14: `Tenant` ext tag 116 (TenantSecurity).
+    TenantSecurityExt,
+    /// Phase 14: `SealedSecret` ext tag 117 (SecretTimes).
+    SecretTimesExt,
 }
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub const ALL: [Feature; 5] = [
+    pub const ALL: [Feature; 11] = [
         Feature::AlterReplicas,
         Feature::RepinRun,
         Feature::ReassignmentExt,
         Feature::WitRequirementExt,
         Feature::RetiredExt,
+        Feature::ApiTokenMetaExt,
+        Feature::ModuleSignaturesExt,
+        Feature::ModuleUploadersExt,
+        Feature::SecurityPolicyExt,
+        Feature::TenantSecurityExt,
+        Feature::SecretTimesExt,
+    ];
+
+    /// The Phase 14 ext emitters (D-P14-28): introduced at [`LEVEL`], no new level.
+    pub const P14: [Feature; 6] = [
+        Feature::ApiTokenMetaExt,
+        Feature::ModuleSignaturesExt,
+        Feature::ModuleUploadersExt,
+        Feature::SecurityPolicyExt,
+        Feature::TenantSecurityExt,
+        Feature::SecretTimesExt,
     ];
 
     /// The feature level at which this feature may first be emitted.
@@ -58,6 +86,13 @@ impl Feature {
             | Feature::ReassignmentExt
             | Feature::WitRequirementExt
             | Feature::RetiredExt => 2,
+            // Phase 14 registers its ext emissions at the Phase 13 level (D-P14-28).
+            Feature::ApiTokenMetaExt
+            | Feature::ModuleSignaturesExt
+            | Feature::ModuleUploadersExt
+            | Feature::SecurityPolicyExt
+            | Feature::TenantSecurityExt
+            | Feature::SecretTimesExt => LEVEL,
         }
     }
 
@@ -69,6 +104,12 @@ impl Feature {
             Feature::ReassignmentExt => "reassignment_ext",
             Feature::WitRequirementExt => "wit_requirement_ext",
             Feature::RetiredExt => "retired_ext",
+            Feature::ApiTokenMetaExt => "api_token_meta_ext",
+            Feature::ModuleSignaturesExt => "module_signatures_ext",
+            Feature::ModuleUploadersExt => "module_uploaders_ext",
+            Feature::SecurityPolicyExt => "security_policy_ext",
+            Feature::TenantSecurityExt => "tenant_security_ext",
+            Feature::SecretTimesExt => "secret_times_ext",
         }
     }
 }
@@ -166,6 +207,26 @@ mod tests {
         }
         let names: BTreeSet<_> = Feature::ALL.iter().map(|f| f.name()).collect();
         assert_eq!(names.len(), Feature::ALL.len(), "feature names unique");
+    }
+
+    #[test]
+    fn phase14_features_are_at_level_and_in_all() {
+        for f in Feature::P14 {
+            assert_eq!(f.introduced_at(), LEVEL, "{f:?}: no new level in Phase 14");
+            assert!(f.introduced_at() <= LEVEL);
+            assert!(Feature::ALL.contains(&f), "{f:?} missing from ALL");
+        }
+        assert_eq!(
+            Feature::P14.map(|f| f.name()),
+            [
+                "api_token_meta_ext",
+                "module_signatures_ext",
+                "module_uploaders_ext",
+                "security_policy_ext",
+                "tenant_security_ext",
+                "secret_times_ext",
+            ]
+        );
     }
 
     #[test]

@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+// Phase 14 (14-01): Principal / Scope / Authenticator / Method inventory (D-P14-3/6).
+pub mod auth;
 pub mod domain;
 pub mod error;
 #[cfg(any(test, feature = "fake"))]
@@ -17,6 +19,8 @@ pub mod phase11;
 pub mod phase13;
 // Phase 13 (13-03): REST + gRPC adapters of the Phase 13 slots.
 pub mod phase13_adapters;
+// Phase 14 (14-01): TenantsApi / ApiTokensApi / AuditApi / SecurityApi + domain types.
+pub mod phase14;
 pub mod phase7;
 pub mod phase8;
 pub mod request_meta;

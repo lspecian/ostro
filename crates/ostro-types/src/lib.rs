@@ -3,6 +3,8 @@
 //! The command envelope (log header, partition `Command` framing, fencing)
 //! lands in Phase 2; `journal::Event` payload semantics land in Phase 3.
 
+// Phase 14 (14-01): the audit contract (AuditEvent, AuditSink).
+pub mod audit;
 pub mod command;
 // Phase 13 (13-01): feature levels, the Feature registry and the P13 mutant names.
 pub mod compat;
