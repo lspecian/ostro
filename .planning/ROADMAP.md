@@ -496,7 +496,7 @@ Plans:
 
 Plans:
 - [x] 14-01-PLAN.md — PHASE-14 GATE part 1 (Phases 5-13 complete, seam/method/tenant-field inventories, lease clock source, reservations) + decisions/USER REVIEW/HUMAN to STATE + contracts (Anonymous-default Principal, scopes, Method, phase14 traits, ext 112-117 with key fingerprints, audit sink) + dependency matrix and every manifest (all)
-- [ ] 14-01b-PLAN.md — PHASE-14 GATE part 2 (wave 2): p14 seam, stubs, UI scope layer, call sites (upload before existing-sha, version gate, ingress, audit), main.rs intercepts, config, CLI/client stubs, fuzz bins, tool pins, CI sync (all)
+- [x] 14-01b-PLAN.md — PHASE-14 GATE part 2 (wave 2): p14 seam, stubs, UI scope layer, call sites (upload before existing-sha, version gate, ingress, audit), main.rs intercepts, config, CLI/client stubs, fuzz bins, tool pins, CI sync (all)
 - [ ] 14-02-PLAN.md — API wire surface: Tenants/ApiTokens/Audit/Security protos + adapters, bearer authentication (/ui exempt, System only for hooks/join), signature carriage, tenant webhooks, OpenAPI + parity (wave 3; SEC-02..04, DISP-06)
 - [ ] 14-03-PLAN.md — Token codec, meta-backed authenticator, admin bootstrap (online + offline), deny-by-default guard decorator over every API trait (wave 3; SEC-02)
 - [ ] 14-04-PLAN.md — Hash-chained node-local audit journal (TDD): group commit, fail-closed permits, torn-tail recovery, retention, chain-head export, verify, OTLP export (wave 3; SEC-04)
