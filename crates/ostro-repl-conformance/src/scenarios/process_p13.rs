@@ -16,7 +16,8 @@
 //! - [`report_dir`] / [`write_report`]: every test writes `$OSTRO_P13_REPORT_DIR/<test>/
 //!   report.txt` (absolute; default [`DEFAULT_REPORT_DIR`]).
 //! - [`Load`]: the mixed continuous workload (`trivial-steps` 3-step runs, `sdk-basic`
-//!   hot waits, `signals` signal waits the workload signals) with an ack log, plus one
+//!   hot waits, `signals` signal waits the workload signals, `parent_attached` runs with an
+//!   attached child on another partition) with an ack log, plus one
 //!   availability probe per partition (`smoke` starts every [`PROBE_PACE`]) whose ack
 //!   instants give the per-partition unavailability of a window ([`Load::unavailability`]).
 //!   Starts go to any running node (the router forwards them, 13-12) with an idempotency
@@ -102,12 +103,17 @@ pub fn host_line() -> String {
     let cpus = std::thread::available_parallelism().map_or(0, |n| n.get());
     let node = std::env::var("NODE_NAME").unwrap_or_default();
     format!(
-        "host: kernel {kernel} ({}), {cpus} CPUs available{}",
+        "host: kernel {kernel} ({}), {cpus} CPUs available{}; child runs in the workload: {}",
         if wsl { "WSL2" } else { "native Linux" },
         if node.is_empty() {
             String::new()
         } else {
             format!(", k8s node {node}")
+        },
+        if child_runs_enabled() {
+            "on"
+        } else {
+            "off (OSTRO_P13_CHILD_RUNS=0)"
         }
     )
 }
@@ -384,7 +390,14 @@ pub async fn busiest_leader(c: &ProcCluster) -> Option<u64> {
 // ------------------------------------------------------------------------- guests
 
 /// The workload guests (`guests/<name>`).
-pub const WORKLOAD_GUESTS: [&str; 4] = ["smoke", "trivial-steps", "sdk-basic", "signals"];
+pub const WORKLOAD_GUESTS: [&str; 6] = [
+    "smoke",
+    "trivial-steps",
+    "sdk-basic",
+    "signals",
+    "child-parent",
+    "child-leaf",
+];
 
 /// Deploy `guests` through any live node.
 pub async fn deploy_guests(c: &ProcCluster, guests: &[&str]) -> ScenarioResult {
@@ -407,6 +420,13 @@ pub const START_GIVE_UP: Duration = Duration::from_secs(60);
 /// Steps of a `trivial-steps` run.
 pub const STEPS: usize = 3;
 
+/// Whether the workload starts child runs (`OSTRO_P13_CHILD_RUNS`, default on; `0` leaves
+/// them out). 13-19 found child runs lost under restarts (reported); the switch lets the
+/// other oracles be measured while that is open, and every report names the mode.
+pub fn child_runs_enabled() -> bool {
+    std::env::var("OSTRO_P13_CHILD_RUNS").map_or(true, |v| v != "0")
+}
+
 /// What a workload run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -418,6 +438,10 @@ pub enum Kind {
     Signal,
     /// `smoke`: the per-partition availability probe (completes at once).
     Probe,
+    /// `parent_attached` (`guests/child-parent`): starts an attached `leaf_echo` child
+    /// (`guests/child-leaf`) and waits for it; the child's partition is hashed from the
+    /// parent's id, so it is usually led by another node (cross-node delivery, 767d3ee).
+    Child,
 }
 
 impl Kind {
@@ -428,6 +452,7 @@ impl Kind {
             Kind::Hot => "sdk-basic",
             Kind::Signal => "signals",
             Kind::Probe => "smoke",
+            Kind::Child => "parent_attached",
         }
     }
 
@@ -437,6 +462,7 @@ impl Kind {
             Kind::Hot => json!({ "name": key, "n": 3 }),
             Kind::Signal => json!({ "mode": "before", "sleep_ms": 200 }),
             Kind::Probe => json!({ "k": key }),
+            Kind::Child => json!({ "workflow": "leaf_echo", "input": { "k": key } }),
         }
     }
 }
@@ -627,7 +653,11 @@ impl Load {
         for w in 0..LOAD_CLIENTS {
             let sh = Arc::clone(&load.shared);
             load.tasks.spawn(async move {
-                let kinds = [Kind::Steps, Kind::Hot, Kind::Signal];
+                let kinds: &[Kind] = if child_runs_enabled() {
+                    &[Kind::Steps, Kind::Hot, Kind::Signal, Kind::Child]
+                } else {
+                    &[Kind::Steps, Kind::Hot, Kind::Signal]
+                };
                 let mut i = w as u64;
                 let mut rot = w as u64;
                 while !sh.stop.load(Ordering::Relaxed) {

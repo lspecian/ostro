@@ -12,8 +12,8 @@
 //! `OSTRO_TEST_LEVEL_MAX=1`, so the cluster is finalized at level 1. Before the upgrade the
 //! gated features are refused (reassign and a submitting migrate answer 409
 //! `feature_not_enabled`). The continuous mixed workload runs throughout (3-step runs, hot
-//! waits, signal waits, one availability probe per partition), the proxy delays every link
-//! by 20 ms, and one short partition between two nodes is cut and healed per iteration.
+//! waits, signal waits, child runs, one availability probe per partition), the proxy delays
+//! every link by 20 ms, and one short partition between two nodes is cut and healed per iteration.
 //! Each node in turn gets SIGTERM (controlled shutdown, 13-11 `before_shutdown`: its
 //! partitions are handed off) and is restarted without the variable; finalized must stay 1
 //! until the last node is restarted and then reach 2 on every node. After each restart the
