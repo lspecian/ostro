@@ -235,10 +235,10 @@ Any node accepts any request (D-P13-14). REST, gRPC, the UI and every in-process
   leads are delivered with `NodeOps.DeliverInbound`, bounded at 10 s. Exactly-once is unchanged:
   the target dedupes `(source, seq)` against its replicated `inbound_seen` whichever path
   delivered, and the shuffler truncates only after Accepted / Duplicate. Metric:
-  `ostro_route_inbound_forwards_total{result}`. **Open issue (13-19 finding 1):** under restarts
-  while the cluster is finalized at level 1, `parent_attached` runs with a cross-partition child
-  can fail to reach a terminal status. The tier-C CI step runs with `OSTRO_P13_CHILD_RUNS=0`
-  until this is fixed.
+  `ostro_route_inbound_forwards_total{result}`. Every Phase 13 node-to-node service
+  (`DeliverInbound`, `HandOff`, `StartRestart`, ...) requires the caller's node identity from the
+  mTLS peer certificate (d33fce7 fixed the late-bound routes, which answered UNAUTHENTICATED and
+  lost child runs under restarts, 13-19 finding 1).
 
 ## 6. Read-your-writes (D-P13-15)
 

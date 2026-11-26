@@ -359,7 +359,7 @@ gate campaign (≥ 10,000 faults, 4 h time box) is run by hand.
 | `OSTRO_CAMPAIGN_TIMEBOX_S` | 14400 (4 h) | no new fault after this; the report carries `HUMAN_NEEDED` |
 | `OSTRO_SHUTDOWN_REPEATS` | 10 | `process_shutdown` SIGTERMs |
 | `OSTRO_PREV_BIN` | unset (SKIP) | previous release binary for a real N−1 upgrade (human_needed until the first release tag) |
-| `OSTRO_P13_CHILD_RUNS` | on | `0` leaves cross-partition child runs out of the workload (CI sets it while 13-19 finding 1 is open); every report names the mode |
+| `OSTRO_P13_CHILD_RUNS` | on | `0` leaves cross-partition child runs out of the workload (a diagnostic switch; 13-19 finding 1 was fixed in d33fce7 and CI runs with child runs on); every report names the mode |
 | `OSTRO_TEST_LEVEL_MAX` | unset | level emulation (`docs/compat.md` §7) |
 | `OSTRO_FAILPOINT_BIN`, `OSTRO_PROC_ROOT`, `OSTRO_PROC_KEEP` | — | existing harness variables (binary path, process root, keep dirs) |
 

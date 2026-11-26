@@ -327,14 +327,11 @@ check_p13_gates() {
 # Keep in sync with the "Phase 13 tier C (multi-process)" step of .github/workflows/ci.yml.
 # The gate campaign (>= 10,000 faults, 4 h time box) is run by hand: OSTRO_CAMPAIGN_FAULTS=10000.
 P13_TIER_C_TESTS=(process_promotion process_rolling_upgrade process_ryw process_downgrade process_shutdown upgrade_from_prev cluster_campaign_p13)
-# TODO(p13-children): remove OSTRO_P13_CHILD_RUNS=0 here and in ci.yml once the child-run loss
-# under restarts (13-19 finding 1, parent_attached runs never terminate after a restart at
-# finalized level 1) is fixed; until then the tier-C workload leaves child runs out.
 check_p13_tier_c() {
   local t
   cargo build -p ostro --features failpoints --target-dir target/failpoints --locked || return 1
   for t in "${P13_TIER_C_TESTS[@]}"; do
-    OSTRO_P13_REPORT_DIR="${OSTRO_P13_REPORT_DIR:-$ROOT/target/p13-reports}" OSTRO_UPGRADE_ITERS=3 OSTRO_CAMPAIGN_FAULTS=50 OSTRO_P13_CHILD_RUNS=0 \
+    OSTRO_P13_REPORT_DIR="${OSTRO_P13_REPORT_DIR:-$ROOT/target/p13-reports}" OSTRO_UPGRADE_ITERS=3 OSTRO_CAMPAIGN_FAULTS=50 \
       cargo test --release -p ostro-repl-conformance --features failpoints --locked --test "$t" -- --ignored --test-threads=1 --nocapture || return 1
   done
 }
