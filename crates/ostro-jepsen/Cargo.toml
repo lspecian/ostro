@@ -1,0 +1,35 @@
+[package]
+name = "ostro-jepsen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Phase 14 (14-01, D-P14-19/21/22/37): the Jepsen-style harness, benchmarks and soak on the
+# Phase 12/13 tier-C ProcCluster + ChaosProxy (no root, no netns, no Docker). Seeded RNG = the
+# workspace `rand` pin (StdRng, no SplitMix64 needed). 14-09/14-10 (harness, nemeses,
+# checkers), 14-22 (runs) and 14-23 (bench, soak, `ostro-soak`) fill the stubs; no plan
+# edits this file.
+[dependencies]
+ostro-repl-conformance = { path = "../ostro-repl-conformance" }
+ostro-client = { path = "../ostro-client" }
+ostro-types.workspace = true
+ostro-partition = { path = "../ostro-partition" }
+ostro-log = { path = "../ostro-log" }
+ostro-server = { path = "../ostro-server" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tempfile.workspace = true
+rand.workspace = true
+
+[[bin]]
+name = "ostro-soak"
+path = "src/bin/ostro-soak.rs"
+test = false
+doc = false
+
+[lints]
+workspace = true

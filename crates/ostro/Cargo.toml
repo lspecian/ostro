@@ -21,6 +21,10 @@ path = "src/main.rs"
 # Phase 10 (10-02): the polyglot (Python/TypeScript) build tests of ostro-build; the
 # `ostro` polyglot tests (parity, replay_cli, template_tests) are gated on it too.
 polyglot = ["ostro-build/polyglot"]
+# Phase 14 (D-P14-42): the Kafka trigger is in the release binary; a slim build is
+# `--no-default-features`.
+default = ["kafka"]
+kafka = ["ostro-server/kafka"]
 failpoints = ["dep:fail", "fail/failpoints", "ostro-server/failpoints", "ostro-backup/failpoints", "ostro-worker/failpoints", "ostro-cluster/failpoints", "ostro-meta/failpoints", "ostro-types/level-emulation"]
 
 [dependencies]
@@ -72,6 +76,8 @@ axum.workspace = true
 # (its polyglot::build is not feature-gated); the spawned-server kit; scratch projects
 ostro-conformance = { path = "../ostro-conformance" }
 ostro-client = { path = "../ostro-client", features = ["testing"] }
+# Phase 14 (14-32): Produce/CreateTopics helpers for tests/kafka_crash.rs.
+ostro-kafka = { path = "../ostro-kafka", features = ["testkit"] }
 
 [lints]
 workspace = true

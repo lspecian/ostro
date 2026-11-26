@@ -1,0 +1,35 @@
+[package]
+name = "ostro-fuzz-targets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Phase 14 (14-01, D-P14-17/37): fuzz target logic in the main workspace, so a stable corpus
+# replay test runs in every ci-local (`cargo test -p ostro-fuzz-targets --test corpus_replay`,
+# 14-07). The libFuzzer harness is the separate `fuzz/` workspace (crate `ostro-fuzz`), which
+# depends on this crate only. 14-07 fills the parser/codec/storage targets, 14-08 the Wasm
+# ones (`evil_guest`, `smith_component`); no plan edits this file.
+[dependencies]
+arbitrary.workspace = true
+wasm-smith.workspace = true
+wit-component.workspace = true
+wit-parser.workspace = true
+wasmparser.workspace = true
+wasm-encoder.workspace = true
+ostro-types.workspace = true
+ostro-meta = { path = "../ostro-meta" }
+ostro-partition = { path = "../ostro-partition" }
+ostro-log = { path = "../ostro-log" }
+ostro-engine = { path = "../ostro-engine" }
+ostro-api = { path = "../ostro-api" }
+ostro-server = { path = "../ostro-server" }
+ostro-triggers = { path = "../ostro-triggers" }
+ostro-bridge = { path = "../ostro-bridge" }
+tokio.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

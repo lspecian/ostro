@@ -131,6 +131,9 @@ name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+dependencies = [
+ "derive_arbitrary",
+]
 
 [[package]]
 name = "arc-swap"
@@ -1215,6 +1218,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
+name = "derive_arbitrary"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
 name = "derive_builder"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1493,6 +1507,12 @@ dependencies = [
  "tempfile",
  "xxhash-rust",
 ]
+
+[[package]]
+name = "flagset"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
 name = "flate2"
@@ -2606,6 +2626,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kafka-protocol"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "099d5c2f1b40cd830cbf18ca4d2a0805f2875b811ca18f0372b2433e68fe2dda"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crc",
+ "crc32c",
+ "indexmap",
+ "uuid",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3003,6 +3037,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "minisign-verify"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871285dc19d8d0ebe0eef3d0e99a205f2a71363b122632cbbfa4a6c370a960ce"
+
+[[package]]
 name = "miniz_oxide"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3359,6 +3399,7 @@ dependencies = [
  "ostro-client",
  "ostro-cluster",
  "ostro-conformance",
+ "ostro-kafka",
  "ostro-meta",
  "ostro-proto",
  "ostro-server",
@@ -3382,6 +3423,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "insta",
  "jiff 1.0.1",
@@ -3505,6 +3547,7 @@ name = "ostro-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "clap",
  "insta",
  "jiff 1.0.1",
@@ -3527,6 +3570,7 @@ name = "ostro-client"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "reqwest",
  "serde",
  "serde_json",
@@ -3640,6 +3684,75 @@ dependencies = [
  "tracing",
  "wasmparser",
  "wasmtime",
+]
+
+[[package]]
+name = "ostro-fuzz-targets"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "ostro-api",
+ "ostro-bridge",
+ "ostro-engine",
+ "ostro-log",
+ "ostro-meta",
+ "ostro-partition",
+ "ostro-server",
+ "ostro-triggers",
+ "ostro-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wasm-encoder",
+ "wasm-smith",
+ "wasmparser",
+ "wit-component",
+ "wit-parser",
+]
+
+[[package]]
+name = "ostro-jepsen"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ostro-client",
+ "ostro-log",
+ "ostro-partition",
+ "ostro-repl-conformance",
+ "ostro-server",
+ "ostro-types",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ostro-kafka"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "bytes",
+ "flate2",
+ "hmac",
+ "kafka-protocol",
+ "lz4_flex",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "ruzstd",
+ "sha2 0.11.1",
+ "snap",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -3797,6 +3910,7 @@ dependencies = [
  "ostro-backup",
  "ostro-client",
  "ostro-cluster",
+ "ostro-kafka",
  "ostro-log",
  "ostro-meta",
  "ostro-objstore",
@@ -3829,6 +3943,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "axum-server",
  "base64 0.22.1",
@@ -3842,6 +3957,7 @@ dependencies = [
  "libc",
  "metrics",
  "metrics-exporter-prometheus",
+ "minisign-verify",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -3852,6 +3968,7 @@ dependencies = [
  "ostro-bridge",
  "ostro-cluster",
  "ostro-engine",
+ "ostro-kafka",
  "ostro-log",
  "ostro-meta",
  "ostro-objstore",
@@ -3863,6 +3980,7 @@ dependencies = [
  "ostro-ui",
  "ostro-worker",
  "ostro-worker-proto",
+ "proptest",
  "rcgen",
  "reqwest",
  "rustls",
@@ -3904,6 +4022,7 @@ dependencies = [
 name = "ostro-triggers"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "croner",
  "hmac",
  "jiff 0.2.46",
@@ -5064,6 +5183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5574,6 +5702,12 @@ checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "snap"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "socket2"
@@ -6826,6 +6960,18 @@ dependencies = [
  "indexmap",
  "wasm-encoder",
  "wasmparser",
+]
+
+[[package]]
+name = "wasm-smith"
+version = "0.261.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62b25880fd539272f995efa87235c61a4c36c7e87a5624601ac0c06d6dc25f9a"
+dependencies = [
+ "anyhow",
+ "arbitrary",
+ "flagset",
+ "wasm-encoder",
 ]
 
 [[package]]

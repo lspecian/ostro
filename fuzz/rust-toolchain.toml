@@ -1,0 +1,5 @@
+[toolchain]
+# Dated nightly for cargo-fuzz (D-P14-17; chosen by 14-01 on 2026-11-26):
+# rustc 1.102.0-nightly (739adecd4 2026-11-24), >= the 1.101.0-nightly floor.
+channel = "nightly-2026-11-25"
+profile = "minimal"

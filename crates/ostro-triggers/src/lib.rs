@@ -26,3 +26,7 @@ mod dep_anchors {
     use sha2 as _;
     use thiserror as _;
 }
+
+// Phase 14 (plan 14-01, D-P14-37): `base64` for the Kafka envelope input (14-32), anchored
+// until it is used.
+use base64 as _;

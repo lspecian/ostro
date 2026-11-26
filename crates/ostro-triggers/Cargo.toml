@@ -20,6 +20,8 @@ hmac.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Phase 14 (14-32): Kafka envelope input (`key_b64` / `value_b64`).
+base64.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

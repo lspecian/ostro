@@ -20,6 +20,8 @@ jiff.workspace = true
 serde.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
+# Phase 14 (14-02): Ostro-Module-Signature header decoding.
+base64.workspace = true
 # FakeControlPlane only (feature "fake")
 sha2 = { workspace = true, optional = true }
 

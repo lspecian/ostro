@@ -72,6 +72,12 @@ libc.workspace = true
 ostro-cluster = { path = "../ostro-cluster" }
 # Phase 11 (11-03): embedded UI router, merged by p11.rs (11-04/11-15)
 ostro-ui.workspace = true
+# Phase 14 (14-01, D-P14-37): module signatures (14-05), direct aws-lc-rs for token RNG /
+# constant-time compare / ECDSA + Ed25519 / UI session HMAC (14-03, 14-05, 14-21), and the
+# Kafka trigger client behind the `kafka` feature (14-32, D-P14-42).
+minisign-verify.workspace = true
+aws-lc-rs.workspace = true
+ostro-kafka = { path = "../ostro-kafka", optional = true }
 
 [features]
 # Fault injection (plan 05-18): the executor's own failpoints (executor::before_append,
@@ -93,6 +99,9 @@ failpoints = [
     "ostro-types/level-emulation",
 ]
 
+# Phase 14 (D-P14-42): the Kafka-protocol topic-consumer trigger (default-on in `ostro`).
+kafka = ["dep:ostro-kafka"]
+
 [dev-dependencies]
 ostro-engine = { path = "../ostro-engine", features = ["testkit"] }
 ostro-testkit = { workspace = true, features = ["mock-http", "db", "canary"] }
@@ -105,6 +114,12 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 # full-server tests)
 ostro-worker = { path = "../ostro-worker" }
 reqwest = { workspace = true, features = ["rustls", "json"] }
+# Phase 14 (14-01): property tests (audit chain 14-04, quotas 14-06, SkewClock 14-10), the
+# 14-02 fakes behind the real guard (14-03, 14-15) and the Kafka testkit (14-32).
+proptest.workspace = true
+tempfile.workspace = true
+ostro-api = { path = "../ostro-api", features = ["fake"] }
+ostro-kafka = { path = "../ostro-kafka", features = ["testkit"] }
 
 [[test]]
 name = "failpoints_phase5"

@@ -68,6 +68,8 @@ ostro-client = { path = "../ostro-client" }
 [dev-dependencies]
 # tests/meta_log_reader.rs writes real metadata log stores (snapshot at the commit index)
 ostro-raft-driver.workspace = true
+# Phase 14 (14-32): tests/kafka_failover.rs produces records through the testkit.
+ostro-kafka = { path = "../ostro-kafka", features = ["testkit"] }
 
 [lints]
 workspace = true

@@ -1,0 +1,47 @@
+[package]
+name = "ostro-kafka"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Phase 14 (14-01, D-P14-37/42): consumer-side Kafka-protocol client for the Kafka trigger
+# (TRIG-04). Pure Rust: kafka-protocol with its own C compression features off (no lz4-sys /
+# zstd-sys), tokio-rustls on aws-lc-rs (no openssl), pure-Rust codecs. 14-31 (transport, TLS,
+# SASL) and 14-34 (metadata, fetch, offsets, codecs) fill the modules; no plan edits this file.
+[dependencies]
+kafka-protocol.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-native-certs.workspace = true
+flate2.workspace = true
+snap.workspace = true
+lz4_flex = { workspace = true, features = ["frame"] }
+ruzstd.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+aws-lc-rs.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+[features]
+# Test-only helpers (CreateTopics + Produce) used by the trigger tests (14-32).
+testkit = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tempfile.workspace = true
+# Test CA + server certificate generated at test time for the fake broker (14-31).
+rcgen.workspace = true
+# The fake broker decodes requests / encodes responses: the `broker` messages too.
+kafka-protocol = { workspace = true, features = ["client", "broker"] }
+
+[lints]
+workspace = true

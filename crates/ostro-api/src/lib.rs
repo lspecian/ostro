@@ -34,6 +34,10 @@ pub use openapi::openapi;
 pub use ostro_proto as proto;
 pub use phase8::ApiExtensions;
 
+// Plan 14-01 (D-P14-37): `base64` for Ostro-Module-Signature decoding (14-02), anchored until
+// it is used.
+use base64 as _;
+
 use ostro_proto::api::v1::{
     connectors_server::ConnectorsServer, modules_server::ModulesServer,
     queues_server::QueuesServer, runs_server::RunsServer, secrets_server::SecretsServer,

@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "vendor/*"]
-exclude = ["spikes", "ci/deny-fixtures", "guests", "sdks"]
+# `fuzz` is the separate cargo-fuzz workspace (crate ostro-fuzz, dated nightly; Phase 14).
+exclude = ["spikes", "ci/deny-fixtures", "guests", "sdks", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -160,8 +161,27 @@ clap_complete = "=4.6.12"
 # (pure Rust). tar is the Phase 8 pin above (already 0.4.46 in Cargo.lock).
 flate2 = { version = "=1.1.11", default-features = false, features = ["rust_backend"] }
 lzma-rust2 = "=0.25.0"
+# Phase 14 (plan 14-01 declares every Phase 14 dependency once, D-P14-37; versions checked
+# 2026-11-26). minisign verification (MIT, zero deps; legacy Ed + prehashed ED).
+minisign-verify = "=0.3.0"
+# Fuzzing (D-P14-17): structured inputs (1.5.0 already in the lock) and wasm-smith matching the
+# wasm-tools family wasmtime 50.0.2 pulls (`=0.261.0`; Apache-2.0 WITH LLVM-exception OR
+# Apache-2.0 OR MIT). wasm-encoder 0.261.0 is already in the lock.
+arbitrary = { version = "1.5.0", features = ["derive"] }
+wasm-smith = "=0.261.0"
+wasm-encoder = "=0.261.0"
+# Kafka trigger client (D-P14-42; ostro-kafka): protocol codec only, its C compression features
+# (lz4-sys, zstd-sys) off; pure-Rust decompression: snap (BSD-3-Clause), ruzstd (MIT), plus the
+# existing flate2 (rust_backend) and lz4_flex (`frame` on the ostro-kafka line).
+kafka-protocol = { version = "=0.18.0", default-features = false, features = ["client"] }
+snap = "1.1.2"
+ruzstd = "0.9.1"
+# Already in the lock as transitive deps; pinned here for ostro-kafka (TLS roots, error glue).
+rustls-native-certs = "0.8"
+anyhow = "1"
 # build
 protox = "0.10.0"
+
 tonic-prost-build = "0.14.9"
 
 [workspace.lints.rust]
@@ -291,6 +311,10 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.hickory-net]
+opt-level = "z"
+
+# Phase 14 (D-P14-42): the Kafka protocol codec is cold (trigger consumers only).
+[profile.release.package.kafka-protocol]
 opt-level = "z"
 
 # Debug info trimmed to keep target dirs small (they filled the disk, 2026-11-22).

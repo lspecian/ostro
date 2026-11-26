@@ -56,6 +56,8 @@ pub mod testing;
 // Plan 10-02: dependencies of 10-09 / 10-17, anchored until they are used.
 use tokio as _;
 use tracing as _;
+// Plan 14-01 (D-P14-37): `base64` for signature upload (14-17/14-19), anchored until it is used.
+use base64 as _;
 
 #[cfg(test)]
 mod dev_dep_anchors {

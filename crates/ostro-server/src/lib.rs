@@ -49,6 +49,13 @@
 //! [`server`] (routed control plane, API slots, cluster-listener services, background
 //! tasks, controlled shutdown); [`route`] holds the routing stubs (13-12 / 13-13).
 
+// Plan 14-01 (D-P14-37): dependencies of 14-05 (minisign-verify), 14-03/14-05/14-21
+// (aws-lc-rs) and 14-32 (ostro-kafka behind `kafka`), anchored until they are used.
+use aws_lc_rs as _;
+use minisign_verify as _;
+#[cfg(feature = "kafka")]
+use ostro_kafka as _;
+
 pub mod bridge_services;
 pub mod children;
 pub mod cluster;

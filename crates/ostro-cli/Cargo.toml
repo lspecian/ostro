@@ -26,6 +26,8 @@ tar.workspace = true
 ostro-build = { path = "../ostro-build" }
 ostro-client = { path = "../ostro-client" }
 ostro-engine = { path = "../ostro-engine" }
+# Phase 14 (14-19): `ostro deploy --signature <file>` sends Ostro-Module-Signature headers.
+base64.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
 
