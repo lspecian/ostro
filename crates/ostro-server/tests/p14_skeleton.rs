@@ -179,7 +179,8 @@ async fn guard_passes_through_and_fills_no_phase14_slot() {
     assert!(ext.tenants.is_none() && ext.api_tokens.is_none());
     assert!(ext.audit.is_none() && ext.security.is_none());
     let g = p14::wrap_ingress(&c, Arc::clone(&routed), ext);
-    assert!(Arc::ptr_eq(&g.control, &routed), "passthrough until 14-03");
+    // 14-03: the guard wraps the routed instance (deny-by-default is tested in p14_guard).
+    assert!(!Arc::ptr_eq(&g.control, &routed), "guarded since 14-03");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

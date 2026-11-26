@@ -8,8 +8,13 @@ use ostro_types::audit::{AuditOutcome, AuditPermit};
 use super::{P14Ctx, WorkerAuditEvent};
 
 /// Before an audited call: a writer permit (fail-closed: 503 `audit_unavailable`).
-/// `Ok(None)` for methods that are not audited. Stub: `Ok(None)`.
-pub fn reserve(_ctx: &P14Ctx, _p: &Principal, _m: Method) -> Result<Option<AuditPermit>, ApiError> {
+/// `Ok(None)` for methods that are not audited. Called by the guard (`guard.rs`) after
+/// `tenant_scope::before`, before the inner call. Stub: `Ok(None)`.
+pub async fn reserve(
+    _ctx: &P14Ctx,
+    _p: &Principal,
+    _m: Method,
+) -> Result<Option<AuditPermit>, ApiError> {
     Ok(None)
 }
 
