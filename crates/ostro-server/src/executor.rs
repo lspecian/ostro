@@ -717,8 +717,9 @@ struct EngineSink {
     cancel: CancellationToken,
     gate: Option<Arc<Semaphore>>,
     engine_end: AtomicU64,
-    /// Fuel the activation consumed (14-06; `u64::MAX` = not reported).
-    fuel: AtomicU64,
+    /// Charges the fuel the activation consumed to the run's tenant (14-06), called by
+    /// the engine before its terminal flush.
+    on_fuel: Box<dyn Fn(u64) + Send + Sync>,
 }
 
 #[async_trait::async_trait]
@@ -770,7 +771,7 @@ impl ActivationSink for EngineSink {
     }
 
     fn fuel_consumed(&self, fuel: u64) {
-        self.fuel.store(fuel, Ordering::Release);
+        (self.on_fuel)(fuel);
     }
 }
 
@@ -982,7 +983,14 @@ impl EngineExecutor {
             cancel: cancel.clone(),
             gate: self.hooks.gate(token.n),
             engine_end: AtomicU64::new(end),
-            fuel: AtomicU64::new(u64::MAX),
+            on_fuel: {
+                let (exhaust, record) = (self.exhaust.clone(), record.clone());
+                Box::new(move |fuel| {
+                    if let Some(p) = &exhaust {
+                        p.charge_fuel(&record, fuel);
+                    }
+                })
+            },
         });
         self.hooks.activations.fetch_add(1, Ordering::Relaxed);
         let act = Activate {
@@ -1004,11 +1012,6 @@ impl EngineExecutor {
             ),
         )
         .await;
-        // Phase 14 (14-06): the activation ended; charge its fuel to the tenant.
-        let fuel = esink.fuel.load(Ordering::Acquire);
-        if fuel != u64::MAX {
-            self.charge_fuel(record, fuel);
-        }
         if sink.is_terminal() || cancel.is_cancelled() {
             return (Some(outcome), ExecOutcome::Released);
         }

@@ -416,6 +416,11 @@ async fn execute(
 
     // Remaining fuel, for the `fuel_used` of an interrupted step.
     let fuel_left = store.get_fuel().ok();
+    // 14-06: report the consumed fuel before the terminal flush below, so a per-tenant
+    // fuel charge lands before the run can complete (and its lease be released).
+    if let Some(left) = fuel_left {
+        meter.fuel_consumed(cfg.activation_fuel.saturating_sub(left));
+    }
     let st = store.data_mut();
     let outcome = match result {
         // External eviction: the call future (and its fiber) is already dropped.
@@ -475,10 +480,8 @@ async fn execute(
     // Nothing live was committed: replay ended with the guest call.
     meter.replay_ended(rt.clock().now_unix_nanos()); // clock-exempt: replay duration metric
     if let Some(left) = fuel_left {
-        let consumed = cfg.activation_fuel.saturating_sub(left);
         metrics::counter!("ostro_fuel_consumed_total", "workflow" => workflow.clone())
-            .increment(consumed);
-        meter.fuel_consumed(consumed);
+            .increment(cfg.activation_fuel.saturating_sub(left));
     }
     if let ActivationOutcome::AttemptFailed(f) = &outcome {
         tracing::warn!(reason = f.reason_code(), detail = %f.dlq_reason(), "activation attempt failed");
