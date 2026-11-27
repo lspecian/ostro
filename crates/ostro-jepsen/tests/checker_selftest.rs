@@ -475,7 +475,9 @@ fn acked_offset_overwritten_after_truncation_is_reported() {
     w.logs.partitions[0].replicas = (1..=3).map(|n| replica(n, &entries, &[])).collect();
     let fen = w.fencing();
     assert!(
-        fen.mentions("node 1 holds a record at offset 3 of epoch 2 > 1 below the acknowledged offset (acked offset overwritten)"),
+        fen.mentions(
+            "node 1 holds no such command below offset 5; a record of epoch 2 > 1 sits at offset 3 (acked offset overwritten)"
+        ),
         "{fen:?}"
     );
     assert_eq!(

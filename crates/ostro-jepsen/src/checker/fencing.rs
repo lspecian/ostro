@@ -9,10 +9,11 @@
 //!    below the settled HW.
 //! 4. **Acknowledged writes survive.** For every acknowledged partition write (start,
 //!    signal, cancel) with a consistency token `p<P>:<epoch>:<offset>`: some replica's log
-//!    reaches `offset`; on every replica that does, no record below `offset` was written in
-//!    an epoch above the token's (nothing below an acknowledged applied cursor was truncated
-//!    and overwritten by a later leader), and the acknowledged command (the run's `StartRun`,
-//!    the signal with its request id, the cancel) is there below `offset`. The token's offset
+//!    reaches `offset`; every replica that does holds the acknowledged command (the run's
+//!    accepted `StartRun`, the signal with its request id, the cancel) below `offset`, in a
+//!    record of an epoch no later than the token's (a missing command next to later-epoch
+//!    records below `offset`, or the command in a later-epoch record, is an acknowledged
+//!    offset truncated and overwritten by a later leader). The token's offset
 //!    is the answering leader's applied cursor after the write (13-13), an upper bound of the
 //!    write's own offset, so the command is matched by run id / request id below it rather
 //!    than at one exact offset.
@@ -267,37 +268,36 @@ fn acked_tokens(logs: &LogExport, ops: &[ClientOp], v: &mut Verdict) {
             continue;
         }
         for r in covering {
-            if let Some(rec) = r
-                .records
-                .iter()
-                .find(|x| x.base < tok.offset && x.epoch > tok.epoch)
-            {
-                v.violation(format!(
-                    "{what}: node {} holds a record at offset {} of epoch {} > {} below the acknowledged offset (acked offset overwritten)",
-                    r.node, rec.base, rec.epoch, tok.epoch
-                ));
-                continue;
-            }
-            let found = r.entries.iter().any(|e| {
+            let found = r.entries.iter().find(|e| {
                 e.offset < tok.offset
                     && carries(op, &e.op)
                     && (op.kind != OpKind::Start
                         || r.reapply.is_none()
                         || r.applied_at(e.offset).is_some_and(|a| a.accepted))
             });
-            if !found {
-                if r.start().unwrap_or(0) > 0 {
-                    v.note(format!(
-                        "{what}: node {} log starts at {:?} (trimmed); command not checked",
-                        r.node,
-                        r.start()
-                    ));
-                } else {
-                    v.violation(format!(
-                        "{what}: node {} holds no such command below offset {}",
-                        r.node, tok.offset
-                    ));
-                }
+            let later = r
+                .records
+                .iter()
+                .find(|x| x.base < tok.offset && x.epoch > tok.epoch);
+            match (found, later) {
+                (Some(e), _) if e.epoch > tok.epoch => v.violation(format!(
+                    "{what}: node {} holds the command at offset {} written in epoch {} > {} (acked offset overwritten)",
+                    r.node, e.offset, e.epoch, tok.epoch
+                )),
+                (Some(_), _) => {}
+                (None, Some(rec)) => v.violation(format!(
+                    "{what}: node {} holds no such command below offset {}; a record of epoch {} > {} sits at offset {} (acked offset overwritten)",
+                    r.node, tok.offset, rec.epoch, tok.epoch, rec.base
+                )),
+                (None, None) if r.start().unwrap_or(0) > 0 => v.note(format!(
+                    "{what}: node {} log starts at {:?} (trimmed); command not checked",
+                    r.node,
+                    r.start()
+                )),
+                (None, None) => v.violation(format!(
+                    "{what}: node {} holds no such command below offset {}",
+                    r.node, tok.offset
+                )),
             }
         }
     }
