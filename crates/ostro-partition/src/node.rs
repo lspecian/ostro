@@ -124,6 +124,9 @@ pub struct NodeConfig {
     pub roles: RoleConfig,
     /// Per-node test hooks (12-13: `fail_partition`); inert unless a test calls them.
     pub test_hooks: NodeTestHooks,
+    /// 14-29 (D-P14-45): per-partition replay observers, consulted only in
+    /// [`StartMode::Inspect`] (whole-cluster restore, tests); `None` = no observer.
+    pub replay_observer: Option<crate::replay_observer::ReplayObserverFactory>,
 }
 
 impl NodeConfig {
@@ -151,6 +154,7 @@ impl NodeConfig {
             follower_driver: None,
             roles: RoleConfig::default(),
             test_hooks: NodeTestHooks::default(),
+            replay_observer: None,
         }
     }
 }
@@ -542,7 +546,12 @@ impl Node {
                     node_id: cfg.node_id,
                     events: Arc::clone(&events),
                 };
-                tokio::spawn(start.run())
+                // 14-29: an observed replay only in Inspect mode, only when one is supplied.
+                let observer = match (term, &cfg.replay_observer) {
+                    (TermMode::Inspect, Some(f)) => f(p),
+                    _ => None,
+                };
+                tokio::spawn(start.run_observed(observer))
             }));
         }
         let mut started: Vec<Result<Started, String>> = Vec::with_capacity(tasks.len());
@@ -1271,6 +1280,15 @@ pub(crate) struct PartitionStart {
 
 impl PartitionStart {
     pub(crate) async fn run(self) -> Result<Started, String> {
+        self.run_observed(None).await
+    }
+
+    /// [`Self::run`]; in Inspect mode with an `observer` (14-29) the tail is replayed through
+    /// [`crate::replay_observer::replay_with_observer`] before the apply machine starts.
+    pub(crate) async fn run_observed(
+        mut self,
+        observer: Option<Box<dyn crate::replay_observer::ReplayObserver>>,
+    ) -> Result<Started, String> {
         self.seed_anchored_epochs().await?;
         // Inspect picks a local term before catch-up (12-08): the log opened with HW =
         // applied (F4), and leading with ISR {self} is what raises the HW to the durable LEO,
@@ -1286,6 +1304,21 @@ impl PartitionStart {
                 self.rf1
                     .become_leader(epoch, ReplicaSet::solo(self.node_id))
                     .map_err(|e| format!("lead at epoch {}: {e}", epoch.0))?;
+                if let Some(mut obs) = observer {
+                    let hw = *self.rf1.high_watermark().borrow();
+                    crate::replay_observer::replay_with_observer(
+                        &self.store,
+                        &*self.rf1,
+                        hw,
+                        self.machine.max_chunk_bytes,
+                        obs.as_mut(),
+                    )
+                    .await?;
+                    self.meta = self
+                        .store
+                        .read_meta()
+                        .map_err(|e| format!("observed replay: read meta: {e}"))?;
+                }
             }
         }
         let acks = Arc::new(PendingAcks::new());

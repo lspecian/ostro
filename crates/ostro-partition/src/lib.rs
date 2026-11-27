@@ -29,6 +29,8 @@ pub mod machine;
 pub mod node;
 pub mod query;
 pub mod replica_services;
+// 14-29 (D-P14-45): per-offset replay observer for whole-cluster restore.
+pub mod replay_observer;
 pub mod roles;
 pub mod router;
 pub mod startup;
