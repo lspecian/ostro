@@ -277,3 +277,19 @@ No test bound or oracle was changed, and there is no warm-up cycle.
 
 Not changed, for the orchestrator to decide: the router turns a lease refusal on the partition's own leader into a re-route wait for a view change of up to 2 x `session_timeout`. That amplified a 2 s lease gap into a > 5 s client stall. A genuine meta-contact loss still behaves this way (p13-fixes / 13-12 design). One option is to end the wait once the local lease holds again.
 
+
+Final `--parallel` at 3262944, finished after the pause:
+
+| group | node | result |
+|---|---|---|
+| test1 | dell-2 | 0 (PASS) |
+| fp1 | dell-2 | 0 (PASS) |
+| fp3 | dell-2 | 0 (PASS) |
+| musl1 | dell-2 | 0 (PASS; size limit PASS) |
+| replication mutant matrix | dell-2 | PASS |
+| server campaign smoke | dell-2 | PASS |
+| test2 | dell-1 | FAIL, only on the known load-only `backup_cli::bucket_online_and_offline_round_trips` |
+| obuild | dell-1 | FAIL, `ostro-build toolchain_cache` timeouts under the dell-1 saturation; unrelated to 14-33 |
+| fp2 | dell-2 | FAIL, `routing::internal_consumers_route` (above); never rerun alone |
+| lint, poly | dell-1 | exit 137 (killed, infrastructure) |
+| musl2 | — | container never started |
