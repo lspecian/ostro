@@ -1,0 +1,82 @@
+---
+source: crates/ostro-cli/tests/p14_cli.rs
+expression: t
+---
+$ ostro tenant create acme --fuel-burst 500 --json
+{
+  "created_at_ms": 1700000001000,
+  "event_rate": null,
+  "fuel_burst": 500,
+  "fuel_per_s": null,
+  "id": "acme",
+  "max_concurrency": null,
+  "memory_bytes": null,
+  "suspended": false,
+  "weight": null
+}
+[exit 0]
+$ ostro tenant ls --json
+{
+  "tenants": [
+    {
+      "created_at_ms": 1700000001000,
+      "event_rate": null,
+      "fuel_burst": 500,
+      "fuel_per_s": null,
+      "id": "acme",
+      "max_concurrency": null,
+      "memory_bytes": null,
+      "suspended": false,
+      "weight": null
+    }
+  ]
+}
+[exit 0]
+$ ostro tenant get acme --json
+{
+  "created_at_ms": 1700000001000,
+  "event_rate": null,
+  "fuel_burst": 500,
+  "fuel_per_s": null,
+  "id": "acme",
+  "max_concurrency": null,
+  "memory_bytes": null,
+  "suspended": false,
+  "weight": null
+}
+[exit 0]
+$ ostro tenant set acme --weight 3 --json
+{
+  "created_at_ms": 1700000001000,
+  "event_rate": null,
+  "fuel_burst": 500,
+  "fuel_per_s": null,
+  "id": "acme",
+  "max_concurrency": null,
+  "memory_bytes": null,
+  "suspended": false,
+  "weight": 3
+}
+[exit 0]
+$ ostro tenant suspend acme --json
+{
+  "created_at_ms": 1700000001000,
+  "event_rate": null,
+  "fuel_burst": 500,
+  "fuel_per_s": null,
+  "id": "acme",
+  "max_concurrency": null,
+  "memory_bytes": null,
+  "suspended": true,
+  "weight": 3
+}
+[exit 0]
+$ ostro tenant rm acme --json
+{
+  "deleted": true,
+  "id": "acme"
+}
+[exit 0]
+$ ostro tenant get nope --json
+error: tenant nope not found (HTTP 404 not_found)
+[exit 1]

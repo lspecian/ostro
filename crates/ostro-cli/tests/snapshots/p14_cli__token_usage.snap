@@ -1,0 +1,25 @@
+---
+source: crates/ostro-cli/tests/p14_cli.rs
+expression: t
+---
+$ ostro auth token create --scope read
+usage: error: the following required arguments were not provided:
+[exit 2]
+$ ostro auth token create --name x
+usage: error: the following required arguments were not provided:
+[exit 2]
+$ ostro auth token create --name x --scope root
+usage: error: invalid value 'root' for '--scope <SCOPES>': unknown scope "root" (expected admin, deploy, operate, trigger or read)
+[exit 2]
+$ ostro auth token create --name x --scope read --tenant acme --system
+usage: error: the argument '--tenant <TENANT>' cannot be used with '--system'
+[exit 2]
+$ ostro auth token create --name x --scope read --ttl 1h --no-expiry
+usage: error: the argument '--ttl <TTL>' cannot be used with '--no-expiry'
+[exit 2]
+$ ostro auth token create --name x --scope read --ttl 7d
+usage: error: invalid value '7d' for '--ttl <TTL>': invalid duration "7d": days and weeks are not accepted, write it as 168h
+[exit 2]
+$ ostro auth token revoke
+usage: error: the following required arguments were not provided:
+[exit 2]

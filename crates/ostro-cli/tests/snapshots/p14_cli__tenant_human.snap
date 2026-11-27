@@ -1,0 +1,107 @@
+---
+source: crates/ostro-cli/tests/p14_cli.rs
+expression: t
+---
+$ ostro tenant create acme --weight 2 --max-concurrency 8 --memory 512MiB --event-rate 100/1s+10
+created tenant acme
+id:              acme
+suspended:       false
+weight:          2
+max concurrency: 8
+fuel per s:      -
+fuel burst:      -
+memory bytes:    536870912
+event rate:      100/1000ms+10
+created:         2023-11-14T22:13:21Z
+[exit 0]
+$ ostro tenant create beta
+created tenant beta
+id:              beta
+suspended:       false
+weight:          -
+max concurrency: -
+fuel per s:      -
+fuel burst:      -
+memory bytes:    -
+event rate:      -
+created:         2023-11-14T22:13:22Z
+[exit 0]
+$ ostro tenant create acme
+error: tenant acme exists (HTTP 409 conflict)
+[exit 1]
+$ ostro tenant ls
+ID    SUSPENDED  WEIGHT  MAX CONC  FUEL/S  MEMORY     EVENT RATE
+acme  no         2       8         -       536870912  100/1000ms+10
+beta  no         -       -         -       -          -
+[exit 0]
+$ ostro tenant get acme
+id:              acme
+suspended:       false
+weight:          2
+max concurrency: 8
+fuel per s:      -
+fuel burst:      -
+memory bytes:    536870912
+event rate:      100/1000ms+10
+created:         2023-11-14T22:13:21Z
+[exit 0]
+$ ostro tenant set acme --fuel-per-s 1000 --clear max-concurrency
+updated tenant acme
+id:              acme
+suspended:       false
+weight:          2
+max concurrency: -
+fuel per s:      1000
+fuel burst:      -
+memory bytes:    536870912
+event rate:      100/1000ms+10
+created:         2023-11-14T22:13:21Z
+[exit 0]
+$ ostro tenant set acme
+error: nothing to change: give a quota flag or --clear <field>
+[exit 2]
+$ ostro tenant rm acme
+error: tenant acme must be suspended and empty (HTTP 409 conflict, reason tenant_not_empty)
+[exit 1]
+$ ostro tenant suspend acme
+suspended tenant acme
+id:              acme
+suspended:       true
+weight:          2
+max concurrency: -
+fuel per s:      1000
+fuel burst:      -
+memory bytes:    536870912
+event rate:      100/1000ms+10
+created:         2023-11-14T22:13:21Z
+[exit 0]
+$ ostro tenant suspend acme
+suspended tenant acme
+id:              acme
+suspended:       true
+weight:          2
+max concurrency: -
+fuel per s:      1000
+fuel burst:      -
+memory bytes:    536870912
+event rate:      100/1000ms+10
+created:         2023-11-14T22:13:21Z
+[exit 0]
+$ ostro tenant resume beta
+resumed tenant beta
+id:              beta
+suspended:       false
+weight:          -
+max concurrency: -
+fuel per s:      -
+fuel burst:      -
+memory bytes:    -
+event rate:      -
+created:         2023-11-14T22:13:22Z
+[exit 0]
+$ ostro tenant rm acme
+deleted tenant acme
+[exit 0]
+$ ostro tenant get acme
+error: tenant acme not found (HTTP 404 not_found)
+[exit 1]

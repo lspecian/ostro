@@ -1,0 +1,31 @@
+---
+source: crates/ostro-cli/tests/p14_cli.rs
+expression: t
+---
+$ ostro tenant create _
+usage: error: invalid value '_' for '<ID>': `_` is the default tenant: it always exists and cannot be managed
+[exit 2]
+$ ostro tenant create Acme
+usage: error: invalid value 'Acme' for '<ID>': "Acme" is not a tenant id (^[a-z0-9][a-z0-9-]{0,62}$)
+[exit 2]
+$ ostro tenant create acme --memory 12XB
+usage: error: invalid value '12XB' for '--memory <MEMORY>': invalid size unit "XB" in "12XB" (use B, KB, MB, GB, TB, KiB, MiB, GiB, TiB)
+[exit 2]
+$ ostro tenant create acme --memory 0
+usage: error: invalid value '0' for '--memory <MEMORY>': must be > 0 (omit it for no limit)
+[exit 2]
+$ ostro tenant create acme --max-concurrency 0
+usage: error: invalid value '0' for '--max-concurrency <MAX_CONCURRENCY>': must be > 0 (omit it for no limit)
+[exit 2]
+$ ostro tenant create acme --event-rate 100
+usage: error: invalid value '100' for '--event-rate <EVENT_RATE>': invalid rate "100" (expected <limit>/<period>, e.g. 100/1s)
+[exit 2]
+$ ostro tenant create acme --event-rate 10/1d
+usage: error: invalid value '10/1d' for '--event-rate <EVENT_RATE>': invalid duration "1d": days and weeks are not accepted, write it as 24h
+[exit 2]
+$ ostro tenant set acme --clear colour
+usage: error: invalid value 'colour' for '--clear <CLEAR>'
+[exit 2]
+$ ostro tenant set acme --weight 2 --clear weight
+error: --clear weight conflicts with a new value for the same field
+[exit 2]

@@ -1,0 +1,117 @@
+---
+source: crates/ostro-cli/tests/p14_cli.rs
+expression: t
+---
+$ ostro auth token create --name ci --scope deploy --scope read --tenant acme --ttl 720h --description CI deployer
+token id:      otk_aaaaaaaaaaaaaaab
+name:          ci
+tenant:        acme
+scopes:        deploy,read
+expires at:    2023-12-14T22:13:21Z
+bearer (shown once):
+  ostro_otk_aaaaaaaaaaaaaaab_ssssssssssssssssssssssssssssssssssssssssssssssssssss
+[stderr] ostro: store it now; it cannot be shown again
+[exit 0]
+$ ostro auth token create --name root --scope admin --system --no-expiry --json
+{
+  "bearer": "ostro_otk_aaaaaaaaaaaaaaac_ssssssssssssssssssssssssssssssssssssssssssssssssssss",
+  "info": {
+    "created_at_ms": 1700000002000,
+    "created_by": "dev",
+    "description": "",
+    "expires_at_ms": null,
+    "id": "otk_aaaaaaaaaaaaaaac",
+    "name": "root",
+    "rotated_from": null,
+    "scopes": [
+      "admin"
+    ],
+    "tenant": null
+  }
+}
+[stderr] ostro: store it now; it cannot be shown again
+[exit 0]
+$ ostro auth token ls
+ID                    NAME  TENANT      SCOPES       EXPIRES               CREATED BY
+otk_aaaaaaaaaaaaaaab  ci    acme        deploy,read  2023-12-14T22:13:21Z  dev
+otk_aaaaaaaaaaaaaaac  root  - (system)  admin        never                 dev
+[exit 0]
+$ ostro auth token ls --tenant acme --json
+{
+  "tokens": [
+    {
+      "created_at_ms": 1700000001000,
+      "created_by": "dev",
+      "description": "CI deployer",
+      "expires_at_ms": 1702592001000,
+      "id": "otk_aaaaaaaaaaaaaaab",
+      "name": "ci",
+      "rotated_from": null,
+      "scopes": [
+        "deploy",
+        "read"
+      ],
+      "tenant": "acme"
+    }
+  ]
+}
+[exit 0]
+$ ostro auth token rotate otk_aaaaaaaaaaaaaaab
+token id:      otk_aaaaaaaaaaaaaaad
+name:          ci
+tenant:        acme
+scopes:        deploy,read
+expires at:    2023-12-14T22:13:23Z
+rotated from:  otk_aaaaaaaaaaaaaaab
+old token:     revoked
+bearer (shown once):
+  ostro_otk_aaaaaaaaaaaaaaad_ssssssssssssssssssssssssssssssssssssssssssssssssssss
+[stderr] ostro: store it now; it cannot be shown again
+[exit 0]
+$ ostro auth token rotate otk_aaaaaaaaaaaaaaac --keep-old --json
+{
+  "bearer": "ostro_otk_aaaaaaaaaaaaaaae_ssssssssssssssssssssssssssssssssssssssssssssssssssss",
+  "info": {
+    "created_at_ms": 1700000004000,
+    "created_by": "dev",
+    "description": "",
+    "expires_at_ms": null,
+    "id": "otk_aaaaaaaaaaaaaaae",
+    "name": "root",
+    "rotated_from": "otk_aaaaaaaaaaaaaaac",
+    "scopes": [
+      "admin"
+    ],
+    "tenant": null
+  }
+}
+[stderr] ostro: store it now; it cannot be shown again
+[exit 0]
+$ ostro auth token revoke otk_aaaaaaaaaaaaaaab
+revoked otk_aaaaaaaaaaaaaaab
+[exit 0]
+$ ostro auth token revoke otk_aaaaaaaaaaaaaaab --json
+{
+  "id": "otk_aaaaaaaaaaaaaaab",
+  "revoked": true
+}
+[exit 0]
+$ ostro auth token revoke otk_nope
+error: token otk_nope not found (HTTP 404 not_found)
+[exit 1]
+$ ostro auth whoami
+token id:  dev
+kind:      dev
+tenant:    - (system)
+scopes:    admin
+[exit 0]
+$ ostro auth whoami --json
+{
+  "kind": "dev",
+  "scopes": [
+    "admin"
+  ],
+  "tenant": null,
+  "token_id": "dev"
+}
+[exit 0]
