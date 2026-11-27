@@ -9,6 +9,11 @@
 //! window stays within `seal_interval` (P8-D23 as revised by 08-23). The startup log names the URL (a prefix, never credentials: those
 //! live in separate config fields and `open_url` rejects userinfo).
 //!
+//! 14-29 (D-P14-45): in a multi-member cluster the metadata leader also uploads meta
+//! snapshots and moves the term-fenced `meta/head`; the uploader learns leadership and term
+//! through `Uploader::with_meta_leader`, fed here from `MetaHandle::raft_status()` on every
+//! meta applied-index change and a 1 s tick.
+//!
 //! A failed LOCK (another incarnation owns the prefix) or a fenced round stops uploading and
 //! sets `ostro_backup_fenced = 1`; the node keeps serving (local trimming stays held at the
 //! upload floor, which the `ostro_backup_upload_floor_lag` alert catches).
@@ -18,7 +23,7 @@ use std::time::Duration;
 
 use ostro_backup::fence::{self, FenceError};
 use ostro_backup::uploader::{METRIC_FENCED, Uploader, UploaderClusterDeps, UploaderConfig};
-use ostro_meta::MetaView;
+use ostro_meta::{MetaHandle, MetaView};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -28,6 +33,8 @@ use super::ServiceCtx;
 const FINAL_ROUND: Duration = Duration::from_secs(10);
 /// Retry period of a failed LOCK acquisition caused by a store error.
 const LOCK_RETRY: Duration = Duration::from_secs(5);
+/// Re-check period of metadata leadership between applied-index changes (14-29).
+const META_LEADER_TICK: Duration = Duration::from_secs(1);
 
 /// Start the service; `None` when backup is off.
 pub fn spawn(ctx: &ServiceCtx) -> Option<JoinHandle<()>> {
@@ -52,6 +59,7 @@ pub fn spawn(ctx: &ServiceCtx) -> Option<JoinHandle<()>> {
         // epoch-fenced heads, single node included; LOCK and manifest/current only while the
         // cluster has one member (D-P12-3). The member count follows meta's Member records.
         let members = member_count_watch(ctx.meta.view().clone(), ctx.shutdown.clone());
+        let meta_leader = meta_leader_watch(Arc::clone(&ctx.meta), ctx.shutdown.clone());
         let up = Arc::new(
             Uploader::new(
                 Arc::clone(&ctx.node),
@@ -62,7 +70,8 @@ pub fn spawn(ctx: &ServiceCtx) -> Option<JoinHandle<()>> {
             .with_cluster(UploaderClusterDeps {
                 roles: ctx.node.roles(),
                 members: members.clone(),
-            }),
+            })
+            .with_meta_leader(meta_leader),
         );
         metrics::gauge!(METRIC_FENCED).set(0.0);
         // LOCK (P8-D4).
@@ -131,6 +140,38 @@ fn member_count_watch(
             tx.send_if_modified(|cur| {
                 let changed = *cur != n;
                 *cur = n;
+                changed
+            });
+        }
+    });
+    rx
+}
+
+/// `Some(term)` while this node leads the metadata group (14-29, D-P14-45), re-read on every
+/// meta applied-index change and every [`META_LEADER_TICK`], until `stop`.
+fn meta_leader_watch(
+    meta: Arc<MetaHandle>,
+    stop: tokio_util::sync::CancellationToken,
+) -> tokio::sync::watch::Receiver<Option<u64>> {
+    let status = |m: &MetaHandle| {
+        let s = m.raft_status();
+        s.is_leader.then_some(s.term)
+    };
+    let (tx, rx) = tokio::sync::watch::channel(status(&meta));
+    tokio::spawn(async move {
+        let mut applied = meta.view().subscribe();
+        let mut tick = tokio::time::interval(META_LEADER_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => return,
+                r = applied.changed() => if r.is_err() { return },
+                _ = tick.tick() => {}
+            }
+            let now = status(&meta);
+            tx.send_if_modified(|cur| {
+                let changed = *cur != now;
+                *cur = now;
                 changed
             });
         }

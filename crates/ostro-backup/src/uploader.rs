@@ -68,6 +68,7 @@ use crate::cluster::{self, Head, HeadPut, HeadSnapshot, Takeover, TakeoverOutcom
 use crate::config::BackupConfig;
 use crate::fence::{self, FenceError, Ident, Immutable, put_immutable};
 use crate::manifest::{self, Manifest, ManifestError, PartitionCut};
+use crate::meta_head::{self, MetaHead, MetaHeadPut};
 
 /// `ostro_backup_cut_age_seconds`: now − `cut_at` of the last durable manifest.
 pub const METRIC_CUT_AGE: &str = "ostro_backup_cut_age_seconds";
@@ -222,6 +223,10 @@ pub struct RoundReport {
     pub skipped: Vec<u16>,
     /// Objects deleted by remote retention.
     pub deleted: usize,
+    /// Multi-member cluster (14-29): the `meta/head` this round wrote, if any.
+    pub meta_head: Option<MetaHead>,
+    /// Multi-member cluster (14-29): a higher-term `meta/head` fenced this writer's term.
+    pub meta_fenced: bool,
 }
 
 /// A remote snapshot object.
@@ -285,6 +290,12 @@ struct Session {
     /// Retention runs on the first manifest of a session and after snapshot changes.
     retention_due: bool,
     cut_at_ms: Option<u64>,
+    /// Multi-member cluster (14-29): etag of `meta/head` as last read or written (`None` =
+    /// not read yet this session, `Some(None)` = absent).
+    meta_head_etag: Option<Option<String>>,
+    /// Multi-member cluster (14-29): meta index of the last snapshot this session pointed
+    /// `meta/head` at (or found already covered).
+    meta_head_index: Option<u64>,
 }
 
 /// After-cut test hook: the uploader sends a resume sender and waits for it.
@@ -311,6 +322,11 @@ pub struct Uploader {
     /// Phase 12 cluster mode (12-02 contract, consumed by 12-15); `None` = Phase 8
     /// behaviour.
     cluster: Option<UploaderClusterDeps>,
+    /// 14-29 (D-P14-45): `Some(term)` while this node leads metadata; `None` = never upload
+    /// meta in a multi-member cluster.
+    meta_leader: Option<watch::Receiver<Option<u64>>>,
+    /// 14-29: the metadata term at which a higher-term `meta/head` fenced this writer.
+    meta_fenced: Mutex<Option<u64>>,
 }
 
 /// Phase 12 (D-P12-20): what the uploader needs in cluster mode. Passed by the server
@@ -421,7 +437,32 @@ impl Uploader {
             inspect: false,
             part_fenced: Mutex::new(BTreeMap::new()),
             cluster: None,
+            meta_leader: None,
+            meta_fenced: Mutex::new(None),
         }
+    }
+
+    /// Whole-cluster restore (14-29, D-P14-45): metadata leadership, `Some(term)` while this
+    /// node leads the metadata group. In a multi-member cluster the leader uploads a meta
+    /// snapshot when the applied meta index moved and moves `meta/head` (term-fenced). Without
+    /// it a multi-member cluster uploads no meta; single-member clusters are unaffected (the
+    /// Phase 8 manifest names the meta snapshot).
+    pub fn with_meta_leader(mut self, rx: watch::Receiver<Option<u64>>) -> Self {
+        self.meta_leader = Some(rx);
+        self
+    }
+
+    /// 14-29: the metadata term at which a higher-term `meta/head` fenced this writer
+    /// (`None` = not fenced). Meta uploads resume when it leads at a higher term.
+    pub fn meta_fenced(&self) -> Option<u64> {
+        *self
+            .meta_fenced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn meta_term(&self) -> Option<u64> {
+        self.meta_leader.as_ref().and_then(|rx| *rx.borrow())
     }
 
     /// Phase 12 cluster mode (D-P12-20): per-partition leader uploads. Without it the
@@ -558,6 +599,16 @@ impl Uploader {
             // Cluster mode (12-15): only led partitions upload, each once its barrier is open.
             if cl.led.is_empty() {
                 report.barrier_closed = true;
+                if !cl.single && self.meta_term().is_some() {
+                    // 14-29: the metadata leader uploads meta even when it leads no partition.
+                    let mut guard = self.session.lock().await;
+                    if guard.as_ref().is_none_or(|s| ptr(&s.store) != ptr(store)) {
+                        *guard = Some(self.open_session(store, count).await?);
+                    }
+                    if let Some(sess) = guard.as_mut() {
+                        self.cluster_meta(sess, cl, &mut report).await;
+                    }
+                }
                 return Ok(report);
             }
         } else {
@@ -706,6 +757,8 @@ impl Uploader {
                     report.deleted = self.apply_retention(sess, plan).await;
                     sess.retention_due = false;
                 }
+                // 14-29: meta snapshot + meta/head after the partition uploads of the round.
+                self.cluster_meta(sess, cl, &mut report).await;
                 report.upload = started.elapsed();
                 metrics::histogram!(METRIC_UPLOAD_SECONDS).record(report.upload.as_secs_f64());
                 self.publish_metrics(sess, &pairs);
@@ -1049,6 +1102,143 @@ impl Uploader {
         Ok(excluded)
     }
 
+    /// Multi-member cluster (14-29, D-P14-45): while this node leads metadata at a term not
+    /// fenced, upload the meta snapshot when the applied meta index moved, then move
+    /// `meta/head` and apply meta retention. Failures are logged and retried next round; they
+    /// never fail the partition uploads of the round.
+    async fn cluster_meta(&self, sess: &mut Session, cl: &ClusterRound, report: &mut RoundReport) {
+        let Some(term) = self.meta_term() else {
+            return;
+        };
+        let Some(view) = self.meta.as_ref() else {
+            return;
+        };
+        if self.meta_fenced().is_some_and(|f| term <= f) {
+            return;
+        }
+        let (index, bytes) = view.read(|s| (view.applied(), ostro_meta::encode_snapshot(s)));
+        if sess.meta_head_index == Some(index) {
+            return;
+        }
+        match self.move_meta_head(sess, cl, term, index, bytes).await {
+            Ok(MetaRound::Written(h)) => {
+                report.meta_snapshot = true;
+                report.meta_head = Some(h);
+            }
+            Ok(MetaRound::Fenced(head_term)) => {
+                *self
+                    .meta_fenced
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(term);
+                metrics::gauge!(meta_head::METRIC_META_FENCED).set(1.0);
+                warn!(
+                    term,
+                    head_term, "meta/head moves fenced by a newer metadata leader"
+                );
+                report.meta_fenced = true;
+            }
+            Ok(MetaRound::Nothing) => {}
+            Err(e) => {
+                metrics::counter!(METRIC_FAILURES, "kind" => "meta").increment(1);
+                warn!(error = %e, "meta snapshot upload failed; retrying next round");
+                sess.meta_head_etag = None;
+            }
+        }
+    }
+
+    async fn move_meta_head(
+        &self,
+        sess: &mut Session,
+        cl: &ClusterRound,
+        term: u64,
+        index: u64,
+        bytes: Vec<u8>,
+    ) -> Result<MetaRound, UploadError> {
+        let store = Arc::clone(&sess.store);
+        let sha: [u8; 32] = Sha256::digest(&bytes).into();
+        let head = MetaHead {
+            term,
+            index,
+            key: meta_key(index),
+            sha256: sha,
+            at_ms: 0,
+            members: cl.members,
+            partitions: self.partitions(),
+        };
+        let etag = match sess.meta_head_etag.clone() {
+            Some(e) => e,
+            None => match meta_head::get(&store).await? {
+                Some((cur, _)) if cur.term > term => return Ok(MetaRound::Fenced(cur.term)),
+                Some((cur, e)) if !meta_head::may_replace(&cur, &head) => {
+                    sess.meta_head_etag = Some(e);
+                    sess.meta_head_index = Some(index);
+                    return Ok(MetaRound::Nothing);
+                }
+                Some((_, e)) => e,
+                None => None,
+            },
+        };
+        sess.meta_head_etag = Some(etag.clone());
+        let len = bytes.len() as u64;
+        match put_immutable(&store, &head.key, bytes, sha).await {
+            Ok(_) => {}
+            // Different bytes under the key: never fence the whole uploader for meta.
+            Err(FenceError::Fenced(m)) => return Err(UploadError::Io(m)),
+            Err(e) => return Err(e.into()),
+        }
+        metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "meta").increment(len);
+        let head = MetaHead {
+            at_ms: self.clock.now_ms(),
+            ..head
+        };
+        match meta_head::put(&store, &head, etag.as_deref()).await? {
+            MetaHeadPut::Written(e) => {
+                sess.meta_head_etag = Some(e);
+                sess.meta_head_index = Some(index);
+                metrics::counter!(METRIC_UPLOAD_BYTES, "kind" => "meta_head").increment(1);
+                if self.cfg.retention {
+                    self.meta_retention(&store, index, sess.meta_key.as_deref())
+                        .await;
+                }
+                debug!(term, index, "meta/head moved");
+                Ok(MetaRound::Written(head))
+            }
+            MetaHeadPut::Fenced(cur) => {
+                sess.meta_head_etag = None;
+                Ok(MetaRound::Fenced(cur.term))
+            }
+            MetaHeadPut::Superseded(_, e) => {
+                sess.meta_head_etag = Some(e);
+                sess.meta_head_index = Some(index);
+                Ok(MetaRound::Nothing)
+            }
+            MetaHeadPut::Conflict(_) => {
+                sess.meta_head_etag = None;
+                Ok(MetaRound::Nothing)
+            }
+        }
+    }
+
+    /// Keep the newest `remote_snapshots_keep` meta snapshots at or below the head (and the
+    /// one a Phase 8 `manifest/current` names); delete older ones, after the head PUT.
+    async fn meta_retention(&self, store: &Arc<dyn ObjectStore>, index: u64, protect: Option<&str>) {
+        let keys: Vec<String> = match store.list("meta/", None).await {
+            Ok(l) => l.into_iter().map(|m| m.key).collect(),
+            Err(e) => {
+                warn!(error = %e, "meta retention: listing failed");
+                return;
+            }
+        };
+        let doomed =
+            meta_head::retention_victims(&keys, self.cfg.remote_snapshots_keep, index, protect);
+        if doomed.is_empty() {
+            return;
+        }
+        if let Err(e) = store.delete_many(&doomed).await {
+            warn!(error = %e, "meta retention: delete failed; retried later");
+        }
+    }
+
     fn publish_metrics(&self, sess: &Session, pairs: &[Option<(Offset, [u8; 32])>]) {
         if let Some(at) = sess.cut_at_ms {
             let age = self.clock.now_ms().saturating_sub(at) as f64 / 1000.0;
@@ -1101,6 +1291,8 @@ impl Uploader {
             gens: None,
             retention_due: true,
             cut_at_ms: None,
+            meta_head_etag: None,
+            meta_head_index: None,
         };
         for p in 0..count {
             for m in store.list(&snap_prefix(p), None).await? {
@@ -1479,6 +1671,14 @@ impl Uploader {
             }
         }
     }
+}
+
+/// What [`Uploader::cluster_meta`] did.
+enum MetaRound {
+    Written(MetaHead),
+    /// A head with this higher term exists.
+    Fenced(u64),
+    Nothing,
 }
 
 /// What one partition's upload did (steps 3-5).

@@ -14,6 +14,7 @@
 //! | [`archive`] | 08-18 | backup tar files (P8-D7) |
 //! | [`remote_gc`] | 08-19 | remote delayed-deletion blob GC (P8-D8) |
 //! | [`cluster`] | 12-15 | Phase 12 per-partition leader uploads, head fencing, takeover reconcile (D-P12-20) |
+//! | [`meta_head`] | 14-29 | term-fenced `meta/head` pointer of multi-member cluster buckets (D-P14-45) |
 
 pub mod archive;
 pub mod chunk;
@@ -21,6 +22,7 @@ pub mod cluster;
 pub mod config;
 pub mod fence;
 pub mod manifest;
+pub mod meta_head;
 pub mod remote_gc;
 pub mod restore;
 pub mod uploader;
