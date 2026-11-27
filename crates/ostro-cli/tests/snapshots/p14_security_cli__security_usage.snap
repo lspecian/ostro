@@ -1,0 +1,16 @@
+---
+source: crates/ostro-cli/tests/p14_security_cli.rs
+expression: t
+---
+$ ostro security trust add
+usage: error: the following required arguments were not provided:
+[exit 2]
+$ ostro security trust add --minisign x --cosign y
+usage: error: the argument '--minisign <KEY|FILE>' cannot be used with '--cosign <FILE>'
+[exit 2]
+$ ostro security policy set
+usage: error: the following required arguments were not provided:
+[exit 2]
+$ ostro security policy set --require-signed maybe
+usage: error: invalid value 'maybe' for '--require-signed <REQUIRE_SIGNED>'
+[exit 2]

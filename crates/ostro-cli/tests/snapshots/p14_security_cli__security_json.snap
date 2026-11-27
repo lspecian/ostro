@@ -1,0 +1,30 @@
+---
+source: crates/ostro-cli/tests/p14_security_cli.rs
+expression: t
+---
+$ ostro security trust add --minisign RWQBAgMEBQYHCAkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJ --json
+{
+  "require_signed_modules": false,
+  "trusted_keys": [
+    {
+      "alg": "minisign",
+      "comment": "",
+      "key_id": "0807060504030201",
+      "public_key": "RWQBAgMEBQYHCAkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJ",
+      "tenant": null
+    }
+  ]
+}
+[exit 0]
+$ ostro security policy set --require-signed false --json
+{
+  "require_signed_modules": false,
+  "trusted_keys": []
+}
+[exit 0]
+$ ostro security policy get --json
+{
+  "require_signed_modules": false,
+  "trusted_keys": []
+}
+[exit 0]

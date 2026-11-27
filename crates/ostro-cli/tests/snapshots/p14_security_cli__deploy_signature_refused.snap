@@ -1,0 +1,16 @@
+---
+source: crates/ostro-cli/tests/p14_security_cli.rs
+expression: t
+---
+$ ostro deploy TMP/orders.wasm --signature TMP/big.sig
+error: signature file TMP/big.sig is 8193 bytes; at most 8192 bytes are accepted
+[exit 2]
+$ ostro deploy TMP/orders.wasm --signature TMP/empty.sig
+error: signature file TMP/empty.sig is empty
+[exit 2]
+$ ostro deploy TMP/orders.wasm --signature TMP/s0.sig --signature TMP/s1.sig --signature TMP/s2.sig --signature TMP/s3.sig --signature TMP/s4.sig
+error: 5 signature files given; at most 4 are accepted
+[exit 2]
+$ ostro deploy TMP/proj --signature TMP/a.minisig
+error: --signature applies to a .wasm file (sign the built component and deploy it)
+[exit 2]

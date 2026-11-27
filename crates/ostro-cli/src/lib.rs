@@ -28,9 +28,6 @@ use notify_debouncer_full as _;
 use ostro_build as _;
 use ostro_client as _;
 use ostro_engine as _;
-// Phase 14 (plan 14-01, D-P14-37): `base64` for `ostro deploy --signature` (14-19), anchored
-// until it is used.
-use base64 as _;
 
 #[cfg(test)]
 mod dev_dep_anchors {

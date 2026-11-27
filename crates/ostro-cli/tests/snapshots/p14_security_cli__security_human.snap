@@ -1,0 +1,53 @@
+---
+source: crates/ostro-cli/tests/p14_security_cli.rs
+expression: t
+---
+$ ostro security policy get
+require signed modules: false
+trusted keys: none
+[exit 0]
+$ ostro security trust add --minisign RWQBAgMEBQYHCAkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJ --comment ci
+key trusted
+require signed modules: false
+KEY ID            ALG       TENANT     COMMENT
+0807060504030201  minisign  (cluster)  ci
+[exit 0]
+$ ostro security trust add --minisign TMP/m.pub
+error: key 0807060504030201 exists (HTTP 409 conflict)
+[exit 1]
+$ ostro security trust add --cosign TMP/cosign.pub --tenant acme
+key trusted
+require signed modules: false
+KEY ID            ALG          TENANT     COMMENT
+0807060504030201  minisign     (cluster)  ci
+auto              cosign-p256  acme       
+[exit 0]
+$ ostro security policy get --tenant other
+require signed modules: false
+KEY ID            ALG       TENANT     COMMENT
+0807060504030201  minisign  (cluster)  ci
+[exit 0]
+$ ostro security trust rm 0807060504030201
+key 0807060504030201 removed
+require signed modules: false
+KEY ID  ALG          TENANT  COMMENT
+auto    cosign-p256  acme    
+[exit 0]
+$ ostro security trust rm 0807060504030201
+error: key 0807060504030201 not found (HTTP 404 not_found)
+[exit 1]
+$ ostro security policy set --require-signed true
+module policy updated
+require signed modules: true
+trusted keys: none
+[exit 0]
+$ ostro security policy get
+require signed modules: true
+trusted keys: none
+[exit 0]
+$ ostro security policy set --require-signed true --tenant acme
+error: --tenant: the 1.0 API has no tenant-level policy field; set the cluster policy, or tighten a tenant through its administrator
+[exit 2]
+$ ostro security trust add --minisign not-a-key
+error: --minisign: not a minisign public key
+[exit 2]

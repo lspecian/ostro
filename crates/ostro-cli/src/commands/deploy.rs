@@ -2,6 +2,8 @@
 //!
 //! - `ostro deploy <file.wasm> [--activate] [--name NAME] [--tenant T]` (05-14, D12):
 //!   upload only, no build. Its human output and its `{upload, activated}` JSON are frozen.
+//!   `--signature FILE` (repeatable, 14-19) sends each file base64-encoded in
+//!   `Ostro-Module-Signature` (≤ 4 files, ≤ 8 KiB each, checked locally; `.wasm` form only).
 //! - `ostro deploy [DIR] [--activate[=BOOL]] [--no-build] [--toolchain T] [--docker]`
 //!   (10-16, CLI-05): build the project when its input hash changed (`ostro_build::build`),
 //!   upload `target/ostro/<name>.wasm` (`--name` > `[project] name`, `--tenant` >
@@ -50,6 +52,10 @@ pub struct DeployArgs {
     /// Project only: shorthand for `--toolchain docker`.
     #[arg(long, conflicts_with = "toolchain")]
     pub docker: bool,
+    /// `.wasm` only: a signature file (minisign `.minisig`, cosign `.sig` or bundle) sent
+    /// with the upload; repeatable (14-19).
+    #[arg(long = "signature", value_name = "FILE")]
+    pub signature: Vec<PathBuf>,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -132,6 +138,9 @@ fn described_workflows(upload: &Value) -> Vec<(String, u64)> {
 pub async fn deploy(c: &Client, out: Out, a: &DeployArgs) -> Result<Outcome, CallError> {
     match a.wasm_file() {
         Some(file) => deploy_wasm(c, out, a, file).await,
+        None if !a.signature.is_empty() => Err(CallError::Usage(
+            "--signature applies to a .wasm file (sign the built component and deploy it)".into(),
+        )),
         None => deploy_project_verb(c, out, a).await,
     }
 }
@@ -148,8 +157,9 @@ async fn deploy_wasm(
     let sha = sha256_hex(&wasm);
     let size = wasm.len();
     let name = a.module_name();
+    let sigs = super::security::read_signatures(&a.signature)?;
     let up = c
-        .upload_module(&sha, wasm, name.as_deref(), a.tenant.as_deref())
+        .upload_module_signed(&sha, wasm, name.as_deref(), a.tenant.as_deref(), &sigs)
         .await?;
     let described = described_workflows(&up.body);
 
