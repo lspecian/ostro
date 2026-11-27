@@ -28,10 +28,15 @@
 //!
 //! `retry_run` has no version override (14-01 inventory), so it needs no `version_gate`.
 //!
-//! Every hook is a stub that keeps the Phase 13 behaviour exactly until its plan lands: the
-//! guard passes through, gates allow, the authenticator and the UI answer the dev principal,
-//! the audit sink is [`NoopAuditSink`], loops idle, and a non-empty `[[triggers.kafka]]` list
-//! fails startup ("Kafka triggers land in 14-32").
+//! Every hook started as a stub that kept the Phase 13 behaviour exactly until its plan
+//! landed: the guard passed through, gates allowed, the authenticator and the UI answered the
+//! dev principal, the audit sink was [`NoopAuditSink`] and loops idled. [`start_triggers`] is
+//! no longer a stub (14-32): `kafka::start` validates a non-empty `[[triggers.kafka]]` list
+//! (a configuration error fails startup with the field-level message, e.g.
+//! `triggers.kafka[0] ("orders"): bootstrap: is required`) and starts the supervisor that
+//! runs one consumer per owned `(trigger, topic, kafka partition)`; a build without the
+//! `kafka` feature refuses any list ("built without the kafka feature"). An empty list starts
+//! nothing.
 //!
 //! # Ownership
 //!
@@ -395,7 +400,8 @@ pub enum IngressKind {
 
 /// Start the Kafka topic-consumer triggers (`[[triggers.kafka]]`, 14-32) on the routed,
 /// unguarded control plane (they start runs as System). `Ok(None)` when none are
-/// configured. Stub: `Ok(None)` for an empty list, a startup error otherwise.
+/// configured; an invalid list (or any list in a build without the `kafka` feature) is a
+/// startup error.
 pub async fn start_triggers(
     ctx: &Arc<P14Ctx>,
     routed: Arc<dyn ControlPlane>,
