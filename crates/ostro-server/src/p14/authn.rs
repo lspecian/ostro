@@ -40,11 +40,15 @@ pub const LAST_SEEN_CAP: usize = 10_000;
 pub fn authenticator(ctx: &Arc<P14Ctx>) -> Arc<dyn Authenticator> {
     match ctx.cfg.auth.mode {
         AuthMode::None => Arc::new(AllowDev),
-        AuthMode::Token => Arc::new(MetaAuthenticator::new(
-            ctx.meta.view().clone(),
-            Arc::clone(&ctx.clock),
-            AuthMode::Token,
-        )),
+        // 14-18: authentication failures are audited (coalesced) by the wrapper.
+        AuthMode::Token => super::audit_hooks::auditing(
+            Arc::new(MetaAuthenticator::new(
+                ctx.meta.view().clone(),
+                Arc::clone(&ctx.clock),
+                AuthMode::Token,
+            )),
+            ctx,
+        ),
     }
 }
 

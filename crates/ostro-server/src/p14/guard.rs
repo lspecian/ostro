@@ -241,7 +241,8 @@ impl Core {
         Out: Send + 'static,
         Fut: Future<Output = Result<Out, ApiError>> + Send,
     {
-        let p = admit(m)?;
+        // 14-18: authorization refusals are audited (coalesced) before they are returned.
+        let p = admit(m).inspect_err(|e| audit_hooks::denied(&self.ctx, m, e))?;
         let req = tenant_scope::before(&p, m, &*self.control, req).await?;
         let (ctx, permit) = self.reserve(&p, m).await?;
         let target = target(&req);
