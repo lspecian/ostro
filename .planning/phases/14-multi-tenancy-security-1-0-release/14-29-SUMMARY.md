@@ -104,7 +104,9 @@ The metadata leader of a multi-member cluster now uploads meta snapshots and mov
 - musl2: one failure outside 14-29's code, ostro `queue_limits` (tests/common/p7.rs:712) after 617 s, in a step that took 9907 s (load). Not rerun alone.
 - lint, test2: still running when the cluster was withdrawn; no result.
 
-Unverified items for the consolidated gate on dell-4: poly and obuild groups; alone reruns of the vault relogin test and `queue_limits`; the lint group (fmt, clippy, grep gates, mutant matrices, ...) and the test2 shard. Locally verified: every task verify, clippy `-D warnings` on the three touched crates, `p12-grep-gates.sh`, CLOCK_GATE_SCOPED, `cargo fmt --check`. The fmt failure on main (ostro-backup cluster_cut.rs, uploader.rs, tests/cluster_cut.rs, tests/meta_head.rs, ostro-server tests/cluster_meta_head.rs) was fixed in 155d891.
+Final runner result (it finished after the withdrawal, exit 1, wall 320 min): test2 failed one test outside 14-29's code, ostro `live_start_with_toml` (tests/common/mod.rs:205, server start; 10460 s step, load); the lint group was killed (exit 137, dell-1) with no ci-local summary.
+
+Unverified items for the consolidated gate on dell-4: poly and obuild groups; alone reruns of the vault relogin test and `queue_limits`; the lint group (fmt, clippy, grep gates, mutant matrices, ...); an alone rerun of `live_start_with_toml` (test2). Locally verified: every task verify, clippy `-D warnings` on the three touched crates, `p12-grep-gates.sh`, CLOCK_GATE_SCOPED, `cargo fmt --check`. The fmt failure on main (ostro-backup cluster_cut.rs, uploader.rs, tests/cluster_cut.rs, tests/meta_head.rs, ostro-server tests/cluster_meta_head.rs) was fixed in 155d891.
 
 ## Notes for 14-30
 
