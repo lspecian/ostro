@@ -199,6 +199,64 @@ departed follower. The table above shows it: the followed partitions are unavail
 the handed-off ones. A fix needs a new "leaving node" signal and a rule in the 12-04 two-phase
 ISR protocol. It is a candidate for Phase 14 or a follow-up plan.
 
+### 4.1 Fail-stop on storage errors, open-file limit and connection cap (p14-fixups-4)
+
+**Fail-stop.** If the metadata Raft driver stops on a storage error, the node cannot serve
+again until it restarts. The error can be `EMFILE` (out of file descriptors), `ENOSPC` or
+`EIO`, and the log says
+`metadata raft driver stopped (raft storage: ...)`.
+
+The running fence (see [compat.md](compat.md)) sees the stop and fail-stops the node in the
+same way as a halted metadata apply:
+
+- the node logs the reason at error level;
+- it runs the normal shutdown, which flushes the audit journal and checkpoints what it can,
+  within 60 s;
+- it exits with status 1, printing `ostro: error: metadata raft driver stopped (...)`.
+
+A supervisor then restarts the node, and recovery reopens the log. Use systemd
+`Restart=on-failure` or a Kubernetes pod restart. Before this change, the node stayed up and
+answered 503 `no metadata lease` until someone noticed.
+
+The driver does not retry `EMFILE` in place. A storage error can leave a Raft `Ready` half
+persisted, and only recovery at open can repair that safely. Partition logs keep their own
+fail-stop (STOR-07): only the failed partition stops, and its leadership moves.
+
+**Open-file limit.** Each node holds descriptors for:
+
+- WAL segments, the state stores and blobs of every partition;
+- the metadata log;
+- peer and worker connections;
+- every client connection.
+
+At startup, `ostro server` raises its soft `RLIMIT_NOFILE` to the hard limit. Still set a
+high limit:
+
+```ini
+# /etc/systemd/system/ostro.service (excerpt)
+[Service]
+ExecStart=/usr/local/bin/ostro server --config /etc/ostro/ostro.toml
+Restart=on-failure
+LimitNOFILE=1048576
+```
+
+For a shell or container, use `ulimit -n 1048576`, or the container runtime's `nofile` ulimit.
+Containerd and CRI-O usually default to a hard limit of 1048576, which the startup raise then
+uses. The Helm chart can set `server.maxConnections` (below).
+
+**Connection cap.** `[api] max_connections` (env `OSTRO_API__MAX_CONNECTIONS`) bounds
+concurrent client-listener connections. At the cap, the listener stops accepting until a
+connection closes. New connections wait in the kernel's accept backlog and use no descriptor,
+so a connection flood cannot starve the storage of descriptors.
+
+- The default `0` means half of the soft limit after the startup raise, clamped to 64..16384.
+  With `LimitNOFILE=1048576` that is 16384.
+- HTTP/2 streams use no descriptor. hyper limits them to 200 per connection.
+- Idle keep-alive connections hold their slot. Clients that pool connections should bound
+  their idle pools.
+- The log shows the cap at startup (`client listener connection cap`), and warns once each
+  time the cap is reached.
+
 ## 5. Routing (API-08)
 
 Any node accepts any request (D-P13-14). REST, gRPC, the UI and every in-process consumer
@@ -305,6 +363,7 @@ state on the node asked.
 | `[api] unkeyed_start_placement` | `local` | `local` or `uniform` (section 5) |
 | `[api] strict_reads` | `false` | barrier + epoch check before every partition read |
 | `[api] lease_margin` | `0.2` | lease safety margin as a fraction of `session_timeout` (0 < m < 0.5) |
+| `[api] max_connections` | `0` (auto) | most concurrent client-listener connections (REST, gRPC, UI); `0` = half the soft open-file limit, clamped to 64..16384 (section 4.1) |
 | `[modules] gc_interval` | `10m` | module GC period ([upgrade-runbook.md](upgrade-runbook.md)) |
 | `[modules] gc_grace` | `10m` | a retired module is a GC candidate after this long |
 | `[modules] gc_protect_resumable` | `true` | runs that can still be retried keep their module |

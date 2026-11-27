@@ -443,6 +443,10 @@ fn run_restore(a: &ostro_cli::commands::backup::RestoreArgs) -> ExitCode {
     }
 }
 
+/// How long a fail-stop's shutdown may take before the process exits regardless
+/// (p14-fixups-4).
+const FATAL_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Start the server, print the ready line, wait for a signal, shut down.
 fn run_server(
     name: &str,
@@ -460,6 +464,15 @@ fn run_server(
         Err(e) => return fail(format!("cannot start the async runtime: {e}")),
     };
     init_tracing(&cfg.effective_log_section());
+    // p14-fixups-4: soft RLIMIT_NOFILE up to the hard limit (systemd and shells often start
+    // with 1,024); the client listener's automatic connection cap is derived from it.
+    if let Some((old, new)) = ostro_server::tls::conn_limit::raise_nofile_soft_limit() {
+        tracing::info!(
+            old,
+            new,
+            "raised the open-file soft limit to the hard limit"
+        );
+    }
     rt.block_on(async move {
         // Register the handlers before startup so a signal during startup is not lost
         // (it is delivered as soon as startup finishes) and does not kill the process
@@ -484,9 +497,29 @@ fn run_server(
             }
         }
         drop(stop_watch);
-        // Phase 13: a fail-stop (running fence, removed node) exits non-zero.
+        // Phase 13: a fail-stop (running fence, removed node, p14-fixups-4: a stopped
+        // metadata raft driver) exits non-zero. Its shutdown flushes what it can within
+        // FATAL_SHUTDOWN_DEADLINE; past it the process exits anyway, so a supervisor
+        // (systemd Restart=, Kubernetes) always gets to restart the node.
         let fatal = handle.fatal();
-        match (handle.shutdown().await, fatal) {
+        let shutdown = handle.shutdown();
+        let res = match &fatal {
+            None => shutdown.await,
+            Some(reason) => {
+                tracing::error!(%reason, "fail-stop: shutting down, then exiting non-zero");
+                match tokio::time::timeout(FATAL_SHUTDOWN_DEADLINE, shutdown).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        eprintln!(
+                            "ostro: error: {reason} (shutdown did not finish within {}s; exiting)",
+                            FATAL_SHUTDOWN_DEADLINE.as_secs()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        };
+        match (res, fatal) {
             (Ok(()), None) => ExitCode::SUCCESS,
             (Ok(()), Some(reason)) => fail(reason),
             (Err(e), _) => fail(format!("shutdown: {e}")),

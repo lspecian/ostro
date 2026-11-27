@@ -1409,6 +1409,7 @@ fn phase13_defaults_match_d_p13_26_in_both_profiles() {
         assert_eq!(c.api.unkeyed_start_placement, UnkeyedStartPlacement::Local);
         assert!(!c.api.strict_reads);
         assert!((c.api.lease_margin - 0.2).abs() < f64::EPSILON);
+        assert_eq!(c.api.max_connections, 0, "p14-fixups-4: automatic cap");
         assert_eq!(c.modules.gc_interval.get(), Duration::from_secs(600));
         assert_eq!(c.modules.gc_grace.get(), Duration::from_secs(600));
         assert!(c.modules.gc_protect_resumable);
@@ -1434,6 +1435,7 @@ meta_max_message_bytes = 67108864
 unkeyed_start_placement = "uniform"
 strict_reads = true
 lease_margin = 0.3
+max_connections = 2048
 
 [modules]
 gc_interval = "1m"
@@ -1466,6 +1468,7 @@ fn phase13_keys_parse_and_round_trip_in_both_profiles() {
         );
         assert!(c.api.strict_reads);
         assert!((c.api.lease_margin - 0.3).abs() < f64::EPSILON);
+        assert_eq!(c.api.max_connections, 2048);
         assert_eq!(c.modules.gc_interval.get(), Duration::from_secs(60));
         assert_eq!(c.modules.gc_grace.get(), Duration::from_secs(120));
         assert!(!c.modules.gc_protect_resumable);

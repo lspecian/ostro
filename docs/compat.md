@@ -164,7 +164,9 @@ upgrade restarted (p50 541 ms, n=3). The finalized level stayed 1 after every ea
 - **Running fence.** It runs at start, after every applied meta change and after every Raft
   status change. It fail-stops a running node that sees finalized > its `level_max` (or a
   fatal meta apply): `running fence: data finalized by a newer Ostro (...); upgrade this
-  binary; stopping`.
+  binary; stopping`. p14-fixups-4: it also fail-stops when the metadata Raft driver stopped on a
+  storage error (`metadata raft driver stopped (raft storage: ...)`, e.g. EMFILE), so that
+  a supervisor restarts the node ([cluster-operations.md](cluster-operations.md) §4.1).
 - **Joiners** check the finalized level from the join answer before writing anything.
 - There is no unsafe-downgrade path in 1.x.
 

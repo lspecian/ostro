@@ -331,11 +331,15 @@ pub fn serve_client(
     listener: TcpListener,
     app: Router,
 ) -> impl Future<Output = io::Result<()>> + Send + 'static {
-    tls::listener::serve(
+    // p14-fixups-4: `[api] max_connections` (0 = half the soft fd limit, clamped).
+    let max = tls::conn_limit::resolve(ctx.config.api.max_connections);
+    tracing::info!(max_connections = max, "client listener connection cap");
+    tls::listener::serve_capped(
         Arc::clone(&ctx.shared.tls),
         listener,
         app,
         ctx.shutdown.clone(),
+        Some(tls::conn_limit::ConnLimit::new(max)),
     )
 }
 

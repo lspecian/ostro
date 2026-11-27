@@ -463,7 +463,11 @@ pub fn running_fence_message(finalized: u32, level_max: u32) -> String {
 }
 
 /// Fail-stop when the finalized level rises above `level_max` (`on_fatal` gets the message,
-/// once; the task then ends). Checks at start, after every applied meta change and every raft status change; also fail-stops on a refused newer meta format or a halted meta apply (13-05).
+/// once; the task then ends). Checks at start, after every applied meta change and every raft status change; also fail-stops on a refused newer meta format or a halted meta apply (13-05),
+/// and (p14-fixups-4) when the metadata raft driver stopped on a storage error
+/// (`RaftStatus::failed`, e.g. EMFILE / ENOSPC / EIO): a stopped metadata group never
+/// recovers in place, so the node exits non-zero and its supervisor restarts it instead of
+/// answering 503 forever.
 pub fn start_running_fence(
     meta: Arc<MetaHandle>,
     level_max: u32,
@@ -481,9 +485,17 @@ pub fn start_running_fence(
             }
             tokio::select! {
                 _ = stop.cancelled() => return,
-                r = applied.changed() => if r.is_err() { return },
-                r = raft.changed() => if r.is_err() { return },
+                r = applied.changed() => if r.is_err() { break },
+                r = raft.changed() => if r.is_err() { break },
             }
+        }
+        // A channel closed: the driver thread published its last status (a storage
+        // failure is published just before the thread exits), so look once more.
+        if !stop.is_cancelled()
+            && let Some(msg) = running_fence_verdict(&meta, level_max)
+        {
+            tracing::error!(level_max, "{msg}");
+            on_fatal(msg);
         }
     })
 }
@@ -502,10 +514,23 @@ fn running_fence_verdict(meta: &MetaHandle, level_max: u32) -> Option<String> {
             CompatError::NewerMetaFormat { found }
         ));
     }
-    meta.raft()
-        .status()
-        .fatal
-        .map(|f| format!("running fence: metadata apply halted ({f}); stopping"))
+    let status = meta.raft().status();
+    if let Some(f) = status.fatal {
+        return Some(format!(
+            "running fence: metadata apply halted ({f}); stopping"
+        ));
+    }
+    status.failed.map(meta_driver_stopped_message)
+}
+
+/// The fail-stop message for a metadata raft driver that stopped on a storage failure
+/// (p14-fixups-4).
+pub fn meta_driver_stopped_message(failure: String) -> String {
+    format!(
+        "metadata raft driver stopped ({failure}); this node cannot serve without it and \
+         exits so its supervisor restarts it (check the open-file limit, disk space and \
+         disk health)"
+    )
 }
 
 #[cfg(test)]

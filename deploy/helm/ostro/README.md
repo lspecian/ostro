@@ -104,6 +104,7 @@ the old key.
 | `server.partitions` | `16` | `[node] partitions` (fixed at first boot) |
 | `server.ports.client` / `.cluster` / `.replication` | `7700` / `7701` / `7702` | client listener; cluster listener (MetaPeer, Replication, worker protocol, mTLS); `[cluster] replication_listen` (0 = off) |
 | `server.logLevel` | `info` | `[log] level` (JSON format) |
+| `server.maxConnections` | `0` | `[api] max_connections` (0 = half the soft open-file limit, 64..16384); see "Open files" |
 | `server.apiTls.mode` | `self-signed` | `self-signed` (CA-issued), `files`, `off` |
 | `server.apiTls.existingSecret` | `""` | TLS Secret for `files` |
 | `server.ui.enabled` | `false` | `[ui] enabled` |
@@ -146,6 +147,23 @@ the old key.
 | `networkPolicy.clientFromNamespaces` | `[]` | namespaces allowed on the client port besides the release namespace |
 | `networkPolicy.dnsNamespace` | `kube-system` | DNS egress target |
 | `networkPolicy.serverEgress` / `.workerEgress` | `[]` | extra egress rules |
+
+## Open files
+
+Each server holds file descriptors for the WAL segments, the state stores, the metadata log,
+peer and worker connections, and every client connection. If it runs out (`EMFILE`), the
+metadata Raft driver stops. The server then exits non-zero and Kubernetes restarts the pod
+(docs/cluster-operations.md §4.1).
+
+Kubernetes has no pod-level `ulimit`, so the container runtime's `nofile` limit applies.
+containerd and CRI-O usually set it to 1048576 (hard), and the server raises its soft limit
+to the hard limit at startup. Check it with `kubectl exec <pod> -- cat /proc/1/limits`.
+
+`server.maxConnections` caps concurrent client connections per server. It defaults to half
+the soft limit, at most 16384. On nodes with a lower limit, raise the runtime default:
+
+- containerd: `LimitNOFILE=` in the `containerd.service` unit;
+- CRI-O: `default_ulimits = ["nofile=1048576:1048576"]`.
 
 ## KEDA
 

@@ -60,6 +60,11 @@ server:
     replication: 7702
   # -- [log] level.
   logLevel: info
+  # -- [api] max_connections: concurrent client connections per server (0 = half the
+  # container's soft open-file limit, clamped to 64..16384). The server raises its soft
+  # RLIMIT_NOFILE to the hard limit at startup; the container runtime's nofile default
+  # (usually 1048576) applies, Kubernetes has no pod-level ulimit field.
+  maxConnections: 0
   apiTls:
     # -- [api.tls] mode: self-signed (a certificate issued by the cluster CA), files
     # (existingSecret, e.g. from cert-manager) or off (plaintext; only behind a mesh).

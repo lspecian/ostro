@@ -201,6 +201,12 @@ pub struct ApiSection {
     /// Phase 13 (D-P13-15/26, 13-13): leader-lease safety margin as a fraction of
     /// `[replication] session_timeout` (0 < m < 0.5, default 0.2).
     pub lease_margin: f64,
+    /// p14-fixups-4: most concurrent client-listener connections (REST, gRPC, UI). At the
+    /// cap no new connection is accepted until one closes (they wait in the accept
+    /// backlog), so a connection flood cannot exhaust the open-file limit the storage
+    /// needs. `0` (default) = half of the process's soft `RLIMIT_NOFILE`, clamped to
+    /// 64..=16384 (the server raises the soft limit to the hard limit at startup).
+    pub max_connections: u64,
 }
 
 impl Default for ApiSection {
@@ -213,6 +219,7 @@ impl Default for ApiSection {
             unkeyed_start_placement: UnkeyedStartPlacement::default(),
             strict_reads: false,
             lease_margin: 0.2,
+            max_connections: 0,
         }
     }
 }

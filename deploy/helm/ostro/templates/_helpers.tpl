@@ -172,6 +172,7 @@ partitions = {{ int $v.server.partitions }}
 
 [api]
 listen = "0.0.0.0:{{ int $p.client }}"
+max_connections = {{ int (default 0 $v.server.maxConnections) }}
 
 [api.tls]
 mode = {{ $v.server.apiTls.mode | quote }}

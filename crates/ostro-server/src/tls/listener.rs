@@ -18,12 +18,13 @@ use std::io;
 use std::sync::Arc;
 
 use axum::Router;
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use super::conn_limit::{CappedAddr, CappedListener, ConnLimit};
 use super::{TlsMode, TlsState, acme};
 
 fn io_other(e: impl std::fmt::Display) -> io::Error {
@@ -31,6 +32,7 @@ fn io_other(e: impl std::fmt::Display) -> io::Error {
 }
 
 /// Serve `app` on `listener` until `shutdown` fires (graceful: in-flight requests finish).
+/// No connection cap (tests); the server uses [`serve_capped`].
 // The signature is fixed by 07-02 (an explicit `Send + 'static` future for p7.rs).
 #[allow(clippy::manual_async_fn)]
 pub fn serve(
@@ -39,11 +41,34 @@ pub fn serve(
     app: Router,
     shutdown: CancellationToken,
 ) -> impl Future<Output = io::Result<()>> + Send + 'static {
+    serve_capped(state, listener, app, shutdown, None)
+}
+
+/// [`serve`] with at most `limit` concurrent connections (p14-fixups-4,
+/// `[api] max_connections`; `None` = uncapped). At the cap no further connection is
+/// accepted until one closes (see [`conn_limit`]).
+#[allow(clippy::manual_async_fn)]
+pub fn serve_capped(
+    state: Arc<TlsState>,
+    listener: TcpListener,
+    app: Router,
+    shutdown: CancellationToken,
+    limit: Option<ConnLimit>,
+) -> impl Future<Output = io::Result<()>> + Send + 'static {
     async move {
         if state.mode() == TlsMode::Off {
-            return axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown.cancelled_owned())
-                .await;
+            return match limit {
+                None => {
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(shutdown.cancelled_owned())
+                        .await
+                }
+                Some(limit) => {
+                    axum::serve(CappedListener::new(listener, limit), app)
+                        .with_graceful_shutdown(shutdown.cancelled_owned())
+                        .await
+                }
+            };
         }
         let mut aux: Vec<JoinHandle<()>> = Vec::new();
         match state.mode() {
@@ -53,7 +78,7 @@ pub fn serve(
             }
             TlsMode::Off | TlsMode::SelfSigned => {}
         }
-        let res = serve_tls(&state, listener, app, shutdown).await;
+        let res = serve_tls(&state, listener, app, shutdown, limit).await;
         for t in aux {
             t.abort();
         }
@@ -66,31 +91,61 @@ async fn serve_tls(
     listener: TcpListener,
     app: Router,
     shutdown: CancellationToken,
+    limit: Option<ConnLimit>,
 ) -> io::Result<()> {
     let config = state.client_server_config().map_err(io_other)?;
     let addr = listener.local_addr()?;
-    let std_listener = listener.into_std()?;
-    let handle = axum_server::Handle::<std::net::SocketAddr>::new();
-    let stopper = {
-        let handle = handle.clone();
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            shutdown.cancelled().await;
-            handle.graceful_shutdown(None);
-        })
-    };
     info!(
         %addr,
         mode = ?state.mode(),
         fingerprint = ?state.fingerprint(),
+        max_connections = limit.as_ref().map(ConnLimit::max),
         "client listener serving TLS"
     );
-    let res = match axum_server::from_tcp_rustls(std_listener, RustlsConfig::from_config(config)) {
-        Ok(server) => server.handle(handle).serve(app.into_make_service()).await,
-        Err(e) => Err(e),
-    };
-    stopper.abort();
-    res
+    let acceptor = RustlsAcceptor::new(RustlsConfig::from_config(config));
+    match limit {
+        None => {
+            let std_listener = listener.into_std()?;
+            let handle = axum_server::Handle::<std::net::SocketAddr>::new();
+            let stopper = graceful_stopper(handle.clone(), shutdown);
+            let res = match axum_server::from_tcp(std_listener) {
+                Ok(server) => {
+                    server
+                        .acceptor(acceptor)
+                        .handle(handle)
+                        .serve(app.into_make_service())
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            stopper.abort();
+            res
+        }
+        Some(limit) => {
+            let handle = axum_server::Handle::<CappedAddr>::new();
+            let stopper = graceful_stopper(handle.clone(), shutdown);
+            let res = axum_server::Server::<CappedAddr>::from_listener(CappedListener::new(
+                listener, limit,
+            ))
+            .acceptor(acceptor)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await;
+            stopper.abort();
+            res
+        }
+    }
+}
+
+/// `shutdown` → `handle.graceful_shutdown(None)` (in-flight requests finish).
+fn graceful_stopper<A: axum_server::Address + Send + Sync + 'static>(
+    handle: axum_server::Handle<A>,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        shutdown.cancelled().await;
+        handle.graceful_shutdown(None);
+    })
 }
 
 /// `files` mode: reload on SIGHUP and when an mtime changes (poll every `reload_poll`).

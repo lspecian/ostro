@@ -14,6 +14,7 @@
 
 pub mod acme;
 pub mod ca;
+pub mod conn_limit;
 pub mod dev_cert;
 pub mod listener;
 pub mod resolver;
