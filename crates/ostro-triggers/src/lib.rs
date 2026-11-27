@@ -9,9 +9,11 @@
 //! | [`tz`] | 08-05 | IANA zone loading: both jiff majors from the same TZif bytes |
 //! | [`webhook`] | 08-06 | signature verifiers (Stripe, GitHub, Slack, Standard Webhooks, generic HMAC; P8-D12) |
 //! | [`extract`] | 08-06 | idempotency-key extractors (`header:<name>`, `json:<pointer>`, `none`) |
+//! | [`kafka`] | 14-32 | Kafka trigger keys, run input, commit watermark, owner placement (D-P14-43) |
 
 pub mod cron;
 pub mod extract;
+pub mod kafka;
 pub mod tz;
 pub mod webhook;
 
@@ -26,7 +28,3 @@ mod dep_anchors {
     use sha2 as _;
     use thiserror as _;
 }
-
-// Phase 14 (plan 14-01, D-P14-37): `base64` for the Kafka envelope input (14-32), anchored
-// until it is used.
-use base64 as _;

@@ -56,11 +56,6 @@
 //! resolver and the worker join service; [`audit`] (14-04) and `flow::tenant` (14-06) are
 //! stubs until their plans.
 
-// Plan 14-01 (D-P14-37): dependency of 14-32 (ostro-kafka behind `kafka`), anchored until
-// it is used.
-#[cfg(feature = "kafka")]
-use ostro_kafka as _;
-
 pub mod audit;
 pub mod bridge_services;
 pub mod children;
