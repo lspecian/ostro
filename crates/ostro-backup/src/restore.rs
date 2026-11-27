@@ -25,6 +25,14 @@
 //!    `outbox_truncated[A->B] <= inbound_seen_B[A] < outbox_next_seq[A->B]`.
 //! 9. [`RestoreReport`]: cut time, per-partition offsets, hashes and digests, durations.
 //!
+//! **Cluster buckets** (14-30, D-P14-45): a bucket with a `meta/head` newer than any
+//! `manifest/current`, or with per-partition heads and no usable `manifest/current`, was
+//! written by a multi-member cluster. It is restored by
+//! [`crate::cluster_restore::restore_detected`] to a cross-partition consistent cut as one seed
+//! node (docs/cluster-restore.md); `--at` is refused there (no common time base in 1.0). A
+//! cluster bucket without any metadata snapshot is still refused
+//! ([`RestoreError::ClusterBucketUnsupported`]).
+//!
 //! Restore never runs during a normal server start: a node without a usable state says
 //! "snapshot required: run 'ostro restore'" (08-09) and stops.
 //!
@@ -148,10 +156,20 @@ pub enum RestoreError {
     /// No manifest matches.
     #[error("no restore point: {0}")]
     NoManifest(String),
-    /// The bucket belongs to a multi-member cluster: per-partition heads, no manifest
-    /// (D-P12-3).
-    #[error("cluster-wide restore is deferred (Phase 13/14); see docs/replication.md ({0})")]
+    /// The bucket belongs to a multi-member cluster but holds no metadata snapshot (written
+    /// before 1.0; 14-30).
+    #[error("cluster bucket cannot be restored: {0}; see docs/cluster-restore.md")]
     ClusterBucketUnsupported(String),
+    /// A cluster bucket has no cross-partition consistent cut above the partitions' floors
+    /// (14-30).
+    #[error(
+        "no consistent cut: partitions {partitions:?} would have to be restored below their \
+         oldest remote snapshot; see docs/cluster-restore.md"
+    )]
+    NoConsistentCut {
+        /// The partitions whose floor would be crossed.
+        partitions: Vec<u16>,
+    },
     /// The manifest is malformed or violates the ordering rules.
     #[error("bad manifest: {0}")]
     BadManifest(String),
@@ -307,6 +325,9 @@ pub struct RestoreReport {
     pub partitions: Vec<PartitionReport>,
     /// Durations.
     pub durations: RestoreDurations,
+    /// Cluster restore details (14-30); absent for a single-member (Phase 8) restore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<crate::cluster_restore::ClusterRestoreReport>,
 }
 
 pub(crate) fn hex(b: &[u8]) -> String {
@@ -318,7 +339,7 @@ pub(crate) fn hex(b: &[u8]) -> String {
         })
 }
 
-fn ms(d: Duration) -> u64 {
+pub(crate) fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -450,7 +471,7 @@ fn partition_count(m: &Manifest, meta_partitions: Option<u16>) -> Result<u16, Re
     Ok(p)
 }
 
-fn write_durably(dir: &Path, name: &str, body: &[u8]) -> Result<(), RestoreError> {
+pub(crate) fn write_durably(dir: &Path, name: &str, body: &[u8]) -> Result<(), RestoreError> {
     let tmp = dir.join(format!("{name}.tmp"));
     let mut f = File::create(&tmp)?;
     f.write_all(body)?;
@@ -462,7 +483,7 @@ fn write_durably(dir: &Path, name: &str, body: &[u8]) -> Result<(), RestoreError
 }
 
 /// TOML basic-string escaping for the `restored_from` value.
-fn toml_str(s: &str) -> String {
+pub(crate) fn toml_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -641,7 +662,7 @@ async fn prepare_partition(
 }
 
 /// Open the data directory in Inspect mode (replay to the log end, no append).
-async fn open_inspect(
+pub(crate) async fn open_inspect(
     data_dir: &Path,
     count: PartitionCount,
     node_id: u64,
@@ -664,15 +685,15 @@ async fn open_inspect(
 }
 
 /// Per partition after the final replay.
-struct Final {
-    applied: u64,
-    digest: [u8; 32],
-    next: BTreeMap<u16, u64>,
-    truncated: BTreeMap<u16, u64>,
-    seen: BTreeMap<u16, u64>,
+pub(crate) struct Final {
+    pub(crate) applied: u64,
+    pub(crate) digest: [u8; 32],
+    pub(crate) next: BTreeMap<u16, u64>,
+    pub(crate) truncated: BTreeMap<u16, u64>,
+    pub(crate) seen: BTreeMap<u16, u64>,
 }
 
-async fn read_final(node: &Node, p: u16) -> Result<Final, RestoreError> {
+pub(crate) async fn read_final(node: &Node, p: u16) -> Result<Final, RestoreError> {
     let h = node
         .handle(PartitionId(p))
         .ok_or_else(|| RestoreError::Replay {
@@ -700,7 +721,7 @@ async fn read_final(node: &Node, p: u16) -> Result<Final, RestoreError> {
 }
 
 /// Pitfall 1: `outbox_truncated[A->B] <= inbound_seen_B[A] < outbox_next_seq[A->B]`.
-fn check_consistency(f: &BTreeMap<u16, Final>) -> Result<(), RestoreError> {
+pub(crate) fn check_consistency(f: &BTreeMap<u16, Final>) -> Result<(), RestoreError> {
     for (&a, fa) in f {
         for (&b, fb) in f {
             if a == b {
@@ -760,6 +781,19 @@ pub async fn restore(
             Arc::new(s)
         }
     };
+
+    // 14-30: a multi-member cluster bucket restores as a seed at a consistent cut.
+    if let Some(bucket) = crate::cluster_restore::detect(&store).await? {
+        if opts.at.is_some() {
+            return Err(RestoreError::BadManifest(
+                "--at is not supported for cluster buckets in 1.0 (no common time base)".into(),
+            ));
+        }
+        // clock-exempt: the operator tool's MemberState changed_at_ms (no injected clock here)
+        let now_ms = ostro_partition::Clock::now_ms(&ostro_partition::SystemClock);
+        return crate::cluster_restore::restore_detected(store, opts, described, now_ms, bucket)
+            .await;
+    }
 
     // 2. Manifest (validated before anything is written).
     let m = load_manifest(&store, opts.at).await?;
@@ -1037,11 +1071,12 @@ pub async fn restore(
             replay_ms,
             total_ms: ms(t0.elapsed()),
         },
+        cluster: None,
     })
 }
 
 /// Step 5: every remote blob, sha verified, into `<data_dir>/blobs`.
-async fn restore_blobs(
+pub(crate) async fn restore_blobs(
     store: &Arc<dyn ObjectStore>,
     data_dir: &Path,
     parallelism: usize,

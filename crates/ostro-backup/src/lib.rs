@@ -16,11 +16,13 @@
 //! | [`cluster`] | 12-15 | Phase 12 per-partition leader uploads, head fencing, takeover reconcile (D-P12-20) |
 //! | [`cluster_cut`] | 14-29 | consistent-cut search over per-partition cursor step functions (D-P14-45) |
 //! | [`meta_head`] | 14-29 | term-fenced `meta/head` pointer of multi-member cluster buckets (D-P14-45) |
+//! | [`cluster_restore`] | 14-30 | whole-cluster restore of a multi-member bucket as a seed (D-P14-45) |
 
 pub mod archive;
 pub mod chunk;
 pub mod cluster;
 pub mod cluster_cut;
+pub mod cluster_restore;
 pub mod config;
 pub mod fence;
 pub mod manifest;

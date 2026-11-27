@@ -587,8 +587,9 @@ async fn restore_refuses_a_multi_member_cluster_bucket() {
         "got {err:?}"
     );
     assert!(
-        err.to_string()
-            .contains("cluster-wide restore is deferred (Phase 13/14); see docs/replication.md"),
+        err.to_string().contains(
+            "no metadata snapshot in the bucket; the metadata leader uploads one in 1.0+"
+        ),
         "{err}"
     );
     assert!(!dir.path().join("restored").join("state").exists());
