@@ -500,7 +500,7 @@ Plans:
 - [x] 14-02-PLAN.md — API wire surface: Tenants/ApiTokens/Audit/Security protos + adapters, bearer authentication (/ui exempt, System only for hooks/join), signature carriage, tenant webhooks, OpenAPI + parity (wave 3; SEC-02..04, DISP-06)
 - [ ] 14-03-PLAN.md — Token codec, meta-backed authenticator, admin bootstrap (online + offline), deny-by-default guard decorator over every API trait (wave 3; SEC-02)
 - [x] 14-04-PLAN.md — Hash-chained node-local audit journal (TDD): group commit, fail-closed permits, torn-tail recovery, retention, chain-head export, verify, OTLP export (wave 3; SEC-04)
-- [ ] 14-05-PLAN.md — Signature verifiers (TDD): minisign via minisign-verify, cosign keyed via aws-lc-rs, key fingerprints + re-verification, rsign2 interop vectors (wave 3; SEC-03)
+- [x] 14-05-PLAN.md — Signature verifiers (TDD): minisign via minisign-verify, cosign keyed via aws-lc-rs, key fingerprints + re-verification, rsign2 interop vectors (wave 3; SEC-03)
 - [x] 14-06-PLAN.md — Dispatch-side quotas: tenant level in fair.rs (weights clamped), per-tenant concurrency/memory/fuel debt on leadership shares, fairness evidence (wave 3; DISP-06)
 - [ ] 14-07-PLAN.md — Fuzzing infrastructure + 13 codec/apply/storage/parser targets, stable corpus replay, fuzz-smoke, scheduled fuzz workflow (wave 4; SEC-05)
 - [ ] 14-08-PLAN.md — Wasm fuzz targets: evil_guest (malformed WIT values) and wasm-smith components (wave 3; SEC-05)
