@@ -517,7 +517,7 @@ Plans:
 - [x] 14-19-PLAN.md — Signed-module enforcement at upload (before existing-sha), activation and version selection with cluster-wide policy, security API/CLI, deploy --signature, system-secret reseal (wave 4; SEC-03)
 - [x] 14-20-PLAN.md — Ingress quotas: per-tenant event-rate GCRA and suspension at start/signal/token/webhook/cron (wave 5; DISP-06)
 - [x] 14-21-PLAN.md — UI auth: token login, signed cluster-wide session cookie, PRINCIPAL-scoped handlers, scope gating, tenant-filtered views (wave 5; SEC-02)
-- [ ] 14-22-PLAN.md — Jepsen-style 3-node loopback runs with all fault classes, auth + audit on (smoke + 2 x 30 min gate) (wave 5; QA-05)
+- [x] 14-22-PLAN.md — Jepsen-style 3-node loopback runs with all fault classes, auth + audit on (smoke + 2 x 30 min gate) (wave 5; QA-05)
 - [ ] 14-23-PLAN.md — Bytes-on-disk verified benchmarks (single + RF=3) + pre-registered soak criteria, ostro-soak driver, soak smoke, after the Jepsen campaigns (wave 6; QA-04, QA-05)
 - [ ] 14-24-PLAN.md — Threat model, security model, generated auth matrix, review packet + findings tracker (wave 6; SEC-05)
 - [ ] 14-25-PLAN.md — Docs set (getting started x3, determinism, connectors, tenancy/auth, audit, signed modules, operations/sizing, install, Kubernetes, README) + docs-check (wave 6; DIST-03)
