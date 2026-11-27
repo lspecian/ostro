@@ -5,7 +5,8 @@
 //!   sign-in needs the CSRF token; a read-only token of `a` sees `a`'s runs (never `b`'s,
 //!   `b`'s run page is 404) and cannot cancel (403, run unchanged); an operate token cancels
 //!   through the UI and the audit journal records `run.cancel` with that token id; revoking
-//!   the token signs its session out on the next request; sign-out clears the cookie;
+//!   the token signs its session out on the next request; sign-out clears the cookie; the
+//!   failed sign-in is an `auth.failure` audit record;
 //! - a session cookie issued by node 1 of a two-node cluster is accepted by node 2;
 //! - `[auth] mode = "none"`: the UI works without signing in (Phase 11 behaviour).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -368,7 +369,7 @@ async fn token_server() -> Fx {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn token_mode_ui_enforces_sessions_scopes_tenants_and_audit() {
     let Fx {
-        s,
+        mut s,
         base,
         a_admin,
         b_admin,
@@ -509,6 +510,19 @@ async fn token_mode_ui_enforces_sessions_scopes_tenants_and_audit() {
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
     let (v, raw) = cookie_value(&r, "ostro_session").expect("clearing cookie");
     assert!(v.is_empty() && raw.contains("Max-Age=0"), "{raw}");
+
+    // The failed sign-in went through the audited authenticator (14-18): its coalesced
+    // auth.failure record is in the journal once the server flushed it at shutdown.
+    s.shutdown().await;
+    let recs = audit_records(&data);
+    assert!(
+        recs.iter()
+            .any(|r| r["action"] == "auth.failure" && r["outcome"]["result"] == "denied"),
+        "no auth.failure record: {:?}",
+        recs.iter()
+            .filter_map(|r| r["action"].as_str())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
