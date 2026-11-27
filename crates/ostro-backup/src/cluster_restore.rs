@@ -37,7 +37,9 @@
 //!    99, ClusterVersion ext 98) and every other record are kept. The result is bootstrapped as
 //!    a single-voter metadata group.
 //! 6. `node.toml` as Phase 8 (new incarnation, `restored_from`) plus the kept `cluster_id`;
-//!    blobs sha verified.
+//!    the cluster CA stored in metadata (`__ostro/cluster-ca`, when the cluster had one) is
+//!    written to `tls/ca.{crt,key}` so the seed and the nodes that join it keep the CA; blobs
+//!    sha verified.
 //!
 //! `--at` is refused for cluster buckets (no common time base in 1.0).
 //!
@@ -130,6 +132,8 @@ pub struct ClusterRestoreReport {
     pub removed_members: Vec<u64>,
     /// Non-terminal runs at the cut (their module pins were checked).
     pub open_runs: u64,
+    /// The cluster CA stored in metadata was written to `<data_dir>/tls/ca.{crt,key}`.
+    pub ca_kept: bool,
     /// Per partition.
     pub partitions: Vec<ClusterPartitionReport>,
 }
@@ -756,6 +760,48 @@ fn rewrite_meta(
     Ok(removed)
 }
 
+/// The cluster CA secret 13-09 stores in metadata (ostro-server `p13::join`).
+const CLUSTER_CA_SECRET: &str = "__ostro/cluster-ca";
+
+/// Write the metadata's cluster CA (`__ostro/cluster-ca`: certificate PEM then key PEM) to
+/// `<data_dir>/tls/ca.{crt,key}`, so the seed keeps the cluster's CA: its own certificate
+/// and the certificates it issues to joiners chain to the same CA (a fresh CA would not match
+/// the stored one). Returns whether a CA was written.
+fn write_stored_ca(state: &MetaState, data_dir: &Path) -> Result<bool, RestoreError> {
+    let Some(secret) = state.secrets().find(|s| s.value.name == CLUSTER_CA_SECRET) else {
+        return Ok(false);
+    };
+    let text = std::str::from_utf8(&secret.value.ciphertext)
+        .map_err(|_| RestoreError::Meta(format!("{CLUSTER_CA_SECRET} is not PEM")))?;
+    let end = "-----END CERTIFICATE-----";
+    let at = text
+        .find(end)
+        .map(|i| i + end.len())
+        .ok_or_else(|| RestoreError::Meta(format!("{CLUSTER_CA_SECRET} holds no certificate")))?;
+    let (cert, key) = text.split_at(at);
+    let key = key.trim();
+    if !key.contains("PRIVATE KEY") {
+        return Err(RestoreError::Meta(format!(
+            "{CLUSTER_CA_SECRET} holds no key"
+        )));
+    }
+    let tls = data_dir.join("tls");
+    fs::create_dir_all(&tls)?;
+    {
+        // The key is created 0600 (never readable by others, not even briefly).
+        use std::io::Write as _;
+        let mut o = fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let mut f = o.open(tls.join("ca.key"))?;
+        f.write_all(format!("{key}\n").as_bytes())?;
+        f.sync_all()?;
+    }
+    write_durably(&tls, "ca.crt", format!("{}\n", cert.trim()).as_bytes())?;
+    Ok(true)
+}
+
 async fn shutdown_node(node: ostro_partition::Node, what: &str) -> Result<(), RestoreError> {
     node.shutdown().await.map_err(|e| RestoreError::Replay {
         partition: 0,
@@ -1053,6 +1099,7 @@ pub(crate) async fn restore_detected(
         epochs.insert(part.p, e);
     }
     let removed = rewrite_meta(&mut state, cand.index, seed, &epochs, now_ms)?;
+    let ca_kept = write_stored_ca(&state, &data_dir)?;
     let bytes = ostro_meta::encode_snapshot(&state);
     let h = MetaHandle::bootstrap_from_snapshot(&data_dir.join("meta"), seed, cand.index, &bytes)
         .await
@@ -1148,6 +1195,7 @@ pub(crate) async fn restore_detected(
             seed,
             removed_members: removed,
             open_runs: pins.len() as u64,
+            ca_kept,
             partitions: cparts,
         }),
     })

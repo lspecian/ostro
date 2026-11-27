@@ -42,6 +42,7 @@ const P: u16 = 3;
 const SEED: u64 = 7;
 const CLUSTER_ID: &str = "c-restore-test";
 const MODULE: &[u8] = b"\0asm-cluster-restore-test-module";
+const CA_SECRET: &str = "-----BEGIN CERTIFICATE-----\nQ0E=\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nS0VZ\n-----END PRIVATE KEY-----\n";
 
 type Led = Arc<Vec<(PartitionId, Epoch)>>;
 
@@ -187,6 +188,21 @@ fn meta_state(index: u64, with_workflow: bool, epoch: u32) -> MetaState {
             );
         }
     }
+    // The cluster CA a grown cluster stores in metadata (13-09 `__ostro/cluster-ca`).
+    ok(
+        &mut s,
+        index,
+        MetaCommand::Put {
+            key: MetaKey::Secret("__ostro/cluster-ca".into()),
+            expected_version: None,
+            record: MetaRecord::Secret(ostro_meta::SealedSecret {
+                name: "__ostro/cluster-ca".into(),
+                ciphertext: CA_SECRET.as_bytes().to_vec(),
+                key_id: ostro_meta::TOKEN_KEY_PLAINTEXT_ID.into(),
+                ext: Vec::new(),
+            }),
+        },
+    );
     if with_workflow {
         let m = sha(MODULE);
         ok(
@@ -497,6 +513,20 @@ async fn skewed_bucket_restores_to_a_consistent_lowered_cut_as_a_seed() {
     );
     assert!(toml.contains("restored_from = "), "{toml}");
     assert!(dir.join("blobs").exists());
+    // The stored cluster CA is kept for the seed.
+    assert!(c.ca_kept);
+    let crt = std::fs::read_to_string(dir.join("tls/ca.crt")).expect("ca.crt");
+    let key = std::fs::read_to_string(dir.join("tls/ca.key")).expect("ca.key");
+    assert_eq!(format!("{crt}{key}"), CA_SECRET);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(dir.join("tls/ca.key"))
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
