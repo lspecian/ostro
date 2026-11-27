@@ -43,9 +43,11 @@ fn p13_mutant_matrix_names_registered_scenarios() {
     let all: BTreeSet<&str> = scenarios::all().iter().map(|s| s.name).collect();
     let process: BTreeSet<&str> = scenarios::all_process().iter().map(|s| s.name).collect();
     for (mutant, names) in mutants_p13::matrix() {
+        // 14-33: Phase 14 plans append their mutants after the eight Phase 13 ones.
         assert!(
-            ostro_types::compat::MUTANTS.contains(&mutant),
-            "{mutant} is not a Phase 13 mutant"
+            ostro_types::compat::MUTANTS.contains(&mutant)
+                || mutants_p13::P14_MUTANTS.contains(&mutant),
+            "{mutant} is not a Phase 13 mutant (nor a Phase 14 addition)"
         );
         for n in names {
             assert!(
