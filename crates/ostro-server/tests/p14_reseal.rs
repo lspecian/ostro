@@ -10,7 +10,8 @@
 //!   values: the await-token key is unchanged across the restart.
 //! - A node whose token key is sealed refuses to boot without the key, or with another key,
 //!   naming the secret and the sealing key; with the right key it boots.
-//! - No key: nothing changes; in token mode the WARN is reported.
+//! - No key: nothing is sealed; in token mode the WARN is reported (and, since 14-21, the UI
+//!   session key exists as `plaintext-v0`).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 #[path = "common/p12_cluster.rs"]
@@ -346,7 +347,15 @@ async fn no_key_in_token_mode_warns_and_changes_nothing() {
     let r = reseal::run(&ctx).await;
     assert!(r.no_key && r.warned, "{r:?}");
     drop(ctx);
-    assert!(secret(&h, UI_SESSION_KEY_SECRET).is_none());
+    // 14-21 (B3): token mode creates the UI session key as plaintext-v0 on the meta leader;
+    // without a sealing key it stays unsealed.
+    assert!(
+        eventually(T, || secret(&h, UI_SESSION_KEY_SECRET).is_some()).await,
+        "{UI_SESSION_KEY_SECRET} was not created in token mode"
+    );
+    let (_, uk) = secret(&h, UI_SESSION_KEY_SECRET).expect("ui key");
+    assert_eq!(uk.key_id, TOKEN_KEY_PLAINTEXT_ID);
+    assert_eq!(uk.ciphertext.len(), 32);
     let (_, tk) = secret(&h, TOKEN_KEY_SECRET).expect("token key");
     assert_eq!(tk.key_id, TOKEN_KEY_PLAINTEXT_ID);
     h.shutdown().await.expect("shutdown");

@@ -55,6 +55,18 @@
 //! | POST | `/ui/workers/{id}/drain` | row fragment (htmx) or 303 -> `/ui/workers` |
 //! | GET | `/ui/partitions`, `/ui/partitions/fragment` | partition health (polls every 5 s) |
 //!
+//! # Routes (14-21, `login`)
+//!
+//! | Method | Path | Answer |
+//! |---|---|---|
+//! | GET | `/ui/login` | sign-in form; 303 -> `/ui/` when the auth has no sessions (Phase 11 `AllowAll`) |
+//! | POST | `/ui/login` | 303 -> `/ui/` with `ostro_session`, or 401 + the form |
+//! | POST | `/ui/logout` | clears `ostro_session`, 303 -> `/ui/login` |
+//!
+//! With a session-based [`auth::UiAuth`] (Phase 14 token mode) a page request without a
+//! valid session is a 303 to `/ui/login`; an htmx or mutating request is a 401 carrying
+//! `HX-Redirect: /ui/login`.
+//!
 //! Every route sits behind [`security::guard`] (Host / `:authority` allowlist, security
 //! headers, D-P11-15).
 
@@ -66,6 +78,7 @@ pub mod auth;
 mod actions;
 mod assets;
 mod inventory;
+mod login;
 mod pages;
 mod security;
 mod timeline;
@@ -120,6 +133,10 @@ pub const ROUTES: &[&str] = &[
     "POST /ui/workers/{id}/drain",
     "/ui/partitions",
     "/ui/partitions/fragment",
+    // 14-21 login
+    "/ui/login",
+    "POST /ui/login",
+    "POST /ui/logout",
 ];
 
 /// `[ui]` configuration as the router sees it.
@@ -164,6 +181,7 @@ pub fn router(deps: UiDeps) -> axum::Router {
     }
     r = r.merge(actions::routes());
     r = r.merge(inventory::routes());
+    r = r.merge(login_routes());
     r.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         auth::viewer,
@@ -186,6 +204,13 @@ fn page_routes() -> axum::Router<pages::UiState> {
         .route("/ui/runs/{run_id}/timeline", get(pages::run_timeline))
         .route("/ui/runs/{run_id}/logs", get(pages::run_logs))
         .route("/ui/dlq", get(pages::dlq))
+}
+
+/// Sign-in and sign-out (14-21).
+fn login_routes() -> axum::Router<pages::UiState> {
+    axum::Router::new()
+        .route("/ui/login", get(login::login_page).post(login::login))
+        .route("/ui/logout", post(login::logout))
 }
 
 /// The embedded assets (11-15).

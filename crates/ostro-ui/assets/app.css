@@ -191,3 +191,12 @@ table.partitions td.bar svg { vertical-align: middle; margin-right: 0.4rem; }
 table.partitions svg rect.track { fill: var(--panel); }
 table.partitions svg rect.fill { fill: var(--ok); }
 table.partitions tr.unhealthy svg rect.fill { fill: var(--bad); }
+/* Phase 14 (14-21): sign-in page, session line; a read-only principal does not see the
+   mutating forms (the server still enforces every scope). */
+header.top .session { margin-left: auto; display: flex; align-items: center; gap: 0.8rem; }
+header.top .session .who { opacity: 0.85; }
+header.top .session form { margin: 0; }
+.login { max-width: 32rem; }
+.login-form { display: flex; flex-direction: column; gap: 0.6rem; }
+.login-form input { width: 100%; }
+body.readonly form[method="post"]:not(.ui-keep) { display: none; }

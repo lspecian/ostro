@@ -190,9 +190,11 @@ async fn guard_passes_through_and_fills_no_phase14_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ui_scope_layer_runs_handlers_as_dev_in_both_modes_until_14_21() {
+async fn ui_scope_layer_runs_handlers_as_dev_or_the_session_principal() {
     use axum::routing::get;
-    for mode in [AuthMode::None, AuthMode::Token] {
+    // mode none: the dev principal (N2); token mode (14-21): the session's principal, and
+    // without a session (here: no context at all) Anonymous, which the guard denies.
+    for (mode, want) in [(AuthMode::None, "Dev"), (AuthMode::Token, "Anonymous")] {
         let layer = p14::UiScopeLayer::for_mode(mode, Arc::new(ostro_ui::auth::AllowAll));
         assert_eq!(layer.mode(), mode);
         let app = layer.apply(axum::Router::new().route(
@@ -210,7 +212,7 @@ async fn ui_scope_layer_runs_handlers_as_dev_in_both_modes_until_14_21() {
             .text()
             .await
             .expect("body");
-        assert_eq!(body, "Dev", "{mode:?}");
+        assert_eq!(body, want, "{mode:?}");
         server.abort();
     }
 }

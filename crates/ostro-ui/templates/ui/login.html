@@ -1,0 +1,12 @@
+{% extends "ui/layout.html" %}
+{% block content %}
+<section class="card login">
+{% if let Some(e) = error %}<p class="error-message" role="alert">{{ e }}</p>{% endif %}
+<form class="login-form ui-keep" method="post" action="/ui/login">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>API token <input type="password" name="token" required autocomplete="off" spellcheck="false" maxlength="256" placeholder="ostro_otk_…"></label>
+<button type="submit">Sign in</button>
+</form>
+<p class="muted">Use an API token (<code>ostro auth token create</code>). The UI keeps a signed session cookie; the token itself is not stored in the browser.</p>
+</section>
+{% endblock %}

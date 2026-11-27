@@ -430,7 +430,11 @@ pub async fn ensure_key(ctx: &P14Ctx) -> Result<bool, String> {
                 return Ok(true);
             }
             MetaResult::StaleVersion { .. } | MetaResult::Conflict { .. } => {}
-            other => return Err(format!("metadata rejected {UI_SESSION_KEY_SECRET}: {other:?}")),
+            other => {
+                return Err(format!(
+                    "metadata rejected {UI_SESSION_KEY_SECRET}: {other:?}"
+                ));
+            }
         }
     }
     Err(format!(
