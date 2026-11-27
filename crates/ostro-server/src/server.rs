@@ -769,6 +769,9 @@ async fn start_inner(
     }
     // Phase 12 (12-14): `GET /v1/admin/replication`, server-local like `/metrics`.
     app = app.merge(cluster.status_router(&node));
+    // Phase 14 (14-10): the failpoints-only test endpoints `/v1/admin/test/{clock,failpoints}`
+    // (a default build mounts nothing).
+    app = p14::test_hooks::mount(app, &p14_ctx);
     // Phase 10 (10-13): the `ApiWriteCounter` layer (mutating requests in flight, read by
     // the idle detector); not installed with time skipping off.
     if let Some(t) = &dev_time {
