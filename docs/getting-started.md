@@ -132,9 +132,14 @@ ostro build && ostro replay --sample 20 --module target/ostro/hello.wasm
 
 Workflow versions are declared in the source (`#[workflow(name = "hello", version = 2)]`,
 `@ostro.workflow(name="hello", version=2)`, `workflow({ name: "hello", version: 2 }, …)`).
-The server refuses a second module for the same name and version, so bump the version
-when you change a workflow's code. `ostro dev --watch` prints the refusal with a hint and
-keeps the previous version active. Before deploying the change to a real server, replay
+A real server (and a persistent `ostro dev`) refuses a second module for the same name and
+version: versions are write-once, so bump the version when you change a workflow's code.
+`ostro dev --watch` prints the refusal with a hint and keeps the previous version active.
+
+`ostro dev --ephemeral --watch` is the exception: there a changed module under an existing
+name and version replaces the old one in place. New runs use the new module; runs already
+started keep the module they started with. No version bump is needed while you iterate
+on a throwaway dev server. Before deploying the change to a real server, replay
 recorded runs against it ([replay.md](replay.md)):
 
 ```sh

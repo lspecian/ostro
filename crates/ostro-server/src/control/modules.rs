@@ -17,6 +17,10 @@
 //!    the default tenant). A `(name, version)` already bound to a different module is
 //!    `409` naming that sha, and one bound under a different explicit module name is
 //!    `409` too: bindings are write-once (research Pitfall 6). Nothing is stored then.
+//!    14-28 (D-P14-48): the one exception is `ostro dev --ephemeral` (dev profile AND
+//!    `node.ephemeral`): a changed module under an existing `(name, version)` rebinds it
+//!    ([`rebind_dev`], after the module record is stored); runs already started keep
+//!    their pinned module, new runs use the new one.
 //!    Phase 13 (13-14, ENG-10, D-P13-17): validation runs `linker_set::select` (13-07) and
 //!    the selection comes back as `Prepared.wit` (WIT line, minimum feature level).
 //!    [`upload_gate`] refuses a module needing a level above the cluster's finalized level
@@ -342,11 +346,14 @@ pub(crate) async fn upload_module(
         .collect();
 
     // Write-once bindings: check before storing anything. `todo` holds the versions this
-    // upload still has to create.
-    let todo: Vec<(String, u32)> = cp.meta.view().read(|s| {
-        let mut todo = Vec::new();
+    // upload still has to create. 14-28 (D-P14-48): only in ephemeral dev a version bound
+    // to another module is rebound (`rebind`) instead of refused.
+    let dev_replace = dev_ephemeral(cp);
+    let (todo, rebind) = cp.meta.view().read(|s| {
+        let (mut todo, mut rebind) = (Vec::new(), Vec::new());
         for (name, version) in by_key.keys() {
             match s.workflow(name, *version) {
+                Some(w) if w.value.module_sha256 != sha && dev_replace => rebind.push(w.clone()),
                 Some(w) if w.value.module_sha256 != sha => {
                     return Err(binding_conflict(name, *version, &w.value.module_sha256));
                 }
@@ -362,7 +369,7 @@ pub(crate) async fn upload_module(
                 None => todo.push((name.clone(), *version)),
             }
         }
-        Ok(todo)
+        Ok((todo, rebind))
     })?;
 
     if existing.is_none() {
@@ -480,6 +487,11 @@ pub(crate) async fn upload_module(
             }
         }
     };
+    // 14-28 (D-P14-48): after the module record (the commit point) exists.
+    for cur in rebind {
+        let m = by_key[&(cur.value.name.clone(), cur.value.version)];
+        rebind_dev(cp, p14.as_deref(), tenant, cur, sha, &module_name, m).await?;
+    }
     let stored = cp
         .meta
         .view()
@@ -489,6 +501,105 @@ pub(crate) async fn upload_module(
         module: module_info(&stored),
         created,
     })
+}
+
+/// 14-28 (D-P14-48): `true` only under `ostro dev --ephemeral`: the dev profile (derived
+/// from the configuration exactly as `server.rs` does, [`crate::tls::TlsProfile::of`]) AND
+/// `node.ephemeral`. A server-profile node with `node.ephemeral` (the test kits) does not
+/// qualify; neither does a persistent dev node.
+fn dev_ephemeral(cp: &ServerControlPlane) -> bool {
+    let cfg = cp.config();
+    crate::tls::TlsProfile::of(cfg) == crate::tls::TlsProfile::Dev && cfg.node.ephemeral
+}
+
+/// 14-28 (D-P14-48): rebind `cur` (a version bound to another module) to `sha` in
+/// ephemeral dev: a CAS `Put` of the existing WorkflowVersion with the new module sha, its
+/// queue and timeout from the new module, the new deployed module name when the upload
+/// names one; `created_at_ms` and ext are kept. Runs already started keep their pinned
+/// module; new runs resolve the new binding. An active version passes the activation gate
+/// first and its `Active` record is re-put (CAS, same content) so activation tokens move.
+async fn rebind_dev(
+    cp: &ServerControlPlane,
+    p14: Option<&crate::p14::P14Ctx>,
+    tenant: Option<&str>,
+    cur: Versioned<WorkflowVersion>,
+    sha: [u8; 32],
+    module_name: &str,
+    m: &WorkflowMeta,
+) -> Result<(), ApiError> {
+    let (name, version) = (cur.value.name.clone(), cur.value.version);
+    let active = cp
+        .meta
+        .view()
+        .read(|s| s.active(&name).cloned())
+        .filter(|a| a.value.version == version);
+    if active.is_some()
+        && let Some(ctx) = p14
+    {
+        crate::p14::activation_gate(ctx, tenant, sha).await?;
+    }
+    let previous = cur.value.module_sha256;
+    let record = WorkflowVersion {
+        module_sha256: sha,
+        default_queue: m.default_queue.clone(),
+        run_timeout_ms: m.run_timeout_ms,
+        module: if module_name.is_empty() {
+            cur.value.module.clone()
+        } else {
+            module_name.to_owned()
+        },
+        ..cur.value.clone()
+    };
+    match cp
+        .meta
+        .propose(MetaCommand::Put {
+            key: MetaKey::Workflow(name.clone(), version),
+            expected_version: Some(cur.version),
+            record: MetaRecord::Workflow(record),
+        })
+        .await
+        .map_err(meta_unavailable)?
+    {
+        MetaResult::Ok { .. } => {}
+        MetaResult::StaleVersion { .. } | MetaResult::Conflict { .. } | MetaResult::NotFound => {
+            // A concurrent upload got there first: fine if it bound the same module.
+            let now = cp
+                .meta
+                .view()
+                .read(|s| s.workflow(&name, version).map(|w| w.value.module_sha256));
+            if now != Some(sha) {
+                return Err(ApiError::unavailable(format!(
+                    "workflow {name}@{version} is being replaced concurrently; retry"
+                )));
+            }
+            return Ok(());
+        }
+        MetaResult::Invalid(msg) => {
+            return Err(ApiError::internal(format!(
+                "metadata rejected the rebinding of {name}@{version}: {msg}"
+            )));
+        }
+    }
+    if let Some(a) = active {
+        // Same content; a lost CAS means a concurrent activation already moved it.
+        let _ = cp
+            .meta
+            .propose(MetaCommand::Put {
+                key: MetaKey::Active(name.clone()),
+                expected_version: Some(a.version),
+                record: MetaRecord::Active(a.value),
+            })
+            .await
+            .map_err(meta_unavailable)?;
+    }
+    tracing::info!(
+        workflow = %name,
+        version,
+        previous_module = %hex(&previous),
+        module = %hex(&sha),
+        "ephemeral dev: replaced the module of an existing workflow version"
+    );
+    Ok(())
 }
 
 pub(crate) fn get_module(cp: &ServerControlPlane, sha: &str) -> Result<ModuleInfo, ApiError> {
