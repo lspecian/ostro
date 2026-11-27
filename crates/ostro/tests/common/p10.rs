@@ -210,10 +210,24 @@ fn drain(rx: &mpsc::Receiver<String>) -> String {
 /// line. Panics (after killing the child) with its stderr if the line never comes or
 /// the process exits first.
 pub fn spawn_dev(args: &[&str], env: &[(&str, &str)]) -> DevProc {
+    spawn_dev_mode(true, args, env)
+}
+
+/// [`spawn_dev`] without `--ephemeral`: `ostro dev --listen 127.0.0.1:0 <args>`, data in
+/// the default `./.ostro` of the fresh temp cwd (a persistent dev node, removed with the
+/// cwd on drop).
+pub fn spawn_dev_persistent(args: &[&str], env: &[(&str, &str)]) -> DevProc {
+    spawn_dev_mode(false, args, env)
+}
+
+fn spawn_dev_mode(ephemeral: bool, args: &[&str], env: &[(&str, &str)]) -> DevProc {
     let cwd = tempfile::tempdir().expect("tempdir");
     let mut cmd = ostro_cmd(env);
-    cmd.current_dir(cwd.path())
-        .args(["dev", "--ephemeral", "--listen", "127.0.0.1:0"])
+    cmd.current_dir(cwd.path()).arg("dev");
+    if ephemeral {
+        cmd.arg("--ephemeral");
+    }
+    cmd.args(["--listen", "127.0.0.1:0"])
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

@@ -4,6 +4,10 @@
 //! if needed, uploaded and activated idempotently against a spawned
 //! `ostro dev --ephemeral`. Needs the system Rust toolchain (rustup + wasm32-wasip2), as
 //! `build_cli.rs`. The `.wasm` form (05-14) stays covered by `cli_verbs`.
+//!
+//! A changed module under an unchanged `(name, version)` replaces the old one under
+//! `ostro dev --ephemeral` only (14-28, D-P14-48: new runs get the new module, runs on
+//! the old one keep it); a persistent `ostro dev` still refuses it (409 + bump hint).
 
 #[path = "common/p10.rs"]
 mod p10;
@@ -86,6 +90,22 @@ fn hello(dev: &p10::DevProc) -> (Option<u64>, Vec<u64>) {
 
 /// Start a `hello` run (it sleeps 3 days; not awaited) and return its version.
 fn run_version(dev: &p10::DevProc, cwd: &Path) -> u64 {
+    run(dev, cwd).1
+}
+
+/// The module a run is pinned to (`module_sha256` of `GET /v1/runs/{id}`).
+fn pin(dev: &p10::DevProc, run: &str) -> String {
+    let (st, body) = p10::http_get(dev.addr, &format!("/v1/runs/{run}"));
+    assert_eq!(st, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    v["module_sha256"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no module_sha256 in {v}"))
+        .to_owned()
+}
+
+/// Start a `hello` run (not awaited): `(run id, version)`.
+fn run(dev: &p10::DevProc, cwd: &Path) -> (String, u64) {
     let (code, start, err) = cli_json(dev, cwd, &["run", "hello", "--input", r#"{"name":"ada"}"#]);
     assert_eq!(code, 0, "{start}\n{err}");
     let id = start["run_id"]
@@ -94,10 +114,11 @@ fn run_version(dev: &p10::DevProc, cwd: &Path) -> u64 {
         .to_owned();
     let (code, run, err) = cli_json(dev, cwd, &["inspect", &id]);
     assert_eq!(code, 0, "{run}\n{err}");
-    run["version"]
+    let version = run["version"]
         .as_u64()
         .or_else(|| run["run"]["version"].as_u64())
-        .unwrap_or_else(|| panic!("no version in {run}"))
+        .unwrap_or_else(|| panic!("no version in {run}"));
+    (id, version)
 }
 
 /// Change the greeting and bump `hello`'s version to `version` (workflow versions are
@@ -158,6 +179,7 @@ fn project_deploy_is_idempotent() {
     let p = project(d.path());
     let ps = p.to_str().unwrap();
     let dev = p10::spawn_dev(&[], &[]);
+    assert!(dev.ready.ephemeral, "step 4 needs `ostro dev --ephemeral`");
 
     // 1. build + upload + activate (ostro.toml: activate defaults to true)
     let (code, v, err) = cli_json(&dev, d.path(), &["deploy", ps]);
@@ -209,16 +231,64 @@ fn project_deploy_is_idempotent() {
     assert_eq!(v["build"]["up_to_date"], false);
     assert_eq!(v["upload"]["created"], true);
     assert_ne!(v["upload"]["module"]["sha256"], sha1.as_str());
+    assert!(
+        v.get("replaced").is_none(),
+        "a new version replaces nothing: {v}"
+    );
+    assert!(v["upload"].get("replaced").is_none(), "{v}");
+    let sha2 = v["upload"]["module"]["sha256"].as_str().unwrap().to_owned();
     assert_eq!(v["activated"][0]["active_version"], 2, "{v}");
     assert_eq!(hello(&dev), (Some(2), vec![1, 2]));
-    assert_eq!(run_version(&dev, d.path()), 2);
+    let (old_run, version) = run(&dev, d.path());
+    assert_eq!(version, 2);
+    assert_eq!(pin(&dev, &old_run), sha2);
 
-    // 4. a source change without a version bump: 409 with the hint, v2 stays active
+    // 4. a source change without a version bump. Under `ostro dev --ephemeral` the new
+    // module replaces hello@2's (14-28, D-P14-48): exit 0, the response names the
+    // replaced module, v2 stays active, new runs get the new module, the run already on
+    // the old one keeps it. (A persistent dev node still answers 409:
+    // `persistent_dev_still_refuses_a_change_without_a_version_bump`.)
     edit(&p, "hey", 2);
-    let (code, out, err) = cli(&dev, d.path(), &["deploy", ps]);
-    assert_eq!(code, 1, "{out}\n{err}");
-    assert!(err.contains("bump the workflow's version"), "{err}");
+    let (code, v, err) = cli_json(&dev, d.path(), &["deploy", ps]);
+    assert_eq!(code, 0, "{v}\n{err}");
+    eprintln!(
+        "replacing deploy:\n{}",
+        serde_json::to_string_pretty(&v).unwrap()
+    );
+    assert_eq!(v["upload"]["created"], true, "{v}");
+    assert_eq!(v["upload"]["replaced"], true, "{v}");
+    assert_eq!(v["upload"]["previous_module"], sha2.as_str(), "{v}");
+    let sha3 = v["upload"]["module"]["sha256"].as_str().unwrap().to_owned();
+    assert_ne!(sha3, sha2);
+    assert_eq!(v["build"]["sha256"], sha3.as_str());
+    assert_eq!(v["replaced"]["previous_module"], sha2.as_str(), "{v}");
+    assert_eq!(v["replaced"]["module"], sha3.as_str(), "{v}");
+    assert_eq!(v["replaced"]["reason"], "ephemeral dev", "{v}");
+    assert_eq!(
+        v["activated"],
+        Value::Array(vec![]),
+        "v2 was already active: {v}"
+    );
     assert_eq!(hello(&dev), (Some(2), vec![1, 2]));
+    let (new_run, version) = run(&dev, d.path());
+    assert_eq!(version, 2);
+    assert_eq!(pin(&dev, &new_run), sha3, "a new run gets the new module");
+    assert_eq!(
+        pin(&dev, &old_run),
+        sha2,
+        "the old run keeps the old module"
+    );
+    // human form of another replacement
+    edit(&p, "hiya", 2);
+    let (code, out, err) = cli(&dev, d.path(), &["deploy", ps]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let line = format!("replaced {} -> ", &sha3[..12]);
+    assert!(out.contains(&line), "{out}");
+    assert!(out.contains("(ephemeral dev)"), "{out}");
+    assert!(out.contains("(created,"), "{out}");
+    assert!(out.contains("already active"), "{out}");
+    assert_eq!(hello(&dev), (Some(2), vec![1, 2]));
+    assert_eq!(pin(&dev, &old_run), sha2);
 
     // 5. --activate=false: uploaded, not activated
     edit(&p, "yo", 3);
@@ -227,6 +297,39 @@ fn project_deploy_is_idempotent() {
     assert_eq!(v["upload"]["created"], true);
     assert_eq!(v["activated"], Value::Array(vec![]));
     assert_eq!(hello(&dev), (Some(2), vec![1, 2, 3]));
+}
+
+/// Outside `ostro dev --ephemeral` versions stay write-once (14-28): a persistent dev
+/// node answers a changed module under an unchanged version with 409 and the bump hint,
+/// stores nothing, and new runs keep the original module. (The server profile is
+/// covered by ostro-server's `dev_replace`.)
+#[test]
+fn persistent_dev_still_refuses_a_change_without_a_version_bump() {
+    let d = tempfile::tempdir().unwrap();
+    let p = project(d.path());
+    let ps = p.to_str().unwrap();
+    let dev = p10::spawn_dev_persistent(&[], &[]);
+    assert!(!dev.ready.ephemeral, "{:?}", dev.ready);
+
+    let (code, v, err) = cli_json(&dev, d.path(), &["deploy", ps]);
+    assert_eq!(code, 0, "{v}\n{err}");
+    let sha1 = v["upload"]["module"]["sha256"].as_str().unwrap().to_owned();
+    assert_eq!(hello(&dev), (Some(1), vec![1]));
+
+    edit(&p, "hey", 1);
+    let (code, out, err) = cli(&dev, d.path(), &["deploy", ps]);
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(err.contains("bump the workflow's version"), "{err}");
+    assert!(!out.contains("replaced"), "{out}");
+    // --json: the server's 409 body on stdout, the hint on stderr
+    let (code, v, err) = cli_json(&dev, d.path(), &["deploy", ps]);
+    assert_eq!(code, 1, "{v}\n{err}");
+    assert_eq!(v["error"]["code"], "conflict", "{v}");
+    assert!(err.contains("bump the workflow's version"), "{err}");
+    assert_eq!(hello(&dev), (Some(1), vec![1]));
+    let (id, version) = run(&dev, d.path());
+    assert_eq!(version, 1);
+    assert_eq!(pin(&dev, &id), sha1);
 }
 
 #[test]
