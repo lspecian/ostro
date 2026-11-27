@@ -85,23 +85,34 @@ pub struct TenantInfo {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct TenantPatch {
     /// New weight.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub weight: Option<Option<u32>>,
     /// New concurrency cap.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub max_concurrency: Option<Option<u32>>,
     /// New fuel refill.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub fuel_per_s: Option<Option<u64>>,
     /// New fuel burst.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub fuel_burst: Option<Option<u64>>,
     /// New memory reservation.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub memory_bytes: Option<Option<u64>>,
     /// New event rate.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub event_rate: Option<Option<RateSpecDto>>,
+}
+
+/// `TenantPatch` fields (14-17): an absent key stays `None` (keep), JSON `null` becomes
+/// `Some(None)` (clear the quota), a value becomes `Some(Some(v))`. Used with
+/// `#[serde(default)]`, so absence never reaches this function.
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 // ---- API tokens (D-P14-4) -----------------------------------------------------------------
@@ -492,8 +503,8 @@ mod tests {
         let patch: TenantPatch =
             serde_json::from_str(r#"{"weight": 3, "max_concurrency": null}"#).unwrap();
         assert_eq!(patch.weight, Some(Some(3)));
-        // `null` in JSON reads as "absent" for Option<Option<_>> without a custom
-        // deserializer; 14-17 decides the clear-quota spelling.
+        // 14-17: `null` clears a quota (`Some(None)`); an absent key keeps it (`None`).
+        assert_eq!(patch.max_concurrency, Some(None));
         assert_eq!(patch.fuel_per_s, None);
         let req: CreateTokenRequest =
             serde_json::from_str(r#"{"name":"ci","scopes":["deploy"]}"#).unwrap();

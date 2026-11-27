@@ -85,6 +85,8 @@ pub fn wrap(
     routed: Arc<dyn ControlPlane>,
     routed_ext: ApiExtensions,
 ) -> Guarded {
+    // 14-17: `delete_tenant` counts the tenant's runs through the routed control plane.
+    super::tenants_api::bind_routed(ctx, &routed);
     wrap_weak(Arc::downgrade(ctx), routed, routed_ext)
 }
 
