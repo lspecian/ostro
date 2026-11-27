@@ -136,3 +136,34 @@ Attach the following to the Phase 14 VERIFICATION record (`14-VERIFICATION.md`, 
 
 A FAIL verdict is a finding, not a test to retry. Record which criterion failed and its
 value, then open a fix before running again.
+
+## 7. Amendments
+
+### 2026-11-27 (after the first two driver smokes, before the third)
+
+**What happened.** Both smokes ran on a shared dell-4, with soft `ulimit -n` 1024.
+
+- **Smoke 1 (180 s):** every criterion passed except **C1**. RSS grew 41% over the window,
+  from 1.0 GB to 1.7 GB.
+- **Smoke 2 (300 s, rated 42,002 steps/s):** about 60 s in, a latency spike piled up
+  in-flight runs. The driver allowed up to 4,096 in flight, and every one held a connection.
+  The node, which inherits the driver's fd limit, ran out of file descriptors. Its
+  metadata raft driver then stopped ("raft storage: Too many open files"), and it never
+  recovered. The driver process also hit EMFILE, so its own samples went blank. That run
+  failed C2, C4, C6, C7, C8 and C9.
+
+The node-side behaviour is a product finding, recorded in the 14-23 SUMMARY. None of the
+criteria C1 to C9 change. The FAILs above stand as recorded.
+
+**Driver changes (they change what C9 counts as "shed"):**
+
+- The in-flight cap is now `min(4096, soft RLIMIT_NOFILE / 4)`, and at least 16. Starts
+  beyond that cap count as shed, as before. The fd limit and the cap are written into the
+  verdict notes.
+- Run the soak with a raised fd limit (`ulimit -n 65536`) so that the cap is 4,096. The
+  commands in §5 should be read with that prefix.
+- Samples also record `RssAnon` and `RssFile` per node, to tell heap growth from mapped
+  files. C1 still judges VmRSS.
+- The cron slice: schedule creation needs the `admin` scope, and schedule names cannot be
+  tenant-qualified. The system admin therefore creates `soak-tick` with a plain name and
+  the workflow `bench/trivial-steps`.
