@@ -25,8 +25,10 @@
 //! `spawn_blocking`, [`REFILL`] rows per partition at a time.
 //!
 //! Filters are applied in memory: workflow, status, queue, tag (the run carries it), every
-//! entry of `tags` (AND), `dlq` (failed or timed out) and the creation range
-//! `created_after_ms <= created_at_ms < created_before_ms`. Newest-first and DLQ listings
+//! entry of `tags` (AND), `dlq` (failed or timed out), the creation range
+//! `created_after_ms <= created_at_ms < created_before_ms` and (Phase 14, 14-16) the tenant
+//! (`RunRecord.tenant`; `_` = the default tenant, empty = no filter; tenant principals
+//! always carry their own tenant here, forced by `p14::tenant_scope`). Newest-first and DLQ listings
 //! are served by `p11_search` (the run index) and use this scan only as their fallback.
 
 use std::collections::VecDeque;
@@ -111,6 +113,18 @@ pub(crate) fn matches(req: &ListRunsRequest, rec: &RunRecord) -> bool {
             ))
         && req.created_after_ms.is_none_or(|a| rec.created_at_ms >= a)
         && req.created_before_ms.is_none_or(|b| rec.created_at_ms < b)
+        && tenant_matches(req.tenant.as_deref(), rec.tenant.as_deref())
+}
+
+/// Phase 14 (14-16): the run-list tenant filter. `None` / `""` lists every tenant, `_` the
+/// default tenant (a run with no or an empty tenant), anything else exactly that tenant.
+pub(crate) fn tenant_matches(want: Option<&str>, have: Option<&str>) -> bool {
+    let have = have.filter(|t| !t.is_empty());
+    match want {
+        None | Some("") => true,
+        Some(super::names::DEFAULT_TENANT_TOKEN) => have.is_none(),
+        Some(t) => have == Some(t),
+    }
 }
 
 pub(crate) fn summary(run: RunId, rec: RunRecord) -> RunSummary {
@@ -258,6 +272,15 @@ mod tests {
         for bad in ["", "garbage", "c1.", "c2.0000", &t[TOKEN_PREFIX.len()..]] {
             assert!(decode_token(bad, count(16)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn tenant_filter_semantics() {
+        assert!(tenant_matches(None, Some("a")) && tenant_matches(Some(""), None));
+        assert!(tenant_matches(Some("_"), None) && tenant_matches(Some("_"), Some("")));
+        assert!(!tenant_matches(Some("_"), Some("a")));
+        assert!(tenant_matches(Some("a"), Some("a")));
+        assert!(!tenant_matches(Some("a"), Some("b")) && !tenant_matches(Some("a"), None));
     }
 
     #[test]

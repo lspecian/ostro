@@ -234,8 +234,9 @@ impl Core {
     ) -> Result<Out, ApiError>
     where
         I: ?Sized + Send + Sync,
-        Req: Send,
-        Out: Send,
+        // 'static (14-16): `tenant_scope` inspects the request/response as `dyn Any`.
+        Req: Send + 'static,
+        Out: Send + 'static,
         Fut: Future<Output = Result<Out, ApiError>> + Send,
     {
         let p = admit(m)?;

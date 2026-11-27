@@ -356,7 +356,9 @@ pub fn webhook_to_dto(w: &Webhook, version: u64) -> Result<WebhookDto, ApiError>
 
 /// DTO -> meta record (syntax only; existence checks are the controller's).
 pub fn webhook_from_dto(d: &WebhookDto) -> Result<Webhook, ApiError> {
-    names::validate_name("name", &d.name)?;
+    // Phase 14 (14-16, D23): tenant webhooks are stored as `<tenant>/<name>` (served by
+    // `POST /hooks/{tenant}/{name}`); the local part keeps the resource grammar.
+    names::validate_name("name", names::split_qualified(&d.name).1)?;
     let mut w = Webhook {
         name: d.name.clone(),
         ..Webhook::default()
@@ -663,7 +665,8 @@ impl WebhookController {
                 priority: None,
                 tags: Vec::new(),
                 traceparent,
-                tenant: None,
+                // Phase 14 (14-16, D-P14-7): a tenant webhook starts runs in its tenant.
+                tenant: webhook_tenant(w),
                 idempotency_key: Some(hook_idempotency_key(&w.name, key)),
                 conflict_policy: ConflictPolicy::ReturnExisting,
                 concurrency_key: None,
@@ -722,7 +725,7 @@ impl WebhookController {
                         priority: None,
                         tags: Vec::new(),
                         traceparent: None,
-                        tenant: None,
+                        tenant: webhook_tenant(w),
                         idempotency_key: Some(k),
                         conflict_policy: ConflictPolicy::ReturnExisting,
                         concurrency_key: None,
@@ -865,6 +868,11 @@ impl WebhookController {
 }
 
 /// A conflict whose `details.reason` is `run_terminal`.
+/// Phase 14 (14-16): the tenant of a webhook, from its qualified name (`None` = default).
+fn webhook_tenant(w: &Webhook) -> Option<String> {
+    names::split_qualified(&w.name).0.map(str::to_owned)
+}
+
 fn is_run_terminal(e: &ApiError) -> bool {
     e.details
         .as_ref()

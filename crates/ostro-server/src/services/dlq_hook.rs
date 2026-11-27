@@ -307,6 +307,12 @@ pub async fn drive(ctx: &P11Ctx, run: RunId) -> Result<HookOutcome, ApiError> {
             tags: vec![onfailure::hook_tag(&run_s)],
             idempotency_key: Some(onfailure::hook_dedupe_key(&run_s, rec.resumed_count)),
             conflict_policy: ConflictPolicy::ReturnExisting,
+            // Phase 14 (14-16, D23): the hook run belongs to its (qualified) workflow's
+            // tenant, which is the failed run's tenant for every tenant-defined policy
+            // (`p14::tenant_scope` qualifies the hook in the policy's tenant).
+            tenant: crate::control::names::split_qualified(&hook.workflow)
+                .0
+                .map(str::to_owned),
             ..Default::default()
         })
         .await

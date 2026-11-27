@@ -240,6 +240,11 @@ pub struct JobFile {
     /// Finish (done / cancelled / failed).
     #[serde(default)]
     pub finished_at_ms: Option<u64>,
+    /// Phase 14 (14-16): the creating principal's tenant (`None` = system scope). The
+    /// selection lists only this tenant's runs and only this tenant (or a system principal)
+    /// sees the job. Absent in files written before Phase 14 (system jobs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 fn is_active(state: &str) -> bool {
@@ -470,6 +475,7 @@ impl BulkRegistry {
         &self,
         ctx: &P11Ctx,
         req: BulkCreateRequest,
+        tenant: Option<String>,
     ) -> Result<BulkCreateResponse, ApiError> {
         let rate = req.rate_per_sec.unwrap_or(self.cfg.default_rate);
         if rate == 0 {
@@ -492,7 +498,15 @@ impl BulkRegistry {
             CursorMode::Scan
         };
         let max = self.cfg.max_matches;
-        let (matched, sample) = count_matches(ctx, &req.filter, created_at_ms, mode, max).await?;
+        let (matched, sample) = count_matches(
+            ctx,
+            &req.filter,
+            tenant.as_deref(),
+            created_at_ms,
+            mode,
+            max,
+        )
+        .await?;
         if matched > max {
             return Err(reason_error(
                 ErrorCode::InvalidArgument,
@@ -540,6 +554,7 @@ impl BulkRegistry {
             selection_done: false,
             started_at_ms: None,
             finished_at_ms: None,
+            tenant,
         };
         let job = Job::new(file);
         {
@@ -596,6 +611,22 @@ impl BulkRegistry {
     pub fn list(&self) -> Vec<BulkJobView> {
         let jobs: Vec<Arc<Job>> = self.jobs().values().cloned().collect();
         jobs.iter().map(|j| j.view()).collect()
+    }
+
+    /// Phase 14 (14-16): the tenant of job `id` (`Some(None)` = a system job; `None` = no
+    /// such job).
+    pub fn tenant_of(&self, id: &str) -> Option<Option<String>> {
+        let job = self.jobs().get(id).cloned();
+        job.map(|j| j.lock().file.tenant.clone())
+    }
+
+    /// Phase 14 (14-16): every job created by `tenant`, in creation order.
+    pub fn list_of(&self, tenant: &str) -> Vec<BulkJobView> {
+        let jobs: Vec<Arc<Job>> = self.jobs().values().cloned().collect();
+        jobs.iter()
+            .filter(|j| j.lock().file.tenant.as_deref() == Some(tenant))
+            .map(|j| j.view())
+            .collect()
     }
 
     /// One job.
@@ -801,6 +832,7 @@ async fn index_ready(ctx: &P11Ctx) -> bool {
 /// The job filter as a listing request: the snapshot bound is always applied.
 fn list_request(
     f: &BulkFilter,
+    tenant: Option<&str>,
     created_at_ms: u64,
     mode: CursorMode,
     token: Option<String>,
@@ -823,9 +855,8 @@ fn list_request(
             CursorMode::Scan => ListOrder::Oldest,
         },
         dlq: f.dlq,
-        // Phase 14 (14-02 field): bulk selection keeps its pre-tenant filter; tenant scoping of
-        // bulk jobs is 14-16's.
-        tenant: None,
+        // Phase 14 (14-16): a tenant's job selects only that tenant's runs.
+        tenant: tenant.map(str::to_owned),
     }
 }
 
@@ -886,6 +917,7 @@ async fn select_page(
 async fn count_matches(
     ctx: &P11Ctx,
     filter: &BulkFilter,
+    tenant: Option<&str>,
     created_at_ms: u64,
     mode: CursorMode,
     max: u64,
@@ -895,7 +927,7 @@ async fn count_matches(
     let mut sample = Vec::new();
     let mut retries = 0u32;
     loop {
-        let req = list_request(filter, created_at_ms, mode, token.clone());
+        let req = list_request(filter, tenant, created_at_ms, mode, token.clone());
         let page = match select_page(ctx, &req, mode).await {
             Ok(p) => p,
             Err(PageError::Retry(msg)) if retries < 40 => {
@@ -1247,6 +1279,8 @@ struct Runner {
     shutdown: CancellationToken,
     action: BulkAction,
     filter: BulkFilter,
+    /// Phase 14 (14-16): the job's tenant (selection filter).
+    tenant: Option<String>,
     created_at_ms: u64,
     mode: CursorMode,
     ops_since_checkpoint: u64,
@@ -1358,7 +1392,13 @@ impl Runner {
                 return Ok(false);
             }
             let token = self.job.lock().file.cursor.clone();
-            let req = list_request(&self.filter, self.created_at_ms, self.mode, token);
+            let req = list_request(
+                &self.filter,
+                self.tenant.as_deref(),
+                self.created_at_ms,
+                self.mode,
+                token,
+            );
             match select_page(&self.ctx, &req, self.mode).await {
                 Ok(page) => {
                     let mut st = self.job.lock();
@@ -1615,10 +1655,11 @@ async fn run_job(
     if job.running.swap(true, Ordering::SeqCst) {
         return;
     }
-    let (spec, created_at_ms, mode) = {
+    let (spec, tenant, created_at_ms, mode) = {
         let st = job.lock();
         (
             st.file.spec.clone(),
+            st.file.tenant.clone(),
             st.file.created_at_ms,
             CursorMode::parse(&st.file.cursor_mode),
         )
@@ -1646,6 +1687,7 @@ async fn run_job(
         shutdown,
         action: spec.action,
         filter: spec.filter,
+        tenant,
         created_at_ms,
         mode,
         ops_since_checkpoint: 0,
