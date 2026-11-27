@@ -536,7 +536,7 @@ impl Conn {
 
     /// The negotiated version of `api` on this connection.
     pub fn version(&self, api: &ApiRange) -> Result<i16, KafkaError> {
-        self.versions.version(api)
+        versions::negotiate(api, self.versions.range(api.key))
     }
 
     /// The connection's task has ended (socket closed, protocol error or timeout).
