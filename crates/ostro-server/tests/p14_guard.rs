@@ -364,14 +364,15 @@ async fn calls_outside_any_principal_scope_are_401_and_never_reach_inner() {
     // `ready` is a pass-through probe.
     assert_eq!(f.guarded.control.ready(), f.routed.ready());
 
-    // Inside a System (or Dev, or token) scope the same calls pass through.
+    // Inside a System (or Dev, or token) scope the same calls pass through. (14-15: scopes
+    // are enforced, so the token holds system admin to pass every probe.)
     for p in [
         Principal::system(),
         Principal::dev(),
         Principal::token(
             "otk_aaaaaaaaaaaaaaaa",
-            Some("acme".into()),
-            ostro_api::auth::ScopeSet::of(&[ostro_api::auth::Scope::Read]),
+            None,
+            ostro_api::auth::ScopeSet::admin(),
         ),
     ] {
         let results = auth::scope(p.clone(), probe_all(&f.guarded)).await;
