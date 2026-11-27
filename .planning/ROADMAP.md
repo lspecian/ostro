@@ -509,7 +509,7 @@ Plans:
 - [ ] 14-11-PLAN.md — Release dry run (static musl, reproducible tarballs, SHA256SUMS + minisign), verified install.sh with local tests, release.yml with macOS notarized pkg and gated pushes (wave 3; DIST-01)
 - [ ] 14-12-PLAN.md — FROM scratch image without Docker (crane + loopback registry), verified contents (wave 3; DIST-01)
 - [ ] 14-13-PLAN.md — Helm chart (StatefulSet, workers, KEDA 2.21, NetworkPolicies) validated offline with helm lint + kubeconform (wave 3; DIST-02)
-- [ ] 14-14-PLAN.md — Migration guides: cron/queue tables, Temporal, Restate (wave 3; DIST-03)
+- [x] 14-14-PLAN.md — Migration guides: cron/queue tables, Temporal, Restate (wave 3; DIST-03)
 - [x] 14-15-PLAN.md — Scope enforcement with an exact route x scope matrix (REST + gRPC descriptor set) + export, join-token separation, principal propagation over forwarding (wave 4; SEC-02)
 - [x] 14-16-PLAN.md — Tenant scoping (qualify/strip, 404, tenant-field force/reject, filtered lists), tenant run index, per-tenant module registration, tenant-correct StartRun sites and triggers (wave 4; SEC-02)
 - [x] 14-17-PLAN.md — Tenant and API-token admin services (otk_ only) + ostro-client + CLI verbs (wave 4; SEC-02, DISP-06)
