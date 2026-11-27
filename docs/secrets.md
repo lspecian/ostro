@@ -373,4 +373,3 @@ no 8-byte template minimum.
   `kubeconfig` explicitly to pin the source.
 - No Vault `renew_self`: leases are refreshed by a fresh login at 3/4 of their duration; a static
   token is re-read only after a 403.
-- No operational key rotation or `ostro secret reseal` (§5.2).

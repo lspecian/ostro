@@ -3,101 +3,94 @@
 **Download one binary, deploy a Wasm workflow, and it runs durably.**
 
 Ostro is a durable-execution engine that ships as a single Rust binary. You write workflows in
-Rust (Python and TypeScript are in progress), compile them to WebAssembly components against one
-WIT contract (`ostro:runtime@0.1.0`), and deploy them to Ostro. Runs that Ostro has accepted are
-never lost. They survive crashes and restarts, and they replay deterministically from their
-journal. Ostro needs no external database, no queue and no separate worker fleet.
-
-The same binary runs as a local `dev` server, a single-node `server` or a stateless `worker`.
-
-> **Status: pre-release, under active development.** No release has been cut yet, and the WIT
-> contract and on-disk format are frozen at v0.1. See [Status](#status) for what is done.
-
-## Features
-
-- **Durable workflows.** Steps, retries with backoff, durable timers, signals, cancellation,
-  child workflows, continue-as-new, await tokens and versioned patching. Replay detects
-  non-determinism. See [docs/workflow-semantics.md](docs/workflow-semantics.md).
-- **Log-first embedded storage.** A partitioned write-ahead journal with group commit, per-partition
-  state on fjall, and snapshot plus log-tail recovery. Checked by crash campaigns of 10,000
-  `kill -9`, failpoint and ENOSPC faults with zero lost or duplicated runs.
-- **Effects with safe retries.** HTTP calls carry stable idempotency keys and are re-driven after a
-  crash. SQL (Postgres and MySQL) has an exactly-once mode. Object storage works with any
-  S3-compatible store or the local disk. Secrets never enter guest code, and egress allow-lists
-  plus an SSRF guard sit in front of every outbound call. See [docs/connectors.md](docs/connectors.md),
-  [docs/secrets.md](docs/secrets.md) and [docs/security-egress.md](docs/security-egress.md).
-- **Triggers.** HTTP and gRPC API, signed webhooks (GitHub, Stripe, Slack, Standard Webhooks,
-  generic HMAC) and time-zone-aware cron schedules with catch-up policies. See
-  [docs/webhooks.md](docs/webhooks.md) and [docs/cron.md](docs/cron.md).
-- **Bottomless backups.** Continuous upload of the log and snapshots to S3-compatible storage with a
-  data-loss window under one second, plus `ostro backup` and `ostro restore`. See
-  [docs/bottomless.md](docs/bottomless.md).
-- **Workers and flow control.** Stateless workers over mutual TLS. Per-queue placement
-  (`embedded`, `workers` or `auto` spill-over), queue weights, priorities, keyed concurrency,
-  throttles, rate limits and pause/resume. A KEDA demand metric drives autoscaling. See
-  [docs/workers.md](docs/workers.md), [docs/flow-control.md](docs/flow-control.md) and
-  [docs/tls.md](docs/tls.md).
-- **Observability.** Prometheus metrics, OpenTelemetry traces and logs, and per-run guest logs. See
-  [docs/metrics.md](docs/metrics.md) and [docs/observability.md](docs/observability.md).
+Rust, Python or TypeScript; `ostro deploy` compiles them to WebAssembly components against one
+frozen WIT contract (`ostro:runtime@0.1.0`) and uploads them, and the server runs them. There is
+no external database, no queue, no worker fleet and no app process to keep alive. Runs that
+Ostro has accepted are never lost: they survive crashes, restarts and failovers, and replay
+deterministically from their journal. The same binary runs as a laptop `dev` server, a
+single-node `server`, a stateless `worker`, or a member of a replicated three-node cluster.
 
 ## Quickstart
 
-You need Rust 1.100 (pinned in `rust-toolchain.toml`) and the `wasm32-wasip2` target.
-
 ```sh
-# Build the binary
-cargo build --release --locked -p ostro
-export PATH="$PWD/target/release:$PATH"
-
-# Build the example workflow
-(cd examples/order-saga && cargo build --release --target wasm32-wasip2)
-
-# Start a local dev server (http://127.0.0.1:7700)
-ostro dev &
-
-# Deploy the workflow and start a run
-ostro deploy examples/order-saga/target/wasm32-wasip2/release/order_saga.wasm --activate
-ostro run order-saga --input '{"order_id":"o-1","amount":4999,"sku":"BOOK-42","qty":1}'
-
-# Send it a signal and wait for the result
-ostro signal <run-id> approve --payload true
+curl -fsSL https://github.com/<owner>/ostro/releases/latest/download/install.sh | sh   # docs/install.md
+ostro dev --ephemeral --time-skipping &         # API, gRPC and UI on http://127.0.0.1:7700
+ostro init hello --lang ts && cd hello          # or --lang rust, --lang python
+ostro deploy                                    # fetches the toolchain, builds, uploads, activates
+ostro run hello --input '{"name":"ada"}'        # prints the run id
+ostro signal <run-id> approve --payload '{"ok":true}'
 ostro result <run-id> --wait
 ```
 
-`examples/order-saga/quickstart.sh` runs the same steps end to end.
+The only thing to install is `ostro`: language toolchains are downloaded on first use, pinned
+and checksum-verified. Step-by-step guides: [Rust](docs/getting-started/rust.md),
+[Python](docs/getting-started/python.md), [TypeScript](docs/getting-started/typescript.md).
+
+## Features
+
+- **Durable workflows in three languages.** Steps with retries, durable timers, signals,
+  await tokens, cancellation, child workflows, continue-as-new, sagas and versioned patching,
+  with one semantics checked by a cross-language conformance suite. See
+  [docs/workflow-semantics.md](docs/workflow-semantics.md).
+- **Deterministic replay, enforced.** The sandbox virtualises time and randomness, divergence
+  is detected at the exact journal position, and `ostro replay` gates deploys against recorded
+  runs. See [docs/determinism.md](docs/determinism.md).
+- **Log-first embedded storage.** Partitioned write-ahead logs with group commit, per-partition
+  state and snapshots, checked by crash campaigns of thousands of `kill -9`, failpoint and
+  ENOSPC faults with zero lost or duplicated runs.
+- **Replication and clustering.** Replicated partitions, a Raft metadata group, rolling
+  upgrades, and `ostro cluster join`, `drain` and `remove`. See
+  [docs/cluster-operations.md](docs/cluster-operations.md) and [docs/replication.md](docs/replication.md).
+- **Effects with safe retries.** HTTP with stable idempotency keys, SQL (Postgres, MySQL) with
+  an exactly-once mode, S3-compatible object storage. Secrets never enter guest code; egress
+  allow-lists and an SSRF guard sit in front of every call. See [docs/connectors.md](docs/connectors.md).
+- **Triggers.** REST and gRPC, signed webhooks, time-zone-aware cron, and Kafka topics. See
+  [docs/webhooks.md](docs/webhooks.md), [docs/cron.md](docs/cron.md) and
+  [docs/kafka-triggers.md](docs/kafka-triggers.md).
+- **Multi-tenancy and security.** Tenants with quotas, scoped API tokens, a hash-chained audit
+  log, signed modules, mutual TLS between nodes and workers. See
+  [docs/tenancy-and-auth.md](docs/tenancy-and-auth.md), [docs/audit.md](docs/audit.md) and
+  [docs/signed-modules.md](docs/signed-modules.md).
+- **Workers and flow control.** Stateless workers, per-queue placement and spill-over, weights,
+  priorities, keyed concurrency, throttles, rate limits, and KEDA autoscaling to zero. See
+  [docs/workers.md](docs/workers.md) and [docs/flow-control.md](docs/flow-control.md).
+- **Bottomless backups and restore.** Continuous upload of logs and snapshots to S3-compatible
+  storage with a data-loss window under one second, plus single-node and whole-cluster restore.
+  See [docs/bottomless.md](docs/bottomless.md) and [docs/cluster-restore.md](docs/cluster-restore.md).
+- **Operations.** Embedded UI, Prometheus metrics, OpenTelemetry traces and logs, DLQ, rerun
+  and bulk operations. See [docs/operations.md](docs/operations.md) and
+  [docs/observability.md](docs/observability.md).
+
+## Documentation
+
+The full index is [docs/README.md](docs/README.md). Start with:
+
+| Topic | Guides |
+|---|---|
+| Install and verify | [docs/install.md](docs/install.md), [docs/kubernetes.md](docs/kubernetes.md) |
+| First workflow | [docs/getting-started.md](docs/getting-started.md) and the per-language guides in [docs/getting-started/](docs/getting-started/) |
+| Run it in production | [docs/operations-sizing.md](docs/operations-sizing.md), [docs/tenancy-and-auth.md](docs/tenancy-and-auth.md), [docs/upgrade-runbook.md](docs/upgrade-runbook.md) |
+| Coming from Temporal, Restate or cron + queue tables | [docs/migrations/index.md](docs/migrations/index.md) |
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `crates/ostro` | The `ostro` binary |
-| `crates/ostro-server` | Server bootstrap, control plane, workers, TLS, flow control |
+| `crates/ostro-server` | Server bootstrap, control plane, auth, tenancy, audit, workers, TLS, flow control |
 | `crates/ostro-engine` | Wasmtime host, replay and the guest runtime |
 | `crates/ostro-partition` | Partition state machine, apply, dispatcher, snapshots |
-| `crates/ostro-log`, `ostro-meta` | Replicated log and metadata state machine |
+| `crates/ostro-log`, `ostro-meta`, `ostro-cluster` | Replicated log, metadata state machine, clustering |
 | `crates/ostro-bridge` | Effects: HTTP, SQL, object store, secrets, egress |
 | `crates/ostro-backup`, `ostro-objstore` | Bottomless backups and the object-store layer |
-| `crates/ostro-triggers` | Cron and webhook verification |
+| `crates/ostro-triggers`, `ostro-kafka` | Cron and webhook verification, the Kafka client |
 | `crates/ostro-worker` | The stateless worker runtime |
-| `sdks/rust` | Rust guest SDK (`#[workflow]` / `#[step]`) |
+| `crates/ostro-cli`, `ostro-client`, `ostro-build`, `ostro-ui` | CLI, client and test kit, toolchains and builds, embedded UI |
+| `sdks/` | Guest SDKs for Rust, Python and TypeScript |
 | `wit/` | The frozen `ostro:runtime@0.1.0` contract |
-| `examples/` | Example workflows |
-| `deploy/` | Kubernetes and KEDA manifests |
-| `docs/` | Design documents and reference docs |
-
-## Status
-
-Ostro is being built in phases (see [docs/05-roadmap.md](docs/05-roadmap.md)):
-
-| Phase | Scope | State |
-|---|---|---|
-| 1–4 | Foundation, storage, Wasm engine, API and Rust SDK | Done |
-| 5 | Workflow semantics, crash harness, WIT 0.1 freeze | Done |
-| 6 | Effects bridge, connectors, secrets | Done |
-| 7 | Workers, placement, flow control, TLS | Done |
-| 8 | Triggers, bottomless backups, observability | Built and verified; final gate pending |
-| 9 | Python and TypeScript SDKs, conformance suite | In progress |
-| 10–14 | Hardening, multi-tenancy, replicated partitions, clustering, release | Planned |
+| `examples/`, `guests/` | Example and test workflows |
+| `deploy/` | Container image, Helm chart, Kubernetes and KEDA manifests |
+| `docs/` | Guides, references and design documents |
 
 ## Building and testing
 
@@ -105,6 +98,7 @@ Ostro is being built in phases (see [docs/05-roadmap.md](docs/05-roadmap.md)):
 cargo build --workspace --locked
 cargo test --workspace --locked
 bash scripts/ci-local.sh          # the full local gate (mirrors CI)
+bash scripts/docs-check.sh        # doc snippets match compiled code, links resolve
 ```
 
 ## License

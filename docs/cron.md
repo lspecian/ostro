@@ -6,7 +6,7 @@ runs. Each nominal fire time starts at most one run, across restarts, leader cha
 crashes.
 
 ```
-ostro schedules create nightly --workflow report --cron '0 30 2 * * *' --timezone Europe/Berlin
+ostro schedules create --name nightly --workflow report --cron '0 30 2 * * *' --timezone Europe/Berlin
 ```
 
 | Surface | Where |

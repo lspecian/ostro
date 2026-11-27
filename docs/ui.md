@@ -99,9 +99,11 @@ the npm package (0BSD), embedded with `include_bytes!` and checked against its s
 
 Authorization goes through one trait, `ostro_ui::auth::UiAuth`:
 `principal(&request parts) -> Result<UiPrincipal, UiReject>`. Pages require the scope
-`read`; actions, rerun, DLQ and bulk require `operate`. Phase 11 installs `AllowAll`
-(every scope). Phase 14 supplies the real implementation (API token to session cookie via
-`POST /ui/login`) without touching the pages.
+`read`; actions, rerun, DLQ and bulk require `operate`. With `[auth] mode = "none"` every
+request gets every scope (the Phase 11 behaviour). In token mode Phase 14 exchanges an API
+token for a session cookie at `POST /ui/login`; the sign-in, the cookie and its `Secure`
+attribute behind TLS proxies are described in
+[tenancy-and-auth.md](tenancy-and-auth.md#9-the-ui-in-token-mode).
 
 ## Testing
 

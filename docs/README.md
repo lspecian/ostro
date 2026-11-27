@@ -1,6 +1,91 @@
-# Ostro — Design Documentation
+# Ostro documentation
 
-> **One Rust binary. Upload durable workflows written in Rust, Python or TypeScript as Wasm — Ostro stores them, runs them, and scales them.**
+> **One Rust binary. Upload durable workflows written in Rust, Python or TypeScript as Wasm: Ostro stores them, runs them, and scales them.**
+
+This page indexes every guide and reference. The design documents written before the build
+started are at the end ([Design documents](#design-documents)). `bash scripts/docs-check.sh`
+checks that every code snippet in these pages matches the file it was copied from and that every
+link resolves.
+
+## Start here
+
+| Guide | Contents |
+|---|---|
+| [install.md](install.md) | Release artefacts, signature verification, the install script, macOS, the container image, building from source, first server settings |
+| [getting-started.md](getting-started.md) | The loop in all three languages: init, dev, deploy, run, test, replay; toolchain notes |
+| [getting-started/rust.md](getting-started/rust.md) | Rust, step by step: deploy, trigger (CLI and HTTP), observe, time-skipping test |
+| [getting-started/python.md](getting-started/python.md) | Python, step by step |
+| [getting-started/typescript.md](getting-started/typescript.md) | TypeScript, step by step |
+| [migrations/index.md](migrations/index.md) | Migrating from [Temporal](migrations/from-temporal.md), [Restate](migrations/from-restate.md) or [cron and queue tables](migrations/from-cron-and-queue-tables.md) |
+
+## Writing workflows
+
+| Guide | Contents |
+|---|---|
+| [workflow-semantics.md](workflow-semantics.md) | Starts, signals, timeouts, gather and race, cancel, terminate, retry, await tokens, versions, continue-as-new, retention, tenancy of names |
+| [determinism.md](determinism.md) | What the sandbox virtualises, steps and effects, divergence detection, `ostro replay` in CI, `patched` and `migrate-runs`, pitfalls per language |
+| [children.md](children.md) | Child workflows |
+| [replay.md](replay.md) | Replaying recorded runs against a new module |
+| [testing.md](testing.md) | The test kits (Rust, Python, TypeScript, Go), time skipping, HTTP mocks |
+| [connectors.md](connectors.md) | HTTP, SQL and object-store effects; secrets, grants and egress quick reference; triggers |
+| [secrets.md](secrets.md) | Secret templates, grants, scrubbing, the sealed store and key rotation, providers |
+| [security-egress.md](security-egress.md) | SSRF defence and per-module egress allow-lists |
+| [limits.md](limits.md) | Engine and API limits |
+| [sdk-builds.md](sdk-builds.md), [toolchains.md](toolchains.md) | How modules are built; pinned toolchains, cache, mirrors, `--docker` |
+| [conformance.md](conformance.md) | The cross-language conformance suite |
+| SDK references | [Rust](../sdks/rust/README.md), [Python](../sdks/python/README.md), [TypeScript](../sdks/ts/README.md) |
+
+## Triggers
+
+| Guide | Contents |
+|---|---|
+| [webhooks.md](webhooks.md) | Signed webhooks (GitHub, Stripe, Slack, Standard Webhooks, HMAC) |
+| [cron.md](cron.md) | Time-zone-aware cron schedules and catch-up |
+| [kafka-triggers.md](kafka-triggers.md) | One run per Kafka record, from any Kafka-protocol broker |
+
+## Running Ostro
+
+| Guide | Contents |
+|---|---|
+| [operations-sizing.md](operations-sizing.md) | Partitions, memory per language, the Python instance budget, disk per step, audit disk, snapshots, backup and restore, upgrades, file descriptors, observability, capacity |
+| [kubernetes.md](kubernetes.md) | The Helm chart, values, Secrets, KEDA scaling to zero, NetworkPolicies, backups |
+| [operations.md](operations.md) | Rerun, dead-letter queue, on-failure hooks, bulk operations, search |
+| [workers.md](workers.md) | Remote workers, placement, spill, demand and KEDA |
+| [flow-control.md](flow-control.md) | Queue concurrency, weights, priorities, keys, throttles, rate limits, pause |
+| [bottomless.md](bottomless.md) | Continuous backups to object storage and the single-node restore runbook |
+| [cluster-restore.md](cluster-restore.md) | Restoring a whole cluster to a consistent cut |
+| [cluster-operations.md](cluster-operations.md) | Forming, growing, draining and rebalancing a cluster |
+| [replication.md](replication.md) | Replicated partitions |
+| [upgrade-runbook.md](upgrade-runbook.md), [compat.md](compat.md) | Rolling upgrades, feature levels, `migrate-runs`, module GC |
+| [tls.md](tls.md) | Listener TLS modes, the cluster CA, mTLS, ACME |
+| [ui.md](ui.md) | The embedded UI |
+| [observability.md](observability.md), [metrics.md](metrics.md) | Traces, logs, guest logs; every metric |
+| [cli-json.md](cli-json.md) | The `--json` envelope of every command |
+| [benchmarks.md](benchmarks.md), [soak.md](soak.md), [sdk-resources.md](sdk-resources.md), [binary-size.md](binary-size.md) | Measurements |
+
+## Security
+
+| Guide | Contents |
+|---|---|
+| [tenancy-and-auth.md](tenancy-and-auth.md) | Tenants, API tokens and their lifecycle, scopes, the 404 rule, quotas and the per-node leadership share, UI sign-in |
+| [audit.md](audit.md) | The hash-chained audit log: what is recorded, verification, fail-closed behaviour, retention, export |
+| [signed-modules.md](signed-modules.md) | Requiring minisign or cosign signatures for deploys |
+| [secrets.md](secrets.md), [security-egress.md](security-egress.md), [tls.md](tls.md) | Secrets, egress, transport security |
+| `security-model.md`, `security/` | The security model, threat model and route-by-route auth matrix (written by plan 14-24) |
+
+## Formats and internals
+
+| Doc | Contents |
+|---|---|
+| [storage-format.md](storage-format.md), [snapshot-format.md](snapshot-format.md) | The frozen v0.1 on-disk formats |
+| [wit-0.1-freeze-review.md](wit-0.1-freeze-review.md) | The WIT 0.1 freeze |
+| [spikes/](spikes/) | Early feasibility spikes |
+
+## Design documents
+
+These were written on 2026-11-18, before the build started. They record the reasoning behind
+the design; where they differ from the guides above, the guides describe what was built.
+
 > `ostro dev` on a laptop → `ostro server` on one VM → add `ostro worker`s → three-node HA cluster. Same file, different flags.
 
 **Decided 2026-11-18:** the name is **Ostro**, and it is a **separate product** built on shared Chronik crates ([04 §5](04-chronik-reuse.md#5-relationship-options-separate-product-vs-chronik-capability), option 1).

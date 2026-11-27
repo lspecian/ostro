@@ -63,7 +63,7 @@ service you operate and call it over HTTP as an effect.
 | Replay tests (`WorkflowReplayer` and friends) | `ostro replay --module ... --sample N` (server-side, exit 4 on divergence) or `--corpus` offline | [Replay](../replay.md) |
 | Search attributes, list filters | Tags set at start (`--tag k=v`), searched with `ostro ls --tag ...` (AND, at most 8 tags); filters by workflow, queue, status, DLQ | [Run operations: Search](../operations.md#search) |
 | Memo | Tags or the run input; published status for values that change | [Run operations: Search](../operations.md#search) |
-| Namespace | Tenant: names, idempotency keys and schedules are tenant-scoped; tokens carry a tenant and scopes; per-tenant quotas | [§14](../workflow-semantics.md#14-tenancy-and-names-d23) |
+| Namespace | Tenant: names, idempotency keys and schedules are tenant-scoped; tokens carry a tenant and scopes; per-tenant quotas | [§14](../workflow-semantics.md#14-tenancy-and-names-d23), [Tenancy and authentication](../tenancy-and-auth.md) |
 | Schedules | Schedules (cron, time zone, overlap and catch-up policies) | [Cron](../cron.md) |
 | Retention period | Per-run retention resolved at start (request, workflow, queue, server default) | [§12](../workflow-semantics.md#12-retention) |
 | Test server with time skipping | `ostro dev --ephemeral --time-skipping` | [Getting started](../getting-started.md) |
@@ -309,7 +309,9 @@ Temporal history. Migrate by **routing new runs** and letting old ones finish.
    connections, egress rules and secrets ([Connectors](../connectors.md),
    [Secrets](../secrets.md)). Keep services the workflow must still call.
 4. **Set up tenancy and tokens**: a tenant per namespace you migrate, `deploy` tokens for
-   CI, `trigger` tokens for starters, `operate` tokens for on-call.
+   CI, `trigger` tokens for starters, `operate` tokens for on-call
+   ([Tenancy and authentication](../tenancy-and-auth.md)). Admin actions land in the
+   [audit log](../audit.md); require [signed modules](../signed-modules.md) if CI signs builds.
 5. **Deploy and gate.** Deploy the module; add `ostro replay --sample N` to CI so that later
    changes are checked against recorded runs.
 6. **Route new starts** for one workflow type to Ostro (a feature flag in the code that

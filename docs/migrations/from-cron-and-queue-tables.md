@@ -268,15 +268,18 @@ accepted and held, nothing is sent, and resume continues where they stopped.
   queue and schedule names and idempotency keys are scoped to the tenant, so two teams can
   both use `email-jobs/81723` ([§14](../workflow-semantics.md#14-tenancy-and-names-d23)).
   Tenant quotas (`ostro tenant set --max-concurrency ... --event-rate 100/1s`) cap the whole
-  tenant on top of the queue limits; a tenant over its `event_rate` gets 429.
+  tenant on top of the queue limits; a tenant over its `event_rate` gets 429
+  ([Tenancy and authentication](../tenancy-and-auth.md#5-quotas)).
 - **Tokens and scopes.** Give producers a `trigger` token, CI a `deploy` token and on-call a
   `operate` token (`ostro auth token create --name ... --scope ...`). Tokens can be rotated
-  (`ostro auth token rotate`) and revoked.
+  (`ostro auth token rotate`) and revoked ([Tokens](../tenancy-and-auth.md#4-tokens)).
 - **Audit.** Administrative and security-relevant actions (module uploads, schedule
   changes, run cancels and terminates, token, tenant and secret changes, authentication
-  failures) are recorded in the cluster audit log: `ostro audit ls --since 24h`.
+  failures) are recorded in the cluster audit log: `ostro audit ls --since 24h`
+  ([Audit log](../audit.md)).
 - **Signed modules.** If the cluster policy requires signatures, deploy with
-  `ostro deploy --signature <file>` for a key trusted with `ostro security trust add`.
+  `ostro deploy --signature <file>` for a key trusted with `ostro security trust add`
+  ([Signed modules](../signed-modules.md)).
 - **Retention.** Pick `retention` per workflow or queue
   (`PUT /v1/workflows/{name}/policy`) longer than both your audit needs and your producers'
   re-send window ([§12](../workflow-semantics.md#12-retention)).

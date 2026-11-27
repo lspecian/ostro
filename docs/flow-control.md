@@ -45,7 +45,11 @@ which a flow PUT preserves.
 - Concurrency counts **leased activations**: runs executing now, on an embedded slot or a
   worker. A suspended or sleeping run holds no lease and counts nothing.
 - Counters are **node-wide**, shared by every partition dispatcher of the node. In a cluster
-  each node enforces its own limit until Phase 13 adds cluster-wide quotas.
+  each node enforces a queue's full limits on the activations of the partitions it leads: the
+  limits are per node, not divided across nodes, so a queue with `concurrency = 10` can run up
+  to 10 activations on each node. Queue rate limits are likewise checked by each node for the
+  starts it admits. Tenant quotas are the exception: they are split across nodes by leadership
+  share ([tenancy-and-auth.md](tenancy-and-auth.md#cluster-wide-quotas-the-per-node-leadership-share)).
 - A flow charge is tentative until placement grants capacity: `FlowControl::admit` returns a
   `FlowPermit` that the dispatcher commits only after `Placement::reserve` is `Granted`; an
   uncommitted permit rolls back (counters and throttle state) when dropped.

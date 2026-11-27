@@ -36,7 +36,9 @@ Restate models, where your own processes run the business code.
   trigger` for producers, `deploy` for CI, `operate` for on-call). Starts, signals and
   token completions count against the tenant's `event_rate` quota and are refused with 429
   and `Retry-After` when it is exhausted, so every producer must retry with the same
-  idempotency key.
+  idempotency key. See [Tenancy and authentication](../tenancy-and-auth.md).
+- Administrative actions are recorded in the [audit log](../audit.md), and a cluster can
+  require [signed modules](../signed-modules.md) for every deploy.
 
 ## Common building blocks
 

@@ -38,7 +38,7 @@ What this means in practice:
 | Restate | Ostro | Reference |
 |---|---|---|
 | Service (stateless handlers) | Workflows in an uploaded module; each invocation is a **run** | [Workflow semantics §1](../workflow-semantics.md#1-starting-a-run-and-the-journal) |
-| Deployment registration | `ostro deploy` (upload, optionally signed, then activate) | [Getting started](../getting-started.md) |
+| Deployment registration | `ostro deploy` (upload, optionally signed, then activate) | [Getting started](../getting-started.md), [Signed modules](../signed-modules.md) |
 | Handler invocation over HTTP ingress | `POST /v1/workflows/{name}/runs` (REST), gRPC, `ostro run`, signed [webhooks](../webhooks.md), [Kafka triggers](../kafka-triggers.md), [cron schedules](../cron.md) | [§1](../workflow-semantics.md#1-starting-a-run-and-the-journal) |
 | Idempotency key on an invocation | `idempotency_key` on the start (`return_existing` or `reject`); held until the run expires by retention | [§1](../workflow-semantics.md#1-starting-a-run-and-the-journal), [§12](../workflow-semantics.md#12-retention) |
 | Awaiting an invocation's result | `GET /v1/runs/{id}/result?wait=30s`, `ostro run --wait`, `ostro result --wait` | [§11](../workflow-semantics.md#11-continue-as-new) |
@@ -106,7 +106,8 @@ call with `concurrency_key` set to the object key (a field of the REST and gRPC 
 request) on a queue with `key_concurrency = 1`. Be aware of what this does and does not
 give you: the limit counts **leased activations**, so a run that sleeps or waits releases
 its slot, and another run for the same key can execute in between. It is not mutual
-exclusion across a whole call, and the counters are kept per node
+exclusion across a whole call, and the counters are kept per node: in a cluster each node
+applies the limit on its own, so one key can run on more than one node at once
 ([Flow control §2](../flow-control.md#2-the-concurrency-unit-d-w13)). Use it to keep a hot
 key from hogging capacity, not to protect shared state; keep that state in your database
 with SQL effects.

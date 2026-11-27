@@ -133,15 +133,23 @@ that shifts op ids, the SDK computes a semantic key in the guest:
 "ostro-" + lower-hex( sha256( b"ostro/idem/v1/name" ‖ run_id ‖ 0x00 ‖ name )[..16] )
 ```
 
-Pass it as the override, and embed it in the body when the provider wants it there:
+Pass it as the override, and embed it in the body when the provider wants it there (from the
+`pay-flow` test guest):
 
+<!-- ostro:snippet path=guests/pay-flow/src/lib.rs lines=31-42 -->
 ```rust
-let key = ctx.idempotency_key("charge");
-let resp = ctx.http().post("https://api.stripe.com/v1/charges")
-    .secret_header("Authorization", "Bearer {{secret:stripe/live}}")
-    .json(&serde_json::json!({ "amount": 1000, "idempotency_key": key }))?
-    .idempotency_key(&key)
-    .send()?;
+    let key = ctx.idempotency_key("pay");
+    let url = format!("{}/pay", input.url.trim_end_matches('/'));
+    let resp = ctx
+        .http()
+        .post(url)
+        .header("Idempotency-Key", key.as_str())
+        .secret_header("Authorization", "Bearer {{secret:pay_token}}")
+        .redact(["Authorization"])
+        .json(&json!({ "idempotency_key": key, "amount": 100 }))?
+        .idempotency_key(key.as_str())
+        .send()
+        .wait()?;
 ```
 
 ### 2.2 Retries
@@ -595,28 +603,50 @@ Notes:
 `node.toml` sections (durations use the server's parser; write hours, not days: `168h`, never
 `7d`). Unknown keys inside these sections are ignored, like the rest of the node config.
 
+| Key | Default | Notes |
+|---|---|---|
+| `[egress] allow_private` | `[]` | CIDRs exempt from the private-range block; see [security-egress.md](security-egress.md) |
+| `[egress] connect_timeout` | `"5s"` | |
+| `[egress] default_timeout` | `"30s"` | per attempt |
+| `[egress] max_response_bytes` | `"4MiB"` | hard max `hard_max_response_bytes`, 64 MiB |
+| `[egress] max_redirects` | `5` | |
+| `[egress] rate_max_wait` | `"30s"` | |
+| `[egress] idempotency_window` | `"24h"` | |
+| `[egress] safety_margin` | `"5m"` | |
+| `[connectors] sql_max_rows` | `10000` | |
+| `[connectors] sql_max_bytes` | `"4MiB"` | |
+| `[connectors] sql_effects_retention` | `"168h"` | |
+| `[connectors] object_max_get_bytes` | `"16MiB"` | |
+| `[connectors] presign_default_expiry` | `"15m"` | |
+| `[connectors] backend_ttl` | `"5m"` | |
+| `[connectors] default_rate` | unset (unlimited) | for example `"100/s"` |
+| `[connectors] public_base_url` | the API listen address | for example `"https://ostro.example.com"` |
+
+`[secrets]` is described in [secrets.md](secrets.md). A complete example with non-default values,
+as parsed by the configuration test (`crates/ostro-server/tests/config.rs`):
+
+<!-- ostro:snippet path=crates/ostro-server/tests/config.rs lines=832-851 -->
 ```toml
 [egress]
-allow_private      = []        # CIDRs exempt from the private-range block; see security-egress.md
-connect_timeout    = "5s"
-default_timeout    = "30s"     # per attempt
-max_response_bytes = "4MiB"    # hard max 64 MiB
-max_redirects      = 5
-rate_max_wait      = "30s"
-idempotency_window = "24h"
-safety_margin      = "5m"
+allow_private = ["10.0.0.0/8", "127.0.0.0/8"]
+connect_timeout = "2s"
+default_timeout = "1m"
+max_response_bytes = "8MiB"
+hard_max_response_bytes = 33554432
+max_redirects = 2
+rate_max_wait = "5s"
+idempotency_window = "48h"
+safety_margin = "10m"
 
 [connectors]
-sql_max_rows           = 10000
-sql_max_bytes          = "4MiB"
-sql_effects_retention  = "168h"
-object_max_get_bytes   = "16MiB"
-presign_default_expiry = "15m"
-backend_ttl            = "5m"
-# default_rate         = "100/s"            # unset = unlimited
-# public_base_url      = "https://ostro.example.com"   # default: the API listen address
-
-[secrets]                      # see secrets.md
+sql_max_rows = 500
+sql_max_bytes = "1MiB"
+sql_effects_retention = "72h"
+object_max_get_bytes = "2MiB"
+presign_default_expiry = "5m"
+backend_ttl = "1m"
+default_rate = "50/s"
+public_base_url = "https://ostro.example.com/"
 ```
 
 Environment overrides use the usual form, for example `OSTRO_EGRESS__ALLOW_PRIVATE`.
@@ -653,3 +683,64 @@ Metrics: `ostro_effect_duration_seconds{kind}`, `ostro_effect_completed_total{ki
 - Presign expiry is per connection until a WIT 0.1.N `object-presign` function exists (D-FX8).
 - The SC3 canary scan of the OTLP export (D-FX6) ran in 08-21 (`ostro-server` test
   `otlp_canary`, clean).
+
+---
+
+## 10. Secrets, grants and egress: quick reference
+
+A workflow that calls an external API with a secret needs three things: the secret, a grant
+that lets the module send it to the destination, and an egress rule that lets the module reach
+the destination at all. Egress is deny-by-default per module
+([security-egress.md](security-egress.md#7-per-module-policies-deny-by-default)).
+
+```sh
+# 1. The secret (sealed with the node's sealing key; the value is read from stdin, a file or
+#    an environment variable, never from the command line)
+printf '%s' "$PAY_TOKEN" | ostro secret set pay_token
+# 2. The grant: module pay-flow may send pay_token to this origin (headers only, unless --body)
+ostro grant add --module pay-flow --secret pay_token --origin https://pay.example.com
+# 3. Egress: module pay-flow may call this origin
+ostro egress set pay-flow --allow https://pay.example.com
+```
+
+| Piece | Where | Guide |
+|---|---|---|
+| `{{secret:NAME}}` templates, grants, scrubbing, providers (sealed, env, file, Vault, Kubernetes) | `ostro secret`, `ostro grant` | [secrets.md](secrets.md) |
+| the sealing key and its rotation | `OSTRO_SEALING_KEY`, `ostro secret sealing`, `ostro secret reseal` | [secrets.md §5](secrets.md#5-the-sealed-store), [§5.2](secrets.md#52-rotation) |
+| SSRF guard, private ranges, per-module allow-lists | `ostro egress` | [security-egress.md](security-egress.md) |
+| connections (SQL, object stores, HTTP targets) | `ostro connection` | §2.7, §3.5, §4.4 above |
+
+Every secret resolution by a running workflow is recorded in the audit log as a coalesced
+`secret.access` record that names the secret, the module and the origin, never the value
+([audit.md](audit.md#4-coalescing)).
+
+## 11. Tenancy notes
+
+With tenants ([tenancy-and-auth.md](tenancy-and-auth.md)):
+
+- **Secrets are per tenant.** A tenant's secret is stored as `<tenant>/<name>`. Its workflows
+  refer to it by the plain name in templates, and a tenant admin manages it with plain names
+  (`ostro secret set pay_token` with a tenant token). A system admin addresses it with
+  `--tenant <t>`. Deleting a tenant requires that it holds no secret.
+- **Grants and egress policies are per module**, and a tenant's modules are qualified
+  (`acme/pay-flow`); a tenant admin uses plain names.
+- **Connections are cluster-scoped in 1.0.** SQL, object-store and HTTP-target connections are
+  shared by every tenant and managed by system admins only: tenant principals do not see them
+  (list empty, get 404) and cannot create or delete them (403). An `http-target` connection
+  therefore applies to every tenant's calls to that origin.
+- Secret access, grant, connection and egress changes are audited per tenant.
+
+## 12. Triggers
+
+Effects are how a workflow reaches out; triggers are how the outside world starts runs:
+
+- the HTTP and gRPC API ([getting-started.md](getting-started.md));
+- signed webhooks from GitHub, Stripe, Slack, Standard Webhooks or generic HMAC senders
+  ([webhooks.md](webhooks.md));
+- time-zone-aware cron schedules with catch-up policies ([cron.md](cron.md));
+- Kafka topics, one run per record, from any broker that speaks the Kafka protocol, with SASL
+  and TLS ([kafka-triggers.md](kafka-triggers.md)). CI tests Apache Kafka 4.1; Redpanda and
+  Chronik are expected to work over the same protocol but are not tested in CI.
+
+Every trigger respects the tenant of what it starts and the tenant's `event_rate` and
+suspension ([tenancy-and-auth.md](tenancy-and-auth.md#ingress-event_rate-and-suspension)).
