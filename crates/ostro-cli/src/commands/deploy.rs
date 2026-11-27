@@ -134,6 +134,24 @@ fn described_workflows(upload: &Value) -> Vec<(String, u64)> {
         .unwrap_or_default()
 }
 
+/// 14-28 (D-P14-48): the sha of the module an upload replaced (`ostro dev --ephemeral`
+/// only: the response carries `replaced: true` and `previous_module`, p14-fixups-3).
+fn replaced_module(upload: &Value) -> Option<String> {
+    if upload["replaced"] != Value::Bool(true) {
+        return None;
+    }
+    upload["previous_module"].as_str().map(str::to_owned)
+}
+
+/// The human line of a replacement: `replaced <old-sha12> -> <new-sha12> (ephemeral dev)`.
+fn replaced_line(previous: &str, sha: &str) -> String {
+    format!(
+        "replaced {} -> {} (ephemeral dev)",
+        previous.get(..12).unwrap_or(previous),
+        sha.get(..12).unwrap_or(sha)
+    )
+}
+
 /// `ostro deploy`: the 05-14 `.wasm` form, or a project.
 pub async fn deploy(c: &Client, out: Out, a: &DeployArgs) -> Result<Outcome, CallError> {
     match a.wasm_file() {
@@ -176,6 +194,9 @@ async fn deploy_wasm(
                 .map(|n| format!(" as module {n}"))
                 .unwrap_or_default()
         );
+        if let Some(prev) = replaced_module(&up.body) {
+            println!("{}", replaced_line(&prev, &sha));
+        }
         let list: Vec<String> = described.iter().map(|(n, v)| format!("{n}@{v}")).collect();
         println!(
             "workflows: {}",
@@ -245,6 +266,9 @@ pub struct DeployReport {
     pub upload: Value,
     /// `true` when the server stored a new module (201), `false` when the sha existed.
     pub created: bool,
+    /// The sha of the module this upload replaced under the same `(name, version)`s
+    /// (`ostro dev --ephemeral` only, 14-28); `None` otherwise.
+    pub replaced: Option<String>,
     /// The described `(workflow, version)` pairs.
     pub workflows: Vec<(String, u64)>,
     /// Activation was requested.
@@ -468,6 +492,7 @@ pub async fn deploy_project(c: &Client, opts: &DeployOptions) -> Result<DeployRe
         project: project.manifest.project.name,
         build,
         created: up.status == 201,
+        replaced: replaced_module(&up.body),
         upload: up.body,
         workflows,
         activate,
@@ -499,14 +524,20 @@ pub fn build_json(project: &str, b: &BuildOutput) -> Value {
 
 /// The `--json` output of a project deploy.
 pub fn render_json(r: &DeployReport) -> String {
-    local_json(
-        "deploy",
-        &json!({
-            "build": build_json(&r.project, &r.build),
-            "upload": r.upload,
-            "activated": Value::Array(r.activated.clone()),
-        }),
-    )
+    let mut fields = json!({
+        "build": build_json(&r.project, &r.build),
+        "upload": r.upload,
+        "activated": Value::Array(r.activated.clone()),
+    });
+    // Additive (docs/cli-json.md): present only when the upload replaced a module.
+    if let Some(prev) = &r.replaced {
+        fields["replaced"] = json!({
+            "previous_module": prev,
+            "module": r.build.sha256,
+            "reason": "ephemeral dev",
+        });
+    }
+    local_json("deploy", &fields)
 }
 
 /// The human output of a project deploy (build line, upload line, activation lines).
@@ -519,6 +550,9 @@ pub fn render_human(r: &DeployReport) -> String {
         "uploaded {sha12} ({state}, {} bytes) as module {}",
         r.build.bytes, r.project
     ));
+    if let Some(prev) = &r.replaced {
+        lines.push(replaced_line(prev, &r.build.sha256));
+    }
     let list: Vec<String> = r
         .workflows
         .iter()
@@ -679,5 +713,23 @@ mod tests {
         assert_eq!(activation_name(None, "w"), "w");
         assert_eq!(activation_name(Some(""), "w"), "w");
         assert_eq!(activation_name(Some("acme"), "w"), "acme/w");
+    }
+
+    #[test]
+    fn replacement_is_read_from_the_upload_body() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        assert_eq!(replaced_module(&json!({"created": true})), None);
+        assert_eq!(
+            replaced_module(&json!({"replaced": false, "previous_module": a})),
+            None
+        );
+        assert_eq!(
+            replaced_module(&json!({"replaced": true, "previous_module": a})),
+            Some(a.clone())
+        );
+        assert_eq!(
+            replaced_line(&a, &b),
+            format!("replaced {} -> {} (ephemeral dev)", &a[..12], &b[..12])
+        );
     }
 }

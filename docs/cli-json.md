@@ -82,8 +82,9 @@ followed by the verb's fields. `<verb>` is `init`, `build`, `deploy`, `replay`,
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `build` | object | The `ostro.build.result` fields above (without `kind`/`version`) |
-| `upload` | object | The REST body of the module upload (`{created, module}`) |
+| `upload` | object | The REST body of the module upload (`{created, module}`, plus `replaced`/`previous_module` on a replacement) |
 | `activated` | object[] | The REST body of each workflow activated by this deploy (empty with `--activate=false` or when every version was already active) |
+| `replaced` | object, optional | Present only when the upload replaced the module of an existing `(name, version)` (`ostro dev --ephemeral` only): `{previous_module, module, reason: "ephemeral dev"}`. The `upload` body then also carries `replaced: true` and `previous_module` |
 
 `ostro deploy <file.wasm> --json` is a REST-proxy verb (see above), not this envelope.
 
