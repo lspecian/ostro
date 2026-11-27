@@ -167,6 +167,9 @@ pub async fn build_schedule_start(
     .map_err(skip)?;
     let (tenant, _) = names::split_qualified(&workflow);
     let tenant = tenant.map(str::to_owned);
+    // Phase 14 (14-20): a suspended tenant's fire is refused before anything is written
+    // (the driver drops it and fires again on the next due time after the resume).
+    crate::p14::ingress::cron_fire_gate(meta, tenant.as_deref()).map_err(skip)?;
     let wf = resolve_workflow(meta, &workflow, spec.version).map_err(StartError::Skip)?;
     let local_queue = wf.default_queue.as_deref().unwrap_or(DEFAULT_QUEUE);
     let queue =
