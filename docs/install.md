@@ -178,6 +178,14 @@ Before you expose a server:
    [secrets.md](secrets.md#52-rotation).
 4. **Backups.** Configure bottomless backups ([bottomless.md](bottomless.md)) and size the node
    ([operations-sizing.md](operations-sizing.md)).
+5. **Supervisor and open files.** Run the server under a supervisor that restarts it, and
+   give it a high open-file limit. With systemd, set `Restart=on-failure` and
+   `LimitNOFILE=1048576` in the `[Service]` section.
+
+   If the metadata Raft driver stops on a storage error such as `EMFILE`, the server exits
+   with status 1 so that the supervisor restarts it. `[api] max_connections` caps client
+   connections, by default at half the soft open-file limit. See
+   [cluster-operations.md](cluster-operations.md#41-fail-stop-on-storage-errors-open-file-limit-and-connection-cap-p14-fixups-4).
 
 Environment variables used by Ostro:
 

@@ -75,6 +75,7 @@ choices:
 | `server.resources`, `server.storage.size` | 1 CPU / 2 GiB request, 8 GiB limit; 20 GiB | per [operations-sizing.md](operations-sizing.md) |
 | `server.apiTls.mode` | `self-signed` | `files` with `server.apiTls.existingSecret` (for example from cert-manager) for clients and KEDA; `off` only behind a mesh |
 | `server.ui.enabled` | `false` | serve `/ui` (token sign-in) |
+| `server.maxConnections` | `0` (half the soft open-file limit, at most 16384) | client connections per server; the container runtime's `nofile` limit applies ([chart README](../deploy/helm/ostro/README.md#open-files)) |
 | `server.extraConfig` | `""` | raw TOML for sections the chart does not render: `[engine]`, `[backup]`, `[telemetry]`, `[tenants]`, `[audit]`, `[security.modules]`, ... |
 | `server.extraEnv` | `[]` | `OSTRO_<SECTION>__<KEY>` overrides |
 | `auth.mode` | `token` | keep `token`; `none` needs `auth.allowInsecureNone` |
