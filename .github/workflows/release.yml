@@ -1,0 +1,374 @@
+# Ostro release pipeline (Phase 14, 14-11; DIST-01, D-P14-23/24).
+# Tag v* = real release (draft GitHub release); workflow_dispatch defaults to a dry run that
+# builds, signs and notarizes but publishes nothing (image, chart and release jobs skipped).
+# Third-party actions are pinned to full commit SHAs (ci.yml pins; artifact actions resolved
+# with git ls-remote on 2026-11-27). Versions are derived in shell from env, never by
+# interpolating expressions into scripts.
+#
+# Secrets (user_setup in 14-11-PLAN; each referenced only in its own job):
+#   macos:     Developer ID Application/Installer .p12 (base64) + password, App Store Connect
+#              API key (id, issuer, .p8 base64) for notarytool
+#   checksums: OSTRO_RELEASE_MINISIGN_KEY = base64 of a password-less minisign secret key
+#              (`rsign generate -W`; rsign reads passwords only from a terminal)
+# Repository variable: OSTRO_RELEASE_MINISIGN_PUBKEY = the public key line (stamped into
+# install.sh and used to verify SHA256SUMS.minisig).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, sign and notarize only; publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_ZIGBUILD_VERSION: 0.24.1
+  ZIG_VERSION: 0.17.1
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: v
+        name: Derive the version (tag without the v prefix; else the workspace version)
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          if [ "$REF_TYPE" = tag ]; then
+            VERSION="${REF_NAME#v}"
+            if [ "$VERSION" != "$cargo_version" ]; then
+              echo "tag $REF_NAME does not match the workspace version $cargo_version" >&2
+              exit 1
+            fi
+          else
+            VERSION="$cargo_version"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release version $VERSION"
+
+  linux:
+    name: linux (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    env:
+      T: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml) + target
+        run: |
+          rustup toolchain install
+          rustup target add "$T"
+          rustup show
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-zigbuild@${{ env.CARGO_ZIGBUILD_VERSION }}
+      - name: Build, check (static, size, --version) and package
+        # the real signature is made once over every artefact in the checksums job
+        run: bash scripts/release-dry-run.sh --version "$VERSION" --target "$T" --out dist --no-sign
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-${{ matrix.target }}
+          path: dist/ostro-*.tar.gz
+          if-no-files-found: error
+
+  macos:
+    name: macos (signed, notarized)
+    needs: version
+    runs-on: macos-14
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml) + darwin targets
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup show
+      - name: Build ostro (aarch64 + x86_64)
+        run: |
+          set -euo pipefail
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p ostro --target "$t"
+          done
+          mkdir -p out
+          cp target/aarch64-apple-darwin/release/ostro out/ostro-aarch64
+          cp target/x86_64-apple-darwin/release/ostro out/ostro-x86_64
+          lipo -create -output out/ostro-universal out/ostro-aarch64 out/ostro-x86_64
+          test "$(out/ostro-aarch64 --version)" = "ostro $VERSION"
+      - name: Import the Developer ID certificates into a temporary keychain
+        env:
+          APP_P12: ${{ secrets.APPLE_DEVELOPER_ID_APP_P12_BASE64 }}
+          INSTALLER_P12: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/ostro-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$APP_P12" | base64 --decode > "$RUNNER_TEMP/app.p12"
+          printf '%s' "$INSTALLER_P12" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+          security import "$RUNNER_TEMP/app.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -f pkcs12 \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          security import "$RUNNER_TEMP/installer.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -f pkcs12 \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/app.p12" "$RUNNER_TEMP/installer.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # put the temporary keychain first in the search list (keep the existing ones)
+          existing=()
+          while IFS= read -r k; do existing+=("$(echo "$k" | tr -d ' "')"); done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN" "${existing[@]}"
+          APP_ID="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/Developer ID Application/ { print $2; exit }')"
+          INSTALLER_ID="$(security find-identity -v "$KEYCHAIN" | awk '/Developer ID Installer/ { print $2; exit }')"
+          test -n "$APP_ID" && test -n "$INSTALLER_ID"
+          {
+            echo "KEYCHAIN=$KEYCHAIN"
+            echo "APP_ID=$APP_ID"
+            echo "INSTALLER_ID=$INSTALLER_ID"
+          } >> "$GITHUB_ENV"
+      - name: codesign (hardened runtime, secure timestamp)
+        run: |
+          set -euo pipefail
+          for b in out/ostro-aarch64 out/ostro-x86_64 out/ostro-universal; do
+            codesign --force --options runtime --timestamp --keychain "$KEYCHAIN" \
+              --identifier dev.ostro.cli --sign "$APP_ID" "$b"
+            codesign --verify --strict --verbose=2 "$b"
+          done
+      - name: Build and sign the .pkg (installs /usr/local/bin/ostro)
+        run: |
+          set -euo pipefail
+          mkdir -p pkgroot
+          cp out/ostro-universal pkgroot/ostro
+          pkgbuild --root pkgroot --install-location /usr/local/bin --identifier dev.ostro.cli \
+            --version "$VERSION" out/ostro-unsigned.pkg
+          productsign --sign "$INSTALLER_ID" --keychain "$KEYCHAIN" --timestamp \
+            out/ostro-unsigned.pkg "out/ostro-$VERSION-macos-universal.pkg"
+          pkgutil --check-signature "out/ostro-$VERSION-macos-universal.pkg"
+      - name: Notarize (notarytool --wait), staple and assess
+        env:
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$key"
+          pkg="out/ostro-$VERSION-macos-universal.pkg"
+          xcrun notarytool submit "$pkg" --key "$key" --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" --wait
+          # bare binaries cannot be stapled; notarizing them puts their ticket online
+          ditto -c -k --keepParent out/ostro-aarch64 out/bare-aarch64.zip
+          ditto -c -k --keepParent out/ostro-x86_64 out/bare-x86_64.zip
+          for z in out/bare-aarch64.zip out/bare-x86_64.zip; do
+            xcrun notarytool submit "$z" --key "$key" --key-id "$NOTARY_KEY_ID" \
+              --issuer "$NOTARY_ISSUER_ID" --wait
+          done
+          rm -f "$key"
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+          spctl -a -vv -t install "$pkg"
+          codesign --verify --strict --verbose=2 out/ostro-aarch64
+          codesign --verify --strict --verbose=2 out/ostro-x86_64
+      - name: Package the signed bare binaries for curl installs
+        run: |
+          set -euo pipefail
+          for a in aarch64 x86_64; do
+            stage="$RUNNER_TEMP/stage-$a"
+            mkdir -p "$stage"
+            cp "out/ostro-$a" "$stage/ostro"
+            cp LICENSE NOTICE README.md "$stage/"
+            tar -C "$stage" -czf "out/ostro-$VERSION-$a-apple-darwin.tar.gz" ostro LICENSE NOTICE README.md
+          done
+      - name: Remove the temporary keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          path: |
+            out/ostro-*-apple-darwin.tar.gz
+            out/ostro-*-macos-universal.pkg
+          if-no-files-found: error
+
+  checksums:
+    name: checksums (SHA256SUMS + minisign)
+    needs: [version, linux, macos]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      EVENT_NAME: ${{ github.event_name }}
+      PUBKEY: ${{ vars.OSTRO_RELEASE_MINISIGN_PUBKEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain (rust-toolchain.toml; for rsign2)
+        run: rustup toolchain install
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS over every artefact, signed with the release key
+        env:
+          OSTRO_RELEASE_MINISIGN_KEY: ${{ secrets.OSTRO_RELEASE_MINISIGN_KEY }}
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -l
+          test -f "ostro-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          test -f "ostro-$VERSION-aarch64-unknown-linux-musl.tar.gz"
+          sha256sum -- ostro-* | LC_ALL=C sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          rsign="$(bash ../scripts/fetch-tools.sh rsign2 | sed -n 's/^rsign2=//p')"
+          key="$RUNNER_TEMP/release.key"
+          if [ -n "$OSTRO_RELEASE_MINISIGN_KEY" ]; then
+            printf '%s' "$OSTRO_RELEASE_MINISIGN_KEY" | base64 --decode > "$key"
+          elif [ "$EVENT_NAME" = push ]; then
+            echo "OSTRO_RELEASE_MINISIGN_KEY is not set: a tag release must be signed" >&2
+            exit 1
+          else
+            echo "::warning::no release key: signing with an ephemeral DRY-RUN key"
+            "$rsign" generate -W -f -p "$RUNNER_TEMP/dry-run.pub" -s "$key" >/dev/null
+            PUBKEY="$(sed -n 2p "$RUNNER_TEMP/dry-run.pub")"
+          fi
+          "$rsign" sign -W -s "$key" -x SHA256SUMS.minisig \
+            -t "ostro $VERSION SHA256SUMS" SHA256SUMS >/dev/null
+          rm -f "$key"
+          if [ -n "$PUBKEY" ]; then
+            "$rsign" verify -P "$PUBKEY" -x SHA256SUMS.minisig SHA256SUMS
+          elif [ "$EVENT_NAME" = push ]; then
+            echo "repository variable OSTRO_RELEASE_MINISIGN_PUBKEY is not set" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: checksums
+          path: |
+            dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
+          if-no-files-found: error
+
+  image:
+    name: image (ghcr.io, multi-arch)
+    needs: [version, linux]
+    if: github.event_name == 'push' || !inputs.dry_run
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      OWNER: ${{ github.repository_owner }}
+      CI: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: linux-*
+          path: dist
+          merge-multiple: true
+      - name: Build and push the scratch image (scripts/build-image.sh, 14-12)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          owner="${OWNER,,}"
+          for a in x86_64 aarch64; do
+            mkdir -p "bin/$a"
+            tar -xzf "dist/ostro-$VERSION-$a-unknown-linux-musl.tar.gz" -C "bin/$a" ostro
+          done
+          crane="$(bash scripts/fetch-tools.sh crane | sed -n 's/^crane=//p')"
+          printf '%s' "$GH_TOKEN" | "$crane" auth login ghcr.io -u "$ACTOR" --password-stdin
+          bash scripts/build-image.sh --binary-x86_64 bin/x86_64/ostro --binary-aarch64 bin/aarch64/ostro \
+            --push "ghcr.io/$owner/ostro:$VERSION"
+
+  chart:
+    name: chart (oci://ghcr.io)
+    needs: [version, image]
+    if: github.event_name == 'push' || !inputs.dry_run
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      OWNER: ${{ github.repository_owner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate, package and push the Helm chart
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          owner="${OWNER,,}"
+          helm version
+          bash scripts/helm-check.sh
+          helm package deploy/helm/ostro --version "$VERSION" --app-version "$VERSION" -d chart-dist
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          helm push "chart-dist/ostro-$VERSION.tgz" "oci://ghcr.io/$owner/charts"
+
+  release:
+    name: release (draft)
+    needs: [version, checksums, image, chart]
+    if: github.event_name == 'push' || !inputs.dry_run
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      REPO: ${{ github.repository }}
+      PUBKEY: ${{ vars.OSTRO_RELEASE_MINISIGN_PUBKEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Stamp install.sh (download base, public key) and draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -n "$PUBKEY"
+          base="https://github.com/$REPO/releases/download"
+          sed -e "s|^DEFAULT_DOWNLOAD_BASE=.*|DEFAULT_DOWNLOAD_BASE=\"$base\"|" \
+              -e "s|^MINISIGN_PUBKEY=.*|MINISIGN_PUBKEY=\"$PUBKEY\"|" install.sh > dist/install.sh
+          grep -q "^MINISIGN_PUBKEY=\"$PUBKEY\"" dist/install.sh
+          printf '%s\n' "$VERSION" > dist/VERSION
+          printf 'untrusted comment: ostro release key\n%s\n' "$PUBKEY" > dist/minisign.pub
+          (cd dist && sha256sum -c SHA256SUMS)
+          gh release create "v$VERSION" --repo "$REPO" --draft --verify-tag \
+            --title "Ostro $VERSION" --notes "Ostro $VERSION. Verify: SHA256SUMS + SHA256SUMS.minisig (minisign.pub)." \
+            dist/ostro-* dist/SHA256SUMS dist/SHA256SUMS.minisig dist/install.sh dist/VERSION dist/minisign.pub
