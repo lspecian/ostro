@@ -22,7 +22,6 @@ pub mod workload;
 // Dependencies declared by plan 14-01 (D-P14-37), anchored so cargo's unused-dependency lint
 // stays quiet until 14-09 / 14-10 / 14-23 consume them (owners delete the lines they use).
 mod dep_anchors {
-    use clap as _;
     use ostro_client as _;
     use ostro_log as _;
 }
