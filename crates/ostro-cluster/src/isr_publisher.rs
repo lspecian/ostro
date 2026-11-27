@@ -321,8 +321,11 @@ impl IsrPublisher {
         // mutant (membership from the assignment alone) bypasses it too (12-16: with the
         // gate honoured, a never-fetching replica stayed out after its first shrink and the
         // conformance scenario caught the mutant only when the first expansion raced the HW).
+        // 14-33: the `readd_stale_progress` mutant (re-add from progress measured before
+        // the removal) skips this fetched-again gate as well as the tracker reset.
         if let isr::PendingChange::Add(r) = change
             && !crate::fetch::mutant(ostro_log::mutants::ISR_FROM_ASSIGNMENT)
+            && !crate::fetch::mutant(ostro_log::mutants::READD_STALE_PROGRESS)
             && let Some(&at) = self.removed_at.get(&r)
         {
             if view.tracker.last_fetch_ms(r).is_none_or(|f| f <= at) {

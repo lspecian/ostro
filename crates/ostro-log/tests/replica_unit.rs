@@ -738,3 +738,176 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------- 14-33: no re-add from stale progress
+
+/// Leader 1, followers 2 and 3 both caught up at `t = 100` with durable LEO 100 (= HW).
+fn three_caught_up() -> ReplicaTracker {
+    let mut t = ReplicaTracker::new(1, &[1, 2, 3], o(100), 0);
+    t.on_fetch(2, o(100), o(100), o(100), 100);
+    t.on_fetch(3, o(100), o(100), o(100), 100);
+    t
+}
+
+#[test]
+fn removed_replica_is_not_readded_from_stale_progress() {
+    // A controller / self-shrink removal of 3 at version 2, while 3 still looks caught up.
+    let mut t = three_caught_up();
+    assert!(
+        should_expand(&t, 3, o(100), o(0), 150, LAG),
+        "caught up before"
+    );
+    t.on_isr_published(&[1, 2, 3], &[1, 2], 2);
+    assert_eq!(t.removed_at_version(3), Some(2));
+    assert_eq!(t.removed_at_version(2), None, "2 stays in the ISR");
+    assert!(
+        !should_expand(&t, 3, o(100), o(0), 150, LAG),
+        "progress from before the removal must not re-add 3"
+    );
+    let s = IsrState::new(vec![1, 2], 2);
+    assert_eq!(
+        next_change(&t, &s, &[1, 2, 3], o(100), o(0), 150, LAG),
+        None,
+        "no Add(3) from stale progress"
+    );
+    // The durable LEO is kept (a fact about 3's disk); the HW no longer counts it.
+    assert_eq!(t.durable_leo(3), Some(o(100)));
+}
+
+#[test]
+fn fresh_caught_up_fetch_after_the_removal_readds() {
+    let mut t = three_caught_up();
+    t.on_isr_published(&[1, 2, 3], &[1, 2], 2);
+    // A fetch after the removal that is not caught up (leader end 120 > 110): still out.
+    t.on_fetch(3, o(110), o(110), o(120), 200);
+    assert_eq!(t.removed_at_version(3), Some(2));
+    assert!(!should_expand(&t, 3, o(110), o(0), 200, LAG));
+    // The next fetch reaches the end returned in the previous response: caught up again.
+    t.on_fetch(3, o(120), o(120), o(130), 250);
+    assert_eq!(t.removed_at_version(3), None);
+    assert!(should_expand(&t, 3, o(120), o(0), 250, LAG));
+    let s = IsrState::new(vec![1, 2], 2);
+    assert_eq!(
+        next_change(&t, &s, &[1, 2, 3], o(120), o(0), 250, LAG),
+        Some(PendingChange::Add(3)),
+        "re-add proposed as before"
+    );
+}
+
+#[test]
+fn first_fetch_after_the_removal_must_reach_the_current_end() {
+    // The previous-response target is cleared with the removal: a fetch reaching only the
+    // end sampled before the removal is not a caught-up observation.
+    let mut t = ReplicaTracker::new(1, &[1, 2, 3], o(100), 0);
+    t.on_fetch(3, o(90), o(90), o(100), 100); // target for the next fetch: 100
+    t.on_isr_published(&[1, 2, 3], &[1, 2], 7);
+    t.on_fetch(3, o(100), o(100), o(140), 150);
+    assert_eq!(
+        t.removed_at_version(3),
+        Some(7),
+        "100 < the current end 140"
+    );
+    t.on_fetch(3, o(140), o(140), o(160), 160);
+    assert_eq!(
+        t.removed_at_version(3),
+        None,
+        "reached the end of the previous response"
+    );
+}
+
+#[test]
+fn lag_shrink_and_its_readd_are_unchanged() {
+    // 3 stops catching up; the leader's own lag shrink removes it ...
+    let mut t = three_caught_up();
+    t.on_fetch(2, o(200), o(200), o(200), 100 + LAG + 1);
+    let s = IsrState::new(vec![1, 2, 3], 1);
+    assert_eq!(
+        next_change(&t, &s, &[1, 2, 3], o(100), o(0), 100 + LAG + 1, LAG),
+        Some(PendingChange::Remove(3))
+    );
+    t.on_isr_published(&[1, 2, 3], &[1, 2], 2);
+    // ... and re-adds it after a caught-up fetch, as before 14-33.
+    let now = 100 + LAG + 50;
+    t.on_fetch(3, o(200), o(200), o(200), now);
+    assert!(should_expand(&t, 3, o(200), o(0), now, LAG));
+    let s = IsrState::new(vec![1, 2], 2);
+    assert_eq!(
+        next_change(&t, &s, &[1, 2, 3], o(200), o(0), now, LAG),
+        Some(PendingChange::Add(3))
+    );
+}
+
+#[test]
+fn readded_replica_drops_its_removal_mark() {
+    let mut t = three_caught_up();
+    t.on_isr_published(&[1, 2, 3], &[1, 2], 2);
+    // Published again (by whoever) at version 3: the mark goes, the leader's own measured
+    // lag decides from now on.
+    t.on_isr_published(&[1, 2], &[1, 2, 3], 3);
+    assert_eq!(t.removed_at_version(3), None);
+    // Leader and unchanged members are never marked.
+    t.on_isr_published(&[1, 2, 3], &[1, 3], 4);
+    assert_eq!(t.removed_at_version(1), None);
+    assert_eq!(t.removed_at_version(3), None);
+    assert_eq!(t.removed_at_version(2), Some(4));
+}
+
+#[test]
+fn pending_add_of_a_removed_replica_is_dropped_and_recomputed() {
+    // The leader proposed Add(3) at version 1; meta publishes version 2 without 3 (another
+    // proposer's change). Existing behaviour: the pending change stays until its CAS fails,
+    // then is rejected; the next decision recomputes from the new published set.
+    let mut t = ReplicaTracker::new(1, &[1, 2, 3], o(100), 0);
+    t.on_fetch(2, o(100), o(100), o(100), 100);
+    t.on_fetch(3, o(100), o(100), o(100), 100);
+    let mut s = IsrState::new(vec![1, 2], 1);
+    assert_eq!(
+        next_change(&t, &s, &[1, 2, 3], o(100), o(0), 100, LAG),
+        Some(PendingChange::Add(3))
+    );
+    assert!(s.propose(PendingChange::Add(3)));
+    // Version 2 published (3 was never in it; an Add CAS on version 1 is now stale).
+    t.on_isr_published(&[1, 2], &[1, 2], 2);
+    s.set_published(vec![1, 2], 2);
+    assert_eq!(
+        s.pending,
+        Some(PendingChange::Add(3)),
+        "pending until its CAS fails"
+    );
+    s.reject();
+    assert_eq!(s.pending, None);
+    assert_eq!(
+        next_change(&t, &s, &[1, 2, 3], o(100), o(0), 100, LAG),
+        Some(PendingChange::Add(3)),
+        "3 was not removed by version 2 (never a member): recomputed, still caught up"
+    );
+    // Now a version that *removes* 3 after it had joined: no Add from the old progress.
+    s.set_published(vec![1, 2, 3], 3);
+    t.on_isr_published(&[1, 2], &[1, 2, 3], 3);
+    s.set_published(vec![1, 2], 4);
+    t.on_isr_published(&[1, 2, 3], &[1, 2], 4);
+    assert_eq!(
+        next_change(&t, &s, &[1, 2, 3], o(100), o(0), 100, LAG),
+        None
+    );
+}
+
+/// The `readd_stale_progress` mutant (14-33) skips the reset: the removed replica is
+/// re-added from its old progress. `fail` is process-global: one test only.
+#[cfg(feature = "failpoints")]
+#[test]
+fn readd_stale_progress_mutant_bites() {
+    let holds = || {
+        let mut t = three_caught_up();
+        t.on_isr_published(&[1, 2, 3], &[1, 2], 2);
+        !should_expand(&t, 3, o(100), o(0), 150, LAG)
+    };
+    let scenario = fail::FailScenario::setup();
+    assert!(holds(), "property fails without the mutant");
+    fail::cfg(ostro_log::mutants::READD_STALE_PROGRESS, "return").expect("cfg");
+    let with = holds();
+    fail::remove(ostro_log::mutants::READD_STALE_PROGRESS);
+    assert!(!with, "mutant did not bite");
+    assert!(holds(), "property fails after removing the mutant");
+    scenario.teardown();
+}

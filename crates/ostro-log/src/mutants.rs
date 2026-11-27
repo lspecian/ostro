@@ -48,6 +48,13 @@ pub const UPLOAD_ABOVE_HW: &str = "repl::mutant::upload_above_hw";
 /// callback, not through the replica tracker). Placed by 12-08 in the partition log.
 pub const RF1_BYPASS: &str = "repl::mutant::rf1_bypass";
 
+/// A leader re-adds a replica a published ISR removed from progress measured before the
+/// removal: the tracker keeps the removed replica's caught-up evidence (14-33, D-P14-50;
+/// `replica/tracker.rs` `on_isr_published`, and ostro-cluster `isr_publisher.rs` skips its
+/// fetched-again gate). Not part of [`ALL`] (the Phase 12 matrix): registered in the Phase 13
+/// matrix (`ostro-repl-conformance` `mutants_p13.rs`).
+pub const READD_STALE_PROGRESS: &str = "repl::mutant::readd_stale_progress";
+
 /// Every mutant name, in declaration order.
 pub const ALL: [&str; 10] = [
     ISR_FROM_ASSIGNMENT,
@@ -80,5 +87,10 @@ mod tests {
             assert!(seen.insert(name), "duplicate {name}");
         }
         assert_eq!(seen.len(), 10);
+        assert!(READD_STALE_PROGRESS.starts_with("repl::mutant::"));
+        assert!(
+            !seen.contains(READD_STALE_PROGRESS),
+            "not in the P12 matrix"
+        );
     }
 }

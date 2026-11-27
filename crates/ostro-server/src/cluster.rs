@@ -941,6 +941,13 @@ impl ClusterServices {
         Arc::clone(&self.follower) as Arc<dyn FollowerDriver>
     }
 
+    /// Stop this node's fetchers for exactly `partitions` and keep them stopped until the
+    /// process exits (14-33, the controlled-shutdown self-shrink; `p13::before_shutdown`).
+    /// Resolves once none of them is running.
+    pub fn stop_following(&self, partitions: &[u16]) -> BoxFuture<'static, ()> {
+        self.follower.stop_following(partitions)
+    }
+
     /// The Phase 7 Execute slot and the listener address (for `P7Ctx::cluster_listener`).
     pub fn execute_slot(&self) -> (LateExecute, SocketAddr) {
         (self.execute.clone(), self.listener_addr)
@@ -1420,9 +1427,16 @@ impl AssignmentSource for MetaAssignments {
 /// The node's `FollowerDriver`: the 12-11 `FetcherDriver` once [`ClusterServices::attach_node`]
 /// set it (it needs the node's blob store and install control). A follower started earlier
 /// waits for it.
+///
+/// 14-33: partitions in `stopped` (the controlled-shutdown self-shrink) are never followed
+/// again by this process: a running fetcher of one stops, a later start idles.
 #[derive(Default)]
 struct LateFollower {
     inner: watch::Sender<Option<Arc<FetcherDriver>>>,
+    /// Partitions this process stopped following for good (14-33).
+    stopped: watch::Sender<std::collections::BTreeSet<u16>>,
+    /// Fetchers running (or about to start) per partition (14-33).
+    running: watch::Sender<BTreeMap<u16, usize>>,
 }
 
 impl LateFollower {
@@ -1433,6 +1447,30 @@ impl LateFollower {
     fn clear(&self) {
         self.inner.send_replace(None);
     }
+
+    fn stop_following(&self, partitions: &[u16]) -> BoxFuture<'static, ()> {
+        let ps: Vec<u16> = partitions.to_vec();
+        // Mark first, then wait: a task counts itself running before it checks the mark,
+        // so every fetcher either sees the mark or is waited for here.
+        self.stopped.send_modify(|s| s.extend(ps.iter().copied()));
+        let mut running = self.running.subscribe();
+        Box::pin(async move {
+            let _ = running
+                .wait_for(|m| ps.iter().all(|p| m.get(p).is_none_or(|n| *n == 0)))
+                .await;
+        })
+    }
+}
+
+fn count_running(running: &watch::Sender<BTreeMap<u16, usize>>, p: u16, up: bool) {
+    running.send_modify(|m| {
+        let n = m.entry(p).or_default();
+        if up {
+            *n += 1;
+        } else {
+            *n = n.saturating_sub(1);
+        }
+    });
 }
 
 struct PendingFollower {
@@ -1458,6 +1496,8 @@ impl FollowerDriver for LateFollower {
         log: Arc<PartitionLogHandle>,
     ) -> Box<dyn FollowerTask> {
         let mut rx = self.inner.subscribe();
+        let mut stopped = self.stopped.subscribe();
+        let running = self.running.clone();
         let stop = CancellationToken::new();
         let s = stop.clone();
         let join = tokio::spawn(async move {
@@ -1470,9 +1510,34 @@ impl FollowerDriver for LateFollower {
                     r = rx.changed() => if r.is_err() { return },
                 }
             };
+            // 14-33: count first, then check the stop mark (see `stop_following`).
+            count_running(&running, p.0, true);
+            if stopped.borrow_and_update().contains(&p.0) {
+                count_running(&running, p.0, false);
+                s.cancelled().await;
+                return;
+            }
             let task = driver.start(p, epoch, leader, log);
-            s.cancelled().await;
+            let marked = async {
+                let gone = stopped.wait_for(|set| set.contains(&p.0)).await.is_err();
+                if gone {
+                    // The services are being torn down: the cancel token decides.
+                    std::future::pending::<()>().await;
+                }
+            };
+            let cancelled = tokio::select! {
+                () = s.cancelled() => true,
+                () = marked => false,
+            };
             task.stop().await;
+            count_running(&running, p.0, false);
+            if !cancelled {
+                info!(
+                    partition = p.0,
+                    "stopped following (controlled-shutdown ISR self-shrink)"
+                );
+                s.cancelled().await;
+            }
         });
         Box::new(PendingFollower { stop, join })
     }

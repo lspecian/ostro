@@ -102,7 +102,9 @@ pub fn maximal(s: &IsrState) -> Vec<u64> {
 /// Whether `replica` may join the ISR (Kafka `isFollowerInSync` + KIP-101 epoch rule):
 /// it fetched, caught up within `lag_max_ms`, and its durable LEO reached
 /// `max(hw, epoch_start)` (the start offset of the leader's current epoch, so a joining
-/// replica already holds this leader's first record).
+/// replica already holds this leader's first record). A replica a published ISR removed
+/// joins again only after a caught-up observation newer than that removal (14-33,
+/// [`ReplicaTracker::on_isr_published`]): stale progress never re-adds it.
 pub fn should_expand(
     t: &ReplicaTracker,
     replica: u64,
@@ -113,6 +115,9 @@ pub fn should_expand(
 ) -> bool {
     if super::mutant(mutants::ISR_FROM_ASSIGNMENT) {
         return t.replicas().contains(&replica);
+    }
+    if t.removed_at_version(replica).is_some() {
+        return false;
     }
     let (Some(durable), Some(_), Some(lag)) = (
         t.durable_leo(replica),

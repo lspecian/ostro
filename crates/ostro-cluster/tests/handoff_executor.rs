@@ -13,7 +13,8 @@ use ostro_cluster::handoff::{
     HandoffConfig, HandoffLog, HandoffLogLookup, HandoffMeta, LocalHandoff, NodeOpsHandoffClient,
 };
 use ostro_cluster::shutdown::{
-    LedPartition, ShutdownMeta, ShutdownReport, controlled_shutdown_with,
+    FollowedPartition, LedPartition, SelfShrink, ShutdownMeta, ShutdownReport,
+    controlled_shutdown_with,
 };
 use ostro_cluster::transport::{ClusterIncoming, ClusterTransport, TransportError};
 use ostro_meta::{MetaCommand, MetaResult, PartitionAssignment};
@@ -657,4 +658,310 @@ async fn no_metadata_quorum_skips_the_handoffs_at_once() {
     assert_eq!(r.kept, vec![0, 4]);
     assert!(!r.meta_transferred);
     assert!(c.events().is_empty(), "nothing attempted");
+}
+
+// ------------------------------------------------------------------ 14-33: ISR self-shrink
+
+/// Shutdown meta with followed partitions: `alter_isr` applies like meta's AlterIsr apply
+/// (epoch + version CAS) unless scripted; `stop_following` and every proposal are logged in
+/// one ordered event list.
+struct Shrink {
+    events: Mutex<Vec<String>>,
+    led: Vec<LedPartition>,
+    followed: Mutex<Vec<FollowedPartition>>,
+    /// Scripted answers per partition, consumed in order (then the CAS apply).
+    script: Mutex<BTreeMap<u16, Vec<Result<MetaResult, String>>>>,
+    /// Applied before answering a scripted StaleVersion: the ISR another proposer published.
+    race: Mutex<BTreeMap<u16, Vec<u64>>>,
+    quorum: bool,
+    hang: bool,
+}
+
+impl Shrink {
+    fn new(led: Vec<LedPartition>, followed: Vec<FollowedPartition>) -> Arc<Self> {
+        Arc::new(Self {
+            events: Mutex::new(Vec::new()),
+            led,
+            followed: Mutex::new(followed),
+            script: Mutex::new(BTreeMap::new()),
+            race: Mutex::new(BTreeMap::new()),
+            quorum: true,
+            hang: false,
+        })
+    }
+
+    fn events(&self) -> Vec<String> {
+        lock(&self.events).clone()
+    }
+}
+
+fn fp(partition: u16, leader: u64, isr: &[u64], min_insync: u8) -> FollowedPartition {
+    FollowedPartition {
+        partition,
+        epoch: 7,
+        leader,
+        isr: isr.to_vec(),
+        isr_version: 20,
+        min_insync,
+    }
+}
+
+struct ShrinkView(Arc<Shrink>);
+
+impl ShutdownMeta for ShrinkView {
+    fn members(&self) -> usize {
+        3
+    }
+
+    fn led(&self, node: u64) -> Vec<LedPartition> {
+        assert_eq!(node, ME);
+        self.0.led.clone()
+    }
+
+    fn meta_transfer_target(&self) -> Option<u64> {
+        Some(2)
+    }
+
+    fn transfer_leader(&self, to: u64) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            lock(&self.0.events).push(format!("meta -> {to}"));
+            Ok(())
+        })
+    }
+
+    fn quorum_contact(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async move { self.0.quorum })
+    }
+
+    fn followed(&self, node: u64) -> Vec<FollowedPartition> {
+        assert_eq!(node, ME);
+        lock(&self.0.followed)
+            .iter()
+            .filter(|f| f.isr.contains(&ME) && f.leader != ME)
+            .cloned()
+            .collect()
+    }
+
+    fn alter_isr(&self, cmd: MetaCommand) -> BoxFuture<'_, Result<MetaResult, String>> {
+        Box::pin(async move {
+            let MetaCommand::AlterIsr {
+                partition,
+                epoch,
+                expected_isr_version,
+                isr,
+            } = cmd
+            else {
+                panic!("only AlterIsr expected, got {cmd:?}");
+            };
+            lock(&self.0.events).push(format!(
+                "alter p{partition} v{expected_isr_version} {isr:?}"
+            ));
+            if self.0.hang {
+                std::future::pending::<()>().await;
+            }
+            let scripted = lock(&self.0.script)
+                .get_mut(&partition)
+                .and_then(|v| (!v.is_empty()).then(|| v.remove(0)));
+            if let Some(r) = scripted {
+                if let Some(raced) = lock(&self.0.race).remove(&partition) {
+                    let mut fs = lock(&self.0.followed);
+                    let f = fs.iter_mut().find(|f| f.partition == partition).expect("p");
+                    f.isr = raced;
+                    f.isr_version += 1;
+                }
+                return r;
+            }
+            let mut fs = lock(&self.0.followed);
+            let f = fs.iter_mut().find(|f| f.partition == partition).expect("p");
+            if f.epoch != epoch || f.isr_version != expected_isr_version {
+                return Ok(MetaResult::StaleVersion {
+                    current: f.isr_version,
+                });
+            }
+            assert!(isr.contains(&f.leader), "leader stays in the ISR");
+            f.isr = isr;
+            f.isr_version += 1;
+            Ok(MetaResult::Ok {
+                version: f.isr_version,
+            })
+        })
+    }
+
+    fn stop_following(&self, partitions: &[u16]) -> BoxFuture<'_, ()> {
+        let ps = partitions.to_vec();
+        Box::pin(async move {
+            lock(&self.0.events).push(format!("stop_following {ps:?}"));
+        })
+    }
+}
+
+async fn shrink_shutdown(c: &Arc<Shrink>, timeout: Duration) -> ShutdownReport {
+    // Handoffs over the `Cluster` fake (moves at once).
+    let handoffs = Cluster::new(Vec::new());
+    controlled_shutdown_with(
+        ME,
+        &ShrinkView(Arc::clone(c)),
+        Arc::new(Client(handoffs)),
+        timeout,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn self_shrink_only_for_followed_partitions_then_meta() {
+    // Leads 0 (handed off by the handoff step), follows 1 (leader 2) and 2 (leader 3).
+    let c = Shrink::new(
+        vec![led(0, &[2, 3])],
+        vec![fp(1, 2, &[1, 2, 3], 2), fp(2, 3, &[3, 1, 2], 2)],
+    );
+    let r = shrink_shutdown(&c, Duration::from_secs(10)).await;
+    assert_eq!(r.moved, vec![0]);
+    assert_eq!(
+        r.self_shrink,
+        vec![(1, SelfShrink::Shrunk), (2, SelfShrink::Shrunk)]
+    );
+    assert!(r.meta_transferred);
+    let ev = c.events();
+    // stop_following first, with exactly the shrunk partitions, then the two proposals,
+    // then the meta transfer last.
+    assert_eq!(
+        ev.first().map(String::as_str),
+        Some("stop_following [1, 2]"),
+        "{ev:?}"
+    );
+    assert_eq!(ev.last().map(String::as_str), Some("meta -> 2"), "{ev:?}");
+    assert!(ev.contains(&"alter p1 v20 [2, 3]".to_string()), "{ev:?}");
+    assert!(ev.contains(&"alter p2 v20 [3, 2]".to_string()), "{ev:?}");
+    assert_eq!(ev.iter().filter(|e| e.starts_with("alter")).count(), 2);
+    // Never a proposal for a led partition.
+    assert!(!ev.iter().any(|e| e.starts_with("alter p0")), "{ev:?}");
+    let f = lock(&c.followed).clone();
+    assert!(f.iter().all(|f| !f.isr.contains(&ME)), "{f:?}");
+}
+
+#[tokio::test]
+async fn self_shrink_respects_min_insync_and_the_leader() {
+    let c = Shrink::new(
+        Vec::new(),
+        vec![
+            // RF 2, min_insync 2: [2] would be below min_insync.
+            fp(1, 2, &[1, 2], 2),
+            // A shrunken ISR [1, 3] with min_insync 2: kept.
+            fp(2, 3, &[1, 3], 2),
+            // The leader is not in the published ISR (cannot happen after apply; guarded).
+            fp(3, 2, &[1, 3], 1),
+            // Eligible.
+            fp(4, 2, &[1, 2, 3], 2),
+        ],
+    );
+    let r = shrink_shutdown(&c, Duration::from_secs(10)).await;
+    assert_eq!(
+        r.self_shrink,
+        vec![
+            (1, SelfShrink::KeptMinInsync),
+            (2, SelfShrink::KeptMinInsync),
+            (3, SelfShrink::KeptMinInsync),
+            (4, SelfShrink::Shrunk),
+        ]
+    );
+    let ev = c.events();
+    assert_eq!(
+        ev.first().map(String::as_str),
+        Some("stop_following [4]"),
+        "{ev:?}"
+    );
+    assert_eq!(
+        ev.iter().filter(|e| e.starts_with("alter")).count(),
+        1,
+        "{ev:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_shrink_rereads_once_on_a_stale_version() {
+    let c = Shrink::new(
+        Vec::new(),
+        vec![fp(1, 2, &[1, 2, 3], 1), fp(2, 2, &[1, 2, 3], 1)],
+    );
+    // p1: the leader's own AlterIsr (drop 3) won the CAS first; the re-read shrinks [1, 2].
+    lock(&c.script).insert(1, vec![Ok(MetaResult::StaleVersion { current: 21 })]);
+    lock(&c.race).insert(1, vec![1, 2]);
+    // p2: loses the CAS twice: version_race.
+    lock(&c.script).insert(
+        2,
+        vec![
+            Ok(MetaResult::StaleVersion { current: 21 }),
+            Ok(MetaResult::StaleVersion { current: 22 }),
+        ],
+    );
+    let r = shrink_shutdown(&c, Duration::from_secs(10)).await;
+    assert_eq!(
+        r.self_shrink,
+        vec![(1, SelfShrink::Shrunk), (2, SelfShrink::VersionRace)]
+    );
+    let ev = c.events();
+    assert!(ev.contains(&"alter p1 v21 [2]".to_string()), "{ev:?}");
+    assert_eq!(
+        ev.iter().filter(|e| e.starts_with("alter p2")).count(),
+        2,
+        "{ev:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_shrink_rejected_and_unknown_outcomes_are_reported() {
+    let c = Shrink::new(
+        Vec::new(),
+        vec![fp(1, 2, &[1, 2, 3], 1), fp(2, 3, &[1, 2, 3], 1)],
+    );
+    lock(&c.script).insert(1, vec![Ok(MetaResult::Invalid("epoch".into()))]);
+    lock(&c.script).insert(2, vec![Err("forward failed".into())]);
+    let r = shrink_shutdown(&c, Duration::from_secs(10)).await;
+    assert_eq!(
+        r.self_shrink,
+        vec![(1, SelfShrink::Rejected), (2, SelfShrink::Rejected)]
+    );
+    assert!(r.meta_transferred, "the meta transfer still runs");
+}
+
+#[tokio::test]
+async fn self_shrink_is_bounded_by_the_budget() {
+    let mut c = Shrink::new(Vec::new(), vec![fp(1, 2, &[1, 2, 3], 1)]);
+    Arc::get_mut(&mut c).expect("unique").hang = true;
+    let r = tokio::time::timeout(
+        Duration::from_secs(10),
+        shrink_shutdown(&c, Duration::from_millis(200)),
+    )
+    .await
+    .expect("bounded by shutdown_handoff_timeout");
+    assert_eq!(r.self_shrink, vec![(1, SelfShrink::Timeout)]);
+    assert!(
+        !r.meta_transferred,
+        "no meta transfer after the budget ran out"
+    );
+    let ev = c.events();
+    assert_eq!(
+        ev.first().map(String::as_str),
+        Some("stop_following [1]"),
+        "{ev:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_shrink_skipped_without_quorum() {
+    let mut c = Shrink::new(vec![led(0, &[2])], vec![fp(1, 2, &[1, 2, 3], 1)]);
+    Arc::get_mut(&mut c).expect("unique").quorum = false;
+    let r = shrink_shutdown(&c, Duration::from_secs(10)).await;
+    assert_eq!(r.kept, vec![0]);
+    assert_eq!(r.self_shrink, vec![(1, SelfShrink::NoQuorum)]);
+    assert!(c.events().is_empty(), "nothing attempted: {:?}", c.events());
+}
+
+#[tokio::test]
+async fn self_shrink_default_trait_methods_keep_phase_13_behaviour() {
+    // The Phase 13 fake implements none of the 14-33 methods: no self-shrink lines.
+    let c = Cluster::new(vec![led(0, &[2])]);
+    let r = shutdown(&c, Duration::from_secs(10)).await;
+    assert_eq!(r.moved, vec![0]);
+    assert!(r.self_shrink.is_empty());
 }

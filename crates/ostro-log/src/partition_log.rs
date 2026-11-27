@@ -1373,6 +1373,12 @@ impl ReplicatedLog for PartitionLog {
                 "leader follows the published replica set"
             );
         }
+        // 14-33: replicas this publication drops lose their caught-up evidence (no re-add
+        // from progress measured before the removal).
+        let prev = st.isr.published.clone();
+        if let Some(t) = st.tracker.as_mut() {
+            t.on_isr_published(&prev, &set.isr, set.isr_version);
+        }
         st.isr.set_published(set.isr, set.isr_version);
         st.min_insync = usize::from(set.min_insync.max(1));
         self.core.republish(&mut st);

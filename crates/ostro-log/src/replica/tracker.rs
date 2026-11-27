@@ -25,6 +25,9 @@ struct Entry {
     last_fetch_ms: Option<u64>,
     /// `leader_durable_end` sampled for the previous response to this replica.
     prev_response_end: Option<Offset>,
+    /// The published ISR version that dropped this replica, until its next caught-up
+    /// observation (14-33): while set, the replica is never expanded back into the ISR.
+    removed_at_version: Option<u64>,
 }
 
 /// Measured progress of every assigned replica, as seen by the leader.
@@ -62,6 +65,7 @@ impl ReplicaTracker {
                     last_caught_up_ms: now_ms,
                     last_fetch_ms: is_self.then_some(now_ms),
                     prev_response_end: None,
+                    removed_at_version: None,
                 }
             })
             .collect();
@@ -97,6 +101,7 @@ impl ReplicaTracker {
                     last_caught_up_ms: now_ms,
                     last_fetch_ms: None,
                     prev_response_end: None,
+                    removed_at_version: None,
                 },
             };
             entries.push(e);
@@ -168,6 +173,7 @@ impl ReplicaTracker {
             || fetch_offset >= leader_durable_end_now;
         if caught_up {
             e.last_caught_up_ms = e.last_caught_up_ms.max(now_ms);
+            e.removed_at_version = None;
         }
         e.prev_response_end = Some(leader_durable_end_now);
         e.last_fetch_ms = Some(now_ms);
@@ -184,6 +190,38 @@ impl ReplicaTracker {
             e.fetch_offset = Offset::ZERO;
             e.prev_response_end = None;
         }
+    }
+
+    /// A published ISR at `version` replaced `prev` with `next` (14-33, D-P14-50), whoever
+    /// proposed it (this leader's lag shrink, the controller, a stopping node's self-shrink).
+    ///
+    /// Every replica `prev` had and `next` lacks loses its caught-up evidence: its
+    /// `last_caught_up_ms` and previous-response target are cleared and `removed_at_version`
+    /// is recorded, so [`isr::should_expand`](super::isr::should_expand) re-adds it only
+    /// after a caught-up fetch observed **after** this removal was adopted. Progress measured
+    /// before the removal (a stopping node's last fetches) never re-adds it. Its durable LEO
+    /// is kept: it is a fact about the replica's disk, and the HW no longer counts it.
+    /// Replicas `next` contains drop a stale removal mark. The `readd_stale_progress`
+    /// mutant skips the reset (the pre-14-33 rule).
+    pub fn on_isr_published(&mut self, prev: &[u64], next: &[u64], version: u64) {
+        if super::mutant(mutants::READD_STALE_PROGRESS) {
+            return;
+        }
+        let me = self.self_id;
+        for e in self.entries.iter_mut().filter(|e| e.replica != me) {
+            if next.contains(&e.replica) {
+                e.removed_at_version = None;
+            } else if prev.contains(&e.replica) {
+                e.last_caught_up_ms = 0;
+                e.prev_response_end = None;
+                e.removed_at_version = Some(version);
+            }
+        }
+    }
+
+    /// The published ISR version that removed `replica`, while it has not caught up since.
+    pub fn removed_at_version(&self, replica: u64) -> Option<u64> {
+        self.entry(replica).and_then(|e| e.removed_at_version)
     }
 
     /// One [`ReplicaProgress`] per replica (`leo` = durable LEO). `in_isr` is `false` here;

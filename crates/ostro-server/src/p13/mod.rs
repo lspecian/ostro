@@ -547,21 +547,80 @@ pub async fn start(ctx: Arc<P13Ctx>) -> P13Services {
     P13Services { stop, tasks }
 }
 
-/// First in the shutdown path: hand off every led partition and transfer meta leadership,
-/// bounded by `[cluster] shutdown_handoff_timeout` (13-11). Stub: hands off nothing.
+/// The controlled shutdown's metadata view (13-11): the [`MetaHandle`] for everything,
+/// plus this node's fetchers for [`ShutdownMeta::stop_following`] (14-33).
+///
+/// [`ShutdownMeta::stop_following`]: ostro_cluster::shutdown::ShutdownMeta::stop_following
+struct ShutdownView<'a> {
+    ctx: &'a P13Ctx,
+}
+
+impl ostro_cluster::shutdown::ShutdownMeta for ShutdownView<'_> {
+    fn members(&self) -> usize {
+        ostro_cluster::shutdown::ShutdownMeta::members(self.ctx.meta.as_ref())
+    }
+
+    fn led(&self, node: u64) -> Vec<ostro_cluster::shutdown::LedPartition> {
+        ostro_cluster::shutdown::ShutdownMeta::led(self.ctx.meta.as_ref(), node)
+    }
+
+    fn meta_transfer_target(&self) -> Option<u64> {
+        ostro_cluster::shutdown::ShutdownMeta::meta_transfer_target(self.ctx.meta.as_ref())
+    }
+
+    fn transfer_leader(&self, to: u64) -> BoxFuture<'_, Result<(), String>> {
+        ostro_cluster::shutdown::ShutdownMeta::transfer_leader(self.ctx.meta.as_ref(), to)
+    }
+
+    fn quorum_contact(&self) -> BoxFuture<'_, bool> {
+        ostro_cluster::shutdown::ShutdownMeta::quorum_contact(self.ctx.meta.as_ref())
+    }
+
+    fn followed(&self, node: u64) -> Vec<ostro_cluster::shutdown::FollowedPartition> {
+        ostro_cluster::shutdown::ShutdownMeta::followed(self.ctx.meta.as_ref(), node)
+    }
+
+    fn alter_isr(
+        &self,
+        cmd: ostro_meta::MetaCommand,
+    ) -> BoxFuture<'_, Result<ostro_meta::MetaResult, String>> {
+        ostro_cluster::shutdown::ShutdownMeta::alter_isr(self.ctx.meta.as_ref(), cmd)
+    }
+
+    /// 14-33: stop this node's replica fetchers for exactly `partitions` (they stay stopped
+    /// until the process exits), so the node is never caught up after its self-shrink and
+    /// the leader never re-adds it.
+    fn stop_following(&self, partitions: &[u16]) -> BoxFuture<'_, ()> {
+        self.ctx.cluster.stop_following(partitions)
+    }
+}
+
+/// First in the shutdown path: hand off every led partition, leave the ISR of every
+/// partition this node only follows (14-33) and transfer meta leadership, bounded by
+/// `[cluster] shutdown_handoff_timeout` (13-11).
 pub async fn before_shutdown(ctx: &P13Ctx) {
-    let report = ostro_cluster::shutdown::controlled_shutdown(
+    let report = ostro_cluster::shutdown::controlled_shutdown_with(
         ctx.node_id(),
-        Arc::clone(&ctx.meta),
+        &ShutdownView { ctx },
         Arc::clone(&ctx.handoff_client),
         ctx.cfg.cluster.shutdown_handoff_timeout.get(),
     )
     .await;
-    if !report.moved.is_empty() || !report.kept.is_empty() || report.meta_transferred {
+    if !report.moved.is_empty()
+        || !report.kept.is_empty()
+        || report.meta_transferred
+        || !report.self_shrink.is_empty()
+    {
+        let self_shrink: Vec<String> = report
+            .self_shrink
+            .iter()
+            .map(|(p, o)| format!("{p}:{}", o.as_str()))
+            .collect();
         info!(
             moved = ?report.moved,
             kept = ?report.kept,
             meta_transferred = report.meta_transferred,
+            self_shrink = ?self_shrink,
             "controlled shutdown"
         );
     }
