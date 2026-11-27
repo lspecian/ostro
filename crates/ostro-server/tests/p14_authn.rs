@@ -472,8 +472,9 @@ async fn server_bootstraps_once_across_restarts() {
     assert!(p.tenant.is_none() && p.scopes == ScopeSet::admin());
     let admins = system_admins(h.meta());
     assert_eq!(admins.len(), 1);
-    // A fresh cluster is finalized at level 1: ext 112 is gated off (D-P14-28).
-    assert_eq!(bootstrap_name(&admins[0]), None);
+    // A fresh cluster starts finalized at the newest level (c9875f9), so the bootstrap token
+    // carries ext 112 with its name.
+    assert_eq!(bootstrap_name(&admins[0]).as_deref(), Some(BOOTSTRAP_NAME));
     h.shutdown().await.expect("shutdown");
 
     let h = boot(server_cfg(dir.path())).await;
