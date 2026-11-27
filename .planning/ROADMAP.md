@@ -528,7 +528,7 @@ Plans:
 - [ ] 14-31-PLAN.md — Kafka transport (ostro-kafka): framing, ApiVersions negotiation, tokio-rustls TLS, SASL PLAIN/SCRAM; fake broker + Kafka 4.1 SSL/SASL listeners (wave 3; TRIG-04)
 - [ ] 14-34-PLAN.md — Kafka read path: metadata, coordinator, ListOffsets, Fetch with pure-Rust codecs, standalone OffsetFetch/OffsetCommit; broker suite + local fixtures; musl size (gate → 70 MB if needed) (wave 4; TRIG-04)
 - [ ] 14-32-PLAN.md — Kafka topic-consumer trigger: [[triggers.kafka]], owner-leader consumers, idempotent StartRun (__kafka/ keys), commit-after-durable, backpressure via ingress quotas, leadership-move and kill -9 tests, docs (wave 5; TRIG-04)
-- [ ] 14-33-PLAN.md — Controlled-shutdown ISR self-shrink (Phase 13 bug 4, in 1.0): leaving-node AlterIsr + stop_following seam + no re-add from stale progress; P13 mutant, tier-C stall < 1 s (wave 3; CLUS-06)
+- [x] 14-33-PLAN.md — Controlled-shutdown ISR self-shrink (Phase 13 bug 4, in 1.0): leaving-node AlterIsr + stop_following seam + no re-add from stale progress; P13 mutant, tier-C stall < 1 s (wave 3; CLUS-06)
 - [ ] 14-27-PLAN.md — PHASE GATE: Phase 14 checks required in CI (incl. test services, Kafka, cluster-restore and self-shrink legs), final measurements with asserted exit codes, 1.0.0-rc.1 + local tag (push = user checkpoint), release checklist, RESERVATIONS flip, REQUIREMENTS (incl. TRIG-04, BACK-05), VALIDATION (wave 8; all)
 
 ## Progress
