@@ -520,7 +520,7 @@ Plans:
 - [x] 14-22-PLAN.md — Jepsen-style 3-node loopback runs with all fault classes, auth + audit on (smoke + 2 x 30 min gate) (wave 5; QA-05)
 - [x] 14-23-PLAN.md — Bytes-on-disk verified benchmarks (single + RF=3) + pre-registered soak criteria, ostro-soak driver, soak smoke, after the Jepsen campaigns (wave 6; QA-04, QA-05) (gate incomplete: final measurements + passing soak smoke pending on a quiet dell-4)
 - [ ] 14-24-PLAN.md — Threat model, security model, generated auth matrix, review packet + findings tracker (wave 6; SEC-05)
-- [ ] 14-25-PLAN.md — Docs set (getting started x3, determinism, connectors, tenancy/auth, audit, signed modules, operations/sizing, install, Kubernetes, README) + docs-check (wave 6; DIST-03)
+- [x] 14-25-PLAN.md — Docs set (getting started x3, determinism, connectors, tenancy/auth, audit, signed modules, operations/sizing, install, Kubernetes, README) + docs-check (wave 6; DIST-03) (gate incomplete: consolidated gate pending on dell-4; full-tree docs-check has 24 marker failures in non-owned docs)
 - [ ] 14-26-PLAN.md — Cross-feature tier-B integration + races, full audit table, full suite x3, full-tree docs-check, fixes with regression tests (wave 7; SEC-02..04, DISP-06)
 - [x] 14-28-PLAN.md — Follow-ups: own file watcher (inotify via libc, polling elsewhere, debounce) replacing notify + deny.toml CC0 exception removed; dev-ephemeral module replacement (option a); Standard Webhooks test-key split (wave 3; CLI-08, CLI-01, TRIG-01)
 - [x] 14-29-PLAN.md — Whole-cluster restore primitives: term-fenced meta/head + metadata snapshots in cluster mode, replay observer, consistent-cut search (greatest fixpoint under Pitfall 1, proptest) (wave 3; BACK-05)
