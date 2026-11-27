@@ -8,8 +8,7 @@
 //! Module owners: [`conn`], [`sasl`], [`versions`] are 14-31 (transport, TLS, SASL, ApiVersions
 //! negotiation); [`metadata`], [`fetch`], [`offsets`], [`codec`] and the `testkit` feature are
 //! 14-34 (Metadata/FindCoordinator, ListOffsets/Fetch, OffsetFetch/OffsetCommit, record-batch
-//! decoding). This module list and the contract types below are final after 14-01; the
-//! [`Client`] methods answer [`KafkaError::Unimplemented`] until their owner plan lands.
+//! decoding). This module list and the contract types below are final after 14-01.
 //!
 //! Consumer-only: producing exists only behind the `testkit` feature (tests create topics and
 //! produce records); consumer-group membership (JoinGroup/SyncGroup/KIP-848) is out of scope
@@ -31,19 +30,15 @@ pub mod testkit;
 pub mod versions;
 
 pub use conn::{Backoff, Broker, Conn, ConnectOptions, MAX_FRAME, WireCheck};
+pub use fetch::Fetched;
 pub use versions::{ApiRange, ApiRequest, BrokerVersions, NegotiatedApi};
 
-// Dependencies declared by plan 14-01 (D-P14-37), anchored so cargo's unused-dependency lint
-// stays quiet until 14-34 consumes them (owners delete the lines they use). 14-31 uses
-// aws-lc-rs for SCRAM (HMAC, digest, PBKDF2, RNG), so `hmac` / `sha2` stay anchored.
+// Dependencies declared by plan 14-01 (D-P14-37) that no module uses: 14-31 does SCRAM with
+// aws-lc-rs (HMAC, digest, PBKDF2, RNG), so `hmac` / `sha2` stay anchored here (removing them
+// is a Cargo.toml change outside 14-34's scope). The codecs are used by `codec` (14-34).
 mod dep_anchors {
-    use anyhow as _;
-    use flate2 as _;
     use hmac as _;
-    use lz4_flex as _;
-    use ruzstd as _;
     use sha2 as _;
-    use snap as _;
 }
 
 #[cfg(test)]
@@ -247,6 +242,8 @@ pub struct Client {
     config: ClientConfig,
     opts: std::sync::Arc<ConnectOptions>,
     bootstrap: Broker,
+    meta: metadata::Metadata,
+    coordinators: offsets::Coordinators,
 }
 
 impl Client {
@@ -269,6 +266,8 @@ impl Client {
                     let bootstrap = Broker::from_conn(conn, std::sync::Arc::clone(&opts));
                     return Ok(Client {
                         config,
+                        meta: metadata::Metadata::new(std::sync::Arc::clone(&opts)),
+                        coordinators: offsets::Coordinators::default(),
                         opts,
                         bootstrap,
                     });
@@ -313,52 +312,9 @@ impl Client {
         self.bootstrap.request(req).await
     }
 
-    /// Partition indexes of `topic` (Metadata, 14-34).
-    pub async fn partitions(&self, topic: &str) -> Result<Vec<i32>, KafkaError> {
-        let _ = topic;
-        Err(KafkaError::Unimplemented("Client::partitions (14-34)"))
-    }
-
-    /// Start or end offsets of `tps` (ListOffsets, 14-34).
-    pub async fn list_offsets(
-        &self,
-        tps: &[TopicPartition],
-        spec: OffsetSpec,
-    ) -> Result<Vec<(TopicPartition, i64)>, KafkaError> {
-        let _ = (tps, spec);
-        Err(KafkaError::Unimplemented("Client::list_offsets (14-34)"))
-    }
-
-    /// Fetch from `tp` at `offset`, at most `max_bytes` (Fetch ≤ v12, read_committed, 14-34).
-    pub async fn fetch(
-        &self,
-        tp: &TopicPartition,
-        offset: i64,
-        max_bytes: i32,
-    ) -> Result<FetchedBatch, KafkaError> {
-        let _ = (tp, offset, max_bytes);
-        Err(KafkaError::Unimplemented("Client::fetch (14-34)"))
-    }
-
-    /// Committed offsets of `group` for `tps` (FindCoordinator + OffsetFetch, 14-34).
-    pub async fn committed(
-        &self,
-        group: &str,
-        tps: &[TopicPartition],
-    ) -> Result<Vec<(TopicPartition, Option<i64>)>, KafkaError> {
-        let _ = (group, tps);
-        Err(KafkaError::Unimplemented("Client::committed (14-34)"))
-    }
-
-    /// Commit `offsets` for `group` (OffsetCommit, generation -1, empty member id; 14-34).
-    pub async fn commit(
-        &self,
-        group: &str,
-        offsets: &[(TopicPartition, i64)],
-    ) -> Result<(), KafkaError> {
-        let _ = (group, offsets);
-        Err(KafkaError::Unimplemented("Client::commit (14-34)"))
-    }
+    // The read path (14-34) lives next to its requests: `partitions` / `leader` /
+    // `refresh_metadata` in [`metadata`], `list_offsets` / `committed` / `commit` /
+    // `coordinator` in [`offsets`], `fetch` / `fetch_at` in [`fetch`].
 }
 
 #[cfg(test)]
