@@ -128,10 +128,7 @@ fn parts_of(c: &Case) -> BTreeMap<u16, CursorSteps> {
         .map(|(p, samples)| {
             let len = (samples.len() - 1) as u64;
             let end = len - len * u64::from(c.lag[p]) / 1000;
-            let floor = c
-                .floor
-                .as_ref()
-                .map_or(0, |f| end * u64::from(f[p]) / 1000);
+            let floor = c.floor.as_ref().map_or(0, |f| end * u64::from(f[p]) / 1000);
             (p as u16, steps_from_replay(samples, floor, end))
         })
         .collect()
@@ -198,7 +195,12 @@ fn check_case(c: &Case, st: &mut Stats) -> Result<(), TestCaseError> {
             // Bounded.
             for (p, s) in &parts {
                 let x = cut.offsets[p];
-                prop_assert!(s.floor <= x && x <= s.end, "p{p}: {x} outside [{}, {}]", s.floor, s.end);
+                prop_assert!(
+                    s.floor <= x && x <= s.end,
+                    "p{p}: {x} outside [{}, {}]",
+                    s.floor,
+                    s.end
+                );
             }
             // Maximal: raising any single partition by one, or to its next step, breaks it.
             for (p, s) in &parts {
@@ -222,7 +224,11 @@ fn check_case(c: &Case, st: &mut Stats) -> Result<(), TestCaseError> {
                 for d in all {
                     if cluster_cut::check(&parts, d).is_ok() {
                         for (p, x) in d {
-                            prop_assert!(*x <= cut.offsets[p], "consistent {d:?} above {:?}", cut.offsets);
+                            prop_assert!(
+                                *x <= cut.offsets[p],
+                                "consistent {d:?} above {:?}",
+                                cut.offsets
+                            );
                         }
                     }
                 }
@@ -325,7 +331,10 @@ fn rule_two_lowers_the_sender_below_an_unseen_truncation() {
     let parts = BTreeMap::from([(0, a), (1, b)]);
     let cut = cluster_cut::search(&parts).expect("cut");
     assert_eq!(cut.offsets, BTreeMap::from([(0, 3), (1, 5)]));
-    assert_eq!(cut.lowered, vec![(0, 6, 3, Lowering::Untruncated { to: 1 })]);
+    assert_eq!(
+        cut.lowered,
+        vec![(0, 6, 3, Lowering::Untruncated { to: 1 })]
+    );
     assert!(cluster_cut::check(&parts, &cut.offsets).is_ok());
 }
 
@@ -436,15 +445,17 @@ async fn workload(node: &Node) {
                 .store()
                 .read_meta()
                 .expect("meta");
-            m.cursor
-                .outbox_next_seq
-                .iter()
-                .all(|(q, next)| m.cursor.outbox_truncated.get(q).copied().unwrap_or(0) + 1 == *next)
+            m.cursor.outbox_next_seq.iter().all(|(q, next)| {
+                m.cursor.outbox_truncated.get(q).copied().unwrap_or(0) + 1 == *next
+            })
         });
         if drained {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "outboxes never drained");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "outboxes never drained"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // Let the shuffler's last appends settle.
@@ -466,8 +477,11 @@ fn copy_dir(src: &Path, dst: &Path) {
 
 fn drop_states(dir: &Path) {
     for p in 0..P {
-        std::fs::remove_dir_all(ostro_partition::store::config::state_dir(dir, PartitionId(p)))
-            .expect("remove state");
+        std::fs::remove_dir_all(ostro_partition::store::config::state_dir(
+            dir,
+            PartitionId(p),
+        ))
+        .expect("remove state");
     }
 }
 
@@ -536,10 +550,16 @@ async fn observed_replay_matches_the_store_and_leaves_the_digest_unchanged() {
     let mut parts = BTreeMap::new();
     for p in 0..P {
         let i = usize::from(p);
-        assert_eq!(f1[i].digest, f2[i].digest, "p{p}: digest with/without observer");
+        assert_eq!(
+            f1[i].digest, f2[i].digest,
+            "p{p}: digest with/without observer"
+        );
         assert_eq!(f1[i].hash, f2[i].hash, "p{p}: state hash");
         assert_eq!(f1[i].applied, f2[i].applied, "p{p}: applied");
-        assert_eq!(f2[i].digest, live[i].digest, "p{p}: rebuild equals the live state");
+        assert_eq!(
+            f2[i].digest, live[i].digest,
+            "p{p}: rebuild equals the live state"
+        );
         assert_eq!(f2[i].applied, live[i].applied);
         let samples = rec.samples(PartitionId(p));
         assert!(samples.len() > 2, "p{p}: {} samples", samples.len());
@@ -556,7 +576,10 @@ async fn observed_replay_matches_the_store_and_leaves_the_digest_unchanged() {
         for (q, v) in &f2[i].seen {
             assert_eq!(steps.seen_at(*q, end), *v, "p{p} seen[{q}]");
         }
-        assert!(!f2[i].seen.is_empty(), "p{p} received cross-partition signals");
+        assert!(
+            !f2[i].seen.is_empty(),
+            "p{p} received cross-partition signals"
+        );
         parts.insert(p, steps);
     }
     // The settled node's heads are a consistent cut: the search keeps them.

@@ -54,11 +54,7 @@ impl StepFn {
     /// The value at cut `c`.
     pub fn at(&self, c: u64, default: u64) -> u64 {
         let i = self.0.partition_point(|(o, _)| *o <= c);
-        if i == 0 {
-            default
-        } else {
-            self.0[i - 1].1
-        }
+        if i == 0 { default } else { self.0[i - 1].1 }
     }
 
     /// The largest `c` in `[lo, hi]` whose value satisfies `ok`, if any (the value is constant
@@ -77,11 +73,7 @@ impl StepFn {
         let mut i = self.0.partition_point(|(o, _)| *o <= hi);
         loop {
             // The interval holding `top` starts at entry i-1 (or at 0 with the default).
-            let (start, v) = if i == 0 {
-                (0, default)
-            } else {
-                self.0[i - 1]
-            };
+            let (start, v) = if i == 0 { (0, default) } else { self.0[i - 1] };
             if ok(v) {
                 return Some(top);
             }
@@ -130,7 +122,9 @@ pub struct CursorSteps {
 impl CursorSteps {
     /// `outbox_next_seq[->to](c)`.
     pub fn next_at(&self, to: u16, c: u64) -> u64 {
-        self.next.get(&to).map_or(NEXT_DEFAULT, |s| s.at(c, NEXT_DEFAULT))
+        self.next
+            .get(&to)
+            .map_or(NEXT_DEFAULT, |s| s.at(c, NEXT_DEFAULT))
     }
 
     /// `outbox_truncated[->to](c)`.
@@ -198,12 +192,18 @@ pub enum CutError {
 /// Pitfall 1 at `cut` for every ordered pair (the semantics of the Phase 8 restore check).
 pub fn check(parts: &BTreeMap<u16, CursorSteps>, cut: &BTreeMap<u16, u64>) -> Result<(), String> {
     for (&a, sa) in parts {
-        let ca = cut.get(&a).copied().ok_or_else(|| format!("no cut for {a}"))?;
+        let ca = cut
+            .get(&a)
+            .copied()
+            .ok_or_else(|| format!("no cut for {a}"))?;
         for (&b, sb) in parts {
             if a == b {
                 continue;
             }
-            let cb = cut.get(&b).copied().ok_or_else(|| format!("no cut for {b}"))?;
+            let cb = cut
+                .get(&b)
+                .copied()
+                .ok_or_else(|| format!("no cut for {b}"))?;
             let next = sa.next_at(b, ca);
             let truncated = sa.truncated_at(b, ca);
             let seen = sb.seen_at(a, cb);
@@ -267,7 +267,8 @@ pub fn search(parts: &BTreeMap<u16, CursorSteps>) -> Result<Cut, CutError> {
                         .largest_where(sa.floor, ca, ZERO_DEFAULT, |v| v <= seen)
                         .ok_or_else(|| fail(a))?;
                     cut.offsets.insert(a, to);
-                    cut.lowered.push((a, ca, to, Lowering::Untruncated { to: b }));
+                    cut.lowered
+                        .push((a, ca, to, Lowering::Untruncated { to: b }));
                     changed = true;
                 }
             }

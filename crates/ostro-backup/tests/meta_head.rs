@@ -227,7 +227,10 @@ async fn put_is_fenced_by_term_without_conditional_put() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_leaders_end_at_the_higher_term_and_the_lower_one_stops() {
-    let (da, db) = (tempfile::tempdir().expect("a"), tempfile::tempdir().expect("b"));
+    let (da, db) = (
+        tempfile::tempdir().expect("a"),
+        tempfile::tempdir().expect("b"),
+    );
     let remote = tempfile::tempdir().expect("remote");
     let store = local_store(remote.path(), true);
     let (na, nb) = (
@@ -263,7 +266,10 @@ async fn racing_leaders_end_at_the_higher_term_and_the_lower_one_stops() {
     mb.set(30);
     let rb = b.up.round(&store).await.expect("b round");
     assert_eq!(rb.meta_head.map(|h| (h.term, h.index)), Some((4, 30)));
-    assert!(!a.up.is_fenced() && !b.up.is_fenced(), "partition uploads unaffected");
+    assert!(
+        !a.up.is_fenced() && !b.up.is_fenced(),
+        "partition uploads unaffected"
+    );
     drop((a, b));
     shutdown(na).await;
     shutdown(nb).await;
@@ -272,7 +278,10 @@ async fn racing_leaders_end_at_the_higher_term_and_the_lower_one_stops() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_rounds_of_two_terms_never_leave_the_lower_term() {
     for _ in 0..5 {
-        let (da, db) = (tempfile::tempdir().expect("a"), tempfile::tempdir().expect("b"));
+        let (da, db) = (
+            tempfile::tempdir().expect("a"),
+            tempfile::tempdir().expect("b"),
+        );
         let remote = tempfile::tempdir().expect("remote");
         let store = local_store(remote.path(), true);
         let (na, nb) = (
@@ -393,7 +402,12 @@ async fn leadership_flips_are_honoured_round_by_round() {
     // Leader again at a higher term.
     a.leader.send_replace(Some(7));
     m.set(5);
-    let h = a.up.round(&store).await.expect("r").meta_head.expect("moved");
+    let h =
+        a.up.round(&store)
+            .await
+            .expect("r")
+            .meta_head
+            .expect("moved");
     assert_eq!((h.term, h.index), (7, 5));
     drop(a);
     shutdown(node).await;
@@ -413,7 +427,10 @@ async fn single_member_and_unset_leader_write_no_meta_head() {
     let r = a.up.round(&store).await.expect("round");
     assert!(r.manifest.is_some() && r.meta_snapshot);
     assert!(r.meta_head.is_none());
-    assert!(head(&store).await.is_none(), "no meta/head in single-member mode");
+    assert!(
+        head(&store).await.is_none(),
+        "no meta/head in single-member mode"
+    );
     drop(a);
     // Multi-member without with_meta_leader: no meta at all.
     let remote2 = tempfile::tempdir().expect("remote2");

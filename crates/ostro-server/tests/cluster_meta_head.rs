@@ -28,11 +28,7 @@ fn leader(hs: &[ServerHandle]) -> Option<(usize, u64)> {
 }
 
 async fn read_head(store: &Arc<dyn ObjectStore>) -> Option<MetaHead> {
-    meta_head::get(store)
-        .await
-        .ok()
-        .flatten()
-        .map(|(h, _)| h)
+    meta_head::get(store).await.ok().flatten().map(|(h, _)| h)
 }
 
 /// Poll until `meta/head` satisfies `f`; every head seen on the way must carry the term of
@@ -47,7 +43,11 @@ async fn wait_head(
     loop {
         if let Some(h) = read_head(store).await {
             if let Some((_, term)) = leader(hs) {
-                assert!(h.term <= term, "head term {} above the leader's {term}", h.term);
+                assert!(
+                    h.term <= term,
+                    "head term {} above the leader's {term}",
+                    h.term
+                );
             }
             if f(&h) {
                 return h;
@@ -92,7 +92,10 @@ async fn meta_leader_writes_meta_head_and_a_transfer_moves_it_up() {
     let (bytes, _) = store.get(&h.key).await.expect("get").expect("snapshot");
     let state = ostro_meta::decode_snapshot(&bytes).expect("meta snapshot decodes");
     assert_eq!(
-        state.cluster().map(|c| c.value.cluster_id.clone()).as_deref(),
+        state
+            .cluster()
+            .map(|c| c.value.cluster_id.clone())
+            .as_deref(),
         Some("meta-head-test")
     );
     // Followers never write: no head carries a term no leader held, and the followers' own

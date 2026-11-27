@@ -1221,7 +1221,12 @@ impl Uploader {
 
     /// Keep the newest `remote_snapshots_keep` meta snapshots at or below the head (and the
     /// one a Phase 8 `manifest/current` names); delete older ones, after the head PUT.
-    async fn meta_retention(&self, store: &Arc<dyn ObjectStore>, index: u64, protect: Option<&str>) {
+    async fn meta_retention(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        index: u64,
+        protect: Option<&str>,
+    ) {
         let keys: Vec<String> = match store.list("meta/", None).await {
             Ok(l) => l.into_iter().map(|m| m.key).collect(),
             Err(e) => {
