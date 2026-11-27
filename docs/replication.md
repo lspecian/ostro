@@ -286,10 +286,19 @@ boot / running fences make N/N−1 rolling upgrades safe: `docs/compat.md`,
 Only a partition's leader uploads its chunks, still capped at the HW. Each partition has an
 epoch-fenced head object `p/<pppp>/head`; a new leader repairs a divergent remote tail before its
 first upload. `LOCK` and `manifest/current` are written only while the cluster has exactly one
-member. **Cluster-wide restore is deferred** (D-P12-3; the user moved whole-cluster restore into
-1.0 on 2026-11-26, planned for Phase 14): `ostro restore` refuses a
-bucket that has per-partition heads but no manifest. Details: `docs/bottomless.md`
-§ "Cluster mode".
+member. In a multi-member cluster the metadata leader also uploads metadata snapshots and moves
+a term-fenced `meta/head` pointer (14-29).
+
+**Whole-cluster restore** (14-30, D-P14-45; replaces the D-P12-3 refusal): `ostro restore` on
+a cluster bucket replays every partition's chain, finds the greatest cut that keeps
+cross-partition causality (Pitfall 1 for every pair of partitions: no partition holds a
+message its sender has not sent at its cut, and no sender dropped outbox rows the receiver
+has not seen), restores every partition there, and rewrites the newest metadata snapshot that
+covers the open runs to a single seed member (old members `Removed`, every assignment on the
+seed at an epoch above every restored epoch). The cluster then grows back with `ostro
+cluster join`. The RPO per partition is `head end - cut`. `--at` is refused for cluster
+buckets. Runbook: [`docs/cluster-restore.md`](cluster-restore.md); bucket layout:
+`docs/bottomless.md` § "Cluster mode".
 
 ## 8. Tests
 

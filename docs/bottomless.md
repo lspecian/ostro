@@ -159,11 +159,12 @@ never removes data a restore from the bucket would still need from this node.
 
 ### Single-node scope
 
-`LOCK` and the single `manifest/current` writer are single-node constructs. Cluster-wide
-bottomless restore is deferred. Phase 12 does per-partition chain repair only:
+`LOCK` and the single `manifest/current` writer are single-node constructs. A whole
+multi-member cluster is restored from its bucket as one seed node at a consistent cut
+([`docs/cluster-restore.md`](cluster-restore.md), 14-30). Phase 12 adds per-partition chain repair:
 divergent-tail truncation and per-partition writer fencing by leader epoch. Restore walks
 each chain back from the manifest head (`chunk::walk_back`), following `prev_chunk_sha256`,
-so forked chunks left by an old writer are ignored. Cluster mode (per-partition heads, takeover repair, restore refusal) is described in
+so forked chunks left by an old writer are ignored. Cluster mode (per-partition heads, takeover repair, cluster restore) is described in
 § "Cluster mode" below.
 
 ## Cluster mode (Phase 12, D-P12-20)
@@ -219,18 +220,22 @@ written in single-node mode too (one code path).
 **`LOCK` and `manifest/current` are single-member constructs.** The uploader reads the member
 count every round. With one member it writes heads **and** the Phase 8 manifest
 (`manifest/current`, generation manifests, meta snapshot), and `LOCK` is acquired as before. With
-two or more members it writes heads only: no manifest, no meta snapshot, no `LOCK`
-(`fence::acquire_if_single_member`). Floors and remote retention then run per led partition
-right after its head moved.
+two or more members it writes heads only: no manifest and no `LOCK`
+(`fence::acquire_if_single_member`); since 1.0 the metadata leader uploads metadata snapshots
+and moves a term-fenced `meta/head` pointer (14-29, `crates/ostro-backup/src/meta_head.rs`).
+Floors and remote retention then run per led partition right after its head moved.
 
-**Restore of a cluster bucket is refused.** Cluster-wide restore is deferred (D-P12-3; on
-2026-11-26 the user moved whole-cluster restore from bottomless backups into 1.0, to be planned
-in Phase 14): partitions led by different nodes have no common instant, so no single manifest names
-a consistent cut. `ostro restore` on a bucket with `p/<pppp>/head` objects but no
-`manifest/current` fails before writing anything:
+**Restore of a cluster bucket** (14-30, D-P14-45): `ostro restore` detects a multi-member
+bucket (a `meta/head` newer than any `manifest/current`, or `p/<pppp>/head` objects without a
+usable `manifest/current`) and rebuilds **one seed node** at the greatest cross-partition
+consistent cut below the heads, with the metadata rewritten to that single member. The
+cluster then grows back with `ostro cluster join`. Runbook, report fields and failure
+messages: [`docs/cluster-restore.md`](cluster-restore.md). `--at` is refused for cluster
+buckets. A bucket from a pre-1.0 multi-member cluster (heads but no metadata snapshot) is
+still refused before anything is written:
 
 ```text
-cluster-wide restore is deferred (Phase 13/14); see docs/replication.md (the bucket has no manifest/current but N per-partition head object(s), e.g. p/0000/head)
+cluster bucket cannot be restored: no metadata snapshot in the bucket; the metadata leader uploads one in 1.0+ (N per-partition head object(s), e.g. p/0000/head); see docs/cluster-restore.md
 ```
 
 A bucket written while the cluster had a single member still has `manifest/current` and restores
@@ -449,7 +454,8 @@ took 1830 ms (manifest 12, meta 40, blobs 210, partitions 950, replay 610)
 `verify_state_hash`, `cut_offset`, `digest`, `chunks`, `envelopes`) and `durations`
 (`manifest_ms`, `meta_ms`, `blobs_ms`, `partitions_ms`, `replay_ms`, `total_ms`). The data
 lost by the restore is everything acknowledged after `cut_at_ms`. Restoring the same
-source twice yields the same digests.
+source twice yields the same digests. A cluster-bucket restore adds a `cluster` object
+(`docs/cluster-restore.md`); a single-member restore has no `cluster` field.
 
 ### Takeover or a new prefix
 
