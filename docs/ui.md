@@ -74,12 +74,14 @@ Request bodies are capped at 256 KiB.
 - `[ui] enabled` unset (both profiles): the UI is on exactly when the API listener is a
   loopback address. `ostro dev` listens on `127.0.0.1:7700`, so the UI is on.
 - `ostro server` on a non-loopback listener: the UI is off unless `[ui] enabled = true`.
-  Enabling it there logs a WARN naming Phase 14.
 - `[ui] enabled = false` turns it off everywhere; `/` then serves the plain shell and
   `/ui/*` is 404.
-- **Until Phase 14 the UI is unauthenticated.** Anyone who can reach the listener can
-  operate runs through it, exactly as through `/v1`. Expose it only on loopback, behind an
-  authenticating reverse proxy, or on a trusted network.
+- With `[auth] mode = "token"` (the `ostro server` default) the UI requires a sign-in
+  with an API token (Phase 14 seam below). With `[auth] mode = "none"` (the `ostro dev`
+  default) the UI is unauthenticated: anyone who can reach the listener can operate runs
+  through it, exactly as through `/v1`, and a non-loopback listener logs a WARN at startup.
+  Expose such a node only on loopback, behind an authenticating reverse proxy, or on a
+  trusted network.
 
 Note: the dev profile does not set `enabled = true` explicitly (11-04); the loopback rule
 decides. `ostro dev --listen 0.0.0.0:7700` therefore has the UI **off** unless

@@ -29,9 +29,10 @@
 //! `retry_run` has no version override (14-01 inventory), so it needs no `version_gate`.
 //!
 //! Every hook started as a stub that kept the Phase 13 behaviour exactly until its plan
-//! landed: the guard passed through, gates allowed, the authenticator and the UI answered the
-//! dev principal, the audit sink was [`NoopAuditSink`] and loops idled. [`start_triggers`] is
-//! no longer a stub (14-32): `kafka::start` validates a non-empty `[[triggers.kafka]]` list
+//! landed (the guard passed through, gates allowed, the authenticator and the UI answered the
+//! dev principal, the audit sink was [`NoopAuditSink`] and loops idled). All of them have
+//! landed now; `[auth] mode = "none"` still keeps the Phase 13 behaviour (dev principal, no
+//! scope checks). [`start_triggers`] (14-32): `kafka::start` validates a non-empty `[[triggers.kafka]]` list
 //! (a configuration error fails startup with the field-level message, e.g.
 //! `triggers.kafka[0] ("orders"): bootstrap: is required`) and starts the supervisor that
 //! runs one consumer per owned `(trigger, topic, kafka partition)`; a build without the
@@ -254,14 +255,15 @@ impl std::fmt::Debug for Guarded {
 }
 
 /// The bearer authenticator of the API (`ApiConfig.authenticator`). `[auth] mode = "none"`:
-/// `AllowDev`. Stub (until 14-03): `AllowDev`.
+/// `AllowDev`; `"token"` (14-03): meta-backed API tokens.
 pub fn authenticator(ctx: &Arc<P14Ctx>) -> Arc<dyn Authenticator> {
     authn::authenticator(ctx)
 }
 
 /// Wrap the routed control plane and slots for the client-facing routers (REST, gRPC, UI).
 /// In-process consumers (webhooks, schedules, DLQ, bulk, on_failure hooks, the Kafka
-/// trigger) keep the routed instances. Stub (until 14-03): passthrough clones.
+/// trigger) keep the routed instances. The guard (14-03, 14-15, 14-16, 14-18) checks the
+/// method's scope, applies tenant scoping and writes the audit record.
 pub fn wrap_ingress(
     ctx: &Arc<P14Ctx>,
     routed: Arc<dyn ControlPlane>,
@@ -271,7 +273,7 @@ pub fn wrap_ingress(
 }
 
 /// Fill the Phase 14 API slots (`tenants`, `api_tokens`, `audit`, `security`). Called before
-/// the Phase 13 routing of every slot. Stub: every slot stays `None` (404).
+/// the Phase 13 routing of every slot.
 pub fn fill_extensions(ctx: &Arc<P14Ctx>, ext: &mut ApiExtensions) {
     tenants_api::install(ctx, ext);
     tokens_api::install(ctx, ext);
@@ -279,19 +281,22 @@ pub fn fill_extensions(ctx: &Arc<P14Ctx>, ext: &mut ApiExtensions) {
     security_api::install(ctx, ext);
 }
 
-/// The UI's [`ostro_ui::auth::UiAuth`]. Stub (until 14-21): `AllowAll`.
+/// The UI's [`ostro_ui::auth::UiAuth`] (14-21): `[auth] mode = "none"` keeps `AllowAll`;
+/// token mode exchanges an API bearer for an HMAC-signed session cookie (see [`mod@ui_auth`]).
 pub fn ui_auth(ctx: &Arc<P14Ctx>) -> Arc<dyn ostro_ui::auth::UiAuth> {
     ui_auth::ui_auth(ctx)
 }
 
 /// The `/ui` scope layer (N2): `[auth] mode = "none"` runs every UI handler inside
 /// `PRINCIPAL.scope(Principal::dev(), …)`; token mode resolves the principal through the
-/// UI auth (stub until 14-21: the dev principal).
+/// UI auth from the session cookie (14-21): the token's principal, its scopes gating each
+/// page and action; no session redirects to the sign-in page.
 pub fn ui_scope_layer(ctx: &Arc<P14Ctx>, auth: Arc<dyn ostro_ui::auth::UiAuth>) -> UiScopeLayer {
     ui_auth::scope_layer(ctx, auth)
 }
 
-/// Wrap the one injectable clock (failpoints builds: the SkewClock, 14-10). Stub: identity.
+/// Wrap the one injectable clock (14-10): failpoints builds add the SkewClock, other builds
+/// return it unchanged.
 pub fn wrap_clock(clock: Arc<dyn Clock>) -> Arc<dyn Clock> {
     test_hooks::wrap_clock(clock)
 }
@@ -354,7 +359,10 @@ pub async fn before_shutdown(ctx: &P14Ctx) {
 /// How a start entered the cluster (D-P14-43; 14-20 charges Kafka like Webhook).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TriggerKind {
-    /// A schedule (`__cron/` key: the manual trigger; cron fires bypass the API).
+    /// A schedule trigger-now (`__cron/<name>/manual/…` key). It never reaches `start_run`:
+    /// `control/schedules.rs::trigger_schedule` passes it to [`admit_ingress`] itself. Cron
+    /// fires bypass the API and every ingress charge (only `ingress::cron_fire_gate`), and
+    /// no API start carries a `__cron/` key in practice.
     Cron,
     /// A webhook delivery (`__hook/` key).
     Webhook,
@@ -415,7 +423,7 @@ pub async fn start_triggers(
 // ---------------------------------------------------------------------------------
 
 /// Admission of an ingress event for `tenant` (suspended tenants, event-rate budgets;
-/// 14-20). Stub: admits.
+/// 14-20; see [`ingress`]).
 pub async fn admit_ingress(
     ctx: &P14Ctx,
     kind: IngressKind,
@@ -441,7 +449,7 @@ impl UploadEvidence {
 /// The upload gate (B1b), called right after the sha check and before the existing-module
 /// lookup, compilation, every meta write and the auto-activation: verifies `sigs` (the
 /// `Ostro-Module-Signature` carriage, 14-02) for `tenant` and enforces `require_signed`.
-/// Stub: no evidence, allowed.
+/// Implemented in [`module_sign`] (14-19).
 pub async fn upload_gate(
     ctx: &P14Ctx,
     tenant: Option<&str>,
@@ -452,13 +460,13 @@ pub async fn upload_gate(
     module_sign::upload_gate(ctx, tenant, sha, bytes, sigs).await
 }
 
-/// Write `evidence` into the ext of a new module record (ext 113). Stub: no-op.
+/// Write `evidence` into the ext of a new module record (ext 113, 14-19).
 pub fn evidence_ext(evidence: &UploadEvidence, ext: &mut Vec<u8>) {
     module_sign::evidence_ext(evidence, ext);
 }
 
 /// Merge `evidence` into an already stored module record (re-upload of an existing sha).
-/// Stub: no-op.
+/// Implemented in [`module_sign`] (14-19).
 pub async fn merge_evidence(
     ctx: &P14Ctx,
     sha: [u8; 32],
@@ -469,7 +477,7 @@ pub async fn merge_evidence(
 
 /// The version gate (B1a): every explicit workflow version or module sha selection (start
 /// with `version`, migrate target, rerun target). Accepts immediately when the target is
-/// the active version or already carries valid evidence (W3). Stub: allowed.
+/// the active version or already carries valid evidence (W3; 14-19).
 pub async fn version_gate(
     ctx: &P14Ctx,
     tenant: Option<&str>,
@@ -480,7 +488,7 @@ pub async fn version_gate(
     module_sign::version_gate(ctx, tenant, workflow, version, sha).await
 }
 
-/// The activation gate (B1c) for the activating `tenant`. Stub: allowed.
+/// The activation gate (B1c) for the activating `tenant` (14-19).
 pub async fn activation_gate(
     ctx: &P14Ctx,
     tenant: Option<&str>,
@@ -499,7 +507,7 @@ pub enum RegisterDecision {
 }
 
 /// The existing-sha branch of an upload (14-16: per-tenant module registration, ext 114).
-/// Stub: [`RegisterDecision::Proceed`].
+/// Implemented in [`upload_tenant`].
 pub async fn register_existing(
     ctx: &P14Ctx,
     sha: [u8; 32],
@@ -543,7 +551,8 @@ pub struct WorkerAuditEvent {
     pub outcome: AuditOutcome,
 }
 
-/// Record a worker join / renew / token revoke (14-18). Stub: no-op.
+/// Record a worker join / renew (14-18; a token revoke is audited by the guard and ignored
+/// here).
 pub fn worker_event(ctx: &P14Ctx, ev: WorkerAuditEvent) {
     audit_hooks::worker_event(ctx, ev);
 }

@@ -249,11 +249,17 @@ pub fn wire(
     services.attach_p11(&ctx);
 
     let ui = ui_config(cfg);
-    if ui.enabled && !cfg.api.listen.ip().is_loopback() {
+    // Phase 14 (14-03, 14-21): token mode authenticates REST, gRPC and /ui (UI sign-in with
+    // an API token). Only `[auth] mode = "none"` leaves them open; `ostro server` refuses
+    // that on a non-loopback listener unless `allow_insecure_none` (`validate_auth`), and
+    // `ostro dev` may still run it there.
+    if cfg.auth.mode == crate::config::AuthMode::None && !cfg.api.listen.ip().is_loopback() {
         warn!(
             listen = %cfg.api.listen,
-            "the embedded UI (/ui) and the REST API are unauthenticated until Phase 14; \
-             they are served on a non-loopback listener"
+            ui = ui.enabled,
+            "[auth] mode = \"none\": the REST/gRPC API{} accept every request as the dev \
+             principal on a non-loopback listener",
+            if ui.enabled { " and the embedded UI (/ui)" } else { "" }
         );
     }
     api_cfg.max_payload_bytes = usize::try_from(ctx.limits.max_payload_bytes).unwrap_or(usize::MAX);
