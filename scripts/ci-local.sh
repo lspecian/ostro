@@ -67,7 +67,7 @@ MUSL_TARGET="x86_64-unknown-linux-musl"
 # (09-08's child:: failpoints). 13-20 appends the Phase 13 server failpoint targets:
 # p13_boot_modes (13-09 member:: crash points), p13_module_gc (13-15 gc::mutant::single_scan
 # bites) and p13_promote (13-16 member::init_after_ca).
-FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance ostro-server:children_failpoints ostro-server:rerun_rearm ostro-server:dlq_api ostro-server:bulk_ops ostro:ops_kill ostro-server:p13_boot_modes ostro-server:p13_module_gc ostro-server:p13_promote ostro-server:audit_journal)
+FAILPOINT_CRATES=(ostro-wal ostro-blob ostro-log ostro-partition ostro-crashtest ostro-meta ostro-engine:aot_failpoints ostro-server:failpoints_phase5 ostro-backup ostro-bridge ostro:fx_redrive ostro:fx_sql_crash ostro-worker ostro-cluster ostro-repl-conformance ostro-server:children_failpoints ostro-server:rerun_rearm ostro-server:dlq_api ostro-server:bulk_ops ostro:ops_kill ostro-server:p13_boot_modes ostro-server:p13_module_gc ostro-server:p13_promote ostro-server:audit_journal ostro-server:audit_log)
 # Crates linted with `--features failpoints` that have no failpoint suite of their own
 # (the `ostro` binary forwards the feature to ostro-server; plan 05-18).
 FAILPOINT_LINT_ONLY=(ostro)
