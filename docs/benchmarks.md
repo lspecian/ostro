@@ -217,3 +217,99 @@ fsync with the same switch.
 
 **Gate status: unchanged, human_needed.** NFR-2.4 (idle p50 < 5 ms) is judged on native
 Linux NVMe (D15). On WSL2 the idle figure is fsync-bound and moves with the virtual disk.
+
+## Phase 14 (1.0 configuration)
+
+Plan 14-23 (QA-04, D-P14-21). These benchmarks run the 1.0 configuration: token auth (a
+bootstrapped system admin creates tenant `bench` and a tenant token, and the load uses that
+token), the audit journal on, and generous tenant quotas on the admission path. They run as
+loopback processes with the release `ostro` binary. The harness is `crates/ostro-jepsen`
+(`src/bench.rs`, tests `bench_single` and `bench_rf3`).
+
+### Method
+
+- **A step counts only when it is found on disk.** For the single node, after the load the
+  node is killed with `kill -9`, and its WAL is scanned offline. Each acknowledged run needs
+  its `StartRun` and its 10 distinct `StepCompleted` events. The node is then restarted on
+  the same data dir, and every acknowledged run is read back through the API: status
+  `completed`, and 10 distinct `step_completed` events in its history. For RF=3 (three
+  processes, `min_insync` 2), the cluster is stopped with `kill -9`. Every replica's WAL is
+  then scanned offline, and each acknowledged run needs all of that on at least `min_insync`
+  replicas. **acked == on disk is always asserted.**
+- **Load:** 64 closed-loop clients, each starting a profile-A run (`trivial-steps`, n=10)
+  and long-polling its result. There is a 10 s warm-up, then a 60 s measured window.
+- **steps/s** = verified steps of the runs whose completion was acknowledged inside the
+  window, divided by the window length.
+- **Bytes on disk per step** = growth of `wal/`, `state/`, `blobs/` and `audit/`, summed
+  over every node, from before the load to after the stop, divided by the verified steps.
+- **Commit latency:** there is no Phase 12 commit-latency histogram (14-01 finding). Commit
+  latency is therefore measured client-side as start request to start acknowledgement
+  (the 12-17 method). The server's `ostro_apply_batch_seconds` p99 (a bucket bound) is
+  reported next to it.
+- **Client ack latency:** start request to the completed result.
+- **Thresholds** are asserted only with `OSTRO_BENCH_ENFORCE=1`:
+  - single node: ≥ 10,000 steps/s (NFR-2.5);
+  - RF=3: ≥ 5,000 steps/s and commit p99 < 20 ms.
+- **Reports:** `target/bench/{single,rf3}.json` (workspace root), with the binary sha256,
+  HEAD and machine load at start and end.
+
+```text
+cargo build -p ostro --release --locked
+cargo build -p ostro --features failpoints --target-dir target/failpoints --locked
+cargo test --release -p ostro-jepsen --locked --test bench_single -- --ignored --nocapture --test-threads=1
+cargo test --release -p ostro-jepsen --locked --test bench_rf3 -- --ignored --nocapture --test-threads=1
+# gate box: add OSTRO_BENCH_ENFORCE=1
+```
+
+| variable | default | meaning |
+|---|---|---|
+| `OSTRO_BENCH_ENFORCE` | unset | `1` asserts the thresholds |
+| `OSTRO_BENCH_SECS` / `OSTRO_BENCH_WARMUP_SECS` | 60 / 10 | measured window, warm-up |
+| `OSTRO_BENCH_CLIENTS` | 64 | closed-loop clients |
+| `OSTRO_BENCH_BIN` | `target/release/ostro` | node binary (falls back to the failpoint build, advisory) |
+| `OSTRO_BENCH_OUT` | `target/bench` | report directory |
+
+### Tooling validation on a loaded dell-4 (NOT the gate numbers)
+
+These runs were short (5 s warm-up and a 20 s window) on dell-4 (24 cpus visible to the
+container, NVMe). Other lanes were running a full CI run and two crash campaigns at the
+same time: the load average was 34 to 63. The release binary had sha256 `899957ca…`, and
+HEAD was 84021e2. **The numbers only show that the instruments work. They are not
+performance results.**
+
+| bench | acked runs | verified on disk | steps/s | commit p50 / p99 | client ack p50 / p99 | bytes/step (wal + state) |
+|---|---|---|---|---|---|---|
+| single node | 81,585 | 81,585 (and 81,585 read back after the restart) | 29,421 | 7.5 / 49.3 ms | 17.1 / 73.9 ms | 147.7 + 98.1 |
+| RF=3 loopback | 11,091 | 11,091 on ≥ 2 replicas | 4,359 | 67.4 / 180.7 ms | 138.3 / 313.5 ms | 442.9 (three WALs) |
+
+The audit journal does not grow with starts: only admin actions are audited, so audit bytes
+per step are 0.
+
+Two full-length (10 s + 60 s) single-node runs used as the soak's rated load measured
+**42,002** and **41,472** verified steps/s, every acknowledged run on disk. Both ran
+while dell-4 was less loaded (load average 20 to 24) and are still advisory.
+
+### Soak
+
+The soak criteria, the driver (`ostro-soak`) and the smoke are in `docs/soak.md`. The
+third 300 s smoke on the loaded dell-4 ran one node at 0.7 × 41,472 = 2,903 runs/s. It
+**FAILED on C1 (RSS) and C2 (fds)** and passed every correctness criterion:
+
+- 0 lost acknowledged runs;
+- 0 duplicate journal entries in 2,000 runs read back;
+- the audit chain verified at every sample;
+- 0 restarts;
+- the load was sustained at 100%;
+- start-ack p99 47.6 ms and run p99 135.7 ms over 696,760 runs.
+
+Over the window, anonymous memory grew from 1.49 GB to 3.06 GB. The node's fds stayed at
+about 5,200 after a latency spike (the driver's connection pool). Both are open findings
+(14-23 SUMMARY). The smoke has not passed yet.
+
+### Gate procedure (human_needed / orchestrator)
+
+1. Run on a quiet dell-4 (nothing in the other lanes), then on the native NVMe 8 vCPU box
+   (D15). Run each bench three times and keep the median.
+2. For the gate, set `OSTRO_BENCH_ENFORCE=1`. Record `target/bench/*.json` in
+   `14-VERIFICATION.md`.
+3. The RF=3 thresholds are a loopback figure here. The LAN figure needs three machines.
