@@ -37,6 +37,17 @@ async fn wait_status(n: &P11Node, id: &str, want: &str) -> Value {
     n.api.wait_run(id, T, |r| r["status"] == want).await
 }
 
+/// How many of `ids` are terminal.
+async fn terminated_of(n: &P11Node, ids: &[String]) -> usize {
+    let mut k = 0;
+    for id in ids {
+        if is_terminal(status_of(n, id).await["status"].as_str().unwrap()) {
+            k += 1;
+        }
+    }
+    k
+}
+
 /// The new run id of an htmx action answered with `HX-Redirect: /ui/runs/<id>`.
 fn redirected_run(r: &UiResp, what: &str) -> String {
     assert_eq!(r.status, StatusCode::OK, "{what}: {}", r.body);
@@ -49,7 +60,17 @@ fn redirected_run(r: &UiResp, what: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ui_pages_and_actions_change_real_state() {
     let _g = SERIAL.lock().await;
-    let mut n = P11Node::start(&Profile::Dev, &[]).await;
+    // Bulk burst 1 and one op in flight: a `rate=1` job really starts one op per second
+    // (the default burst of 10 with 4 ops in flight starts the whole slow job below at
+    // once, so it can finish before the cancel lands).
+    let mut n = P11Node::start(
+        &Profile::Dev,
+        &[
+            ("OSTRO_BULK__BURST", "1"),
+            ("OSTRO_BULK__MAX_IN_FLIGHT", "1"),
+        ],
+    )
+    .await;
     let base = format!("http://{}", n.addr);
 
     // `/` -> 303 /ui/ (UI enabled on the loopback dev listener, D-P11-17).
@@ -348,7 +369,11 @@ async fn ui_pages_and_actions_change_real_state() {
     let prog = ui.get_fragment(&format!("/ui/bulk/{job}/progress")).await;
     prog.assert_page("bulk progress");
 
-    let slow: Vec<String> = (0..5)
+    // A paced job (1 op/s, one op in flight) over 10 parked runs, cancelled through the
+    // UI. Once it reads `cancelled`, at most the one op in flight may still finish; after
+    // that the terminated count must not grow (a job that kept going would terminate
+    // about one more run per second).
+    let slow: Vec<String> = (0..10)
         .map(|_| n.run_nowait(PIPELINE, PARKED, &["ui-slow"]))
         .collect();
     let r = ui
@@ -377,16 +402,23 @@ async fn ui_pages_and_actions_change_real_state() {
         (j["state"] == "cancelled").then_some(j)
     })
     .await;
+    let at_cancel = terminated_of(&n, &slow).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let mut alive = 0;
-    for id in &slow {
-        if !is_terminal(status_of(&n, id).await["status"].as_str().unwrap()) {
-            alive += 1;
-        }
-    }
+    let settled = terminated_of(&n, &slow).await;
     assert!(
-        alive >= 3,
-        "the cancelled job kept terminating runs ({alive} alive)"
+        settled <= at_cancel + 1,
+        "the cancelled job kept terminating runs ({at_cancel} at cancel, {settled} 1.5 s later)"
+    );
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let last = terminated_of(&n, &slow).await;
+    assert_eq!(
+        last, settled,
+        "the cancelled job kept terminating runs ({settled} -> {last} over 2.5 s)"
+    );
+    assert!(
+        last + 3 <= slow.len(),
+        "the paced job finished before the cancel landed ({last} of {} terminated)",
+        slow.len()
     );
     n.stop();
 }
