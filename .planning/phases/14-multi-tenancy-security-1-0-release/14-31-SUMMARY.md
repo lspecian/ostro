@@ -118,6 +118,23 @@ Fetch v12 of broker v4..=v18, OffsetCommit v8, ...), `test result: ok. 10 passed
 
 ## Plan gate
 
+**Gate: incomplete — cluster withdrawn; consolidated gate pending on dell-4.** The user ended
+cluster use while the reruns were in progress. Nothing further runs on the cluster, so the
+steps below are unverified for this plan and belong to the consolidated gate on dell-4:
+
+- `cargo test` (test2 units): `keda_sim::zero_to_n_to_zero` never got its alone rerun.
+- `musl zigbuild test` (musl2 units): `flow_e2e` alone passed 11/12 at b3e7208; `weights` hit
+  a server-start timeout at load 134 and was not rerun; the base-commit (51246c0) comparison
+  never ran.
+- `musl binary size limit`: not rerun under main's new 70 MB limit (b89e1fb). This plan adds
+  0 bytes (60,370,032 B both at 5ea700b and here).
+- Verified for this plan: the lint-group steps (all PASS on slot 1); test1 units,
+  failpoint suites, mutant matrices, server campaign smoke, polyglot/obuild/clients and musl
+  release (PASS in the parallel run); ostro-kafka lib/transport/skeleton/clippy/fmt/tree
+  checks and broker_auth 10/10 (local Kafka 4.1.2, twice, and the slot-1 cluster run).
+
+Details of the parallel run:
+
 `ostro-k8s-ci --parallel` at b3e7208 (p003721-32319, 251 min wall): **not green; none of the failures
 trace to this plan** (the transport is the only change, and ostro-server only anchors `ostro_kafka`):
 
