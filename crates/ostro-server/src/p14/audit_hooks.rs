@@ -211,6 +211,7 @@ pub async fn reserve(
     if classify(m).is_none() {
         return Ok(None);
     }
+    crate::audit::writer::bind_clock(ctx);
     // `AuditSink::reserve` waits up to `[audit] reserve_timeout` itself (block_in_place on
     // the multi-thread runtime).
     match ctx.audit.reserve() {
@@ -283,6 +284,7 @@ pub fn denied(ctx: &Weak<P14Ctx>, m: Method, err: &ApiError) {
         return;
     }
     let Some(ctx) = ctx.upgrade() else { return };
+    crate::audit::writer::bind_clock(&ctx);
     let why = err.reason().unwrap_or(err.code.as_str()).to_owned();
     let mut ev = event(
         &p,
@@ -318,6 +320,7 @@ pub fn worker_event(ctx: &P14Ctx, ev: WorkerAuditEvent) {
     if let Some(w) = &ev.worker_id {
         rec.details.insert("worker_id".into(), w.clone());
     }
+    crate::audit::writer::bind_clock(ctx);
     match ctx.audit.reserve() {
         Ok(permit) => {
             let fut = permit.commit(rec);

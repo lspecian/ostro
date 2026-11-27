@@ -935,6 +935,16 @@ pub fn start(ctx: &P14Ctx, stop: CancellationToken) -> Option<JoinHandle<()>> {
     }))
 }
 
+/// 14-18: hand the writer `P14Ctx.clock` without starting its task (idempotent; [`start`]
+/// hands it the same clock). The audit hooks call it before reserving, so guarded calls on
+/// a context whose Phase 14 services were never started (contexts built by tests) commit
+/// instead of waiting for a clock forever.
+pub fn bind_clock(ctx: &P14Ctx) {
+    if let Some(w) = lookup(&ctx.audit) {
+        w.set_clock(Arc::clone(&ctx.clock));
+    }
+}
+
 /// Flush pending coalesced records and publish the chain head (shutdown).
 pub async fn flush(ctx: &P14Ctx) {
     if let Some(w) = lookup(&ctx.audit) {

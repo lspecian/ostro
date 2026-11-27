@@ -180,9 +180,8 @@ async fn guard_passes_through_and_fills_no_phase14_slot() {
         Arc::new(ostro_api::fake::FakeControlPlane::default());
     let mut ext = ostro_api::ApiExtensions::default();
     p14::fill_extensions(&c, &mut ext);
-    // 14-17 fills the tenants and API-token slots.
-    assert!(ext.tenants.is_some() && ext.api_tokens.is_some());
-    assert!(ext.audit.is_none());
+    // 14-17 fills the tenants and API-token slots, 14-18 the audit slot.
+    assert!(ext.tenants.is_some() && ext.api_tokens.is_some() && ext.audit.is_some());
     // 14-19 fills the security slot.
     assert!(ext.security.is_some());
     let g = p14::wrap_ingress(&c, Arc::clone(&routed), ext);

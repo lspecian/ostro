@@ -82,16 +82,6 @@ pub fn authorization(token: &str) -> Option<reqwest::header::HeaderValue> {
     Some(v)
 }
 
-/// The answer of a Phase 14 client stub: `unimplemented`, naming the owner plan.
-pub(crate) fn lands_in(method: &str, plan: &str) -> ClientError {
-    ClientError {
-        status: None,
-        code: "unimplemented".to_owned(),
-        message: format!("{method}: Phase 14: implemented in {plan}"),
-        details: serde_json::Value::Null,
-    }
-}
-
 #[cfg(test)]
 mod dev_dep_anchors {
     use axum as _;

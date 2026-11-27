@@ -202,11 +202,6 @@ pub enum ClientCommand {
     Security(security::SecurityCmd),
 }
 
-/// The answer of a Phase 14 CLI stub (a usage error naming the owner plan).
-pub(crate) fn lands_in(verb: &str, plan: &str) -> CallError {
-    CallError::Usage(format!("{verb}: not implemented until {plan}"))
-}
-
 /// Run a verb to completion on a current-thread runtime.
 ///
 /// Phase 10 local verbs (`init`, `build`, `toolchain`, `doctor`, `replay`) run outside
