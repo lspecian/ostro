@@ -676,7 +676,7 @@ async fn scope_request(
         | ClusterStatus | CreateNodeToken | ClusterRemove | ClusterDrain | ClusterReassign
         | ClusterRebalance | UpgradeStatus | UpgradeFinalize | UpgradeHold | UpgradeRelease
         | RunModuleGc | CreateTenant | GetTenant | ListTenants | UpdateTenant | SuspendTenant
-        | ResumeTenant | DeleteTenant | GetModulePolicy => {
+        | ResumeTenant | DeleteTenant | GetModulePolicy | GetSealingStatus | Reseal => {
             return Err(system_only(m));
         }
     }
@@ -826,7 +826,7 @@ fn scope_response(t: &str, m: Method, resp: &mut dyn Any) -> Result<(), ApiError
         | RunModuleGc | MigrateRuns | CreateTenant | GetTenant | ListTenants | UpdateTenant
         | SuspendTenant | ResumeTenant | DeleteTenant | CreateApiToken | RevokeApiToken
         | RotateApiToken | WhoAmI | GetModulePolicy | SetModulePolicy | AddTrustedKey
-        | RemoveTrustedKey | AttachSignatures => {}
+        | RemoveTrustedKey | AttachSignatures | GetSealingStatus | Reseal => {}
     }
     Ok(())
 }

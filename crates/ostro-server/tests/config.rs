@@ -752,6 +752,7 @@ fn phase6_defaults_per_profile() {
         );
         assert_eq!(s.env_prefix, "OSTRO_SECRET_");
         assert!(s.sealing_key_file.is_none() && s.vault.is_none() && s.k8s.is_none());
+        assert!(s.old_sealing_key_files.is_empty(), "{name}");
         let e = c.egress.to_bridge().expect("egress");
         assert!(e.allow_private.is_empty(), "{name}: deny-by-default");
         assert_eq!(e.connect_timeout, Duration::from_secs(5));
@@ -786,12 +787,32 @@ fn phase6_defaults_per_profile() {
 }
 
 #[test]
+fn old_sealing_key_files_from_the_environment() {
+    let c = load_toml_env(
+        "",
+        &env(&[("OSTRO_SECRETS__OLD_SEALING_KEY_FILES", "/k/a.key,/k/b.key")]),
+    )
+    .expect("env list");
+    assert_eq!(
+        c.secrets
+            .to_bridge()
+            .expect("secrets")
+            .old_sealing_key_files,
+        [
+            std::path::PathBuf::from("/k/a.key"),
+            std::path::PathBuf::from("/k/b.key")
+        ]
+    );
+}
+
+#[test]
 fn phase6_full_example_parses() {
     let c = load_toml(
         r#"
 [secrets]
 providers = ["vault", "sealed", "env", "file", "k8s"]
 sealing_key_file = "/etc/ostro/sealing.key"
+old_sealing_key_files = ["/etc/ostro/sealing-old.key"]
 env_prefix = "MY_SECRET_"
 file_dir = "/run/secrets"
 auto_sealing_key = true
@@ -837,6 +858,10 @@ public_base_url = "https://ostro.example.com/"
         ["vault", "sealed", "env", "file", "k8s"]
     );
     assert_eq!(s.env_prefix, "MY_SECRET_");
+    assert_eq!(
+        s.old_sealing_key_files,
+        [std::path::PathBuf::from("/etc/ostro/sealing-old.key")]
+    );
     assert_eq!(
         s.file_dir.as_deref(),
         Some(std::path::Path::new("/run/secrets"))

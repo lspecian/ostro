@@ -241,6 +241,10 @@ service Security {
   rpc RemoveTrustedKey(RemoveTrustedKeyRequest) returns (ModulePolicy);
   // Verify and attach signatures to a stored module.
   rpc AttachSignatures(AttachSignaturesRequest) returns (AttachSignaturesResponse);
+  // Which sealing keys the stored sealed records use (p14-key-rotation).
+  rpc GetSealingStatus(GetSealingStatusRequest) returns (SealingStatus);
+  // Re-seal every stored sealed record with the current sealing key (idempotent).
+  rpc Reseal(ResealRequest) returns (ResealResponse);
 }
 
 message TrustedKey {
@@ -286,4 +290,45 @@ message AttachSignaturesRequest {
 message AttachSignaturesResponse {
   string sha256 = 1;
   repeated string key_ids = 2;
+}
+
+// ---- sealing-key rotation (p14-key-rotation) ------------------------------------------
+
+message SealingKeyUse {
+  // aes256gcm:<kid> or plaintext-v0.
+  string key_id = 1;
+  // current, old, unknown or plaintext.
+  string state = 2;
+  uint64 records = 3;
+}
+
+// Judged against the answering node's key ring.
+message SealingStatus {
+  uint64 node = 1;
+  // Absent = no sealing key resolves on the node.
+  optional string current_key_id = 2;
+  repeated string old_key_ids = 3;
+  uint64 records = 4;
+  uint64 current = 5;
+  uint64 old = 6;
+  uint64 unknown = 7;
+  uint64 plaintext = 8;
+  repeated SealingKeyUse keys = 9;
+  // old == 0: the old keys can be removed.
+  bool old_keys_removable = 10;
+}
+
+message GetSealingStatusRequest {}
+
+message ResealRequest {}
+
+message ResealResponse {
+  string key_id = 1;
+  uint64 records = 2;
+  uint64 resealed = 3;
+  uint64 already_current = 4;
+  uint64 skipped = 5;
+  // "<record>: <reason>" per record that could not be re-sealed.
+  repeated string failed = 6;
+  SealingStatus status = 7;
 }

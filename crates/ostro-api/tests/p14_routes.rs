@@ -156,6 +156,8 @@ async fn absent_slots_answer_404_and_unimplemented() {
             Some(json!({"alg": "minisign", "key_id": "k", "public_key": "p"})),
         ),
         ("DELETE", "/v1/security/modules/keys/k", None),
+        ("GET", "/v1/security/sealing", None),
+        ("POST", "/v1/security/sealing/reseal", None),
         (
             "POST",
             &format!("/v1/modules/{SHA}/signatures"),
@@ -433,6 +435,28 @@ async fn audit_and_security_routes() {
         )
         .await;
     assert_eq!(st, StatusCode::OK, "8 KiB is the limit, inclusive");
+
+    // Sealing-key rotation (p14-key-rotation): status, then an idempotent reseal.
+    f.security.add_sealed(true);
+    f.security.add_sealed(false);
+    let (st, v) = s.call("GET", "/v1/security/sealing", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["old"].clone(), v["old_keys_removable"].clone()),
+        (json!(1), json!(false))
+    );
+    let (st, v) = s.call("POST", "/v1/security/sealing/reseal", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["resealed"].clone(), v["records"].clone()),
+        (json!(1), json!(2))
+    );
+    assert_eq!(v["status"]["old_keys_removable"], json!(true));
+    let (_, v) = s.call("POST", "/v1/security/sealing/reseal", None).await;
+    assert_eq!(
+        (v["resealed"].clone(), v["already_current"].clone()),
+        (json!(0), json!(2))
+    );
 }
 
 fn module() -> (Vec<u8>, String) {

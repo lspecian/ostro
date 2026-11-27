@@ -6,6 +6,8 @@
 //! | `secret set <name> [--tenant T] [--from-file P \| --from-env V]` | `PUT /v1/secrets/{name}[?tenant=T]` |
 //! | `secret ls [--tenant T]` | `GET /v1/secrets[?tenant=T]` |
 //! | `secret rm <name> [--tenant T]` | `DELETE /v1/secrets/{name}[?tenant=T]` |
+//! | `secret sealing` | `GET /v1/security/sealing` (which sealing keys the stored records use) |
+//! | `secret reseal` | `POST /v1/security/sealing/reseal` (re-seal everything with the current key) |
 //! | `grant add --module M --secret S --origin O... [--body]` | `PUT /v1/grants` |
 //! | `grant ls [--module M]` | `GET /v1/grants[?module=M]` |
 //! | `grant rm <id>` | `DELETE /v1/grants/{id}` |
@@ -52,6 +54,19 @@ pub enum SecretCommand {
     Ls(SecretLsArgs),
     /// Delete a secret.
     Rm(SecretRmArgs),
+    /// Show which sealing keys the stored sealed records use (the old keys can be removed
+    /// once no record needs them).
+    Sealing(SecretConnArgs),
+    /// Re-seal every stored sealed record (user and system secrets) with the current
+    /// sealing key. Idempotent; run it after every node has the new key.
+    Reseal(SecretConnArgs),
+}
+
+/// `ostro secret sealing|reseal`.
+#[derive(Debug, Clone, Args)]
+pub struct SecretConnArgs {
+    #[command(flatten)]
+    pub conn: Conn,
 }
 
 /// `ostro secret set`.
@@ -211,6 +226,7 @@ impl SecretCommand {
             SecretCommand::Set(a) => &a.conn,
             SecretCommand::Ls(a) => &a.conn,
             SecretCommand::Rm(a) => &a.conn,
+            SecretCommand::Sealing(a) | SecretCommand::Reseal(a) => &a.conn,
         }
     }
 }
@@ -479,7 +495,80 @@ pub async fn render_secret(
                 format!("secret {} deleted", a.name)
             })
         }
+        SecretCommand::Sealing(_) => {
+            let r = c.sealing_status().await?;
+            Ok(if json {
+                pretty(&r.body)
+            } else {
+                sealing_text(&r.body)
+            })
+        }
+        SecretCommand::Reseal(_) => {
+            let r = c.reseal().await?;
+            if json {
+                return Ok(pretty(&r.body));
+            }
+            let b = &r.body;
+            let mut out = format!(
+                "re-sealed {} of {} records with {} ({} already current, {} skipped, {} failed)",
+                s(&b["resealed"]),
+                s(&b["records"]),
+                s(&b["key_id"]),
+                s(&b["already_current"]),
+                s(&b["skipped"]),
+                b["failed"].as_array().map_or(0, Vec::len),
+            );
+            for f in b["failed"].as_array().into_iter().flatten() {
+                out.push_str(&format!("\n  failed: {}", s(f)));
+            }
+            out.push('\n');
+            out.push_str(&sealing_text(&b["status"]));
+            Ok(out)
+        }
     }
+}
+
+/// `secret sealing` (and the tail of `secret reseal`): the key table and the verdict.
+fn sealing_text(b: &Value) -> String {
+    let rows: Vec<Vec<String>> = list_of(b, "keys")
+        .iter()
+        .map(|x| vec![s(&x["key_id"]), s(&x["state"]), s(&x["records"])])
+        .collect();
+    let mut out = format!(
+        "current key: {}\nold keys: {}\n",
+        if b["current_key_id"].is_string() {
+            s(&b["current_key_id"])
+        } else {
+            "(none)".to_owned()
+        },
+        b["old_key_ids"]
+            .as_array()
+            .filter(|a| !a.is_empty())
+            .map_or("(none)".to_owned(), |a| {
+                a.iter().map(s).collect::<Vec<_>>().join(", ")
+            }),
+    );
+    if rows.is_empty() {
+        out.push_str("no sealed records\n");
+    } else {
+        out.push_str(&table(&["KEY_ID", "STATE", "RECORDS"], &rows));
+        out.push('\n');
+    }
+    let old = b["old"].as_u64().unwrap_or(0);
+    let unknown = b["unknown"].as_u64().unwrap_or(0);
+    if old > 0 {
+        out.push_str(&format!(
+            "{old} records still need an old key: run `ostro secret reseal` before removing it"
+        ));
+    } else {
+        out.push_str("no record needs an old key: the old keys can be removed");
+    }
+    if unknown > 0 {
+        out.push_str(&format!(
+            "\n{unknown} records are sealed with a key this node does not hold"
+        ));
+    }
+    out
 }
 
 /// Run one `grant` verb and return what it prints on stdout.
@@ -755,6 +844,40 @@ mod tests {
         };
         let e = read_secret_value(&a).unwrap_err();
         assert!(e.message().contains("is not set"), "{}", e.message());
+    }
+
+    #[test]
+    fn sealing_verbs_parse_and_render() {
+        for (verb, want_reseal) in [("sealing", false), ("reseal", true)] {
+            let ClientCommand::Secret { command } = parse(&["secret", verb]).unwrap() else {
+                panic!("secret {verb}")
+            };
+            assert_eq!(matches!(command, SecretCommand::Reseal(_)), want_reseal);
+        }
+        let old = json!({
+            "current_key_id": "aes256gcm:22222222",
+            "old_key_ids": ["aes256gcm:11111111"],
+            "old": 2, "unknown": 1,
+            "keys": [
+                {"key_id": "aes256gcm:11111111", "state": "old", "records": 2},
+                {"key_id": "aes256gcm:22222222", "state": "current", "records": 3},
+            ],
+        });
+        let t = sealing_text(&old);
+        assert!(t.contains("current key: aes256gcm:22222222"), "{t}");
+        assert!(t.contains("old keys: aes256gcm:11111111"), "{t}");
+        assert!(t.contains("2 records still need an old key"), "{t}");
+        assert!(
+            t.contains("1 records are sealed with a key this node does not hold"),
+            "{t}"
+        );
+        let done = json!({"current_key_id": "aes256gcm:22222222", "old_key_ids": [], "old": 0});
+        let t = sealing_text(&done);
+        assert!(
+            t.contains("old keys: (none)") && t.contains("no sealed records"),
+            "{t}"
+        );
+        assert!(t.contains("the old keys can be removed"), "{t}");
     }
 
     #[test]

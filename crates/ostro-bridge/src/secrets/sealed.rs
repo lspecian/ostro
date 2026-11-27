@@ -16,6 +16,14 @@
 //! `plaintext-v0` (the Phase 4 await-token key, `__ostro/token-key`) is opened as raw bytes;
 //! `seal` never produces it. After [`SealingKeyRing::rotate`] new seals use the new key and
 //! ciphertexts under old kids still open.
+//!
+//! # Rotation (p14-key-rotation)
+//!
+//! Every record names the key that sealed it (`key_id = aes256gcm:<kid>`), so opening looks
+//! the kid up in the ring: the current key or any old key. Old keys are loaded next to the
+//! current one from `OSTRO_SEALING_KEY_OLD` (comma-separated base64 keys) and `[secrets]
+//! old_sealing_key_files`; they only open, `seal` always uses the current key. The envelope
+//! is unchanged (version 1), so records written by every earlier release stay readable.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -41,6 +49,8 @@ pub const AAD_PREFIX: &[u8] = b"ostro/secret/v1";
 pub const KEY_ID_PREFIX: &str = "aes256gcm:";
 /// Environment variable holding the base64 sealing key (RESERVATIONS §11).
 pub const SEALING_KEY_ENV: &str = "OSTRO_SEALING_KEY";
+/// Environment variable holding older sealing keys (comma-separated base64), opening only.
+pub const SEALING_KEY_OLD_ENV: &str = "OSTRO_SEALING_KEY_OLD";
 /// File name of the dev-profile auto-generated key under the data dir.
 pub const DEV_KEY_FILE: &str = "sealing.key";
 /// Key length.
@@ -70,8 +80,18 @@ pub enum SealError {
         err: std::io::Error,
     },
     /// The record's `key_id` names no key in the ring (or an unknown scheme).
-    #[error("unknown sealing key id {0:?}")]
+    #[error(
+        "unknown sealing key id {0:?}: sealed with a key this node does not hold (an old key \
+         goes into [secrets] old_sealing_key_files or OSTRO_SEALING_KEY_OLD until `ostro \
+         secret reseal` has re-sealed every record)"
+    )]
     UnknownKeyId(String),
+    /// Old keys are configured but no current key resolves.
+    #[error(
+        "old sealing keys are configured but there is no current sealing key (set \
+         OSTRO_SEALING_KEY or [secrets] sealing_key_file)"
+    )]
+    OldKeysWithoutCurrent,
     /// The ciphertext is not a valid version-1 envelope.
     #[error("malformed sealed secret envelope")]
     Malformed,
@@ -199,9 +219,44 @@ impl SealingKeyRing {
         key.zeroize();
     }
 
+    /// Adds `key` for opening only (the current key is unchanged; a key already in the ring
+    /// is a no-op). `key` is zeroized.
+    pub fn add_old(&mut self, mut key: [u8; KEY_LEN]) {
+        let kid = kid_of(&key);
+        self.keys.entry(kid).or_insert_with(|| {
+            RandomizedNonceKey::new(&AES_256_GCM, &key).expect("32-byte AES-256 key")
+        });
+        key.zeroize();
+    }
+
     /// The current kid.
     pub fn current_kid(&self) -> &str {
         &self.current
+    }
+
+    /// The kids of the old (opening-only) keys, sorted.
+    pub fn old_kids(&self) -> Vec<String> {
+        self.keys
+            .keys()
+            .filter(|k| **k != self.current)
+            .cloned()
+            .collect()
+    }
+
+    /// The `key_id`s (`aes256gcm:<kid>`) of the old keys, sorted.
+    pub fn old_key_ids(&self) -> Vec<String> {
+        self.old_kids()
+            .into_iter()
+            .map(|k| format!("{KEY_ID_PREFIX}{k}"))
+            .collect()
+    }
+
+    /// Whether a record with `key_id` opens with this ring (an `aes256gcm:<kid>` the ring
+    /// holds; `plaintext-v0` needs no key and answers `false`).
+    pub fn holds(&self, key_id: &str) -> bool {
+        key_id
+            .strip_prefix(KEY_ID_PREFIX)
+            .is_some_and(|k| self.keys.contains_key(k))
     }
 
     /// The current `key_id` (`aes256gcm:<kid>`).
@@ -216,8 +271,11 @@ impl SealingKeyRing {
     /// 3. `dev` only: `<data_dir>/sealing.key`, created with mode 0600 (and a warning naming
     ///    the path) if missing.
     ///
+    /// Then the old (opening-only) keys: `OSTRO_SEALING_KEY_OLD` (comma-separated base64)
+    /// and every `[secrets] old_sealing_key_files` entry.
+    ///
     /// `Ok(None)` = server mode without a key: the caller refuses to store secrets. A key of
-    /// the wrong length or encoding is an error.
+    /// the wrong length or encoding is an error, and so are old keys without a current key.
     pub fn load(
         cfg: &SecretsConfig,
         data_dir: &Path,
@@ -235,23 +293,56 @@ impl SealingKeyRing {
     ) -> Result<Option<Self>, SealError> {
         let key = if let Some(v) = env(SEALING_KEY_ENV) {
             let v = Zeroizing::new(v.into_encoded_bytes());
-            decode_key(&v, SEALING_KEY_ENV)?
+            Some(decode_key(&v, SEALING_KEY_ENV)?)
         } else if let Some(p) = &cfg.sealing_key_file {
-            read_key_file(p)?
+            Some(read_key_file(p)?)
         } else if dev {
             let p = data_dir.join(DEV_KEY_FILE);
-            match read_key_file(&p) {
+            Some(match read_key_file(&p) {
                 Ok(k) => k,
                 Err(SealError::Io { err, .. }) if err.kind() == std::io::ErrorKind::NotFound => {
                     create_dev_key(&p)?
                 }
                 Err(e) => return Err(e),
-            }
+            })
         } else {
-            return Ok(None);
+            None
         };
-        Ok(Some(Self::from_bytes(*key)))
+        let old = load_old_keys(cfg, env)?;
+        let Some(key) = key else {
+            if old.is_empty() {
+                return Ok(None);
+            }
+            return Err(SealError::OldKeysWithoutCurrent);
+        };
+        let mut ring = Self::from_bytes(*key);
+        for k in old {
+            ring.add_old(*k);
+        }
+        Ok(Some(ring))
     }
+}
+
+/// The old keys: `OSTRO_SEALING_KEY_OLD` (comma-separated base64, empty items ignored), then
+/// every `old_sealing_key_files` entry.
+fn load_old_keys(
+    cfg: &SecretsConfig,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<Vec<Zeroizing<[u8; KEY_LEN]>>, SealError> {
+    let mut out = Vec::new();
+    if let Some(v) = env(SEALING_KEY_OLD_ENV) {
+        let v = Zeroizing::new(v.into_encoded_bytes());
+        for (i, item) in v.split(|b| *b == b',').enumerate() {
+            if item.trim_ascii().is_empty() {
+                continue;
+            }
+            out.push(decode_key(item, &format!("{SEALING_KEY_OLD_ENV}[{i}]"))?);
+        }
+    }
+    for p in &cfg.old_sealing_key_files {
+        out.push(read_key_file(p)?);
+    }
+    Ok(out)
 }
 
 /// Seals and opens `SealedSecret` records.
@@ -565,6 +656,100 @@ mod tests {
             SealingKeyRing::load_with(&missing, dir.path(), true, &no_env),
             Err(SealError::Io { .. })
         ));
+    }
+
+    #[test]
+    fn old_keys_open_but_never_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_file = dir.path().join("old.key");
+        std::fs::write(&old_file, STANDARD.encode([2u8; 32])).unwrap();
+        let cfg = SecretsConfig {
+            old_sealing_key_files: vec![old_file.clone()],
+            ..SecretsConfig::default()
+        };
+        let cur = STANDARD.encode([1u8; 32]);
+        let olds = format!(
+            " {} ,, {}",
+            STANDARD.encode([3u8; 32]),
+            STANDARD.encode([1u8; 32])
+        );
+        let env = |k: &str| match k {
+            SEALING_KEY_ENV => Some(OsString::from(cur.clone())),
+            SEALING_KEY_OLD_ENV => Some(OsString::from(olds.clone())),
+            _ => None,
+        };
+        let r = SealingKeyRing::load_with(&cfg, dir.path(), false, &env)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.current_kid(), kid_of(&[1; 32]));
+        // The current key listed as old too is not an old key.
+        let mut want = vec![kid_of(&[2; 32]), kid_of(&[3; 32])];
+        want.sort();
+        assert_eq!(r.old_kids(), want);
+        assert!(r.holds(&format!("aes256gcm:{}", kid_of(&[3; 32]))));
+        assert!(!r.holds("plaintext-v0") && !r.holds("aes256gcm:00000000"));
+        let st = SealedStore::new(Arc::new(r));
+        for seed in [2u8, 3] {
+            let old = store(seed).seal("_/k", CANARY).unwrap();
+            assert_eq!(st.open(&old).unwrap().expose(), CANARY);
+        }
+        let new = st.seal("_/k", CANARY).unwrap();
+        assert_eq!(new.key_id, format!("aes256gcm:{}", kid_of(&[1; 32])));
+
+        // Old keys with the file key as current.
+        let cur_file = dir.path().join("cur.key");
+        std::fs::write(&cur_file, [9u8; 32]).unwrap();
+        let cfg2 = SecretsConfig {
+            sealing_key_file: Some(cur_file),
+            ..cfg.clone()
+        };
+        let r = SealingKeyRing::load_with(&cfg2, dir.path(), false, &no_env)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.current_kid(), kid_of(&[9; 32]));
+        assert_eq!(r.old_key_ids(), [format!("aes256gcm:{}", kid_of(&[2; 32]))]);
+
+        // Old keys without a current key: refused, never promoted to current.
+        assert!(matches!(
+            SealingKeyRing::load_with(&cfg, dir.path(), false, &no_env),
+            Err(SealError::OldKeysWithoutCurrent)
+        ));
+        let only_old = |k: &str| (k == SEALING_KEY_OLD_ENV).then(|| OsString::from(cur.clone()));
+        assert!(matches!(
+            SealingKeyRing::load_with(&SecretsConfig::default(), dir.path(), false, &only_old),
+            Err(SealError::OldKeysWithoutCurrent)
+        ));
+        // A bad old key is an error naming its source.
+        let bad = |k: &str| match k {
+            SEALING_KEY_ENV => Some(OsString::from(cur.clone())),
+            SEALING_KEY_OLD_ENV => Some(OsString::from(STANDARD.encode([1u8; 8]))),
+            _ => None,
+        };
+        let e = SealingKeyRing::load_with(&SecretsConfig::default(), dir.path(), false, &bad)
+            .unwrap_err();
+        assert!(e.to_string().contains("OSTRO_SEALING_KEY_OLD[0]"), "{e}");
+        let missing = SecretsConfig {
+            old_sealing_key_files: vec![dir.path().join("nope")],
+            ..cfg2
+        };
+        assert!(matches!(
+            SealingKeyRing::load_with(&missing, dir.path(), false, &no_env),
+            Err(SealError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_key_error_names_the_fix() {
+        let s = store(5).seal("_/k", CANARY).unwrap();
+        let e = store(6).open(&s).unwrap_err();
+        let msg = e.to_string();
+        assert!(matches!(e, SealError::UnknownKeyId(ref k) if *k == s.key_id));
+        assert!(
+            msg.contains(&s.key_id)
+                && msg.contains("old_sealing_key_files")
+                && msg.contains("OSTRO_SEALING_KEY_OLD"),
+            "{msg}"
+        );
     }
 
     #[test]

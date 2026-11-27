@@ -67,8 +67,9 @@ use ostro_api::phase13::{
 };
 use ostro_api::phase14::{
     ApiTokensApi, AttachSignaturesRequest, AttachSignaturesResult, AuditApi, AuditPage, AuditQuery,
-    CreateTokenRequest, CreatedToken, ModulePolicy, RotateTokenRequest, SecurityApi, TenantInfo,
-    TenantPatch, TenantSpec, TenantsApi, TokenInfo, TrustedKeySpec, WhoAmI,
+    CreateTokenRequest, CreatedToken, ModulePolicy, ResealResult, RotateTokenRequest,
+    SealingStatus, SecurityApi, TenantInfo, TenantPatch, TenantSpec, TenantsApi, TokenInfo,
+    TrustedKeySpec, WhoAmI,
 };
 use ostro_api::{ApiError, ApiExtensions};
 use ostro_types::audit::{AuditOutcome, AuditPermit};
@@ -208,9 +209,8 @@ pub const fn wrapper_of(m: Method) -> &'static str {
             "GuardedApiTokens"
         }
         QueryAudit => "GuardedAudit",
-        GetModulePolicy | SetModulePolicy | AddTrustedKey | RemoveTrustedKey | AttachSignatures => {
-            "GuardedSecurity"
-        }
+        GetModulePolicy | SetModulePolicy | AddTrustedKey | RemoveTrustedKey | AttachSignatures
+        | GetSealingStatus | Reseal => "GuardedSecurity",
     }
 }
 
@@ -618,5 +618,7 @@ guarded! {
         fn add_trusted_key(key: TrustedKeySpec) -> ModulePolicy => AddTrustedKey, |k: &TrustedKeySpec| k.key_id.clone();
         fn remove_trusted_key(key_id: String) -> ModulePolicy => RemoveTrustedKey, text;
         fn attach_signatures(req: AttachSignaturesRequest) -> AttachSignaturesResult => AttachSignatures, |r: &AttachSignaturesRequest| r.sha256.clone();
+        fn get_sealing_status() -> SealingStatus => GetSealingStatus, no_target;
+        fn reseal() -> ResealResult => Reseal, no_target;
     }
 }

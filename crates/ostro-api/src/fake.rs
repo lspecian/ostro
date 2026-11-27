@@ -3371,7 +3371,44 @@ mod p14 {
     struct SecurityState {
         policy: ModulePolicy,
         modules: BTreeMap<String, Vec<String>>,
+        /// Sealed records: `true` = on the current key (p14-key-rotation).
+        sealed: Vec<bool>,
         errors: Errors,
+    }
+
+    /// The fake's current and old sealing key ids.
+    pub const FAKE_SEALING_KEYS: [&str; 2] = ["aes256gcm:fa4ec0de", "aes256gcm:01d0c0de"];
+
+    fn fake_sealing_status(sealed: &[bool]) -> SealingStatus {
+        let current = sealed.iter().filter(|c| **c).count() as u64;
+        let old = sealed.len() as u64 - current;
+        let mut keys = Vec::new();
+        if old > 0 {
+            keys.push(SealingKeyUse {
+                key_id: FAKE_SEALING_KEYS[1].into(),
+                state: "old".into(),
+                records: old,
+            });
+        }
+        if current > 0 {
+            keys.push(SealingKeyUse {
+                key_id: FAKE_SEALING_KEYS[0].into(),
+                state: "current".into(),
+                records: current,
+            });
+        }
+        SealingStatus {
+            node: 1,
+            current_key_id: Some(FAKE_SEALING_KEYS[0].into()),
+            old_key_ids: vec![FAKE_SEALING_KEYS[1].into()],
+            records: sealed.len() as u64,
+            current,
+            old,
+            unknown: 0,
+            plaintext: 0,
+            keys,
+            old_keys_removable: old == 0,
+        }
     }
 
     /// In-memory [`SecurityApi`]: the policy, keys (409 on a duplicate id, 404 on removing
@@ -3392,6 +3429,11 @@ mod p14 {
         /// Make `method` (a [`SecurityApi`] method name) answer `err`.
         pub fn fail(&self, method: &str, err: Option<ApiError>) {
             lock(&self.state).errors.set(method, err);
+        }
+
+        /// Add a sealed record, on the current key or an old one.
+        pub fn add_sealed(&self, current: bool) {
+            lock(&self.state).sealed.push(current);
         }
 
         /// Register a stored module.
@@ -3497,6 +3539,29 @@ mod p14 {
             Ok(AttachSignaturesResult {
                 sha256: r.sha256,
                 key_ids: m.clone(),
+            })
+        }
+
+        async fn get_sealing_status(&self) -> Result<SealingStatus, ApiError> {
+            let st = lock(&self.state);
+            st.errors.check("get_sealing_status")?;
+            Ok(fake_sealing_status(&st.sealed))
+        }
+
+        async fn reseal(&self) -> Result<ResealResult, ApiError> {
+            let mut st = lock(&self.state);
+            st.errors.check("reseal")?;
+            let resealed = st.sealed.iter().filter(|c| !**c).count() as u64;
+            let records = st.sealed.len() as u64;
+            st.sealed.iter_mut().for_each(|c| *c = true);
+            Ok(ResealResult {
+                key_id: FAKE_SEALING_KEYS[0].into(),
+                records,
+                resealed,
+                already_current: records - resealed,
+                skipped: 0,
+                failed: Vec::new(),
+                status: fake_sealing_status(&st.sealed),
             })
         }
     }

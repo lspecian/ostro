@@ -4,6 +4,7 @@
 //! [secrets]
 //! providers = ["sealed", "env", "file"]   # ordered; the first provider that has the secret wins
 //! sealing_key_file = "/etc/ostro/sealing.key"
+//! old_sealing_key_files = ["/etc/ostro/sealing-old.key"]   # read-only, for rotation
 //! env_prefix = "OSTRO_SECRET_"
 //! file_dir = "/run/secrets"
 //!
@@ -21,7 +22,8 @@
 //! ```
 //!
 //! The sealing key itself is never configured inline: it comes from `OSTRO_SEALING_KEY`, the
-//! `sealing_key_file`, or (dev only) `<data_dir>/sealing.key` (see
+//! `sealing_key_file`, or (dev only) `<data_dir>/sealing.key`; older keys kept for opening
+//! only come from `OSTRO_SEALING_KEY_OLD` and `old_sealing_key_files` (see
 //! [`super::sealed::SealingKeyRing::load`]).
 
 use std::path::PathBuf;
@@ -74,6 +76,9 @@ pub struct SecretsConfig {
     pub providers: Vec<ProviderKind>,
     /// File holding the 32-byte sealing key (base64 text or 32 raw bytes).
     pub sealing_key_file: Option<PathBuf>,
+    /// Older sealing keys (same file format), used only to open records sealed before a key
+    /// rotation; never used to seal (p14-key-rotation).
+    pub old_sealing_key_files: Vec<PathBuf>,
     /// Environment variable prefix of the env provider (default `OSTRO_SECRET_`).
     pub env_prefix: String,
     /// Directory of the file provider; the file provider is skipped while unset.
@@ -89,6 +94,7 @@ impl Default for SecretsConfig {
         Self {
             providers: vec![ProviderKind::Sealed, ProviderKind::Env, ProviderKind::File],
             sealing_key_file: None,
+            old_sealing_key_files: Vec::new(),
             env_prefix: DEFAULT_ENV_PREFIX.to_owned(),
             file_dir: None,
             vault: None,
@@ -233,6 +239,7 @@ mod tests {
         let c: SecretsConfig = serde_json::from_value(serde_json::json!({
             "providers": ["env", "vault", "k8s", "sealed", "file"],
             "sealing_key_file": "/etc/ostro/sealing.key",
+            "old_sealing_key_files": ["/etc/ostro/old.key"],
             "env_prefix": "MY_SECRET_",
             "file_dir": "/run/secrets",
             "vault": {
@@ -249,6 +256,10 @@ mod tests {
         }))
         .unwrap();
         c.validate().unwrap();
+        assert_eq!(
+            c.old_sealing_key_files,
+            [PathBuf::from("/etc/ostro/old.key")]
+        );
         assert_eq!(c.providers[1], ProviderKind::Vault);
         let v = c.vault.unwrap();
         assert_eq!(v.auth, VaultAuth::Approle);

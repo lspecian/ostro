@@ -216,6 +216,35 @@ fn audit_and_security_messages_round_trip() {
         sha256: "a".repeat(64),
         key_ids: vec!["0123456789abcdef".into()],
     });
+    // p14-key-rotation.
+    let status = api::SealingStatus {
+        node: 2,
+        current_key_id: Some("aes256gcm:0a0b0c0d".into()),
+        old_key_ids: vec!["aes256gcm:01020304".into()],
+        records: 5,
+        current: 3,
+        old: 1,
+        unknown: 0,
+        plaintext: 1,
+        keys: vec![api::SealingKeyUse {
+            key_id: "aes256gcm:0a0b0c0d".into(),
+            state: "current".into(),
+            records: 3,
+        }],
+        old_keys_removable: false,
+    };
+    rt(status.clone());
+    rt(api::GetSealingStatusRequest {});
+    rt(api::ResealRequest {});
+    rt(api::ResealResponse {
+        key_id: "aes256gcm:0a0b0c0d".into(),
+        records: 5,
+        resealed: 1,
+        already_current: 3,
+        skipped: 1,
+        failed: vec!["t/x: unknown sealing key id".into()],
+        status: Some(status),
+    });
 }
 
 /// Encode `(field number, LEN payload)` as protobuf wire bytes.
@@ -314,6 +343,8 @@ fn services_and_methods_have_the_reserved_names() {
         "/ostro.api.v1.Security/AddTrustedKey",
         "/ostro.api.v1.Security/RemoveTrustedKey",
         "/ostro.api.v1.Security/AttachSignatures",
+        "/ostro.api.v1.Security/GetSealingStatus",
+        "/ostro.api.v1.Security/Reseal",
         // Pre-existing services are listed too.
         "/ostro.api.v1.Cluster/Join",
         "/ostro.health.v1.Health/Check",

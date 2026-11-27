@@ -213,6 +213,8 @@ pub const fn required(m: Method) -> Requirement {
         Method::AddTrustedKey => TenantAdmin,
         Method::RemoveTrustedKey => TenantAdmin,
         Method::AttachSignatures => S(Deploy),
+        Method::GetSealingStatus => SystemAdmin,
+        Method::Reseal => SystemAdmin,
     }
 }
 

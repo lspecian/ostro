@@ -757,6 +757,36 @@ async fn attach_signatures(
     ))
 }
 
+/// Which sealing keys the stored sealed records use (p14-key-rotation).
+#[utoipa::path(
+    get,
+    path = "/v1/security/sealing",
+    tag = "security",
+    responses(
+        (status = 200, description = "Records per sealing key, against the answering node's key ring", body = SealingStatus),
+        (status = 404, description = "Security API not enabled", body = ErrorBody),
+        (status = 412, description = "A configured sealing key is unreadable (details.reason = sealing_key_invalid)", body = ErrorBody),
+    )
+)]
+async fn get_sealing_status(State(ext): State<ExtState>) -> Result<Json<SealingStatus>, ApiError> {
+    Ok(Json(security(&ext)?.get_sealing_status().await?))
+}
+
+/// Re-seal every stored sealed record with the current sealing key (idempotent).
+#[utoipa::path(
+    post,
+    path = "/v1/security/sealing/reseal",
+    tag = "security",
+    responses(
+        (status = 200, description = "Counts of the pass and the status after it", body = ResealResult),
+        (status = 404, description = "Security API not enabled", body = ErrorBody),
+        (status = 412, description = "No sealing key (details.reason = sealing_key_missing) or an unreadable one (sealing_key_invalid)", body = ErrorBody),
+    )
+)]
+async fn reseal(State(ext): State<ExtState>) -> Result<Json<ResealResult>, ApiError> {
+    Ok(Json(security(&ext)?.reseal().await?))
+}
+
 /// The Phase 14 REST routes with their OpenAPI description, without state.
 pub fn api_routes() -> OpenApiRouter<ExtState> {
     let r = OpenApiRouter::new()
@@ -771,7 +801,9 @@ pub fn api_routes() -> OpenApiRouter<ExtState> {
         .routes(routes!(query_audit))
         .routes(routes!(get_module_policy, set_module_policy))
         .routes(routes!(add_trusted_key))
-        .routes(routes!(remove_trusted_key));
+        .routes(routes!(remove_trusted_key))
+        .routes(routes!(get_sealing_status))
+        .routes(routes!(reseal));
     // Documented as `{sha}` (D-P14-29), mounted with the `{sha256}` segment name the
     // upload route uses (one parameter name per segment in the merged router).
     crate::rest::wildcard_routes(
@@ -1137,6 +1169,88 @@ impl From<AttachSignaturesResult> for pb::AttachSignaturesResponse {
     }
 }
 
+impl From<SealingKeyUse> for pb::SealingKeyUse {
+    fn from(k: SealingKeyUse) -> Self {
+        pb::SealingKeyUse {
+            key_id: k.key_id,
+            state: k.state,
+            records: k.records,
+        }
+    }
+}
+
+impl From<pb::SealingKeyUse> for SealingKeyUse {
+    fn from(k: pb::SealingKeyUse) -> Self {
+        SealingKeyUse {
+            key_id: k.key_id,
+            state: k.state,
+            records: k.records,
+        }
+    }
+}
+
+impl From<SealingStatus> for pb::SealingStatus {
+    fn from(s: SealingStatus) -> Self {
+        pb::SealingStatus {
+            node: s.node,
+            current_key_id: s.current_key_id,
+            old_key_ids: s.old_key_ids,
+            records: s.records,
+            current: s.current,
+            old: s.old,
+            unknown: s.unknown,
+            plaintext: s.plaintext,
+            keys: s.keys.into_iter().map(Into::into).collect(),
+            old_keys_removable: s.old_keys_removable,
+        }
+    }
+}
+
+impl From<pb::SealingStatus> for SealingStatus {
+    fn from(s: pb::SealingStatus) -> Self {
+        SealingStatus {
+            node: s.node,
+            current_key_id: s.current_key_id,
+            old_key_ids: s.old_key_ids,
+            records: s.records,
+            current: s.current,
+            old: s.old,
+            unknown: s.unknown,
+            plaintext: s.plaintext,
+            keys: s.keys.into_iter().map(Into::into).collect(),
+            old_keys_removable: s.old_keys_removable,
+        }
+    }
+}
+
+impl From<ResealResult> for pb::ResealResponse {
+    fn from(r: ResealResult) -> Self {
+        pb::ResealResponse {
+            key_id: r.key_id,
+            records: r.records,
+            resealed: r.resealed,
+            already_current: r.already_current,
+            skipped: r.skipped,
+            failed: r.failed,
+            status: Some(r.status.into()),
+        }
+    }
+}
+
+impl From<pb::ResealResponse> for ResealResult {
+    fn from(r: pb::ResealResponse) -> Self {
+        ResealResult {
+            key_id: r.key_id,
+            records: r.records,
+            resealed: r.resealed,
+            already_current: r.already_current,
+            skipped: r.skipped,
+            failed: r.failed,
+            status: r.status.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
 impl From<pb::AttachSignaturesResponse> for AttachSignaturesResult {
     fn from(r: pb::AttachSignaturesResponse) -> Self {
         AttachSignaturesResult {
@@ -1351,6 +1465,20 @@ impl security_server::Security for GrpcSecurity {
             signatures: r.signatures.iter().map(|s| b64(s)).collect(),
         };
         ok(self.0.attach_signatures(req).await.map_err(st)?.into())
+    }
+
+    async fn get_sealing_status(
+        &self,
+        _r: tonic::Request<pb::GetSealingStatusRequest>,
+    ) -> GrpcResult<pb::SealingStatus> {
+        ok(self.0.get_sealing_status().await.map_err(st)?.into())
+    }
+
+    async fn reseal(
+        &self,
+        _r: tonic::Request<pb::ResealRequest>,
+    ) -> GrpcResult<pb::ResealResponse> {
+        ok(self.0.reseal().await.map_err(st)?.into())
     }
 }
 

@@ -78,6 +78,8 @@ fn phase14_paths_and_bearer_security() {
         ("/v1/security/modules/keys", "post"),
         ("/v1/security/modules/keys/{key_id}", "delete"),
         ("/v1/modules/{sha}/signatures", "post"),
+        ("/v1/security/sealing", "get"),
+        ("/v1/security/sealing/reseal", "post"),
         ("/hooks/{tenant}/{name}", "post"),
     ] {
         assert!(

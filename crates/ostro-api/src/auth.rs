@@ -597,6 +597,8 @@ methods! {
     AddTrustedKey => ("SecurityApi", "add_trusted_key", Admin, TenantAdmin, true, 4),
     RemoveTrustedKey => ("SecurityApi", "remove_trusted_key", Admin, TenantAdmin, true, 4),
     AttachSignatures => ("SecurityApi", "attach_signatures", Deploy, QualifiedName, true, 4),
+    GetSealingStatus => ("SecurityApi", "get_sealing_status", Admin, SystemOnly, false, 4),
+    Reseal => ("SecurityApi", "reseal", Admin, SystemOnly, true, 4),
 }
 
 impl Method {
@@ -765,6 +767,7 @@ mod tests {
         assert_eq!(count("TenantsApi"), 7);
         assert_eq!(count("ApiTokensApi"), 5);
         assert_eq!(count("AuditApi"), 1);
-        assert_eq!(count("SecurityApi"), 5);
+        // p14-key-rotation: + get_sealing_status, reseal.
+        assert_eq!(count("SecurityApi"), 7);
     }
 }

@@ -673,6 +673,8 @@ async fn every_audited_method_records_exactly_once() {
                     .await,
                 ),
             ),
+            (GetSealingStatus, unit(se.get_sealing_status().await)),
+            (Reseal, unit(se.reseal().await)),
         ]
     })
     .await;

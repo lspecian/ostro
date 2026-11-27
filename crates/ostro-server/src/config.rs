@@ -1283,6 +1283,10 @@ pub struct SecretsSection {
     pub providers: Vec<String>,
     /// File holding the sealing key (32 raw bytes or base64). `OSTRO_SEALING_KEY` wins.
     pub sealing_key_file: Option<PathBuf>,
+    /// Older sealing keys (same format), opening only, for a key rotation; with
+    /// `OSTRO_SEALING_KEY_OLD` (comma-separated base64). `OSTRO_SECRETS__OLD_SEALING_KEY_FILES`
+    /// takes a comma-separated list.
+    pub old_sealing_key_files: Vec<PathBuf>,
     /// Env provider prefix (default `OSTRO_SECRET_`).
     pub env_prefix: String,
     /// File provider directory (the provider is skipped while unset).
@@ -1301,6 +1305,7 @@ impl Default for SecretsSection {
         Self {
             providers: vec!["sealed".into(), "env".into(), "file".into()],
             sealing_key_file: None,
+            old_sealing_key_files: Vec::new(),
             env_prefix: "OSTRO_SECRET_".into(),
             file_dir: None,
             auto_sealing_key: false,
@@ -2378,6 +2383,7 @@ pub fn load_layered(
             // 127.0.0.0/8,::1/128`); every other key stays a scalar (10-17).
             .list_separator(",")
             .with_list_parse_key("egress.allow_private")
+            .with_list_parse_key("secrets.old_sealing_key_files")
             .source(Some(env.sectioned())),
     );
     let mut cfg: ServerConfig = b.build()?.try_deserialize()?;

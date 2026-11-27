@@ -159,6 +159,14 @@ head -c 32 /dev/urandom | base64 > /etc/ostro/sealing.key.b64   # generate once,
 chmod 0600 /etc/ostro/sealing.key.b64
 ```
 
+Old keys (key rotation, §5.2) are loaded next to the current key, for opening only:
+
+- `OSTRO_SEALING_KEY_OLD`: comma-separated base64 keys;
+- `[secrets] old_sealing_key_files = ["/etc/ostro/sealing-old.key.b64"]` (same file format;
+  `OSTRO_SECRETS__OLD_SEALING_KEY_FILES` takes a comma-separated list).
+
+New seals always use the current key. Old keys without a current key are a configuration error.
+
 **A server without a key refuses to store secrets.** `PUT /v1/secrets/...` answers 412
 `precondition_failed` with `details.reason = "sealing_key_missing"`, and local presign keys
 cannot be created either. Env, file, Vault and Kubernetes providers still work without a key.
@@ -168,11 +176,64 @@ directory. Webhook verifier secrets (`aes256gcm`) are opened with the same key r
 
 ### 5.2 Rotation
 
-The key ring supports several keys: new seals use the current key and ciphertexts under older
-kids still open. **Phase 6 has no operator command to load an old key next to a new one or to
-reseal existing records** (`ostro secret reseal` is a follow-up). Until it exists, rotate by
-configuring the new key and setting every secret again (`ostro secret set`); records sealed under
-a key the node no longer has fail with `secret_not_found`.
+Every sealed record carries the id of the key that sealed it (`key_id = aes256gcm:<kid>`). A
+node opens a record with whichever key of its ring has that kid: the current key or an old key.
+The record format is unchanged, so records written by every earlier release stay readable.
+
+Rotate the sealing key of a cluster in three steps. Keep both keys backed up until the last
+step is done.
+
+1. **Change the key on every node, one node at a time.** Make the new key the current key and
+   move the old key to the old keys, then restart the node. Wait until it is back
+   (`ostro cluster status`) before you go to the next node.
+
+   ```toml
+   [secrets]
+   sealing_key_file      = "/etc/ostro/sealing-2026.key.b64"   # new, current
+   old_sealing_key_files = ["/etc/ostro/sealing-2025.key.b64"] # old, opening only
+   ```
+
+   (or `OSTRO_SEALING_KEY=<new>` and `OSTRO_SEALING_KEY_OLD=<old>`). Every node keeps opening
+   the records sealed with the old key, so await tokens, joins and secret resolution keep
+   working during the roll. A node joining now needs the same two keys.
+
+   While the roll is in progress, a secret written through a node that already has the new
+   key is sealed with it, and nodes that have not restarted yet cannot open it. To avoid that
+   window, first add the new key to `old_sealing_key_files` on every node (one rolling restart),
+   then swap the two keys (a second rolling restart).
+
+2. **Re-seal**, once every node runs with the new key:
+
+   ```sh
+   ostro secret reseal       # POST /v1/security/sealing/reseal
+   ```
+
+   It re-seals every stored sealed record (user secrets of every tenant, presign keys, webhook
+   verifier secrets and the `__ostro/` system secrets) with the current key, keeping each value.
+   Records already on the current key are left alone, so it is safe to run again. The node that
+   runs it writes one `system.reseal` audit record with the counts (`records`, `resealed`,
+   `already_current`, `skipped`, `failed`), and the guard records the call as
+   `security.sealing.reseal`. A record sealed with a key the node does not hold is listed in
+   `failed` with that key id; the rest of the pass still runs.
+
+3. **Remove the old key** from every node (another rolling restart) once the status says no
+   record needs it:
+
+   ```sh
+   ostro secret sealing      # GET /v1/security/sealing
+   ```
+
+   It lists the records per key id and state (`current`, `old`, `unknown` for a key the node
+   does not hold, `plaintext` for legacy records) and ends with "no record needs an old key: the
+   old keys can be removed" (`old_keys_removable: true` in the JSON answer).
+
+The reseal step and the status need a system admin token. A node started with only the old
+key after the reseal refuses to start, naming the record and its key id:
+`__ostro/token-key (aes256gcm:…) cannot be opened with this node's sealing key: unknown sealing
+key id …`.
+
+The startup reseal (§7.2) never moves records to another key: while the roll of step 1 is in
+progress, some nodes may not hold the new key yet.
 
 ---
 
@@ -229,6 +290,8 @@ cache_ttl  = "30s"
 | add a grant | `PUT /v1/grants`, body `{module, secret, origins, body?}` | `PutGrant` | `ostro grant add --module M --secret S --origin O... [--body]` |
 | list grants | `GET /v1/grants[?module=M]` | `ListGrants` | `ostro grant ls` |
 | delete a grant | `DELETE /v1/grants/{id}` | `DeleteGrant` | `ostro grant rm <id>` |
+| sealing status (§5.2) | `GET /v1/security/sealing` | `ostro.api.v1.Security/GetSealingStatus` | `ostro secret sealing` |
+| re-seal everything (§5.2) | `POST /v1/security/sealing/reseal` | `ostro.api.v1.Security/Reseal` | `ostro secret reseal` |
 
 - **Values are write-only.** No response (REST, gRPC, OpenAPI examples, CLI output) ever contains a
   value; lists return names and key ids only. The OpenAPI document marks `value`/`value_b64`
@@ -251,7 +314,8 @@ ostro egress set payments --allow https://api.stripe.com
 Reserved sealed names used by Ostro itself:
 - `__ostro/token-key`: the await-token signing key (§7.2).
 - `__ostro/cluster-ca`: the cluster CA certificate and key that sign joining nodes (§7.2).
-- `__ostro/ui-session-key`: the UI session signing key (sealed whenever a sealing key resolves).
+- `__ostro/ui-session-key`: the UI session signing key (cluster-wide like the two above: sealed
+  only with an operator-supplied key, §7.2).
 - `__ostro/presign/<connection>`: the HMAC key of a local object connection's presigned URLs
   (Phase 6), created on first use.
 
@@ -275,9 +339,12 @@ node's certificate, by a joined node importing it for its worker TLS, and by `os
   records with its own configured key once its metadata has caught up.
 - `ostro restore` of a cluster bucket opens a sealed `__ostro/cluster-ca` with `OSTRO_SEALING_KEY`.
   Without the key it fails and says so.
-- A node cannot load an old key next to a new one (§5.2). Replacing the key of a cluster whose
-  system secrets are sealed therefore stops every node from starting: keep the key and back it
-  up.
+- To replace the key, follow the rotation procedure (§5.2): the new key as current and the old
+  one as an old key on every node, then `ostro secret reseal`, then remove the old key. Replacing
+  the key without keeping the old one stops every node from starting.
+- The reseal step (§5.2) keeps this rule: with only the dev auto-generated key,
+  `__ostro/token-key`, `__ostro/cluster-ca` and `__ostro/ui-session-key` are skipped (counted in
+  `skipped`) and stay `plaintext-v0`.
 
 ---
 

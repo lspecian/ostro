@@ -145,7 +145,9 @@ pub const fn classify(m: Method) -> Option<&'static str> {
         AddTrustedKey => "security.key.add",
         RemoveTrustedKey => "security.key.remove",
         AttachSignatures => "module.signatures.attach",
-        GetTenant | ListTenants | ListApiTokens | WhoAmI | QueryAudit | GetModulePolicy => {
+        Reseal => "security.sealing.reseal",
+        GetTenant | ListTenants | ListApiTokens | WhoAmI | QueryAudit | GetModulePolicy
+        | GetSealingStatus => {
             return None;
         }
     };

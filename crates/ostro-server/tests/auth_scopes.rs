@@ -309,6 +309,8 @@ const REST: &[(&str, Row)] = &[
         "PUT /v1/security/modules/policy",
         M(Method::SetModulePolicy),
     ),
+    ("GET /v1/security/sealing", M(Method::GetSealingStatus)),
+    ("POST /v1/security/sealing/reseal", M(Method::Reseal)),
     ("GET /v1/tenants", M(Method::ListTenants)),
     ("POST /v1/tenants", M(Method::CreateTenant)),
     ("DELETE /v1/tenants/{id}", M(Method::DeleteTenant)),
@@ -519,9 +521,14 @@ const GRPC: &[(&str, Row)] = &[
         M(Method::GetModulePolicy),
     ),
     (
+        "/ostro.api.v1.Security/GetSealingStatus",
+        M(Method::GetSealingStatus),
+    ),
+    (
         "/ostro.api.v1.Security/RemoveTrustedKey",
         M(Method::RemoveTrustedKey),
     ),
+    ("/ostro.api.v1.Security/Reseal", M(Method::Reseal)),
     (
         "/ostro.api.v1.Security/SetModulePolicy",
         M(Method::SetModulePolicy),

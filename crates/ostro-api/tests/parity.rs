@@ -5251,6 +5251,9 @@ mod phase14 {
         let cp = Arc::new(FakeControlPlane::new());
         let fakes = FakeP14::new();
         fakes.security.add_module(SHA);
+        for current in [true, false, false] {
+            fakes.security.add_sealed(current);
+        }
         for (i, (tenant, action)) in [(None, "deploy"), (Some("acme"), "token.create")]
             .into_iter()
             .enumerate()
@@ -5312,6 +5315,8 @@ mod phase14 {
         async fn add_key(&mut self, k: Value) -> Out;
         async fn remove_key(&mut self, id: &str) -> Out;
         async fn attach(&mut self, sha: &str, sigs: Vec<Vec<u8>>) -> Out;
+        async fn sealing_status(&mut self) -> Out;
+        async fn reseal(&mut self) -> Out;
         async fn upload_signed(&mut self, sigs: Vec<Vec<u8>>) -> Out;
         async fn list_runs_tenant(&mut self, tenant: &str) -> Out;
     }
@@ -5471,6 +5476,21 @@ mod phase14 {
                     .json(&body),
             )
             .await
+        }
+        async fn sealing_status(&mut self) -> Out {
+            let v = self
+                .send(self.http.get(format!("{}/v1/security/sealing", self.base)))
+                .await?;
+            Ok(js(serde_json::from_value::<SealingStatus>(v).expect("dto")))
+        }
+        async fn reseal(&mut self) -> Out {
+            let v = self
+                .send(
+                    self.http
+                        .post(format!("{}/v1/security/sealing/reseal", self.base)),
+                )
+                .await?;
+            Ok(js(serde_json::from_value::<ResealResult>(v).expect("dto")))
         }
         async fn upload_signed(&mut self, sigs: Vec<Vec<u8>>) -> Out {
             let wasm = fake_module(&[("p14", 1)]);
@@ -5716,6 +5736,22 @@ mod phase14 {
                 .map_err(grpc_err)?;
             Ok(js(AttachSignaturesResult::from(r.into_inner())))
         }
+        async fn sealing_status(&mut self) -> Out {
+            let r = self
+                .security
+                .get_sealing_status(pb::GetSealingStatusRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(SealingStatus::from(r.into_inner())))
+        }
+        async fn reseal(&mut self) -> Out {
+            let r = self
+                .security
+                .reseal(pb::ResealRequest {})
+                .await
+                .map_err(grpc_err)?;
+            Ok(js(ResealResult::from(r.into_inner())))
+        }
         async fn upload_signed(&mut self, sigs: Vec<Vec<u8>>) -> Out {
             let wasm = fake_module(&[("p14", 1)]);
             let r = self
@@ -5890,6 +5926,20 @@ mod phase14 {
         );
         step!("policy denied (403)", c.get_policy().await);
         s.fakes.security.fail("get_module_policy", None);
+        // Sealing-key rotation (p14-key-rotation).
+        step!("sealing status (old keys in use)", c.sealing_status().await);
+        step!("reseal", c.reseal().await);
+        step!("reseal again (idempotent)", c.reseal().await);
+        step!("sealing status (removable)", c.sealing_status().await);
+        s.fakes.security.fail(
+            "reseal",
+            Some(
+                ApiError::precondition_failed("no sealing key")
+                    .with_details(json!({"reason": "sealing_key_missing"})),
+            ),
+        );
+        step!("reseal without a key (412)", c.reseal().await);
+        s.fakes.security.fail("reseal", None);
         // Upload signatures and the list filter.
         step!(
             "upload signed",

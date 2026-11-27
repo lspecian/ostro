@@ -5098,6 +5098,88 @@ expression: pretty
         }
       }
     },
+    "/v1/security/sealing": {
+      "get": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Which sealing keys the stored sealed records use (p14-key-rotation).",
+        "operationId": "get_sealing_status",
+        "responses": {
+          "200": {
+            "description": "Records per sealing key, against the answering node's key ring",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SealingStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Security API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "A configured sealing key is unreadable (details.reason = sealing_key_invalid)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/security/sealing/reseal": {
+      "post": {
+        "tags": [
+          "security"
+        ],
+        "summary": "Re-seal every stored sealed record with the current sealing key (idempotent).",
+        "operationId": "reseal",
+        "responses": {
+          "200": {
+            "description": "Counts of the pass and the status after it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResealResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Security API not enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "No sealing key (details.reason = sealing_key_missing) or an unreadable one (sealing_key_invalid)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tenants": {
       "get": {
         "tags": [
@@ -9917,6 +9999,59 @@ expression: pretty
         ],
         "description": "Which workflow version a rerun executes."
       },
+      "ResealResult": {
+        "type": "object",
+        "description": "`POST /v1/security/sealing/reseal`: every record re-sealed with the current key.",
+        "required": [
+          "key_id",
+          "records",
+          "resealed",
+          "already_current",
+          "skipped",
+          "status"
+        ],
+        "properties": {
+          "already_current": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records already on the current key (untouched).",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`<record>: <reason>` of every record that could not be re-sealed (for example sealed\nwith a key this node does not hold)."
+          },
+          "key_id": {
+            "type": "string",
+            "description": "The current key the records were sealed with."
+          },
+          "records": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records examined.",
+            "minimum": 0
+          },
+          "resealed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records re-sealed (from an old key, or a legacy `plaintext-v0` system secret).",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records left alone: `plaintext-v0` records that are not system secrets, and the\ncluster-wide system secrets when only the dev auto key resolves.",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/SealingStatus",
+            "description": "The status after the pass."
+          }
+        }
+      },
       "RetireModuleResponse": {
         "type": "object",
         "description": "`DELETE /v1/modules/{sha}`.",
@@ -10607,6 +10742,107 @@ expression: pretty
               "$ref": "#/components/schemas/ScheduleDto"
             },
             "description": "Every schedule, by name."
+          }
+        }
+      },
+      "SealingKeyUse": {
+        "type": "object",
+        "description": "One `key_id` and how many stored sealed records use it.",
+        "required": [
+          "key_id",
+          "state",
+          "records"
+        ],
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "description": "`aes256gcm:<kid>` or `plaintext-v0`."
+          },
+          "records": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records sealed with it.",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string",
+            "description": "`current`, `old` (a configured old key), `unknown` (not in this node's key ring) or\n`plaintext`."
+          }
+        }
+      },
+      "SealingStatus": {
+        "type": "object",
+        "description": "`GET /v1/security/sealing`: which keys the stored sealed records use, judged against the\nanswering node's key ring (every node is configured with the same keys).",
+        "required": [
+          "node",
+          "records",
+          "current",
+          "old",
+          "unknown",
+          "plaintext",
+          "old_keys_removable"
+        ],
+        "properties": {
+          "current": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records sealed with the current key.",
+            "minimum": 0
+          },
+          "current_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node's current sealing key (`None`: no key resolves)."
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SealingKeyUse"
+            },
+            "description": "Per `key_id`, sorted."
+          },
+          "node": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The answering node.",
+            "minimum": 0
+          },
+          "old": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records still sealed with an old key (`ostro secret reseal` moves them).",
+            "minimum": 0
+          },
+          "old_key_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The node's old (opening-only) keys."
+          },
+          "old_keys_removable": {
+            "type": "boolean",
+            "description": "`old == 0`: no record needs an old key any more, so the old keys can be removed."
+          },
+          "plaintext": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Legacy `plaintext-v0` records (system secrets without an operator key).",
+            "minimum": 0
+          },
+          "records": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Every sealed record (user secrets and `__ostro/` system secrets).",
+            "minimum": 0
+          },
+          "unknown": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records sealed with a key this node does not hold (they cannot be opened here).",
+            "minimum": 0
           }
         }
       },

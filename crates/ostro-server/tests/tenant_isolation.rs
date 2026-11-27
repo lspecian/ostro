@@ -635,6 +635,8 @@ async fn every_method_scopes_its_request_and_response_types() {
                     .await,
                 ),
             ),
+            (GetSealingStatus, unit(se.get_sealing_status().await)),
+            (Reseal, unit(se.reseal().await)),
         ]
     })
     .await;

@@ -418,6 +418,7 @@ Every meta record ends with `ext: Vec<u8>` in one codec: `varint(tag u32) ‖ va
 | Config | `[[triggers.kafka]]` (key `kafka` inside the Phase 8 `[triggers]` section) with sub-tables `tls`, `sasl` | P14 (D-P14-51) |
 | Name grammar | idempotency-key prefix `__kafka/` (joins `__ostro/`, `__cron/`, `__hook/` under the D23 `__` reservation) | P14 (D-P14-51) |
 | Run tag | `ostro.kafka` (`ostro.kafka=<trigger name>`) | P14 (D-P14-51) |
+| Sealing-key rotation | env `OSTRO_SEALING_KEY_OLD`; config `[secrets] old_sealing_key_files`; REST `GET /v1/security/sealing`, `POST /v1/security/sealing/reseal`; gRPC `Security/GetSealingStatus`, `Security/Reseal`; CLI `ostro secret {reseal,sealing}`; audit action `security.sealing.reseal` (the pass itself audits `system.reseal`); `details.reason` `sealing_key_invalid` | P14 (p14-key-rotation) |
 | Metric prefix | `ostro_kafka_` | P14 (D-P14-51) |
 | Failpoint prefixes | `kafka::`, `cluster_restore::` | P14 (D-P14-51) |
 | Failpoints (mutants, `repl::mutant::*` convention) | `repl::mutant::readd_stale_progress` (14-33), `repl::mutant::restore_skip_fixpoint` (14-30) | P14 (D-P14-51) |

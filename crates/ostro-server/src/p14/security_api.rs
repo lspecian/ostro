@@ -36,7 +36,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use ostro_api::auth::{self, Principal};
 use ostro_api::error::reason;
 use ostro_api::phase14::{
-    AttachSignaturesRequest, AttachSignaturesResult, ModulePolicy, SecurityApi, TrustedKeySpec,
+    AttachSignaturesRequest, AttachSignaturesResult, ModulePolicy, ResealResult, SealingStatus,
+    SecurityApi, TrustedKeySpec,
 };
 use ostro_api::{ApiError, ApiExtensions};
 use ostro_meta::MetaState;
@@ -693,6 +694,16 @@ impl SecurityApi for SecurityService {
                 .map(|s| key_id_hex_of(s.alg, &s.key_id))
                 .collect(),
         })
+    }
+
+    async fn get_sealing_status(&self) -> Result<SealingStatus, ApiError> {
+        let ctx = self.ctx()?;
+        super::reseal::sealing_status(&ctx)
+    }
+
+    async fn reseal(&self) -> Result<ResealResult, ApiError> {
+        let ctx = self.ctx()?;
+        super::reseal::reseal_all(&ctx).await
     }
 }
 

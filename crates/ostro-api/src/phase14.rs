@@ -24,6 +24,8 @@
 //! | GET / PUT | `/v1/security/modules/policy` | [`SecurityApi::get_module_policy`] / `set_module_policy` (14-19) |
 //! | POST / DELETE | `/v1/security/modules/keys`, `/v1/security/modules/keys/{key_id}` | [`SecurityApi::add_trusted_key`] / `remove_trusted_key` (14-19) |
 //! | POST | `/v1/modules/{sha}/signatures` | [`SecurityApi::attach_signatures`] (14-19) |
+//! | GET | `/v1/security/sealing` | [`SecurityApi::get_sealing_status`] (p14-key-rotation) |
+//! | POST | `/v1/security/sealing/reseal` | [`SecurityApi::reseal`] (p14-key-rotation) |
 
 use std::collections::BTreeMap;
 
@@ -326,6 +328,71 @@ pub struct AttachSignaturesResult {
     pub key_ids: Vec<String>,
 }
 
+// ---- sealing-key rotation (p14-key-rotation) -----------------------------------------------
+
+/// One `key_id` and how many stored sealed records use it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SealingKeyUse {
+    /// `aes256gcm:<kid>` or `plaintext-v0`.
+    pub key_id: String,
+    /// `current`, `old` (a configured old key), `unknown` (not in this node's key ring) or
+    /// `plaintext`.
+    pub state: String,
+    /// Records sealed with it.
+    pub records: u64,
+}
+
+/// `GET /v1/security/sealing`: which keys the stored sealed records use, judged against the
+/// answering node's key ring (every node is configured with the same keys).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SealingStatus {
+    /// The answering node.
+    pub node: u64,
+    /// The node's current sealing key (`None`: no key resolves).
+    #[serde(default)]
+    pub current_key_id: Option<String>,
+    /// The node's old (opening-only) keys.
+    #[serde(default)]
+    pub old_key_ids: Vec<String>,
+    /// Every sealed record (user secrets and `__ostro/` system secrets).
+    pub records: u64,
+    /// Records sealed with the current key.
+    pub current: u64,
+    /// Records still sealed with an old key (`ostro secret reseal` moves them).
+    pub old: u64,
+    /// Records sealed with a key this node does not hold (they cannot be opened here).
+    pub unknown: u64,
+    /// Legacy `plaintext-v0` records (system secrets without an operator key).
+    pub plaintext: u64,
+    /// Per `key_id`, sorted.
+    #[serde(default)]
+    pub keys: Vec<SealingKeyUse>,
+    /// `old == 0`: no record needs an old key any more, so the old keys can be removed.
+    pub old_keys_removable: bool,
+}
+
+/// `POST /v1/security/sealing/reseal`: every record re-sealed with the current key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ResealResult {
+    /// The current key the records were sealed with.
+    pub key_id: String,
+    /// Records examined.
+    pub records: u64,
+    /// Records re-sealed (from an old key, or a legacy `plaintext-v0` system secret).
+    pub resealed: u64,
+    /// Records already on the current key (untouched).
+    pub already_current: u64,
+    /// Records left alone: `plaintext-v0` records that are not system secrets, and the
+    /// cluster-wide system secrets when only the dev auto key resolves.
+    pub skipped: u64,
+    /// `<record>: <reason>` of every record that could not be re-sealed (for example sealed
+    /// with a key this node does not hold).
+    #[serde(default)]
+    pub failed: Vec<String>,
+    /// The status after the pass.
+    pub status: SealingStatus,
+}
+
 // ---- traits ---------------------------------------------------------------------------------
 
 /// Tenant lifecycle (system admin; 14-17).
@@ -439,6 +506,15 @@ pub trait SecurityApi: Send + Sync + 'static {
     ) -> Result<AttachSignaturesResult, ApiError> {
         let _ = req;
         Err(lands_in("attach_signatures", "14-19"))
+    }
+    /// Which sealing keys the stored records use (p14-key-rotation).
+    async fn get_sealing_status(&self) -> Result<SealingStatus, ApiError> {
+        Err(lands_in("get_sealing_status", "p14-key-rotation"))
+    }
+    /// Re-seal every stored sealed record with the current key (idempotent; audited
+    /// `system.reseal` with counts).
+    async fn reseal(&self) -> Result<ResealResult, ApiError> {
+        Err(lands_in("reseal", "p14-key-rotation"))
     }
 }
 

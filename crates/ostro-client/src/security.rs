@@ -12,6 +12,8 @@
 //! | DELETE | `/v1/security/modules/keys/{key_id}` | [`Client::remove_trusted_key`] (`<tenant>:<key id>` names a tenant key) |
 //! | POST | `/v1/modules/{sha}/signatures` | [`Client::attach_signatures`] |
 //! | PUT | `/v1/modules/{sha}` + `Ostro-Module-Signature` | [`Client::upload_module_signed`] |
+//! | GET | `/v1/security/sealing` | [`Client::sealing_status`] (p14-key-rotation) |
+//! | POST | `/v1/security/sealing/reseal` | [`Client::reseal`] (p14-key-rotation) |
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -96,6 +98,25 @@ impl Client {
             &["v1", "security", "modules", "keys", key_id],
             &[],
             None,
+        )
+        .await
+    }
+
+    /// `GET /v1/security/sealing` -> `SealingStatus` (which sealing keys the stored records
+    /// use; `old_keys_removable` once none needs an old key).
+    pub async fn sealing_status(&self) -> Result<Response, CallError> {
+        self.call(Method::GET, &["v1", "security", "sealing"], &[], None)
+            .await
+    }
+
+    /// `POST /v1/security/sealing/reseal` -> `ResealResult` (every record re-sealed with the
+    /// current key; idempotent).
+    pub async fn reseal(&self) -> Result<Response, CallError> {
+        self.call(
+            Method::POST,
+            &["v1", "security", "sealing", "reseal"],
+            &[],
+            Some(&json!({})),
         )
         .await
     }
