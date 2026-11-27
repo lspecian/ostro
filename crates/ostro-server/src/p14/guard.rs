@@ -35,7 +35,7 @@ use std::future::Future;
 use std::sync::{Arc, Weak};
 
 use ostro_api::ControlPlane;
-use ostro_api::auth::{self, Method, PrincipalKind};
+use ostro_api::auth::{self, Method, Principal, PrincipalKind};
 use ostro_api::domain::{
     ActivateWorkflow, AwaitResultRequest, AwaitResultResponse, CancelRequest, CancelResponse,
     CompleteTokenRequest, CompleteTokenResponse, ConnectionInfo, DevSkip, DevSkipResult,
@@ -71,7 +71,7 @@ use ostro_api::phase14::{
     TenantPatch, TenantSpec, TenantsApi, TokenInfo, TrustedKeySpec, WhoAmI,
 };
 use ostro_api::{ApiError, ApiExtensions};
-use ostro_types::audit::AuditOutcome;
+use ostro_types::audit::{AuditOutcome, AuditPermit};
 use tracing::trace;
 
 use super::{Guarded, P14Ctx, audit_hooks, authz, tenant_scope};
@@ -220,7 +220,10 @@ struct Core {
 }
 
 impl Core {
-    /// The fixed hook sequence around one inner call (see the module docs).
+    /// The fixed hook sequence around one inner call (see the module docs). Only the
+    /// request-typed steps (`tenant_scope::before/after`, the target helper and the inner
+    /// call) are generic; everything else lives in the non-generic helpers below, so the ~115
+    /// instantiations stay small (binary size, NFR-2.1).
     async fn call<I, Req, Out, Fut>(
         &self,
         inner: &Arc<I>,
@@ -235,36 +238,70 @@ impl Core {
         Out: Send,
         Fut: Future<Output = Result<Out, ApiError>> + Send,
     {
-        let p = auth::current();
-        if p.kind == PrincipalKind::Anonymous {
-            trace!(target: TRACE_TARGET, method = ?m, stage = "deny_anonymous");
-            return Err(ApiError::unauthenticated("authentication required"));
-        }
-        trace!(target: TRACE_TARGET, method = ?m, stage = "authz");
-        authz::require(&p, m)?;
-        trace!(target: TRACE_TARGET, method = ?m, stage = "tenant_before");
+        let p = admit(m)?;
         let req = tenant_scope::before(&p, m, &*self.control, req).await?;
+        let (ctx, permit) = self.reserve(&p, m).await?;
+        let target = target(&req);
+        stage(m, "inner");
+        let out = f(Arc::clone(inner), req).await;
+        finish(ctx, permit, &p, m, target, outcome_of(out.as_ref().err())).await?;
+        tenant_scope::after(&p, m, out)
+    }
+
+    /// Step 4: the context (503 once released) and the audit permit.
+    async fn reserve(
+        &self,
+        p: &Principal,
+        m: Method,
+    ) -> Result<(Arc<P14Ctx>, Option<AuditPermit>), ApiError> {
         let ctx = self
             .ctx
             .upgrade()
             .ok_or_else(|| ApiError::unavailable("the server is shutting down"))?;
-        trace!(target: TRACE_TARGET, method = ?m, stage = "audit_reserve");
-        let permit = audit_hooks::reserve(&ctx, &p, m).await?;
-        let target = target(&req);
-        trace!(target: TRACE_TARGET, method = ?m, stage = "inner");
-        let out = f(Arc::clone(inner), req).await;
-        trace!(target: TRACE_TARGET, method = ?m, stage = "audit_after");
-        audit_hooks::after(&ctx, permit, &p, m, &target, outcome_of(&out)).await?;
-        trace!(target: TRACE_TARGET, method = ?m, stage = "tenant_after");
-        tenant_scope::after(&p, m, out)
+        stage(m, "audit_reserve");
+        let permit = audit_hooks::reserve(&ctx, p, m).await?;
+        Ok((ctx, permit))
     }
 }
 
+/// Steps 1-2 (and the trace of step 3): the principal, `Anonymous` refused, `authz`.
+fn admit(m: Method) -> Result<Principal, ApiError> {
+    let p = auth::current();
+    if p.kind == PrincipalKind::Anonymous {
+        stage(m, "deny_anonymous");
+        return Err(ApiError::unauthenticated("authentication required"));
+    }
+    stage(m, "authz");
+    authz::require(&p, m)?;
+    stage(m, "tenant_before");
+    Ok(p)
+}
+
+/// Step 6 (and the trace of step 7): commit the audit record.
+async fn finish(
+    ctx: Arc<P14Ctx>,
+    permit: Option<AuditPermit>,
+    p: &Principal,
+    m: Method,
+    target: String,
+    outcome: AuditOutcome,
+) -> Result<(), ApiError> {
+    stage(m, "audit_after");
+    audit_hooks::after(&ctx, permit, p, m, &target, outcome).await?;
+    stage(m, "tenant_after");
+    Ok(())
+}
+
+/// The per-stage TRACE event (one callsite).
+fn stage(m: Method, stage: &'static str) {
+    trace!(target: TRACE_TARGET, method = ?m, stage);
+}
+
 /// The audit outcome of an inner result.
-fn outcome_of<T>(out: &Result<T, ApiError>) -> AuditOutcome {
-    match out {
-        Ok(_) => AuditOutcome::Ok,
-        Err(e) => AuditOutcome::Failed(e.code.as_str().to_owned()),
+fn outcome_of(err: Option<&ApiError>) -> AuditOutcome {
+    match err {
+        None => AuditOutcome::Ok,
+        Some(e) => AuditOutcome::Failed(e.code.as_str().to_owned()),
     }
 }
 
