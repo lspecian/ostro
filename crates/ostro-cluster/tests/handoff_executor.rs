@@ -673,6 +673,11 @@ struct Shrink {
     script: Mutex<BTreeMap<u16, Vec<Result<MetaResult, String>>>>,
     /// Applied before answering a scripted StaleVersion: the ISR another proposer published.
     race: Mutex<BTreeMap<u16, Vec<u64>>>,
+    /// After a race: `followed` keeps returning the pre-race row this many more times (this
+    /// node's metadata view lagging the leader).
+    view_lag: Mutex<BTreeMap<u16, (u32, FollowedPartition)>>,
+    /// `followed` calls.
+    reads: std::sync::atomic::AtomicUsize,
     quorum: bool,
     hang: bool,
 }
@@ -685,6 +690,8 @@ impl Shrink {
             followed: Mutex::new(followed),
             script: Mutex::new(BTreeMap::new()),
             race: Mutex::new(BTreeMap::new()),
+            view_lag: Mutex::new(BTreeMap::new()),
+            reads: std::sync::atomic::AtomicUsize::new(0),
             quorum: true,
             hang: false,
         })
@@ -735,10 +742,20 @@ impl ShutdownMeta for ShrinkView {
 
     fn followed(&self, node: u64) -> Vec<FollowedPartition> {
         assert_eq!(node, ME);
+        self.0
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut lagged = lock(&self.0.view_lag);
         lock(&self.0.followed)
             .iter()
+            .map(|f| match lagged.get_mut(&f.partition) {
+                Some((n, old)) if *n > 0 => {
+                    *n -= 1;
+                    old.clone()
+                }
+                _ => f.clone(),
+            })
             .filter(|f| f.isr.contains(&ME) && f.leader != ME)
-            .cloned()
             .collect()
     }
 
@@ -766,6 +783,9 @@ impl ShutdownMeta for ShrinkView {
                 if let Some(raced) = lock(&self.0.race).remove(&partition) {
                     let mut fs = lock(&self.0.followed);
                     let f = fs.iter_mut().find(|f| f.partition == partition).expect("p");
+                    if let Some((_, old)) = lock(&self.0.view_lag).get_mut(&partition) {
+                        *old = f.clone();
+                    }
                     f.isr = raced;
                     f.isr_version += 1;
                 }
@@ -964,4 +984,48 @@ async fn self_shrink_default_trait_methods_keep_phase_13_behaviour() {
     let r = shutdown(&c, Duration::from_secs(10)).await;
     assert_eq!(r.moved, vec![0]);
     assert!(r.self_shrink.is_empty());
+}
+
+#[tokio::test]
+async fn self_shrink_waits_for_a_lagging_view_after_a_lost_cas() {
+    // The leader's own AlterIsr (drop 3) won the CAS; this node's metadata view shows it only
+    // after 5 more reads. Re-reading at once would propose version 20 again and lose.
+    let c = Shrink::new(Vec::new(), vec![fp(1, 2, &[1, 2, 3], 1)]);
+    lock(&c.script).insert(1, vec![Ok(MetaResult::StaleVersion { current: 21 })]);
+    lock(&c.race).insert(1, vec![1, 2]);
+    lock(&c.view_lag).insert(1, (5, fp(1, 2, &[1, 2, 3], 1)));
+    let r = shrink_shutdown(&c, Duration::from_secs(10)).await;
+    assert_eq!(r.self_shrink, vec![(1, SelfShrink::Shrunk)]);
+    let ev = c.events();
+    assert!(ev.contains(&"alter p1 v21 [2]".to_string()), "{ev:?}");
+    assert!(
+        !ev.iter().any(|e| e == "alter p1 v20 [2]"),
+        "never the stale version again: {ev:?}"
+    );
+}
+
+#[tokio::test]
+async fn self_shrink_view_wait_is_bounded() {
+    // The view never catches up: one bounded wait, the stale re-proposal loses, version_race.
+    let c = Shrink::new(Vec::new(), vec![fp(1, 2, &[1, 2, 3], 1)]);
+    lock(&c.script).insert(
+        1,
+        vec![
+            Ok(MetaResult::StaleVersion { current: 21 }),
+            Ok(MetaResult::StaleVersion { current: 21 }),
+        ],
+    );
+    lock(&c.race).insert(1, vec![1, 2]);
+    lock(&c.view_lag).insert(1, (u32::MAX, fp(1, 2, &[1, 2, 3], 1)));
+    let r = tokio::time::timeout(
+        Duration::from_secs(5),
+        shrink_shutdown(&c, Duration::from_secs(10)),
+    )
+    .await
+    .expect("bounded by VIEW_CATCH_UP");
+    assert_eq!(r.self_shrink, vec![(1, SelfShrink::VersionRace)]);
+    assert!(
+        c.reads.load(std::sync::atomic::Ordering::SeqCst) > 10,
+        "polled the view while waiting"
+    );
 }

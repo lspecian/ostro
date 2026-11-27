@@ -33,7 +33,8 @@
 //!   caught-up observation newer than the removal) keeps the node out until it exits. Then
 //!   it proposes `AlterIsr{partition, epoch, expected_isr_version, isr: published − self}`
 //!   (bounded parallelism, the remaining budget; a `StaleVersion` re-reads the published
-//!   state once). This is the shrink the lag detector would make `replica_lag_max` later:
+//!   state once, after waiting up to [`VIEW_CATCH_UP`] for this node's metadata view to show
+//!   the publication the CAS lost to). This is the shrink the lag detector would make `replica_lag_max` later:
 //!   the HW keeps counting this node until meta committed the removal (D-P12-5), and the
 //!   `AlterIsr` apply rules are unchanged. The [`ShutdownReport::self_shrink`] lines carry
 //!   each partition's outcome. Skipped with the handoffs when there is no metadata quorum.
@@ -485,11 +486,7 @@ async fn shrink_one(node_id: u64, meta: &dyn ShutdownMeta, f: FollowedPartition)
                     current,
                     "controlled shutdown: self-shrink lost its CAS; re-reading the published ISR"
                 );
-                match meta
-                    .followed(node_id)
-                    .into_iter()
-                    .find(|g| g.partition == cur.partition)
-                {
+                match fresher_view(node_id, meta, &cur).await {
                     Some(g) => cur = g,
                     // Out of the ISR already (someone else removed it) or now the leader /
                     // not a replica: nothing left to shrink.
@@ -508,6 +505,41 @@ async fn shrink_one(node_id: u64, meta: &dyn ShutdownMeta, f: FollowedPartition)
         }
     }
     SelfShrink::VersionRace
+}
+
+/// Bound on waiting for this node's metadata view to show the publication a self-shrink CAS
+/// lost to (polled every [`VIEW_POLL`]).
+pub const VIEW_CATCH_UP: Duration = Duration::from_secs(1);
+
+/// Poll period of [`VIEW_CATCH_UP`].
+pub const VIEW_POLL: Duration = Duration::from_millis(20);
+
+/// After a lost CAS: the partition as this node's metadata view shows it once the view moved
+/// past `stale` (another epoch or ISR version), waiting up to [`VIEW_CATCH_UP`] for a view
+/// that lags the metadata leader (the CAS ran into a publication this node may not have
+/// applied yet; re-reading at once would propose the same stale version again). `None` when
+/// the node no longer follows the partition as an ISR member; the last read on timeout.
+async fn fresher_view(
+    node_id: u64,
+    meta: &dyn ShutdownMeta,
+    stale: &FollowedPartition,
+) -> Option<FollowedPartition> {
+    let polls = (VIEW_CATCH_UP.as_millis() / VIEW_POLL.as_millis().max(1)).max(1);
+    let mut last = None;
+    for i in 0..=polls {
+        let now = meta
+            .followed(node_id)
+            .into_iter()
+            .find(|g| g.partition == stale.partition)?;
+        if (now.epoch, now.isr_version) != (stale.epoch, stale.isr_version) {
+            return Some(now);
+        }
+        last = Some(now);
+        if i < polls {
+            tokio::time::sleep(VIEW_POLL).await;
+        }
+    }
+    last
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
