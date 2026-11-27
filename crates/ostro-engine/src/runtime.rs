@@ -418,12 +418,18 @@ impl Runtime {
         let engine = self.engine.engine();
         let mut linker: Linker<StoreLimits> = Linker::new(engine);
         linker.define_unknown_imports_as_traps(&p.component).ok()?;
+        // Instantiation runs guest code (core start functions, a component's `_initialize`):
+        // bound it by the activation's fuel and wall time, else a looping initializer hangs
+        // this thread with the permit held (14-08, SEC-05 `fuzz/regressions/evil_guest/`).
+        let cfg = self.engine.config();
+        let ticks = cfg.activation_timeout.as_nanos() / cfg.epoch_tick.as_nanos().max(1);
+        let ticks = u64::try_from(ticks).unwrap_or(u64::MAX).saturating_add(1);
         for limit in p.core_instances.max(1)..=max {
             let limits = StoreLimitsBuilder::new().instances(limit as usize).build();
             let mut store = Store::new(engine, limits);
             store.limiter(|l| l);
-            store.set_fuel(u64::MAX).ok()?;
-            store.set_epoch_deadline(u64::MAX);
+            store.set_fuel(cfg.activation_fuel).ok()?;
+            store.set_epoch_deadline(ticks);
             match linker.instantiate_async(&mut store, &p.component).await {
                 Ok(_) => {
                     metrics::histogram!("ostro_module_core_instances").record(f64::from(limit));
