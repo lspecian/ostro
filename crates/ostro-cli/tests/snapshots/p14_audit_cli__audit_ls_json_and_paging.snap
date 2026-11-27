@@ -1,0 +1,60 @@
+---
+source: crates/ostro-cli/tests/p14_audit_cli.rs
+expression: t
+---
+$ ostro audit ls --limit 2 --json
+{
+  "cursor": "2",
+  "partial_nodes": [],
+  "records": [
+    {
+      "action": "module.upload",
+      "actor": "otk_admin",
+      "actor_kind": "token",
+      "details": {},
+      "hash": "abababababababababababababababababababababababababababababababab",
+      "node": 1,
+      "outcome": "ok",
+      "request_id": null,
+      "seq": 0,
+      "target": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "tenant": null,
+      "ts_ms": 1795773600000
+    },
+    {
+      "action": "run.cancel",
+      "actor": "otk_ops",
+      "actor_kind": "token",
+      "details": {},
+      "hash": "abababababababababababababababababababababababababababababababab",
+      "node": 2,
+      "outcome": "ok",
+      "request_id": null,
+      "seq": 1,
+      "target": "r-1",
+      "tenant": "acme",
+      "ts_ms": 1795773601000
+    }
+  ]
+}
+
+[exit 0]
+$ ostro audit ls --limit 2
+TIME                      NODE  ACTION         ACTOR              TENANT  TARGET                                                            OUTCOME
+2026-11-27T10:00:00.000Z  1     module.upload  otk_admin (token)  -       cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd  ok
+2026-11-27T10:00:01.000Z  2     run.cancel     otk_ops (token)    acme    r-1                                                               ok
+more: --cursor 2
+
+[exit 0]
+$ ostro audit ls --limit 2 --cursor 2
+TIME                      NODE  ACTION             ACTOR                  TENANT  TARGET  OUTCOME
+2026-11-27T10:00:02.000Z  1     run.cancel         otk_ops (token)        acme    r-2     failed:not_found
+2026-11-27T10:00:03.000Z  3     auth.failure (x7)  malformed (anonymous)  -               denied:malformed
+more: --cursor 4
+
+[exit 0]
+$ ostro audit ls --limit 2 --cursor 4
+TIME                      NODE  ACTION      ACTOR              TENANT  TARGET  OUTCOME
+2026-11-27T10:00:04.000Z  2     secret.set  otk_admin (token)  beta    db      ok
+
+[exit 0]

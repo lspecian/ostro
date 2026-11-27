@@ -55,6 +55,8 @@ impl PeerApi {
             inventory: Some(client.clone()),
             cluster: Some(client.clone()),
             module_lifecycle: Some(client.clone()),
+            // Phase 14 (14-18): the audit query fan-out reads every member's journal.
+            audit: Some(client.clone()),
             ..ApiExtensions::default()
         };
         PeerApi { cp: client, ext }

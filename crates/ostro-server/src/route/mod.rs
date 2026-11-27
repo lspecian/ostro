@@ -1540,6 +1540,10 @@ impl RoutedExtensions {
         if ext.cluster.is_some() {
             ext.cluster = Some(me.clone());
         }
+        // Phase 14 (14-18): the audit query fans out to every member's journal.
+        if ext.audit.is_some() {
+            ext.audit = Some(me.clone());
+        }
         if ext.module_lifecycle.is_some() {
             ext.module_lifecycle = Some(me);
         }
@@ -1889,6 +1893,19 @@ impl ClusterApi for RoutedExtensions {
     }
     async fn upgrade_release(&self) -> Result<UpgradeStatus, ApiError> {
         ext_local!(self, cluster, "ClusterApi", upgrade_release, meta_write)
+    }
+}
+
+/// Phase 14 (14-18): `GET /v1/audit` asks every member's node-local journal and merges the
+/// pages (`p14::audit_api::fan_out`); unreachable members are reported, not fatal.
+#[async_trait::async_trait]
+impl ostro_api::phase14::AuditApi for RoutedExtensions {
+    async fn query(
+        &self,
+        q: ostro_api::phase14::AuditQuery,
+    ) -> Result<ostro_api::phase14::AuditPage, ApiError> {
+        let s = slot(&self.inner.audit, "query")?;
+        crate::p14::audit_api::fan_out(&self.core, s, q).await
     }
 }
 

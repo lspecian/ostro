@@ -52,6 +52,9 @@ type Leg = (Option<u64>, Vec<u16>);
 /// A finished leg.
 type LegResult<T> = (Option<u64>, Vec<u16>, Result<T, ApiError>);
 
+/// Per-node results of [`RouteCore::each_node`] (`None` = this node).
+type NodeResults<T> = Vec<(Option<u64>, Result<T, ApiError>)>;
+
 /// One page of rows to merge: `(run, created_at_ms, row)` and the leg's token.
 type PageRows<T> = (Vec<(RunId, u64, T)>, Option<String>);
 
@@ -304,6 +307,71 @@ impl RouteCore {
             }
             record(class, "forwarded", true);
             Ok(out)
+        })
+    }
+
+    /// Phase 14 (14-18): every member asked, like [`Self::all_nodes`], but a member that
+    /// cannot answer does not fail the call: the per-node results come back (this node
+    /// first as `None`, then the members in id order) and the caller reports the failed
+    /// ones (the audit query's `partial_nodes`). A forwarded-in call answers locally.
+    pub async fn each_node<T, L, LF, R, RF>(
+        &self,
+        class: RouteClass,
+        local: L,
+        remote: R,
+    ) -> NodeResults<T>
+    where
+        T: Send + 'static,
+        L: Fn() -> LF + Send + Sync,
+        LF: std::future::Future<Output = Result<T, ApiError>> + Send,
+        R: Fn(PeerApi) -> RF + Send + Sync,
+        RF: std::future::Future<Output = Result<T, ApiError>> + Send,
+    {
+        let local = || erase(local());
+        let remote = |peer: PeerApi| erase(remote(peer));
+        self.each_node_dyn(class, &local, &remote)
+            .await
+            .into_iter()
+            .map(|(n, r)| (n, unerase(r)))
+            .collect()
+    }
+
+    /// [`Self::each_node`] over type-erased calls (compiled once; binary size).
+    fn each_node_dyn<'s, 'f: 's>(
+        &'s self,
+        class: RouteClass,
+        local: &'s LocalFn<'s, 'f>,
+        remote: &'s RemoteFn<'s, 'f>,
+    ) -> BoxFuture<'s, NodeResults<AnyOut>> {
+        Box::pin(async move {
+            let meta = current_meta();
+            if meta.hop >= 1 {
+                let r = self.local(Access::None, local()).await;
+                record(class, "local", r.is_ok());
+                return vec![(None, r)];
+            }
+            let mut members = self.env.members();
+            members.sort_unstable();
+            members.dedup();
+            let mut nodes: Vec<Option<u64>> = vec![None];
+            let mut futs: Vec<BoxFuture<'_, Result<AnyOut, ApiError>>> = Vec::new();
+            futs.push(Box::pin(self.local(Access::None, local())));
+            for n in members {
+                let meta = meta.clone();
+                let remote = &remote;
+                nodes.push(Some(n));
+                futs.push(Box::pin(async move {
+                    self.forward(n, &meta, |_| {}, remote).await
+                }));
+            }
+            let out: Vec<_> = nodes.into_iter().zip(join_all(futs).await).collect();
+            record(
+                class,
+                "forwarded",
+                out.iter()
+                    .all(|(_, r): &(Option<u64>, Result<AnyOut, ApiError>)| r.is_ok()),
+            );
+            out
         })
     }
 

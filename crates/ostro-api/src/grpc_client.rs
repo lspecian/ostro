@@ -1923,6 +1923,25 @@ impl ModuleLifecycleApi for GrpcControlPlane {
     }
 }
 
+// Phase 14 (14-18): the audit query over the cluster listener (the node fan-out of
+// `GET /v1/audit` asks every member's journal through it).
+#[async_trait::async_trait]
+impl crate::phase14::AuditApi for GrpcControlPlane {
+    async fn query(
+        &self,
+        q: crate::phase14::AuditQuery,
+    ) -> Result<crate::phase14::AuditPage, ApiError> {
+        Ok(call!(
+            self,
+            "Audit",
+            "Query",
+            pb::AuditPage,
+            pb::AuditQueryRequest::from(q)
+        )?
+        .into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

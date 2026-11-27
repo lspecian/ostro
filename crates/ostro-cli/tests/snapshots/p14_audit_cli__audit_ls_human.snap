@@ -1,0 +1,34 @@
+---
+source: crates/ostro-cli/tests/p14_audit_cli.rs
+expression: t
+---
+$ ostro audit ls
+TIME                      NODE  ACTION             ACTOR                  TENANT  TARGET                                                            OUTCOME
+2026-11-27T10:00:00.000Z  1     module.upload      otk_admin (token)      -       cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd  ok
+2026-11-27T10:00:01.000Z  2     run.cancel         otk_ops (token)        acme    r-1                                                               ok
+2026-11-27T10:00:02.000Z  1     run.cancel         otk_ops (token)        acme    r-2                                                               failed:not_found
+2026-11-27T10:00:03.000Z  3     auth.failure (x7)  malformed (anonymous)  -                                                                         denied:malformed
+2026-11-27T10:00:04.000Z  2     secret.set         otk_admin (token)      beta    db                                                                ok
+
+[exit 0]
+$ ostro audit ls --action run.cancel
+TIME                      NODE  ACTION      ACTOR            TENANT  TARGET  OUTCOME
+2026-11-27T10:00:01.000Z  2     run.cancel  otk_ops (token)  acme    r-1     ok
+2026-11-27T10:00:02.000Z  1     run.cancel  otk_ops (token)  acme    r-2     failed:not_found
+
+[exit 0]
+$ ostro audit ls --tenant acme --actor otk_ops
+TIME                      NODE  ACTION      ACTOR            TENANT  TARGET  OUTCOME
+2026-11-27T10:00:01.000Z  2     run.cancel  otk_ops (token)  acme    r-1     ok
+2026-11-27T10:00:02.000Z  1     run.cancel  otk_ops (token)  acme    r-2     failed:not_found
+
+[exit 0]
+$ ostro audit ls --action secret.* --since 1795773604000
+TIME                      NODE  ACTION      ACTOR              TENANT  TARGET  OUTCOME
+2026-11-27T10:00:04.000Z  2     secret.set  otk_admin (token)  beta    db      ok
+
+[exit 0]
+$ ostro audit ls --action token.create
+no audit records
+
+[exit 0]

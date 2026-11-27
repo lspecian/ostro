@@ -1,0 +1,16 @@
+---
+source: crates/ostro-cli/tests/p14_audit_cli.rs
+expression: t
+---
+$ ostro audit ls
+error: audit journal unavailable: writer stalled (HTTP 503 unavailable, reason audit_unavailable)
+[exit 1]
+$ ostro audit ls --limit many
+usage: invalid value for one of the arguments
+[exit 2]
+$ ostro audit verify
+usage: one or more required arguments were not provided
+[exit 2]
+$ ostro audit verify --data-dir /var/lib/ostro
+error: `ostro audit verify` is run by the ostro binary
+[exit 2]
