@@ -350,7 +350,7 @@ impl RemoteRunner {
         };
         let (run, token) = (job.run, job.token);
         let (activation, outcome, revoked) = self.drive(&engine, job).await;
-        engine.hooks().jobs().push(JobRecord {
+        engine.hooks().push_job(JobRecord {
             run,
             token,
             activation,

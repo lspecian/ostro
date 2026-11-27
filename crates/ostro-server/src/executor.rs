@@ -274,8 +274,13 @@ impl ModuleOverrideSlot {
 }
 
 /// Test hooks (not part of the product surface).
+///
+/// p14-fixups-4: the per-job records ([`ExecutorHooks::jobs`], `remote.sinks`) grow by one
+/// entry per finished job. [`Default`] (every test) records them; the production server
+/// starts with [`ExecutorHooks::production`], which records nothing (the 14-23 soak's
+/// anonymous-memory growth: ~430 MB of `JobRecord`s per 25 min at 2,900 runs/s).
 #[doc(hidden)]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ExecutorHooks {
     /// Activations started.
     pub activations: AtomicU64,
@@ -289,8 +294,11 @@ pub struct ExecutorHooks {
     /// Restrict `pause_before_append` / `suppress_heartbeat` to this attempt number
     /// (0 = every attempt).
     pub only_attempt: AtomicU32,
-    /// One record per finished job.
+    /// One record per finished job (only while [`ExecutorHooks::record`] is set).
     pub jobs: Mutex<Vec<JobRecord>>,
+    /// Record [`jobs`](Self::jobs) and `remote.sinks` (true by default; false in
+    /// [`ExecutorHooks::production`]).
+    pub record: AtomicBool,
     /// WF-08 only (05-11): when it returns `Some(sha)` for a run, the executor loads that
     /// module instead of `RunRecord.module_sha` (a run "re-pinned" after a restart; there is
     /// no re-pin API before Phase 13). `None` = no override.
@@ -300,7 +308,42 @@ pub struct ExecutorHooks {
     pub remote: crate::workers::remote_executor::RemoteHooks,
 }
 
+impl Default for ExecutorHooks {
+    fn default() -> Self {
+        Self {
+            activations: AtomicU64::new(0),
+            self_fences: AtomicU64::new(0),
+            pause_before_append: Mutex::new(None),
+            suppress_heartbeat: AtomicBool::new(false),
+            only_attempt: AtomicU32::new(0),
+            jobs: Mutex::new(Vec::new()),
+            record: AtomicBool::new(true),
+            module_override: ModuleOverrideSlot::default(),
+            remote: crate::workers::remote_executor::RemoteHooks::default(),
+        }
+    }
+}
+
 impl ExecutorHooks {
+    /// The production server's hooks: nothing is recorded per job.
+    pub fn production() -> Self {
+        let h = Self::default();
+        h.record.store(false, Ordering::Relaxed);
+        h
+    }
+
+    /// Whether per-job records are kept.
+    pub fn recording(&self) -> bool {
+        self.record.load(Ordering::Relaxed)
+    }
+
+    /// Append a finished job's record (when [`recording`](Self::recording)).
+    pub(crate) fn push_job(&self, rec: JobRecord) {
+        if self.recording() {
+            self.jobs().push(rec);
+        }
+    }
+
     fn applies(&self, n: u32) -> bool {
         let only = self.only_attempt.load(Ordering::Acquire);
         only == 0 || only == n
@@ -466,9 +509,11 @@ impl EngineExecutor {
         if let Some(b) = &self.bridge {
             sink = sink.with_bridge(Arc::clone(b));
         }
-        self.hooks
-            .remote
-            .note_sink(job.reservation_kind(), self.bridge.as_ref());
+        if self.hooks.recording() {
+            self.hooks
+                .remote
+                .note_sink(job.reservation_kind(), self.bridge.as_ref());
+        }
         sink
     }
 
@@ -922,7 +967,7 @@ impl EngineExecutor {
         } else {
             outcome
         };
-        self.hooks.jobs().push(JobRecord {
+        self.hooks.push_job(JobRecord {
             run,
             token,
             activation,
@@ -1381,5 +1426,35 @@ impl EngineExecutor {
                 .map_err(|e| e.to_string());
         }
         Ok(journal)
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    fn rec() -> JobRecord {
+        JobRecord {
+            run: RunId::new_v7(ostro_types::PartitionId(0)),
+            token: ostro_types::AttemptToken {
+                epoch: ostro_types::Epoch(1),
+                n: 1,
+            },
+            activation: None,
+            outcome: ExecOutcome::Released,
+            revoked: false,
+            self_fenced: false,
+        }
+    }
+
+    /// p14-fixups-4: production hooks keep no per-job records; test hooks keep them.
+    #[test]
+    fn production_hooks_record_no_jobs() {
+        let prod = ExecutorHooks::production();
+        prod.push_job(rec());
+        assert!(prod.jobs().is_empty());
+        let test = ExecutorHooks::default();
+        test.push_job(rec());
+        assert_eq!(test.jobs().len(), 1);
     }
 }

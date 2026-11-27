@@ -256,7 +256,8 @@ impl Default for ServerOptions {
         Self {
             // The one production clock (injection root); tests pass their own.
             clock: Arc::new(ostro_partition::SystemClock), // clock-exempt: injection root
-            hooks: Arc::new(ExecutorHooks::default()),
+            // p14-fixups-4: no per-job test records in production (unbounded growth).
+            hooks: Arc::new(ExecutorHooks::production()),
             tls_profile: None,
             cluster_transport: None,
             wal_rotation_bytes: None,
