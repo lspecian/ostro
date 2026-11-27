@@ -522,7 +522,7 @@ Plans:
 - [ ] 14-24-PLAN.md — Threat model, security model, generated auth matrix, review packet + findings tracker (wave 6; SEC-05)
 - [ ] 14-25-PLAN.md — Docs set (getting started x3, determinism, connectors, tenancy/auth, audit, signed modules, operations/sizing, install, Kubernetes, README) + docs-check (wave 6; DIST-03)
 - [ ] 14-26-PLAN.md — Cross-feature tier-B integration + races, full audit table, full suite x3, full-tree docs-check, fixes with regression tests (wave 7; SEC-02..04, DISP-06)
-- [ ] 14-28-PLAN.md — Follow-ups: own file watcher (inotify via libc, polling elsewhere, debounce) replacing notify + deny.toml CC0 exception removed; dev-ephemeral module replacement (option a); Standard Webhooks test-key split (wave 3; CLI-08, CLI-01, TRIG-01)
+- [x] 14-28-PLAN.md — Follow-ups: own file watcher (inotify via libc, polling elsewhere, debounce) replacing notify + deny.toml CC0 exception removed; dev-ephemeral module replacement (option a); Standard Webhooks test-key split (wave 3; CLI-08, CLI-01, TRIG-01)
 - [x] 14-29-PLAN.md — Whole-cluster restore primitives: term-fenced meta/head + metadata snapshots in cluster mode, replay observer, consistent-cut search (greatest fixpoint under Pitfall 1, proptest) (wave 3; BACK-05)
 - [x] 14-30-PLAN.md — Whole-cluster restore: cluster bucket → consistent cut → seed (metadata rewritten, old members Removed) → `ostro cluster join` back to RF; tier C on file:// and SeaweedFS; runbook (wave 4; BACK-05)
 - [x] 14-31-PLAN.md — Kafka transport (ostro-kafka): framing, ApiVersions negotiation, tokio-rustls TLS, SASL PLAIN/SCRAM; fake broker + Kafka 4.1 SSL/SASL listeners (wave 3; TRIG-04)
