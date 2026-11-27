@@ -28,8 +28,11 @@ ostro-client = { path = "../ostro-client" }
 ostro-engine = { path = "../ostro-engine" }
 # Phase 14 (14-19): `ostro deploy --signature <file>` sends Ostro-Module-Signature headers.
 base64.workspace = true
-notify.workspace = true
-notify-debouncer-full.workspace = true
+
+# 14-28 (D-P14-47): `ostro dev --watch` uses its own inotify watcher on Linux (replaces
+# notify + notify-debouncer-full); other platforms poll.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

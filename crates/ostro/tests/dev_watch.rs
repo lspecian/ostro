@@ -333,3 +333,45 @@ fn watch_with_time_skipping_deploys_and_stays_idle() {
     assert_eq!(active(&dev), Some(2));
     assert_eq!(run_version(&dev), 2);
 }
+
+/// 14-28 (D-P14-47): the in-tree watcher survives a directory rename inside the project:
+/// files in the moved tree still trigger builds, and a later source save still redeploys.
+#[test]
+fn watch_survives_a_directory_rename_inside_the_project() {
+    let d = tempfile::tempdir().unwrap();
+    let p = d.path().join("p");
+    copy_tree(&fixture(), &p);
+    let ps = p.to_str().unwrap();
+    let dev = p10::spawn_dev(&["--watch", ps], &[("CARGO_NET_OFFLINE", "true")]);
+    let mut log = Log::new(&dev);
+    log.wait_for(0, "deployed hello v1", BUILD_TIMEOUT);
+
+    // a new directory tree: watched, its file triggers a build
+    let mark = log.all.len();
+    std::fs::create_dir_all(p.join("data/inner")).unwrap();
+    std::fs::write(p.join("data/inner/a.txt"), "a").unwrap();
+    log.wait_for(mark, "building", BUILD_TIMEOUT);
+    log.wait_for(mark, "new runs use v1", BUILD_TIMEOUT);
+    log.settle(Duration::from_secs(1));
+
+    // the rename itself is a change
+    let mark = log.all.len();
+    std::fs::rename(p.join("data"), p.join("moved")).unwrap();
+    log.wait_for(mark, "building", BUILD_TIMEOUT);
+    log.wait_for(mark, "new runs use v1", BUILD_TIMEOUT);
+    log.settle(Duration::from_secs(1));
+
+    // a write inside the moved tree is still seen
+    let mark = log.all.len();
+    std::fs::write(p.join("moved/inner/b.txt"), "b").unwrap();
+    log.wait_for(mark, "building", BUILD_TIMEOUT);
+    log.wait_for(mark, "new runs use v1", BUILD_TIMEOUT);
+    log.settle(Duration::from_secs(1));
+
+    // and a source save still redeploys
+    let mark = log.all.len();
+    edit(&p, "hi", 2);
+    log.wait_for(mark, "new runs use v2", BUILD_TIMEOUT);
+    assert_eq!(active(&dev), Some(2));
+    assert_eq!(log.count(0, "build failed"), 0, "{:?}", log.watch_lines(0));
+}

@@ -3,11 +3,13 @@
 //! [`run_watch`] runs on its own task next to the in-process server:
 //!
 //! - one build + deploy at start, then one per debounced batch of changes
-//!   (notify-debouncer-full, 250 ms), through [`deploy_project`], the code path of
-//!   `ostro deploy [DIR]`;
+//!   ([`debounce`]: 250 ms quiet window, 2 s max latency), through [`deploy_project`],
+//!   the code path of `ostro deploy [DIR]`;
+//! - the watcher is our own (D-P14-47, replaces `notify`): [`inotify`] over `libc` on
+//!   Linux (falls back to [`poll`] when inotify limits are reached), [`poll`] elsewhere;
 //! - paths in `ostro_build::pipeline::IGNORE` (`target/`, `.git/`, `*.swp`, `4913`, ...)
-//!   and the caller's extra patterns never trigger a build. Ignored top-level
-//!   directories are not even watched (no inotify watches on `target/`);
+//!   and the caller's extra patterns never trigger a build. Ignored directories are not
+//!   even watched or walked (no inotify watches on `target/`);
 //! - builds are serialised: changes that arrive during a build set a dirty flag, which
 //!   gives exactly one follow-up build;
 //! - the build itself runs on a dedicated thread, so the server is never blocked;
@@ -21,13 +23,17 @@ use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use notify_debouncer_full::notify::event::ModifyKind;
-use notify_debouncer_full::notify::{EventKind, RecursiveMode};
-use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use std::sync::Arc;
+
 use ostro_build::pipeline::{ignored_dir, ignored_file, is_ignored};
 
 use crate::client::Client;
 use crate::commands::deploy::{DeployError, DeployOptions, DeployReport, deploy_project};
+
+pub mod debounce;
+#[cfg(target_os = "linux")]
+pub mod inotify;
+pub mod poll;
 
 /// The default debounce window (D-P10-14).
 pub const DEBOUNCE_MS: u64 = 250;
@@ -154,52 +160,53 @@ fn report(res: Result<DeployReport, DeployError>, active: &mut Vec<(String, u64)
     }
 }
 
-/// Start watching `root`: the root itself (non-recursive) and every top-level directory
-/// that is not ignored (recursive). Returns the watched directories.
-fn watch_tree<W>(
-    deb: &mut notify_debouncer_full::Debouncer<W, notify_debouncer_full::RecommendedCache>,
-    root: &Path,
-    extra: &[String],
-    watched: &mut BTreeSet<PathBuf>,
-) -> Result<(), String>
-where
-    W: notify_debouncer_full::notify::Watcher,
-{
-    if watched.insert(root.to_path_buf()) {
-        deb.watch(root, RecursiveMode::NonRecursive)
-            .map_err(|e| format!("watching {}: {e}", root.display()))?;
-    }
-    let entries =
-        std::fs::read_dir(root).map_err(|e| format!("reading {}: {e}", root.display()))?;
-    for e in entries.flatten() {
-        let p = e.path();
-        // `file_type` does not follow symlinks: symlinked dirs are not watched (nor staged).
-        if e.file_type().is_ok_and(|t| t.is_dir()) {
-            watch_dir(deb, root, &p, extra, watched);
-        }
-    }
-    Ok(())
+/// The path filter a backend applies: which directories are watched (walked) and which
+/// changed paths are reported.
+pub(crate) type Filter = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
+/// Which backend to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// inotify on Linux, polling elsewhere.
+    Native,
+    /// mtime/size/inode polling (the test-only way to pick it on Linux).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Poll,
 }
 
-/// Watch the top-level directory `dir` recursively unless it is ignored or watched.
-fn watch_dir<W>(
-    deb: &mut notify_debouncer_full::Debouncer<W, notify_debouncer_full::RecommendedCache>,
+/// A running watcher backend (stops when dropped).
+pub(crate) enum Backend {
+    #[cfg(target_os = "linux")]
+    Inotify {
+        _watcher: inotify::Watcher,
+    },
+    Poll {
+        _watcher: poll::Watcher,
+    },
+}
+
+/// Start a backend over `root`. On Linux, `Kind::Native` falls back to polling (with one
+/// `ostro dev: inotify unavailable (<err>); polling` line) when inotify limits are hit.
+pub(crate) fn start_backend(
+    kind: Kind,
     root: &Path,
-    dir: &Path,
-    extra: &[String],
-    watched: &mut BTreeSet<PathBuf>,
-) where
-    W: notify_debouncer_full::notify::Watcher,
-{
-    if dir.parent() != Some(root) || !relevant(root, dir, extra) || watched.contains(dir) {
-        return;
-    }
-    match deb.watch(dir, RecursiveMode::Recursive) {
-        Ok(()) => {
-            watched.insert(dir.to_path_buf());
+    filter: Filter,
+    tx: tokio::sync::mpsc::UnboundedSender<debounce::Event>,
+) -> Result<Backend, String> {
+    #[cfg(target_os = "linux")]
+    if kind == Kind::Native {
+        match inotify::Watcher::start(root, filter.clone(), tx.clone()) {
+            Ok(w) => return Ok(Backend::Inotify { _watcher: w }),
+            Err(e) if inotify::is_limit(&e) => {
+                eprintln!("ostro dev: inotify unavailable ({e}); polling");
+            }
+            Err(e) => return Err(format!("starting the file watcher: {e}")),
         }
-        Err(e) => eprintln!("ostro dev: cannot watch {}: {e}", dir.display()),
     }
+    let _ = kind;
+    poll::Watcher::start(root, filter, tx, poll::INTERVAL)
+        .map(|w| Backend::Poll { _watcher: w })
+        .map_err(|e| format!("starting the file watcher: {e}"))
 }
 
 /// Runs the watch loop against `server` until `shutdown` resolves. Errors are setup
@@ -222,49 +229,14 @@ pub async fn run_watch(
         .map(|p| p.manifest.project.name)
         .map_err(|e| e.to_string())?;
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<PathBuf>>();
-    let (filter_root, extra) = (root.clone(), opts.ignore.clone());
-    let mut deb = new_debouncer(
+    // watcher events -> debounce (quiet window + max latency) -> batches -> build loop
+    let (events, mut rx) = debounce::spawn(
         Duration::from_millis(opts.debounce_ms.max(1)),
-        None,
-        move |res: DebounceEventResult| match res {
-            Ok(events) => {
-                let paths: Vec<PathBuf> = events
-                    .iter()
-                    .filter(|e| !matches!(e.event.kind, EventKind::Access(_)))
-                    // A directory's own content/metadata change (its mtime moves when an
-                    // entry, even an ignored one, is created in it; backends differ in
-                    // whether they report that) is not a source change: its files report
-                    // their own events. Creates, removes and renames of a directory count.
-                    .filter(|e| {
-                        !(matches!(
-                            e.event.kind,
-                            EventKind::Modify(
-                                ModifyKind::Data(_)
-                                    | ModifyKind::Metadata(_)
-                                    | ModifyKind::Any
-                                    | ModifyKind::Other
-                            )
-                        ) && e.event.paths.iter().all(|p| p.is_dir()))
-                    })
-                    .flat_map(|e| e.event.paths.iter())
-                    .filter(|p| relevant(&filter_root, p, &extra))
-                    .cloned()
-                    .collect();
-                if !paths.is_empty() {
-                    let _ = tx.send(paths);
-                }
-            }
-            Err(errs) => {
-                for e in errs {
-                    eprintln!("ostro dev: watch error: {e}");
-                }
-            }
-        },
-    )
-    .map_err(|e| format!("starting the file watcher: {e}"))?;
-    let mut watched = BTreeSet::new();
-    watch_tree(&mut deb, &root, &opts.ignore, &mut watched)?;
+        Duration::from_millis(debounce::MAX_LATENCY_MS),
+    );
+    let (filter_root, extra) = (root.clone(), opts.ignore.clone());
+    let filter: Filter = Arc::new(move |p: &Path| relevant(&filter_root, p, &extra));
+    let _backend = start_backend(Kind::Native, &root, filter, events)?;
     eprintln!(
         "ostro dev: watching {} (debounce {} ms)",
         root.display(),
@@ -286,23 +258,15 @@ pub async fn run_watch(
             report(res, &mut active, t0.elapsed());
             // Everything queued during the build collapses into one follow-up build.
             dirty = false;
-            while let Ok(paths) = rx.try_recv() {
-                for p in &paths {
-                    watch_dir(&mut deb, &root, p, &opts.ignore, &mut watched);
-                }
-                dirty = true;
+            while let Ok(batch) = rx.try_recv() {
+                dirty |= !batch.is_empty();
             }
             continue;
         }
         tokio::select! {
             () = &mut shutdown => return Ok(()),
             m = rx.recv() => match m {
-                Some(paths) => {
-                    for p in &paths {
-                        watch_dir(&mut deb, &root, p, &opts.ignore, &mut watched);
-                    }
-                    dirty = true;
-                }
+                Some(batch) => dirty = !batch.is_empty(),
                 None => return Err("the file watcher stopped".to_owned()),
             },
         }
@@ -360,5 +324,162 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let e = check_project(d.path()).unwrap_err();
         assert!(e.contains("no Ostro project"), "{e}");
+    }
+
+    // ---- watcher backends + debouncer (D-P14-47): the same scenarios for both ----
+
+    use debounce::Batch;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    struct Rig {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        kind: Kind,
+        _backend: Backend,
+        rx: UnboundedReceiver<Batch>,
+    }
+
+    impl Rig {
+        async fn start(kind: Kind) -> Rig {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::create_dir_all(root.join("target/debug")).unwrap();
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            std::fs::write(root.join("src/lib.rs"), "fn a() {}").unwrap();
+            // polling: a quiet window longer than the interval keeps one change one batch
+            let quiet = match kind {
+                Kind::Native => 100,
+                Kind::Poll => 450,
+            };
+            let (tx, rx) = debounce::spawn(
+                Duration::from_millis(quiet),
+                Duration::from_millis(debounce::MAX_LATENCY_MS),
+            );
+            let fr = root.clone();
+            let filter: Filter = Arc::new(move |p: &Path| relevant(&fr, p, &[]));
+            let backend = start_backend(kind, &root, filter, tx).unwrap();
+            Rig {
+                _dir: dir,
+                root,
+                kind,
+                _backend: backend,
+                rx,
+            }
+        }
+
+        fn p(&self, rel: &str) -> PathBuf {
+            self.root.join(rel)
+        }
+
+        /// The batches of one change: the first within 5 s, then whatever follows
+        /// within a settle window.
+        async fn batches(&mut self) -> Vec<Batch> {
+            let first = tokio::time::timeout(Duration::from_secs(5), self.rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{:?}: no batch within 5 s", self.kind))
+                .unwrap();
+            let mut out = vec![first];
+            out.extend(self.quiet_batches().await);
+            out
+        }
+
+        /// Batches arriving within the settle window (expected: none).
+        async fn quiet_batches(&mut self) -> Vec<Batch> {
+            let settle = Duration::from_millis(match self.kind {
+                Kind::Native => 600,
+                Kind::Poll => 1_500,
+            });
+            let mut out = Vec::new();
+            let deadline = tokio::time::Instant::now() + settle;
+            while let Ok(Some(b)) = tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                out.push(b);
+            }
+            out
+        }
+    }
+
+    fn one_batch(kind: Kind, what: &str, got: &[Batch], must: &[PathBuf]) {
+        assert_eq!(got.len(), 1, "{kind:?} {what}: {got:?}");
+        for p in must {
+            assert!(
+                got[0].paths.contains(p),
+                "{kind:?} {what}: {p:?} not in {got:?}"
+            );
+        }
+    }
+
+    async fn scenarios(kind: Kind) {
+        let mut r = Rig::start(kind).await;
+        // let a polling snapshot / the inotify watches settle
+        assert!(r.quiet_batches().await.is_empty(), "{kind:?}: setup noise");
+
+        std::fs::write(r.p("src/lib.rs"), "fn a() { /* edited */ }").unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "modify", &b, &[r.p("src/lib.rs")]);
+
+        std::fs::write(r.p("src/new.rs"), "fn n() {}").unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "create", &b, &[r.p("src/new.rs")]);
+
+        std::fs::remove_file(r.p("src/new.rs")).unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "delete", &b, &[r.p("src/new.rs")]);
+
+        std::fs::rename(r.p("src/lib.rs"), r.p("src/lib2.rs")).unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "rename", &b, &[r.p("src/lib.rs"), r.p("src/lib2.rs")]);
+
+        // noise: ignored directories and file names never give a batch
+        std::fs::write(r.p("target/debug/noise.o"), "x").unwrap();
+        std::fs::create_dir_all(r.p("target/new-dir")).unwrap();
+        std::fs::write(r.p("target/new-dir/x"), "x").unwrap();
+        std::fs::write(r.p(".git/index"), "x").unwrap();
+        std::fs::write(r.p("src/.lib2.rs.swp"), "x").unwrap();
+        std::fs::write(r.p("src/4913"), "x").unwrap();
+        std::fs::remove_file(r.p("src/4913")).unwrap();
+        let b = r.quiet_batches().await;
+        assert!(b.is_empty(), "{kind:?} noise: {b:?}");
+
+        // a new subdirectory with a file written immediately: the file is reported
+        std::fs::create_dir_all(r.p("src/sub")).unwrap();
+        std::fs::write(r.p("src/sub/m.rs"), "fn m() {}").unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "new dir", &b, &[r.p("src/sub/m.rs")]);
+
+        // the new directory is watched: a later edit in it is reported
+        std::fs::write(r.p("src/sub/m.rs"), "fn m() { 1; }").unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "edit in new dir", &b, &[r.p("src/sub/m.rs")]);
+
+        // a directory rename inside the project: the moved tree is still watched
+        std::fs::rename(r.p("src/sub"), r.p("src/moved")).unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "dir rename", &b, &[r.p("src/moved")]);
+        std::fs::write(r.p("src/moved/m.rs"), "fn m() { 2; }").unwrap();
+        let b = r.batches().await;
+        one_batch(kind, "edit after dir rename", &b, &[r.p("src/moved/m.rs")]);
+        assert!(
+            !b[0].paths.iter().any(|p| p.starts_with(r.p("src/sub"))),
+            "{kind:?}: stale path after the rename: {b:?}"
+        );
+
+        // 200 rapid writes: one or two batches
+        for i in 0..200 {
+            std::fs::write(r.p("src/lib2.rs"), format!("fn a() {{ {i}; }}")).unwrap();
+        }
+        let b = r.batches().await;
+        assert!((1..=2).contains(&b.len()), "{kind:?} rapid writes: {b:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watch_inotify_backend_scenarios() {
+        scenarios(Kind::Native).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watch_poll_backend_scenarios() {
+        scenarios(Kind::Poll).await;
     }
 }

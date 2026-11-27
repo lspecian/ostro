@@ -151,10 +151,6 @@ ostro-ui = { path = "crates/ostro-ui" }
 # tests use the Phase 12 `tower` pin above (ServiceExt).
 http = "1"
 # Phase 10 (plan 10-02 declares every Phase 10 dependency once, D-P10-11; exact pins).
-# notify is CC0-1.0: deny.toml carries a crate-scoped exception for it (USER REVIEW D-P10-11).
-# `ostro dev --watch` (10-16): file watcher + debouncer.
-notify = "=8.2.2"
-notify-debouncer-full = "=0.7.0"
 # `ostro completions` (10-03)
 clap_complete = "=4.6.12"
 # toolchain archives (10-07): .tar.gz (pure-Rust miniz_oxide backend, no zlib C) and .tar.xz
@@ -272,12 +268,6 @@ opt-level = "z"
 opt-level = "z"
 
 [profile.release.package.clap_complete]
-opt-level = "z"
-
-[profile.release.package.notify]
-opt-level = "z"
-
-[profile.release.package.notify-debouncer-full]
 opt-level = "z"
 
 [profile.release.package.instant-acme]

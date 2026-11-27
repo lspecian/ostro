@@ -21,10 +21,8 @@ pub use output::{Outcome, exit_code};
 // Phase 8 (plan 08-01): `tar` for `ostro backup --to` (08-12/08-18), anchored until it is used.
 use tar as _;
 
-// Phase 10 (plan 10-02): dependencies of 10-09 (ostro-client), 10-12/10-13 (ostro-build,
-// ostro-engine) and 10-16 (notify, notify-debouncer-full), anchored until they are used.
-use notify as _;
-use notify_debouncer_full as _;
+// Phase 10 (plan 10-02): dependencies of 10-09 (ostro-client) and 10-12/10-13 (ostro-build,
+// ostro-engine), anchored until they are used.
 use ostro_build as _;
 use ostro_client as _;
 use ostro_engine as _;
