@@ -3620,6 +3620,7 @@ dependencies = [
  "ostro-server",
  "ostro-types",
  "rand 0.9.5",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

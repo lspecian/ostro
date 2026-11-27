@@ -167,3 +167,20 @@ criteria C1 to C9 change. The FAILs above stand as recorded.
 - The cron slice: schedule creation needs the `admin` scope, and schedule names cannot be
   tenant-qualified. The system admin therefore creates `soak-tick` with a plain name and
   the workflow `bench/trivial-steps`.
+
+### 2026-11-27 (p14-fixups-4, after smoke 3)
+
+**What changed.** Only the driver changed; C1 to C9 did not, and smoke 3 still counts as a
+FAIL.
+
+- **The driver's HTTP pool is bounded.** Every driver request now goes through one client
+  that keeps at most 128 idle keep-alive connections per node, each for at most 15 s
+  (`soak::driver_http`). Before this, the connections opened during a latency spike stayed
+  open for the rest of the run, about 4,900 in smoke 3, and counted in the node's fds (C2).
+  The in-flight cap and what counts as shed are unchanged.
+- **The node fail-stops on a stopped metadata driver.** If the node's metadata Raft driver
+  stops (for example on EMFILE), the node now exits non-zero instead of serving 503. The
+  harness does not restart it. C5 counts it as a "not running" observation.
+- **The cron slice stays as pre-registered.** A tenant admin can create tenant schedules (it
+  always could: `admin` scope on the tenant). The load token has no `admin` scope, so the
+  system admin still creates `soak-tick`.

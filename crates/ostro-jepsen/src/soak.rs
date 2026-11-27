@@ -92,6 +92,26 @@ pub fn inflight_cap() -> usize {
         None => MAX_INFLIGHT,
     }
 }
+/// Idle keep-alive connections the driver keeps per node (p14-fixups-4, 14-23 finding 3):
+/// after a latency spike the in-flight runs fall back to tens, and the connections opened
+/// for the spike are closed instead of being kept open (and counted in the node's fds) for
+/// the rest of the run.
+pub const POOL_MAX_IDLE_PER_HOST: usize = 128;
+/// How long an idle driver connection is kept.
+pub const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The driver's HTTP client: HTTP/1.1 keep-alive with a bounded idle pool
+/// ([`POOL_MAX_IDLE_PER_HOST`], [`POOL_IDLE_TIMEOUT`]); no proxy (loopback nodes).
+pub fn driver_http() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .tcp_nodelay(true)
+        .build()
+        .map_err(|e| format!("driver HTTP client: {e}"))
+}
+
 /// Runs longer than this use the 1 h warm-up and the C1 slope form.
 pub const LONG_RUN: Duration = Duration::from_secs(24 * 3600);
 /// Profile-A steps per run.
@@ -1532,11 +1552,13 @@ pub async fn run(spec: &SoakSpec) -> Result<SoakVerdict, String> {
     for g in [bench::WORKFLOW, "signals", "child-parent", "child-leaf"] {
         rig.deploy(g).await?;
     }
-    let api = rig.api(0);
-    let admin = rig.admin_api();
-    // Schedule creation needs the admin scope (14-15 authz) and schedule names cannot be
-    // tenant-qualified: the system admin creates it with a plain name and the tenant's
-    // qualified workflow.
+    // p14-fixups-4: one bounded-pool client for every driver request.
+    let http = driver_http()?;
+    let api = rig.api(0).with_http(&http);
+    let admin = rig.admin_api().with_http(&http);
+    // The cron slice as pre-registered (docs/soak.md amendment 2026-11-27): the system admin
+    // creates it with a plain name and the tenant's qualified workflow (the load token has
+    // no `admin` scope; a tenant admin could create it in its tenant, p14-fixups-4).
     let sched = json!({
         "name": "soak-tick",
         "workflow": format!("{TENANT}/{}", bench::WORKFLOW),

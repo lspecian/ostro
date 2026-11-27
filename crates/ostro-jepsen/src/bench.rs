@@ -370,6 +370,24 @@ impl Api {
         }
     }
 
+    /// The same nodes, target and bearer over another HTTP client (p14-fixups-4: the soak's
+    /// bounded connection pool, [`crate::soak::driver_http`]).
+    pub fn with_http(&self, http: &reqwest::Client) -> Self {
+        Self {
+            apis: Arc::new(
+                self.apis
+                    .iter()
+                    .map(|a| ApiClient {
+                        base_url: a.base_url.clone(),
+                        http: http.clone(),
+                    })
+                    .collect(),
+            ),
+            cur: Arc::new(AtomicUsize::new(self.cur.load(Ordering::Relaxed))),
+            token: self.token.clone(),
+        }
+    }
+
     /// The same nodes and target with another bearer.
     pub fn with_token(&self, token: Option<&str>) -> Self {
         Self {

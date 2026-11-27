@@ -24,6 +24,9 @@ serde_json.workspace = true
 clap.workspace = true
 tempfile.workspace = true
 rand.workspace = true
+# p14-fixups-4 (orchestrator-approved): the soak driver's bounded HTTP pool (same features as
+# ostro-repl-conformance, so the lock file is unchanged).
+reqwest = { workspace = true, features = ["rustls", "json"] }
 
 [[bin]]
 name = "ostro-soak"
