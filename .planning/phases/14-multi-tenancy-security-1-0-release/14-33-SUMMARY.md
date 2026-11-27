@@ -229,3 +229,22 @@ The plan-level gate was cut short by cluster saturation and then the orchestrato
 ## Self-Check: PASSED
 
 Commits 398130a, 981fc35, aece208 and 3262944 are ancestors of main. `shutdown.rs` contains `expected_isr_version`, `p13/mod.rs` contains `stop_following`, `tracker.rs` contains `last_caught_up_ms`, and `process_shutdown.rs` contains `controlled_shutdown_followed_partition_stall`.
+
+## Post-handback finding (2026-11-27, slot-1 lint-steps job at 3262944): OPEN
+
+The ci-local "Phase 13 tier C (multi-process)" step **FAILS at 3262944** on `process_shutdown::controlled_shutdown_followed_partition_stall`. That step runs every ignored test of `process_shutdown`, so main's ci-local now has this failing step.
+
+- p99 was 4.31 s from a single outlier: repeat 1 (the first SIGTERM after cluster start), node 1, partition 1 (leader 2, ISR [2, 1, 3]).
+- The other 26 samples were 66 to 110 ms.
+- `controlled_shutdown_timing` in the same file passed.
+- The other Phase 13 tier C tests (promotion, rolling upgrade x3, RYW, downgrade) passed. `upgrade_from_prev` and `cluster_campaign_p13` did not run after the failure.
+
+The stopped node's log for that repeat shows it stopped following partition 1 and the self-shrink of partition 1 committed (`result="shrunk"`), yet partition 1 had no probe ack for the whole 4 s hold. So the stall is **not** a failed self-shrink, and aece208 (the lagging-view retry) does not address it.
+
+The same "repeat 1, node 1, partition 1" outlier appeared in the first run (f4a1c50). In the passing runs, repeat 1 / partition 1 was still the worst sample (111 to 123 ms). Something specific to the first leader term after bootstrap, on the remaining ISR or on the leader's HW, still holds the partition after the removal. Root cause unknown: it needs the leader's (node 2's) log for that repeat.
+
+The plan's p99 < 1 s claim above holds for the runs listed there but **not reliably**. This needs a fixer (14-33 follow-up) before the 14-27 gate. Options:
+- investigate the first-term HW/ISR behaviour (preferred);
+- or, if it is a test artefact of the fresh cluster, warm up with one throwaway SIGTERM cycle and record it. That is a change to a 14-33 measurement, not to a Phase 12/13 oracle.
+
+Also measured in the same job: P13 mutant matrix REQUIRE_ALL 9/9; clippy, build, deny, grep gates, phase 7 legs and wit-next-fixture PASS; `cargo fmt --check` FAIL only on 14-29's files.
