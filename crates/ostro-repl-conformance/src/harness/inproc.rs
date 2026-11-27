@@ -167,6 +167,18 @@ impl InProcCluster {
         self.nodes.get(&node).and_then(|s| s.handle.as_ref())
     }
 
+    /// Take `node`'s running server out of the cluster (14-33): the slot stays, down (as
+    /// after `kill`, but without touching the fault rules), and the caller stops the handle
+    /// itself, e.g. a graceful `ServerHandle::shutdown` while the scenario keeps sending
+    /// traffic through the other nodes. `restart(node)` boots it again.
+    pub fn take_handle(&mut self, node: u64) -> Option<ServerHandle> {
+        self.nodes
+            .get_mut(&node)
+            .unwrap_or_else(|| panic!("no node {node} in this cluster"))
+            .handle
+            .take()
+    }
+
     /// The configuration `node` runs with.
     pub fn config(&self, node: u64) -> &ServerConfig {
         &self.slot(node).cfg

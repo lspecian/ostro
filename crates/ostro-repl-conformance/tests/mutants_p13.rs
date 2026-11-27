@@ -1,7 +1,8 @@
 //! The Phase 13 mutant matrix (13-18, D-P13-25): `cargo test -p ostro-repl-conformance
 //! --features failpoints --test mutants_p13 -- --test-threads=1 --nocapture`.
 //!
-//! Per mutant of [`ostro_repl_conformance::mutants_p13::MAP`]: every mapped scenario runs
+//! Per mutant of [`ostro_repl_conformance::mutants_p13::MAP`] (the eight Phase 13 mutants
+//! plus 14-33's `repl::mutant::readd_stale_progress`): every mapped scenario runs
 //! without the mutant (must pass), then with `fail::cfg(<mutant>, "return")` until one fails
 //! with a measured `ScenarioFailure` (`FAILED as expected`; a harness error or a deadline
 //! never counts as biting). A mutant without a runnable scenario prints `SKIP`; with

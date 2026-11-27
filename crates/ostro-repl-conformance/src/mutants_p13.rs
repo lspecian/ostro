@@ -1,5 +1,6 @@
 //! The Phase 13 mutant matrix (D-P13-25, 13-18): each of the eight
-//! `ostro_types::compat::MUTANTS` failpoints → the tier-B scenarios that must catch it.
+//! `ostro_types::compat::MUTANTS` failpoints, then the Phase 14 additions ([`P14_MUTANTS`]:
+//! 14-33's `repl::mutant::readd_stale_progress`) → the tier-B scenarios that must catch it.
 //!
 //! `tests/mutants_p13.rs` (feature `failpoints`, one test, one whole cluster at a time) runs,
 //! per mutant, every mapped scenario without the mutant (must pass), then with
@@ -22,6 +23,7 @@
 //! | `route::mutant::serve_without_lease` | `zombie_leader_never_serves_stale` | the zombie keeps serving reads past its lease: the RYW checker reports a stale read |
 //! | `gc::mutant::single_scan` | `gc_survives_leader_changes` | scan 2 never runs: the round is not postponed across the leader change between the scans |
 //! | `migrate::mutant::skip_seq_check` | `concurrent_growth_seq_mismatch` | a run that grew since the replay check is repinned instead of reported `seq_mismatch` |
+//! | `repl::mutant::readd_stale_progress` (14-33) | `shutdown_followed_partitions_keep_committing` | the leader of the quiet followed partition keeps the stopping node's caught-up progress from before its self-shrink and re-adds it while it is shutting down / down (the "stays out of the ISR until exit" check) |
 
 use crate::scenarios::{self, Scenario};
 
@@ -34,7 +36,11 @@ pub struct MutantMap {
     pub scenarios: &'static [&'static str],
 }
 
-/// The matrix, in `ostro_types::compat::MUTANTS` order (module docs).
+/// Mutants added to the Phase 13 matrix by Phase 14 plans, in order (after the eight
+/// `ostro_types::compat::MUTANTS`).
+pub const P14_MUTANTS: [&str; 1] = [ostro_log::mutants::READD_STALE_PROGRESS];
+
+/// The matrix, in `ostro_types::compat::MUTANTS` order, then [`P14_MUTANTS`] (module docs).
 pub const MAP: &[MutantMap] = &[
     MutantMap {
         mutant: "upgrade::mutant::emit_ungated",
@@ -70,6 +76,11 @@ pub const MAP: &[MutantMap] = &[
     MutantMap {
         mutant: "migrate::mutant::skip_seq_check",
         scenarios: &["concurrent_growth_seq_mismatch"],
+    },
+    // 14-33 (D-P14-50).
+    MutantMap {
+        mutant: "repl::mutant::readd_stale_progress",
+        scenarios: &["shutdown_followed_partitions_keep_committing"],
     },
 ];
 
@@ -110,8 +121,12 @@ mod tests {
     #[test]
     fn map_covers_exactly_the_eight_mutants_in_order() {
         let names: Vec<&str> = MAP.iter().map(|m| m.mutant).collect();
-        assert_eq!(names, MUTANTS, "MAP follows ostro_types::compat::MUTANTS");
-        assert_eq!(matrix().len(), 8);
+        let want: Vec<&str> = MUTANTS.iter().chain(P14_MUTANTS.iter()).copied().collect();
+        assert_eq!(
+            names, want,
+            "MAP follows ostro_types::compat::MUTANTS, then P14_MUTANTS"
+        );
+        assert_eq!(matrix().len(), 9);
     }
 
     #[test]
@@ -160,5 +175,6 @@ mod tests {
             MAP[7].mutant,
             ostro_server::control::migrate::MUTANT_SKIP_SEQ_CHECK
         );
+        assert_eq!(MAP[8].mutant, ostro_log::mutants::READD_STALE_PROGRESS);
     }
 }
