@@ -584,6 +584,8 @@ impl ScheduleApi for ScheduleController {
         let handle = &cp.partition(owner)?;
         let run = RunId::new_v7(owner);
         let now = self.ctx.now_ms();
+        // Phase 14 (14-20): trigger-now of a suspended tenant's schedule is 403.
+        crate::p14::ingress::cron_fire_gate(self.ctx.meta.view(), names::split_qualified(&name).0)?;
         let start = build_schedule_start(
             self.ctx.meta.view(),
             &self.ctx.config.runs,

@@ -154,10 +154,10 @@ impl EventRates {
         if t.cells.len() >= PRUNE_AT && !t.cells.contains_key(tenant) {
             t.cells.retain(|_, c| c.tat > now_ns);
         }
-        let cell = t.cells.entry(tenant.to_owned()).or_insert(Cell {
-            gcra,
-            tat: now_ns,
-        });
+        let cell = t
+            .cells
+            .entry(tenant.to_owned())
+            .or_insert(Cell { gcra, tat: now_ns });
         cell.gcra = gcra;
         match gcra.conforms(cell.tat, now_ns) {
             Ok(()) => {
@@ -552,7 +552,10 @@ mod tests {
             assert_eq!(e.code, ErrorCode::PermissionDenied, "{kind:?}");
             assert_eq!(e.reason(), Some(reason::TENANT_SUSPENDED), "{kind:?}");
         }
-        assert!(rates_of(&f.ctx).is_empty(), "a suspended tenant is not charged");
+        assert!(
+            rates_of(&f.ctx).is_empty(),
+            "a suspended tenant is not charged"
+        );
         let e = cron_fire_gate(f.ctx.meta.view(), Some("a")).expect_err("fire refused");
         assert_eq!(e.reason(), Some(reason::TENANT_SUSPENDED));
         cron_fire_gate(f.ctx.meta.view(), Some("b")).expect("no record");
