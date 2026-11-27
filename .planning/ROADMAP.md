@@ -507,7 +507,7 @@ Plans:
 - [x] 14-09-PLAN.md — Jepsen-style harness core: workload with consistency tokens, partition/kill nemeses, lost/duplicate/fencing checkers with self-tests (wave 3; QA-05)
 - [x] 14-10-PLAN.md — Fault knobs: failpoints-only re-anchoring skew clock + runtime failpoints endpoint, clock and disk-stall nemeses, negative control (wave 4; QA-05)
 - [ ] 14-11-PLAN.md — Release dry run (static musl, reproducible tarballs, SHA256SUMS + minisign), verified install.sh with local tests, release.yml with macOS notarized pkg and gated pushes (wave 3; DIST-01)
-- [ ] 14-12-PLAN.md — FROM scratch image without Docker (crane + loopback registry), verified contents (wave 3; DIST-01)
+- [x] 14-12-PLAN.md — FROM scratch image without Docker (crane + loopback registry), verified contents (wave 3; DIST-01)
 - [x] 14-13-PLAN.md — Helm chart (StatefulSet, workers, KEDA 2.21, NetworkPolicies) validated offline with helm lint + kubeconform (wave 3; DIST-02)
 - [x] 14-14-PLAN.md — Migration guides: cron/queue tables, Temporal, Restate (wave 3; DIST-03)
 - [x] 14-15-PLAN.md — Scope enforcement with an exact route x scope matrix (REST + gRPC descriptor set) + export, join-token separation, principal propagation over forwarding (wave 4; SEC-02)
