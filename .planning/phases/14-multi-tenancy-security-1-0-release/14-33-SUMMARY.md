@@ -230,7 +230,7 @@ The plan-level gate was cut short by cluster saturation and then the orchestrato
 
 Commits 398130a, 981fc35, aece208 and 3262944 are ancestors of main. `shutdown.rs` contains `expected_isr_version`, `p13/mod.rs` contains `stop_following`, `tracker.rs` contains `last_caught_up_ms`, and `process_shutdown.rs` contains `controlled_shutdown_followed_partition_stall`.
 
-## Post-handback finding (2026-11-27, slot-1 lint-steps job at 3262944): OPEN
+## Post-handback finding (2026-11-27, slot-1 lint-steps job at 3262944): RESOLVED (75f3406)
 
 The ci-local "Phase 13 tier C (multi-process)" step **FAILS at 3262944** on `process_shutdown::controlled_shutdown_followed_partition_stall`. That step runs every ignored test of `process_shutdown`, so main's ci-local now has this failing step.
 
@@ -248,3 +248,32 @@ The plan's p99 < 1 s claim above holds for the runs listed there but **not relia
 - or, if it is a test artefact of the fresh cluster, warm up with one throwaway SIGTERM cycle and record it. That is a change to a 14-33 measurement, not to a Phase 12/13 oracle.
 
 Also measured in the same job: P13 mutant matrix REQUIRE_ALL 9/9; clippy, build, deny, grep gates, phase 7 legs and wit-next-fixture PASS; `cargo fmt --check` FAIL only on 14-29's files.
+
+### Resolution (2026-11-27, 14-33 follow-up fixer): 75f3406
+
+The root cause is a **lost metadata lease round**: two nodes' `ReadIndex` request contexts collided in the vendored meta raft driver. It is not first-term HW/ISR state and not a measurement artefact.
+
+- The driver built a `ReadIndex` context from a kind byte plus a per-driver sequence only. raft-rs keys a pending read by its context on the leader and silently ignores a second request whose context is already pending. When two nodes issued the same sequence at the same moment, one read was lost until `read_timeout`, which is two election timeouts (2 s with the shipped meta timings).
+- On a fresh cluster, the followers' first lease rounds all carry sequence 1, and their counters advance in step after that. The losing follower then had no metadata lease for 2 s.
+- During those 2 s, every partition write it led waited the 500 ms anchor wait and was refused (`not_leader`, "no metadata lease"). The router then held each refused write for up to 2 x `session_timeout` (6 s), waiting for a view change that never came.
+- The client gave up at 5 s, so the partition had no probe ack from the SIGTERM to the end of the hold. Measured that way, the stall is `exit + hold`, which matches 4.31 s = 0.29 s + 4 s.
+- Repeat 1 is not special to the self-shrink. The shrink committed and the leader adopted it in a few ms. The write stall comes from the lease, on whichever node lost the collision. A meta leadership transfer can trigger the same collision later in a run (seen locally at repeat 2: node 3's lease lapsed after the transfer from node 2).
+
+Evidence (local, slot-6, failpoint debug build, shipped timings):
+- **Reproduced at 3262944 + b3657fa:** 5 failures in 29 short runs, at repeat 1 or 2, with stalls of 4.18 to 4.78 s.
+- **Probe logging:** the stalled partition's single probe request timed out client-side after 5.00 s, and the retry with the same key answered `created: true`, so the first attempt was never written. The leader node logged "no metadata lease" refusals after a 500 ms wait each.
+- **Driver logging on the losing follower:** `issue round seq=1 term=2 leader=3`, never resolved, then `round timed out` 2.0 s later; `seq=2` resolved in 3 ms. The other follower's `seq=1`, sent 0.5 ms apart, resolved in 9 ms.
+- **Before the fix:** 4 of 8 instrumented runs had a lost round with 5 to 7 refusals.
+- **After the fix:**
+  - 0 of 14 runs (42 SIGTERMs, including meta transfers) had a refusal; the longest anchor wait was 105 ms.
+  - All 14 runs passed, with a worst stall of 158 ms.
+  - The full ci-local `--test process_shutdown` (both ignored tests, 20 repeats) passed: followed-partition stall p50 61 ms / p99 166 ms over 27 samples, and `controlled_shutdown_timing` passed.
+
+The fix (VENDORED.md P6) adds this node's id to every context: kind byte, node id, sequence, 17 bytes in all. Contexts are opaque to raft-rs and echoed only to the requester, so mixed-version clusters are unaffected.
+
+The regression test is `ostro-raft-driver` `concurrent_follower_reads_do_not_collide`. Two followers read at the same moment under a 50 ms link delay, 5 rounds. Before the fix it fails deterministically (`Err(Dropped)` after 1.0 s); after it, it passes 10 of 10 runs. `cargo test -p ostro-raft-driver` (43) and `-p ostro-meta` pass, clippy on the crate is clean, and check-vendored passes.
+
+No test bound or oracle was changed, and there is no warm-up cycle.
+
+Not changed, for the orchestrator to decide: the router turns a lease refusal on the partition's own leader into a re-route wait for a view change of up to 2 x `session_timeout`. That amplified a 2 s lease gap into a > 5 s client stall. A genuine meta-contact loss still behaves this way (p13-fixes / 13-12 design). One option is to end the wait once the local lease holds again.
+
