@@ -1085,3 +1085,37 @@ async fn default_tenant_token_starts_runs_and_stays_in_its_tenant() {
     assert!(all.contains(&run_d) && all.contains(&run_a), "{list}");
     s.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rest_token_create_accepts_the_default_tenant() {
+    use reqwest::Method;
+    // p14-fixups: `ostro auth token create --tenant _` (the REST adapter used to reject `_`
+    // with the tenant-id format check).
+    let s = Srv::start().await;
+    let (st, v) = s
+        .admin(
+            Method::POST,
+            "/v1/auth/tokens",
+            Some(json!({"name": "default-ci", "scopes": ["deploy", "read"], "tenant": "_"})),
+        )
+        .await;
+    assert_eq!(st, 201, "{v}");
+    assert_eq!(v["info"]["tenant"], "_", "{v}");
+    let bearer = v["bearer"].as_str().expect("bearer").to_owned();
+    let (st, _, w) = s
+        .req(Method::GET, "/v1/auth/whoami", Some(&bearer), None)
+        .await;
+    assert_eq!((st, &w["tenant"]), (200, &json!("_")), "{w}");
+    // Only the bare literal: anything else still needs the tenant-id format.
+    for bad in ["a_b", "__", "Acme"] {
+        let (st, v) = s
+            .admin(
+                Method::POST,
+                "/v1/auth/tokens",
+                Some(json!({"name": "x", "scopes": ["read"], "tenant": bad})),
+            )
+            .await;
+        assert_eq!(st, 400, "{bad}: {v}");
+    }
+    s.shutdown().await;
+}

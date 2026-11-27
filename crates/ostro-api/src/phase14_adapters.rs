@@ -168,6 +168,16 @@ pub mod check {
         }
     }
 
+    /// The tenant of a token to create: `_` (the default tenant, which always exists and is
+    /// never a creatable id) or a D23 tenant id; 400 otherwise.
+    pub fn token_tenant(field: &str, s: &str) -> Result<(), ApiError> {
+        if s == "_" {
+            Ok(())
+        } else {
+            tenant_id(field, s)
+        }
+    }
+
     /// The run-list tenant filter: absent or empty = no filter, `_` = the default tenant,
     /// else a D23 tenant id (400 otherwise).
     pub fn tenant_filter(t: Option<String>) -> Result<Option<String>, ApiError> {
@@ -522,7 +532,7 @@ async fn create_token(
     let api = api_tokens(&ext)?;
     let req = json_body(body)?;
     if let Some(t) = &req.tenant {
-        check::tenant_id("tenant", t)?;
+        check::token_tenant("tenant", t)?;
     }
     Ok(no_store(
         StatusCode::CREATED,
@@ -1224,7 +1234,7 @@ impl api_tokens_server::ApiTokens for GrpcApiTokens {
     ) -> GrpcResult<pb::CreateTokenResponse> {
         let req: CreateTokenRequest = r.into_inner().into();
         if let Some(t) = &req.tenant {
-            check::tenant_id("tenant", t).map_err(st)?;
+            check::token_tenant("tenant", t).map_err(st)?;
         }
         ok(self.0.create_token(req).await.map_err(st)?.into())
     }
@@ -1396,6 +1406,18 @@ mod tests {
         assert_eq!(check::decode_signature(0, &big).unwrap().len(), 8192);
         let too_big = b64(&vec![7; check::MAX_SIGNATURE_BYTES + 1]);
         assert!(check::decode_signature(0, &too_big).is_err());
+    }
+
+    #[test]
+    fn token_tenants_allow_the_default_tenant_literal() {
+        // 14-17 follow-up: `ostro auth token create --tenant _` must reach the service.
+        assert!(check::token_tenant("tenant", "_").is_ok());
+        assert!(check::token_tenant("tenant", "acme-1").is_ok());
+        // Only the bare literal: `_` stays invalid inside an id and as a creatable tenant.
+        for bad in ["__", "_a", "a_b", "Acme", "-a", ""] {
+            assert!(check::token_tenant("tenant", bad).is_err(), "{bad}");
+        }
+        assert!(check::tenant_id("id", "_").is_err());
     }
 
     #[test]
