@@ -1,0 +1,1 @@
+{"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json", "verificationMaterial": {"publicKey": {"hint": "release"}}, "messageSignature": {"messageDigest": {"algorithm": "SHA2_256", "digest": "YUcMElwfnrXd6onNNXFq5Fik2T0fY09rj6mpqVuXFWw="}, "signature": "MEQCIExLhgbDmtauiIt8YcRJ1zWDbZVM+6PZP/mS2eX0pAhgAiASmnQznaXobQGSS4bWHRyb9/CoWDZpS2JqbLxM5xc8qg=="}}

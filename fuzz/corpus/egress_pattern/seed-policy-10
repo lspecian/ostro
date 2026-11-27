@@ -1,0 +1,2 @@
+http://example.com:80
+http://example.com/%7B%7Bsecret:a%7D%7D

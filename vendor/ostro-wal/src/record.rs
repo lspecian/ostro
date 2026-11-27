@@ -22,6 +22,18 @@ const WAL_MAGIC: u16 = 0xCA7E;
 const WAL_VERSION_V1: u8 = 1;
 const WAL_VERSION_V2: u8 = 2;
 
+/// Ostro (14-07 fuzz): read `len` bytes, failing like `read_exact` (UnexpectedEof) BEFORE
+/// allocating when fewer remain, so a corrupt length is an error, not a multi-GiB allocation.
+fn read_vec(cursor: &mut Cursor<&[u8]>, len: usize) -> Result<Vec<u8>> {
+    let remaining = cursor.get_ref().len().saturating_sub(cursor.position() as usize);
+    if len > remaining {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+    }
+    let mut buf = vec![0u8; len];
+    std::io::Read::read_exact(cursor, &mut buf)?;
+    Ok(buf)
+}
+
 /// WAL record with versioning and checksums
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalRecord {
@@ -228,21 +240,18 @@ impl WalRecord {
                 // Read key
                 let key_len = cursor.read_i32::<LittleEndian>()?;
                 let key = if key_len >= 0 {
-                    let mut buf = vec![0u8; key_len as usize];
-                    std::io::Read::read_exact(&mut cursor, &mut buf)?;
-                    Some(buf)
+                    Some(read_vec(&mut cursor, key_len as usize)?)
                 } else {
                     None
                 };
 
                 // Read value
                 let value_len = cursor.read_i32::<LittleEndian>()?;
-                let mut value = vec![0u8; value_len as usize];
-                std::io::Read::read_exact(&mut cursor, &mut value)?;
+                let value = read_vec(&mut cursor, value_len as usize)?;
 
                 // Read headers
                 let headers_count = cursor.read_i32::<LittleEndian>()?;
-                let mut headers = Vec::with_capacity(headers_count as usize);
+                let mut headers = Vec::new();
                 for _ in 0..headers_count {
                     let name_len = cursor.read_u16::<LittleEndian>()?;
                     let mut name_buf = vec![0u8; name_len as usize];
@@ -251,8 +260,7 @@ impl WalRecord {
                         .map_err(|e| WalError::InvalidFormat(e.to_string()))?;
 
                     let value_len = cursor.read_u32::<LittleEndian>()?;
-                    let mut value_buf = vec![0u8; value_len as usize];
-                    std::io::Read::read_exact(&mut cursor, &mut value_buf)?;
+                    let value_buf = read_vec(&mut cursor, value_len as usize)?;
 
                     headers.push((name, value_buf));
                 }
@@ -292,8 +300,7 @@ impl WalRecord {
 
                 // Read canonical data
                 let data_len = cursor.read_u32::<LittleEndian>()?;
-                let mut canonical_data = vec![0u8; data_len as usize];
-                std::io::Read::read_exact(&mut cursor, &mut canonical_data)?;
+                let canonical_data = read_vec(&mut cursor, data_len as usize)?;
 
                 // v1.3.51+: Read offset metadata
                 let base_offset = cursor.read_i64::<LittleEndian>()?;
@@ -643,6 +650,20 @@ impl WalRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ostro 14-07 regression (fuzz/regressions/wal_recovery_scan/huge-canonical-data-len-*):
+    /// a V2 record claiming 4 GiB of canonical data in 23 bytes fails like a short read,
+    /// without allocating the claimed length; V1 key/value/header lengths likewise.
+    #[test]
+    fn corrupt_lengths_fail_without_allocating() {
+        let v2 = [0x7e, 0xca, 2, 0, 11, 0, 0, 0, 0, 0, 0, 0, 1, 0, b'p', 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff];
+        assert!(matches!(WalRecord::from_bytes(&v2), Err(WalError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof));
+        let mut v1 = vec![0x7e, 0xca, 1, 0];
+        v1.extend_from_slice(&[0u8; 24]); // length, offset, timestamp, crc
+        v1.extend_from_slice(&(-1i32).to_le_bytes()); // no key
+        v1.extend_from_slice(&(-2i32).to_le_bytes()); // value length 0xFFFF_FFFE as usize
+        assert!(matches!(WalRecord::from_bytes(&v1), Err(WalError::Io(_))));
+    }
 
     #[test]
     fn test_wal_record_v1_roundtrip() {
