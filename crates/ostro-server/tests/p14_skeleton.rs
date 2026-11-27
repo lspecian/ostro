@@ -161,11 +161,15 @@ async fn start_triggers_is_none_without_kafka_and_refuses_a_kafka_list() {
     let c2 = ctx(cfg, &dir2).await;
     let err = p14::start_triggers(&c2, routed, roles())
         .await
-        .expect_err("a Kafka list before 14-32");
-    assert!(
-        err.to_string().contains("Kafka triggers land in 14-32"),
-        "{err}"
-    );
+        .expect_err("an incomplete Kafka list fails startup");
+    // 14-32: with the `kafka` feature the table is validated (only `name` is set); without
+    // it any Kafka list is refused.
+    let want = if cfg!(feature = "kafka") {
+        "triggers.kafka[0] (\"orders\"): bootstrap: is required"
+    } else {
+        "built without the kafka feature"
+    };
+    assert!(err.to_string().contains(want), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
