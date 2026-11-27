@@ -586,6 +586,8 @@ impl ControlPlane for FakeControlPlane {
             return Ok(UploadModuleResult {
                 module: existing.clone(),
                 created: false,
+                replaced: false,
+                previous_module: None,
             });
         }
         let workflows = parse_fake_workflows(&req.wasm)?;
@@ -640,6 +642,8 @@ impl ControlPlane for FakeControlPlane {
         Ok(UploadModuleResult {
             module,
             created: true,
+            replaced: false,
+            previous_module: None,
         })
     }
 

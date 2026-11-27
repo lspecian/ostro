@@ -143,6 +143,14 @@ pub struct UploadModuleResponse {
     pub module: ModuleDto,
     /// `false` on idempotent re-upload.
     pub created: bool,
+    /// `true` when the upload replaced the module of an existing workflow version (only
+    /// under `ostro dev --ephemeral`, Phase 14); omitted when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replaced: bool,
+    /// Lowercase hex sha256 of the module the replaced version used before; present
+    /// exactly when `replaced`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_module: Option<String>,
 }
 
 /// Raw Wasm component bytes (documentation-only schema of the upload body).
@@ -865,6 +873,8 @@ async fn upload_module(
     let dto = UploadModuleResponse {
         module: res.module.into(),
         created: res.created,
+        replaced: res.replaced,
+        previous_module: res.previous_module,
     };
     Ok((status, Json(dto)).into_response())
 }

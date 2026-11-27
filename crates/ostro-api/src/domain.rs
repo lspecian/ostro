@@ -329,6 +329,14 @@ pub struct UploadModuleResult {
     pub module: ModuleInfo,
     /// `false` when the module already existed (idempotent re-upload).
     pub created: bool,
+    /// Phase 14 (14-28, D-P14-48): `true` when this upload rebound an existing workflow
+    /// version to the new module (only under `ostro dev --ephemeral`; every other profile
+    /// answers 409 instead).
+    pub replaced: bool,
+    /// The lowercase hex sha256 of the module the rebound version(s) used before; `Some`
+    /// exactly when `replaced`. With several rebound versions bound to different modules,
+    /// the first in (name, version) order.
+    pub previous_module: Option<String>,
 }
 
 /// A (workflow name, version) pair.

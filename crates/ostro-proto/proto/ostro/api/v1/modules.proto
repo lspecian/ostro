@@ -33,6 +33,13 @@ message UploadModuleResponse {
   ModuleInfo module = 1;
   // False when the module already existed.
   bool created = 2;
+  // Phase 14 (14-28, D-P14-48): true when this upload rebound an existing workflow version
+  // to the new module (only under `ostro dev --ephemeral`; other profiles refuse the
+  // upload with the binding conflict instead).
+  bool replaced = 3;
+  // Lowercase hex sha256 of the module the rebound version used before; set exactly when
+  // `replaced`.
+  optional string previous_module = 4;
 }
 
 message ModuleInfo {

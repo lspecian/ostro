@@ -381,3 +381,25 @@ fn bearers_are_redacted_from_debug() {
         assert!(dbg.contains("otk_aaaaaaaaaaaaaaaa"), "{dbg}");
     }
 }
+
+#[test]
+fn upload_response_replacement_fields_are_appended() {
+    // p14-fixups-3 (14-28): `replaced` = 3 (bool), `previous_module` = 4 (optional string).
+    let old = api::UploadModuleResponse {
+        module: None,
+        created: true,
+        replaced: false,
+        previous_module: None,
+    };
+    let bytes = old.encode_to_vec();
+    let back = api::UploadModuleResponse::decode(bytes.as_slice()).expect("decode old");
+    assert!(!back.replaced && back.previous_module.is_none());
+    let mut new = bytes.clone();
+    prost::encoding::encode_key(3, prost::encoding::WireType::Varint, &mut new);
+    prost::encoding::encode_varint(1, &mut new);
+    new.extend(len_field(4, "b".repeat(64).as_bytes()));
+    let back = api::UploadModuleResponse::decode(new.as_slice()).expect("decode new");
+    assert!(back.created && back.replaced);
+    assert_eq!(back.previous_module, Some("b".repeat(64)));
+    rt(back);
+}

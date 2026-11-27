@@ -492,6 +492,8 @@ impl modules_server::Modules for GrpcModules {
         Ok(Response::new(pb::UploadModuleResponse {
             module: Some(res.module.into()),
             created: res.created,
+            replaced: res.replaced,
+            previous_module: res.previous_module,
         }))
     }
 

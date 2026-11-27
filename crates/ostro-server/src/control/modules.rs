@@ -487,10 +487,13 @@ pub(crate) async fn upload_module(
             }
         }
     };
-    // 14-28 (D-P14-48): after the module record (the commit point) exists.
+    // 14-28 (D-P14-48): after the module record (the commit point) exists. The response
+    // names the module the first rebound version used before (p14-fixups-3).
+    let mut previous_module = None;
     for cur in rebind {
         let m = by_key[&(cur.value.name.clone(), cur.value.version)];
-        rebind_dev(cp, p14.as_deref(), tenant, cur, sha, &module_name, m).await?;
+        let previous = rebind_dev(cp, p14.as_deref(), tenant, cur, sha, &module_name, m).await?;
+        previous_module.get_or_insert_with(|| hex(&previous));
     }
     let stored = cp
         .meta
@@ -500,6 +503,8 @@ pub(crate) async fn upload_module(
     Ok(UploadModuleResult {
         module: module_info(&stored),
         created,
+        replaced: previous_module.is_some(),
+        previous_module,
     })
 }
 
@@ -518,6 +523,8 @@ fn dev_ephemeral(cp: &ServerControlPlane) -> bool {
 /// names one; `created_at_ms` and ext are kept. Runs already started keep their pinned
 /// module; new runs resolve the new binding. An active version passes the activation gate
 /// first and its `Active` record is re-put (CAS, same content) so activation tokens move.
+/// Returns the sha of the module the version was bound to before (also when a concurrent
+/// upload of the same module did the rebinding).
 async fn rebind_dev(
     cp: &ServerControlPlane,
     p14: Option<&crate::p14::P14Ctx>,
@@ -526,7 +533,7 @@ async fn rebind_dev(
     sha: [u8; 32],
     module_name: &str,
     m: &WorkflowMeta,
-) -> Result<(), ApiError> {
+) -> Result<[u8; 32], ApiError> {
     let (name, version) = (cur.value.name.clone(), cur.value.version);
     let active = cp
         .meta
@@ -572,7 +579,7 @@ async fn rebind_dev(
                     "workflow {name}@{version} is being replaced concurrently; retry"
                 )));
             }
-            return Ok(());
+            return Ok(previous);
         }
         MetaResult::Invalid(msg) => {
             return Err(ApiError::internal(format!(
@@ -599,7 +606,7 @@ async fn rebind_dev(
         module = %hex(&sha),
         "ephemeral dev: replaced the module of an existing workflow version"
     );
-    Ok(())
+    Ok(previous)
 }
 
 pub(crate) fn get_module(cp: &ServerControlPlane, sha: &str) -> Result<ModuleInfo, ApiError> {

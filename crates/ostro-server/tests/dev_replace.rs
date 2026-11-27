@@ -16,6 +16,8 @@
 //! - **persistent dev**, **server profile** and **server profile with `node.ephemeral`**
 //!   (the test-kit configuration): 409 `conflict` naming A's sha, nothing stored, new runs
 //!   still run A.
+//! - the upload response of a replacement carries `replaced: true` and `previous_module`
+//!   (REST and gRPC; p14-fixups-3).
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod common;
@@ -288,6 +290,63 @@ async fn ephemeral_dev_replaced_module_serves_new_runs_old_runs_keep_theirs() {
     assert_eq!(pin(&s, &r3).await, a);
     let r4 = start(&s, "rs_conf_ndet").await;
     assert_eq!(completed(&s, &r4).await, json!(["b", "a"]), "r4 ran B");
+}
+
+/// The upload response reports a replacement (p14-fixups-3): REST `replaced: true` +
+/// `previous_module` (both omitted otherwise), gRPC `replaced` + `previous_module`; also
+/// when the replacing module was already stored (`created: false`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ephemeral_dev_upload_response_names_the_replaced_module() {
+    use ostro_proto::api::v1 as pb;
+    use ostro_proto::api::v1::modules_client::ModulesClient;
+
+    let (wasm_a, wasm_b) = (guest_wasm("conf-rust"), guest_wasm("conf-rust-v2"));
+    let (a, b) = (hex(&Sha256::digest(&wasm_a)), hex(&Sha256::digest(&wasm_b)));
+    let s = ephemeral_dev().await;
+
+    // A fresh binding replaces nothing: both fields omitted.
+    let (st, v) = put_module(&s, &wasm_a).await;
+    assert_eq!(st, StatusCode::CREATED, "upload A: {v}");
+    assert!(v.get("replaced").is_none(), "{v}");
+    assert!(v.get("previous_module").is_none(), "{v}");
+
+    // B replaces A.
+    let (st, v) = put_module(&s, &wasm_b).await;
+    assert_eq!(st, StatusCode::CREATED, "upload B: {v}");
+    assert_eq!(v["replaced"], true, "{v}");
+    assert_eq!(v["previous_module"], a.as_str(), "{v}");
+
+    // The idempotent re-upload of B replaces nothing.
+    let (st, v) = put_module(&s, &wasm_b).await;
+    assert_eq!(st, StatusCode::OK, "re-upload B: {v}");
+    assert!(v.get("replaced").is_none(), "{v}");
+    assert!(v.get("previous_module").is_none(), "{v}");
+
+    // gRPC: A (already stored) comes back over B.
+    let mut modules = ModulesClient::new(s.channel().await).max_encoding_message_size(64 << 20);
+    let upload = |wasm: Vec<u8>, sha: String| pb::UploadModuleRequest {
+        sha256: sha,
+        wasm,
+        language: Some("rust".into()),
+        tenant: None,
+        name: None,
+        signatures: vec![],
+    };
+    let r = modules
+        .upload(upload(wasm_a.clone(), a.clone()))
+        .await
+        .expect("gRPC upload A")
+        .into_inner();
+    assert!(!r.created, "A was already stored");
+    assert!(r.replaced, "{r:?}");
+    assert_eq!(r.previous_module.as_deref(), Some(b.as_str()), "{r:?}");
+    assert_eq!(binding(&s, "rs_conf_patch").await, (a.clone(), Some(1)));
+    let r = modules
+        .upload(upload(wasm_a, a))
+        .await
+        .expect("gRPC re-upload A")
+        .into_inner();
+    assert!(!r.replaced && r.previous_module.is_none(), "{r:?}");
 }
 
 /// Ephemeral dev, `guests/patch-v1` (A) and `guests/patch-v2` (B), both `patch-demo` v1

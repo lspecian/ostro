@@ -461,6 +461,8 @@ impl ControlPlane for GrpcControlPlane {
         Ok(domain::UploadModuleResult {
             module: module_info(r.module.ok_or_else(|| bad_reply("module missing"))?),
             created: r.created,
+            replaced: r.replaced,
+            previous_module: r.previous_module.filter(|_| r.replaced),
         })
     }
 

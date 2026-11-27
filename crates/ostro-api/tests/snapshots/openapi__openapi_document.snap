@@ -11593,6 +11593,17 @@ expression: pretty
           "module": {
             "$ref": "#/components/schemas/ModuleDto",
             "description": "The stored module."
+          },
+          "previous_module": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lowercase hex sha256 of the module the replaced version used before; present\nexactly when `replaced`."
+          },
+          "replaced": {
+            "type": "boolean",
+            "description": "`true` when the upload replaced the module of an existing workflow version (only\nunder `ostro dev --ephemeral`, Phase 14); omitted when `false`."
           }
         }
       },
