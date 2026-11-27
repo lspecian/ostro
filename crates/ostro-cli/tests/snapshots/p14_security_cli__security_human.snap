@@ -46,8 +46,10 @@ require signed modules: true
 trusted keys: none
 [exit 0]
 $ ostro security policy set --require-signed true --tenant acme
-error: --tenant: the 1.0 API has no tenant-level policy field; set the cluster policy, or tighten a tenant through its administrator
-[exit 2]
+module policy of tenant acme updated
+require signed modules (tenant acme): true
+trusted keys: none
+[exit 0]
 $ ostro security trust add --minisign not-a-key
 error: --minisign: not a minisign public key
 [exit 2]

@@ -257,6 +257,9 @@ message TrustedKey {
 message ModulePolicy {
   bool require_signed_modules = 1;
   repeated TrustedKey trusted_keys = 2;
+  // Present = the policy of this tenant (ext 116): set tightens (true) or clears the
+  // tightening (false); answers carry the tenant's effective requirement.
+  optional string tenant = 3;
 }
 
 message GetModulePolicyRequest {}

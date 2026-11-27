@@ -1528,3 +1528,116 @@ async fn every_start_site_keeps_the_tenant() {
         in_a(&s.run_record(&id.parse().expect("id")), "w");
     }
 }
+
+/// p14-fixups-2: `ModulePolicy.tenant` over REST and gRPC. A system admin sets any tenant's
+/// requirement (`true` tightens, `false` clears) without touching the cluster policy; a
+/// tenant admin tightens only its own tenant (the field is forced to it), never relaxes,
+/// never names another tenant and never sets the cluster policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tenant_module_policy_over_rest_and_grpc() {
+    let mut fx = fixture().await;
+    let path = "/v1/security/modules/policy";
+
+    // System admin tightens a: a's unsigned upload is refused, b's is not.
+    let (st, v) = fx
+        .admin
+        .put(path, json!({"require_signed_modules": true, "tenant": "a"}))
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["tenant"], "a");
+    assert_eq!(v["require_signed_modules"], true);
+    let (st, v, _) = fx.a.upload("smoke", None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(reason(&v), "signature_required");
+    let (st, v, _) = fx.b.upload("smoke", None).await;
+    assert!(st.is_success(), "b is not tightened: {st} {v}");
+    // The cluster policy is unchanged.
+    let (st, v) = fx.admin.get(path).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["require_signed_modules"], false, "{v}");
+    assert!(v.get("tenant").is_none(), "{v}");
+
+    // System admin clears a's tightening.
+    let (st, v) = fx
+        .admin
+        .put(
+            path,
+            json!({"require_signed_modules": false, "tenant": "a"}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["require_signed_modules"], false);
+    let (st, v, _) = fx.a.upload("smoke", None).await;
+    assert!(st.is_success(), "a relaxed: {st} {v}");
+
+    // Tenant admin b tightens its own tenant (no tenant field: forced to b).
+    let (st, v) =
+        fx.b.put(path, json!({"require_signed_modules": true}))
+            .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["tenant"], "b");
+    assert_eq!(v["require_signed_modules"], true);
+    let (st, v, _) = fx.b.upload("signals", None).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    let (st, v) =
+        fx.b.put(path, json!({"require_signed_modules": true, "tenant": "b"}))
+            .await;
+    assert_eq!(st, StatusCode::OK, "own tenant named: {v}");
+    // ... but never relaxes, never names another tenant, never sends keys.
+    let (st, v) =
+        fx.b.put(path, json!({"require_signed_modules": false}))
+            .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "relax: {v}");
+    let (st, v) =
+        fx.b.put(path, json!({"require_signed_modules": true, "tenant": "a"}))
+            .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "other tenant: {v}");
+    assert_eq!(reason(&v), "forbidden_tenant");
+    let (st, v) =
+        fx.b.put(
+            path,
+            json!({"require_signed_modules": true, "trusted_keys": [
+                {"alg": "minisign", "key_id": "auto", "public_key": "x"}
+            ]}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "keys: {v}");
+    // A system read token cannot set anything.
+    let (st, v) = fx
+        .sys
+        .put(path, json!({"require_signed_modules": true, "tenant": "a"}))
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "read token: {v}");
+    assert_eq!(reason(&v), "missing_scope");
+    // a stays relaxed, the cluster stays off.
+    let (st, v, _) = fx.a.upload("signals", None).await;
+    assert!(st.is_success(), "{st} {v}");
+
+    // gRPC: the system admin clears b's tightening; the answer carries the tenant.
+    use ostro_proto::api::v1 as pb;
+    let mut c = pb::security_client::SecurityClient::new(fx.s.channel().await);
+    let mut req = tonic::Request::new(pb::SetModulePolicyRequest {
+        policy: Some(pb::ModulePolicy {
+            require_signed_modules: false,
+            trusted_keys: vec![],
+            tenant: Some("b".into()),
+        }),
+    });
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", fx.admin.bearer)
+            .parse()
+            .expect("header"),
+    );
+    let p = c
+        .set_module_policy(req)
+        .await
+        .expect("grpc set")
+        .into_inner();
+    assert_eq!(p.tenant.as_deref(), Some("b"));
+    assert!(!p.require_signed_modules);
+    let (st, v, _) = fx.b.upload("signals", None).await;
+    assert!(st.is_success(), "b relaxed over gRPC: {st} {v}");
+    drop(c);
+    fx.s.shutdown().await;
+}

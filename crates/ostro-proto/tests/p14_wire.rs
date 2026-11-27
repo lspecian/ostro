@@ -197,6 +197,7 @@ fn audit_and_security_messages_round_trip() {
                 ..key()
             },
         ],
+        tenant: Some("acme".into()),
     };
     rt(policy.clone());
     rt(api::GetModulePolicyRequest {});

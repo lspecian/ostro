@@ -42,13 +42,23 @@ impl Client {
     }
 
     /// `PUT /v1/security/modules/policy` `{require_signed_modules}` (an empty
-    /// `trusted_keys` keeps the cluster keys).
-    pub async fn set_module_policy(&self, require_signed: bool) -> Result<Response, CallError> {
+    /// `trusted_keys` keeps the cluster keys). With `tenant`, that tenant's requirement:
+    /// `true` tightens it, `false` clears the tightening (a tenant admin may only tighten
+    /// its own tenant).
+    pub async fn set_module_policy(
+        &self,
+        require_signed: bool,
+        tenant: Option<&str>,
+    ) -> Result<Response, CallError> {
+        let mut body = json!({ "require_signed_modules": require_signed });
+        if let Some(t) = tenant {
+            body["tenant"] = json!(t);
+        }
         self.call(
             Method::PUT,
             &["v1", "security", "modules", "policy"],
             &[],
-            Some(&json!({ "require_signed_modules": require_signed })),
+            Some(&body),
         )
         .await
     }

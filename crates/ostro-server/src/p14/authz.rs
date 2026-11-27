@@ -207,7 +207,9 @@ pub const fn required(m: Method) -> Requirement {
         Method::WhoAmI => Authenticated,
         Method::QueryAudit => TenantAdmin,
         Method::GetModulePolicy => SystemScope(Read),
-        Method::SetModulePolicy => SystemAdmin,
+        // p14-fixups-2: a tenant admin may tighten its own tenant (`ModulePolicy.tenant`,
+        // forced by the tenant hook; the service refuses relaxing and the cluster policy).
+        Method::SetModulePolicy => TenantAdmin,
         Method::AddTrustedKey => TenantAdmin,
         Method::RemoveTrustedKey => TenantAdmin,
         Method::AttachSignatures => S(Deploy),

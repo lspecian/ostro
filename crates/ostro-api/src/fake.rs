@@ -3428,6 +3428,13 @@ mod p14 {
         async fn set_module_policy(&self, p: ModulePolicy) -> Result<ModulePolicy, ApiError> {
             let mut st = lock(&self.state);
             st.errors.check("set_module_policy")?;
+            // A tenant's requirement leaves the cluster policy alone; the answer carries it.
+            if let Some(t) = p.tenant.clone().filter(|t| !t.is_empty()) {
+                let mut v = st.policy.clone();
+                v.require_signed_modules |= p.require_signed_modules;
+                v.tenant = Some(t);
+                return Ok(v);
+            }
             st.policy = p;
             Ok(st.policy.clone())
         }

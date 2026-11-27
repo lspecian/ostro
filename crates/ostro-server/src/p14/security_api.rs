@@ -149,6 +149,7 @@ pub fn view_for(
     ModulePolicy {
         require_signed_modules: cluster.require_signed_modules,
         trusted_keys: keys,
+        tenant: None,
     }
 }
 
@@ -393,6 +394,32 @@ impl SecurityApi for SecurityService {
     async fn set_module_policy(&self, policy: ModulePolicy) -> Result<ModulePolicy, ApiError> {
         let ctx = self.ctx()?;
         let p = Self::caller()?;
+        // p14-fixups-2: `tenant` = that tenant's requirement (ext 116, `set_tenant_require`:
+        // a tenant principal only tightens its own tenant; `false` clears the tightening).
+        if let Some(t) = policy.tenant.as_deref().filter(|t| !t.is_empty()) {
+            if !policy.trusted_keys.is_empty() {
+                return Err(field_error(
+                    "trusted_keys",
+                    "tenant keys are added with POST /v1/security/modules/keys",
+                ));
+            }
+            self.set_tenant_require(t, policy.require_signed_modules.then_some(true))
+                .await?;
+            info!(
+                tenant = t,
+                require_signed_modules = policy.require_signed_modules,
+                actor = %p.token_id,
+                "tenant module policy set"
+            );
+            return ctx.meta.view().read(|s| {
+                let (cluster, _) = module_sign::cluster_policy(&ctx.cfg, s)?;
+                let ts = module_sign::tenant_security(s, Some(t))?;
+                let mut v = view_for(&cluster, s, Some(t));
+                v.require_signed_modules = module_sign::effective(&cluster, ts.as_ref()).require;
+                v.tenant = Some(t.to_owned());
+                Ok(v)
+            });
+        }
         if p.tenant.is_some() {
             return Err(ApiError::permission_denied(
                 reason::FORBIDDEN_TENANT,

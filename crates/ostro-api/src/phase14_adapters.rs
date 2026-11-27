@@ -655,7 +655,7 @@ async fn get_module_policy(State(ext): State<ExtState>) -> Result<Json<ModulePol
     Ok(Json(security(&ext)?.get_module_policy().await?))
 }
 
-/// Replace the cluster module-signing policy.
+/// Replace the cluster module-signing policy, or set a tenant's requirement.
 #[utoipa::path(
     put,
     path = "/v1/security/modules/policy",
@@ -664,7 +664,8 @@ async fn get_module_policy(State(ext): State<ExtState>) -> Result<Json<ModulePol
     responses(
         (status = 200, description = "The new policy", body = ModulePolicy),
         (status = 400, description = "Invalid key", body = ErrorBody),
-        (status = 404, description = "Security API not enabled", body = ErrorBody),
+        (status = 403, description = "A tenant admin relaxing or setting the cluster policy", body = ErrorBody),
+        (status = 404, description = "Security API not enabled, or unknown tenant", body = ErrorBody),
     )
 )]
 async fn set_module_policy(
@@ -1112,6 +1113,7 @@ impl From<ModulePolicy> for pb::ModulePolicy {
         pb::ModulePolicy {
             require_signed_modules: p.require_signed_modules,
             trusted_keys: p.trusted_keys.into_iter().map(Into::into).collect(),
+            tenant: p.tenant,
         }
     }
 }
@@ -1121,6 +1123,7 @@ impl From<pb::ModulePolicy> for ModulePolicy {
         ModulePolicy {
             require_signed_modules: p.require_signed_modules,
             trusted_keys: p.trusted_keys.into_iter().map(Into::into).collect(),
+            tenant: p.tenant,
         }
     }
 }

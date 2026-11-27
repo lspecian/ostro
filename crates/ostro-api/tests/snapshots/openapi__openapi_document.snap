@@ -5042,7 +5042,7 @@ expression: pretty
         "tags": [
           "security"
         ],
-        "summary": "Replace the cluster module-signing policy.",
+        "summary": "Replace the cluster module-signing policy, or set a tenant's requirement.",
         "operationId": "set_module_policy",
         "requestBody": {
           "content": {
@@ -5075,8 +5075,18 @@ expression: pretty
               }
             }
           },
+          "403": {
+            "description": "A tenant admin relaxing or setting the cluster policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Security API not enabled",
+            "description": "Security API not enabled, or unknown tenant",
             "content": {
               "application/json": {
                 "schema": {
@@ -8665,7 +8675,14 @@ expression: pretty
         "properties": {
           "require_signed_modules": {
             "type": "boolean",
-            "description": "Signed modules required cluster-wide."
+            "description": "Signed modules required cluster-wide (with `tenant`: required for that tenant)."
+          },
+          "tenant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Some(t)` = tenant `t`'s policy (ext 116). On `PUT`, `require_signed_modules: true`\ntightens the tenant and `false` clears its tightening (a tenant never relaxes the\ncluster policy); `trusted_keys` must be empty (tenant keys go through\n`POST /v1/security/modules/keys`). A tenant admin may only tighten its own tenant.\nThe answer then carries the tenant's effective requirement."
           },
           "trusted_keys": {
             "type": "array",

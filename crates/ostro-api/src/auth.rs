@@ -593,7 +593,7 @@ methods! {
     WhoAmI => ("ApiTokensApi", "whoami", Read, Unscoped, false, 4),
     QueryAudit => ("AuditApi", "query", Admin, TenantAdmin, false, 4),
     GetModulePolicy => ("SecurityApi", "get_module_policy", Read, SystemOnly, false, 4),
-    SetModulePolicy => ("SecurityApi", "set_module_policy", Admin, SystemOnly, true, 4),
+    SetModulePolicy => ("SecurityApi", "set_module_policy", Admin, TenantAdmin, true, 4),
     AddTrustedKey => ("SecurityApi", "add_trusted_key", Admin, TenantAdmin, true, 4),
     RemoveTrustedKey => ("SecurityApi", "remove_trusted_key", Admin, TenantAdmin, true, 4),
     AttachSignatures => ("SecurityApi", "attach_signatures", Deploy, QualifiedName, true, 4),

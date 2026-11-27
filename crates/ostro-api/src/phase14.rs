@@ -293,11 +293,18 @@ pub struct TrustedKeySpec {
 /// `GET|PUT /v1/security/modules/policy`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ModulePolicy {
-    /// Signed modules required cluster-wide.
+    /// Signed modules required cluster-wide (with `tenant`: required for that tenant).
     pub require_signed_modules: bool,
     /// Cluster-wide trusted keys.
     #[serde(default)]
     pub trusted_keys: Vec<TrustedKeySpec>,
+    /// `Some(t)` = tenant `t`'s policy (ext 116). On `PUT`, `require_signed_modules: true`
+    /// tightens the tenant and `false` clears its tightening (a tenant never relaxes the
+    /// cluster policy); `trusted_keys` must be empty (tenant keys go through
+    /// `POST /v1/security/modules/keys`). A tenant admin may only tighten its own tenant.
+    /// The answer then carries the tenant's effective requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
 }
 
 /// `POST /v1/modules/{sha}/signatures` body.

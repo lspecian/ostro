@@ -8,8 +8,9 @@
 //! | `trust add --minisign <KEY\|FILE> \| --cosign <FILE> [--comment c] [--tenant t]` | `POST /v1/security/modules/keys` (`key_id = auto`: the server derives it) |
 //! | `trust rm <key-id> [--tenant t]` | `DELETE /v1/security/modules/keys/{key_id}` (`<t>:<key-id>` with `--tenant`) |
 //!
-//! `policy set --tenant` is refused locally: the 1.0 wire `ModulePolicy` has no tenant field
-//! (the server keeps a tenant-level requirement in ext 116, not reachable over REST yet).
+//! `policy set --tenant t` sends `ModulePolicy.tenant` (p14-fixups-2): `--require-signed
+//! true` tightens tenant `t`, `false` clears its tightening (a tenant never relaxes the
+//! cluster policy; a tenant admin may only tighten its own tenant).
 //! Signatures are attached at upload (`ostro deploy --signature`) or with
 //! `POST /v1/modules/{sha}/signatures`; no `modules sign-attach` verb (minimal surface).
 //! `--json` prints the REST body.
@@ -78,7 +79,8 @@ pub struct PolicySetArgs {
     /// Require a valid signature on every upload and activation.
     #[arg(long, required = true)]
     pub require_signed: Option<bool>,
-    /// Tenant (not supported by the 1.0 API; refused).
+    /// Set this tenant's requirement instead of the cluster policy (`true` tightens the
+    /// tenant, `false` clears its tightening).
     #[arg(long)]
     pub tenant: Option<String>,
     #[command(flatten)]
@@ -253,8 +255,12 @@ fn policy_text(body: &Value, tenant: Option<&str>) -> String {
             ]
         })
         .collect();
+    let scope = body["tenant"]
+        .as_str()
+        .map(|t| format!(" (tenant {t})"))
+        .unwrap_or_default();
     let mut out = format!(
-        "require signed modules: {}\n",
+        "require signed modules{scope}: {}\n",
         body["require_signed_modules"].as_bool().unwrap_or(false)
     );
     if rows.is_empty() {
@@ -283,20 +289,17 @@ pub async fn render(c: &Client, json: bool, cmd: &SecurityCmd) -> Result<String,
                 a.tenant.as_deref(),
             ),
             PolicyCmd::Set(a) => {
-                if a.tenant.is_some() {
-                    return Err(CallError::Usage(
-                        "--tenant: the 1.0 API has no tenant-level policy field; set the \
-                         cluster policy, or tighten a tenant through its administrator"
-                            .into(),
-                    ));
-                }
                 let on = a.require_signed.ok_or_else(|| {
                     CallError::Usage("--require-signed true|false is required".into())
                 })?;
+                let head = match &a.tenant {
+                    Some(t) => format!("module policy of tenant {t} updated\n"),
+                    None => "module policy updated\n".to_owned(),
+                };
                 (
-                    c.set_module_policy(on).await?.body,
-                    "module policy updated\n".to_owned(),
-                    None,
+                    c.set_module_policy(on, a.tenant.as_deref()).await?.body,
+                    head,
+                    a.tenant.as_deref(),
                 )
             }
         },

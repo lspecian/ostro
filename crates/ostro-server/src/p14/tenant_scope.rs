@@ -37,8 +37,8 @@
 //!   retiring a module that other tenants also registered is 403 `forbidden_tenant`.
 //! - **tenant-carrying fields (B7)**: `UploadModule.tenant`, `StartRunRequest.tenant`,
 //!   `ListRunsRequest.tenant`, `PutSecret.tenant`, the `list_secrets`/`delete_secret` tenant,
-//!   `CreateTokenRequest.tenant`, the `list_tokens` tenant, `AuditQuery.tenant` and
-//!   `TrustedKeySpec.tenant` are forced to `t` when empty and refused with 403
+//!   `CreateTokenRequest.tenant`, the `list_tokens` tenant, `AuditQuery.tenant`,
+//!   `TrustedKeySpec.tenant` and `ModulePolicy.tenant` (p14-fixups-2) are forced to `t` when empty and refused with 403
 //!   `forbidden_tenant` when they name another tenant (`_` included). The bulk job tenant
 //!   has no request field: `control::p11_bulk` stamps the job with the caller's tenant.
 //! - **system-only methods**: 403 `forbidden_tenant` (14-15's scope check usually answers
@@ -73,7 +73,8 @@ use ostro_api::phase11::{
 };
 use ostro_api::phase13::{MigrateRunsRequest, RetireModuleResponse};
 use ostro_api::phase14::{
-    AttachSignaturesRequest, AuditPage, AuditQuery, CreateTokenRequest, TokenInfo, TrustedKeySpec,
+    AttachSignaturesRequest, AuditPage, AuditQuery, CreateTokenRequest, ModulePolicy, TokenInfo,
+    TrustedKeySpec,
 };
 use ostro_api::{ApiError, ControlPlane, ErrorCode};
 use ostro_meta::is_resource_name;
@@ -661,6 +662,10 @@ async fn scope_request(
         AddTrustedKey => {
             force(t, "tenant", &mut req_of::<TrustedKeySpec>(m, req)?.tenant)?;
         }
+        // p14-fixups-2: a tenant principal sets its own tenant's requirement only.
+        SetModulePolicy => {
+            force(t, "tenant", &mut req_of::<ModulePolicy>(m, req)?.tenant)?;
+        }
         AttachSignatures => {
             let sha = req_of::<AttachSignaturesRequest>(m, req)?.sha256.clone();
             own_module(t, inner, &sha).await?;
@@ -671,7 +676,7 @@ async fn scope_request(
         | ClusterStatus | CreateNodeToken | ClusterRemove | ClusterDrain | ClusterReassign
         | ClusterRebalance | UpgradeStatus | UpgradeFinalize | UpgradeHold | UpgradeRelease
         | RunModuleGc | CreateTenant | GetTenant | ListTenants | UpdateTenant | SuspendTenant
-        | ResumeTenant | DeleteTenant | GetModulePolicy | SetModulePolicy => {
+        | ResumeTenant | DeleteTenant | GetModulePolicy => {
             return Err(system_only(m));
         }
     }
