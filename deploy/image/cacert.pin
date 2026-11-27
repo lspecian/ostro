@@ -1,0 +1,8 @@
+# Mozilla CA certificate bundle as extracted by curl.se (MPL-2.0), pinned by date and sha256.
+# scripts/build-image.sh downloads it into its own empty directory and refuses it unless the
+# sha256 matches. Refresh: pick the newest dated file on https://curl.se/docs/caextract.html,
+# download it into a fresh empty directory, compare its sha256 with
+# https://curl.se/ca/cacert.pem.sha256 (same day) and update both lines (deploy/image/README.md).
+# Pinned 2026-11-27 (14-12): certificate data from Mozilla as of 2026-11-05, 118 certificates.
+url=https://curl.se/ca/cacert-2026-11-05.pem
+sha256=427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285

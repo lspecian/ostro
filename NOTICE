@@ -11,3 +11,9 @@ This product includes WebAssembly System Interface (WASI) 0.2.12 WIT definitions
 (https://github.com/WebAssembly/WASI), as distributed in the `wasip2` crate
 1.0.4+wasi-0.2.12, licensed under Apache-2.0 WITH LLVM-exception (also available
 under Apache-2.0 or MIT). See crates/ostro-engine/wit-wasi/ and VENDORED.md.
+
+The container image (deploy/image, scripts/build-image.sh) includes the Mozilla CA
+certificate bundle as extracted by curl.se (https://curl.se/docs/caextract.html), pinned in
+deploy/image/cacert.pin, licensed under the Mozilla Public License 2.0 (MPL-2.0,
+https://mozilla.org/MPL/2.0/). It is shipped unmodified as /etc/ssl/certs/ca-certificates.crt;
+its source is the pinned URL.
