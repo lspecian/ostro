@@ -158,7 +158,13 @@ pub async fn build_schedule_start(
     req: FireRequest,
 ) -> Result<StartRun, StartError> {
     let skip = |e: ApiError| StartError::Skip(e.message);
-    let workflow = policy::policy_key("workflow", &spec.workflow).map_err(skip)?;
+    // Phase 14 (14-16, D-P14-7): a tenant schedule (`<t>/<name>`) starts its runs in `t`,
+    // with the workflow qualified in the same tenant.
+    let workflow = match names::split_qualified(&spec.name).0 {
+        Some(t) => names::qualify_request_name("workflow", Some(t), &spec.workflow),
+        None => policy::policy_key("workflow", &spec.workflow),
+    }
+    .map_err(skip)?;
     let (tenant, _) = names::split_qualified(&workflow);
     let tenant = tenant.map(str::to_owned);
     let wf = resolve_workflow(meta, &workflow, spec.version).map_err(StartError::Skip)?;

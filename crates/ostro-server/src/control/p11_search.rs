@@ -12,7 +12,9 @@
 //!
 //! # Prefix choice
 //!
-//! First tag -> `Tag`; else workflow -> `Workflow`; else `dlq` -> `Status(Failed)` and
+//! First tag -> `Tag`; else workflow -> `Workflow`; else (Phase 14, 14-16) a tenant id ->
+//! `Tenant` (`0x04`, kind `n`; `_` = the default tenant has no rows and uses the next rule
+//! with the tenant applied in memory); else `dlq` -> `Status(Failed)` and
 //! `Status(TimedOut)` (two prefixes merged); else a terminal status -> `Status`; else
 //! `All` (`0x05`, every run). The remaining filters (other tags, queue, non-terminal
 //! status, creation range, DLQ membership) apply in memory on the decoded `RunRecord`.
@@ -22,7 +24,8 @@
 //! One stream per `(prefix, partition)`, read with [`query::index_page`] [`REFILL`] rows at
 //! a time, merged by `(!created_at_ms, !uuid, partition)`. The token is
 //! `i1.<kind>.<created_at_ms>.<run id>`: the last run **examined** (matching or not), with
-//! `kind` one of `t` (tag), `w` (workflow), `d` (dlq), `s` (status), `a` (all). Because
+//! `kind` one of `t` (tag), `w` (workflow), `n` (tenant), `d` (dlq), `s` (status), `a`
+//! (all). Because
 //! every prefix sorts by the same suffix, one position resumes every stream: partition `q`
 //! continues strictly after the position when `q <= p`, and at the position itself when
 //! `q > p` (the predecessor key is used as the exclusive start). A token whose kind does
@@ -90,6 +93,13 @@ fn plan(req: &ListRunsRequest) -> (char, Vec<Vec<u8>>) {
     }
     if let Some(w) = req.workflow.as_ref().filter(|w| !w.contains('\0')) {
         return ('w', vec![index_prefix(IndexKind::Workflow, w.as_bytes())]);
+    }
+    if let Some(t) = req
+        .tenant
+        .as_deref()
+        .filter(|t| ostro_meta::is_tenant_id(t))
+    {
+        return ('n', vec![index_prefix(IndexKind::Tenant, t.as_bytes())]);
     }
     if req.dlq {
         return (
@@ -469,5 +479,17 @@ mod tests {
         assert_eq!(plan(&r).0, 'a');
         r.tags = vec!["nul\0tag".into()];
         assert_eq!(plan(&r).0, 'a', "NUL tags have no rows");
+        // Phase 14 (14-16): a tenant id selects the Tenant rows; `_` has none.
+        r.tags.clear();
+        r.status = None;
+        r.tenant = Some("acme".into());
+        let (k, p) = plan(&r);
+        assert_eq!(k, 'n');
+        assert_eq!(p, vec![index_prefix(IndexKind::Tenant, b"acme")]);
+        r.tenant = Some("_".into());
+        assert_eq!(plan(&r).0, 'a');
+        r.tenant = Some("acme".into());
+        r.workflow = Some("acme/w".into());
+        assert_eq!(plan(&r).0, 'w', "the workflow row is already tenant-scoped");
     }
 }
