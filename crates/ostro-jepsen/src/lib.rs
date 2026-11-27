@@ -25,13 +25,4 @@ mod dep_anchors {
     use clap as _;
     use ostro_client as _;
     use ostro_log as _;
-    use ostro_partition as _;
-    use ostro_repl_conformance as _;
-    use ostro_server as _;
-    use ostro_types as _;
-    use rand as _;
-    use serde as _;
-    use serde_json as _;
-    use tempfile as _;
-    use tokio as _;
 }
