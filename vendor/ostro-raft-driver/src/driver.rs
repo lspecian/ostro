@@ -201,9 +201,14 @@ enum Event {
 }
 
 /// Ostro (13-05): `ReadIndex` request contexts. A user read and an internal lease round
-/// are told apart by the first byte; the rest is a per-driver sequence.
+/// are told apart by the first byte; then this node's id and a per-driver sequence (both
+/// u64 LE). The id makes a context unique across nodes (14-33 follow-up): the leader keys
+/// pending reads by context and ignores a request whose context is already pending, so
+/// two nodes issuing the same sequence at once lost one of the reads until its timeout.
 const CTX_READ: u8 = 1;
 const CTX_LEASE: u8 = 2;
+/// Ostro: the length of a read context (kind byte, node id, sequence).
+const CTX_LEN: usize = 17;
 /// Ostro (13-05): a follower keeps running lease rounds while its anchor was asked for
 /// within this window (the first ask starts them).
 const LEASE_DEMAND_WINDOW: Duration = Duration::from_secs(10);
@@ -677,8 +682,9 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
     fn read_ctx(&mut self, kind: u8) -> (u64, Vec<u8>) {
         let seq = self.next_read;
         self.next_read += 1;
-        let mut ctx = Vec::with_capacity(9);
+        let mut ctx = Vec::with_capacity(CTX_LEN);
         ctx.push(kind);
+        ctx.extend_from_slice(&self.id.to_le_bytes());
         ctx.extend_from_slice(&seq.to_le_bytes());
         (seq, ctx)
     }
@@ -749,8 +755,8 @@ impl<S: StateMachine, O: Outbox> DriverCore<S, O> {
         for rs in states {
             let ctx = rs.request_ctx;
             match ctx.first() {
-                Some(&CTX_LEASE) if ctx.len() == 9 => {
-                    let seq = u64::from_le_bytes(ctx[1..].try_into().unwrap());
+                Some(&CTX_LEASE) if ctx.len() == CTX_LEN => {
+                    let seq = u64::from_le_bytes(ctx[9..].try_into().unwrap());
                     if let Some((want, sent)) = self.lease_inflight {
                         if want == seq {
                             self.lease_inflight = None;

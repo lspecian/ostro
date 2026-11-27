@@ -229,6 +229,35 @@ async fn read_index_fails_fast_on_leader_loss() {
     eprintln!("follower read after leader loss: {:?} after {:?}", r, t.elapsed());
 }
 
+/// Two followers reading at the same moment both get an answer (14-33 follow-up). The
+/// leader keys a pending `ReadIndex` by its request context and ignores a second request
+/// whose context is already pending. With contexts made of a per-driver sequence only,
+/// two followers issuing the same sequence at once collided and one read was lost until
+/// its timeout (two election timeouts). For a lease round that meant a follower without its
+/// metadata lease for those two election timeouts: a fresh cluster's first lease rounds all
+/// carry sequence 1, and partition writes on the losing node were refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_follower_reads_do_not_collide() {
+    let c = Cluster::new(&[1, 2, 3], config);
+    let leader = c.leader().await;
+    create(&c.h(leader), "warm").await.unwrap();
+    let followers: Vec<u64> = c.ids.iter().copied().filter(|&i| i != leader).collect();
+    for &f in &followers {
+        c.h(f).wait_for_leader().await.unwrap();
+    }
+    // Neither follower runs lease rounds (never asked for its anchor), so each round below
+    // issues the same sequence on both. The delay keeps the first request pending at the
+    // leader (one heartbeat round trip) when the second one arrives.
+    c.router.0.lock().unwrap().delay = Duration::from_millis(50);
+    let (ha, hb) = (c.h(followers[0]), c.h(followers[1]));
+    for round in 0..5 {
+        let t = Instant::now();
+        let (a, b) = tokio::join!(ha.read_index(), hb.read_index());
+        assert!(a.is_ok() && b.is_ok(), "round {}: follower reads {:?} / {:?} after {:?}", round, a, b, t.elapsed());
+    }
+    c.router.0.lock().unwrap().delay = Duration::ZERO;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn transfer_leader_moves_leadership() {
     let c = Cluster::new(&[1, 2, 3], config);
