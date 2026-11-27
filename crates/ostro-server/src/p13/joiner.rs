@@ -273,14 +273,25 @@ pub fn joined_tls(data_dir: &Path) -> Result<Option<JoinedTls>, BootError> {
 /// CA key yet (a joined node), so the Phase 7 TLS state (worker joins, the client listener's
 /// self-signed certificate) uses the cluster CA instead of creating its own. Called by
 /// `p7::init` before `tls::init`; a node that already has `ca.key`, or a meta without the
-/// secret, is left alone.
-pub fn import_cluster_ca(data_dir: &Path, cluster_id: &str, view: &MetaView) {
+/// secret, is left alone. A sealed secret opens with `store` (p14-fixups-2: the node's
+/// `p14::reseal::cluster_store`; every node needs the cluster's sealing key).
+pub fn import_cluster_ca(
+    data_dir: &Path,
+    cluster_id: &str,
+    view: &MetaView,
+    store: Option<&ostro_bridge::secrets::SealedStore>,
+) {
     let dir = data_dir.join("tls");
     if dir.join(crate::tls::ca::ClusterCa::KEY_FILE).exists() || !tls_complete(data_dir) {
         return;
     }
-    let Some(ca) = view.read(super::join::stored_ca) else {
-        return;
+    let ca = match view.read(|s| super::join::stored_ca(s, store)) {
+        Ok(Some(ca)) => ca,
+        Ok(None) => return,
+        Err(e) => {
+            warn!(error = %e, "joined node: the cluster CA in metadata cannot be imported");
+            return;
+        }
     };
     match crate::tls::ca::ClusterCa::import_pem(&dir, cluster_id, &ca.cert_pem, &ca.key_pem) {
         Ok(_) => info!("joined node: cluster CA imported from metadata for the Phase 7 TLS state"),

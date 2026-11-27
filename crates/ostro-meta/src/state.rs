@@ -956,6 +956,10 @@ impl MetaState {
 
     /// The await-token HMAC key written by `InitCluster` (Phase 4: stored as
     /// plaintext in a [`SealedSecret`]; see [`TOKEN_KEY_SECRET`]).
+    ///
+    /// Raw bytes only: once Phase 14 sealed the record (aes256gcm, an operator sealing key)
+    /// this answers `None`. Servers read it through `ostro_server::p14::reseal::token_key`,
+    /// which opens both forms.
     pub fn token_key(&self) -> Option<[u8; 32]> {
         self.secrets
             .get(TOKEN_KEY_SECRET)

@@ -425,6 +425,11 @@ fn run_restore(a: &ostro_cli::commands::backup::RestoreArgs) -> ExitCode {
     opts.takeover = a.takeover;
     opts.parallelism = a.parallelism.max(1);
     opts.node_id = a.node_id;
+    // p14-fixups-2: a sealed `__ostro/cluster-ca` opens with OSTRO_SEALING_KEY.
+    opts.open_secret = match ostro_server::p14::reseal::env_secret_opener() {
+        Ok(o) => o,
+        Err(e) => return fail(format!("OSTRO_SEALING_KEY: {e}")),
+    };
     let rt = match runtime() {
         Ok(rt) => rt,
         Err(code) => return code,

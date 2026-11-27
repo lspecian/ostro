@@ -353,9 +353,15 @@ async fn read_token_key(copy: &Path, node_id: u64) -> Result<[u8; 32], String> {
     let meta = MetaHandle::start(&copy.join("meta"), node_id)
         .await
         .map_err(|e| format!("cannot open meta to read the token key: {e}"))?;
-    let key = meta.view().read(|s| s.token_key());
+    // A sealed key (p14-fixups-2) opens with OSTRO_SEALING_KEY.
+    let store =
+        ostro_server::p14::reseal::cluster_store(&ostro_server::config::ServerConfig::default())?;
+    let key = meta
+        .view()
+        .read(|s| ostro_server::p14::reseal::token_key(s, store.as_ref()));
     meta.stop().await;
-    key.ok_or_else(|| "the token key is not readable from meta: refusing to export".to_string())
+    key.map_err(|e| e.to_string())?
+        .ok_or_else(|| "the token key is not readable from meta: refusing to export".to_string())
 }
 
 async fn read_run(copy: &Path, run: RunId) -> Result<Exported, String> {

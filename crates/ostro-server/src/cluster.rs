@@ -173,29 +173,39 @@ fn resolved_cluster_id(
 }
 
 /// A joiner's await-token key: wait (bounded) until the seed's `ClusterInfo` reached the
-/// local meta, then check the partition count.
+/// local meta, then check the partition count. A sealed key opens with `sealed` (the node's
+/// [`p14::reseal::cluster_store`]); a key this node cannot open fails at once.
 async fn joined_token_key(
     meta: &MetaHandle,
     count: PartitionCount,
     wait: Duration,
+    sealed: Option<&ostro_bridge::secrets::SealedStore>,
 ) -> Result<[u8; 32], ServerError> {
     let mut applied = meta.view().subscribe();
     let read = || {
-        meta.view()
-            .read(|s| s.cluster().map(|c| c.value.partitions).zip(s.token_key()))
+        meta.view().read(|s| {
+            let Some(p) = s.cluster().map(|c| c.value.partitions) else {
+                return Ok(None);
+            };
+            Ok(crate::p14::reseal::token_key(s, sealed)?.map(|k| (p, k)))
+        })
     };
     let found = tokio::time::timeout(wait, async {
         loop {
-            if let Some(v) = read() {
-                return Some(v);
+            match read() {
+                Ok(Some(v)) => return Ok(Some(v)),
+                Err(e) => return Err(e),
+                Ok(None) => {}
             }
             if applied.changed().await.is_err() {
-                return None;
+                return Ok(None);
             }
         }
     })
     .await
     .ok()
+    .transpose()
+    .map_err(|e: crate::p14::reseal::SystemSecretError| ServerError::Config(e.to_string()))?
     .flatten();
     let Some((stored, key)) = found else {
         return Err(ServerError::Config(format!(
@@ -754,18 +764,41 @@ impl ClusterServices {
         // 8. InitCluster with the bound id, then the own Member record.
         let t = std::time::Instant::now(); // clock-exempt: startup timing
         let boot_bound = cfg.cluster.join_timeout.get();
+        // p14-fixups-2: `__ostro/token-key` may be sealed (aes256gcm) with the operator's
+        // sealing key; every node needs the same key (`p14::reseal` module docs).
+        let sealed = match crate::p14::reseal::cluster_store(cfg) {
+            Ok(s) => s,
+            Err(e) => {
+                meta.stop().await;
+                stop_listener(listener_tasks, listener_stop).await;
+                return Err(ServerError::Config(format!("[secrets] sealing key: {e}")));
+            }
+        };
         let init = async {
             let token_key = if mode == BootMode::Joiner || marker.is_some() {
                 // Never InitCluster on a joiner: the seed's ClusterInfo arrives through the log.
                 // 13-09: nor on a joined node's later restarts (it never bootstrapped the
                 // cluster, so it never proposes InitCluster at all).
-                joined_token_key(&meta, count, cfg.cluster.join_timeout.get()).await?
+                joined_token_key(
+                    &meta,
+                    count,
+                    cfg.cluster.join_timeout.get(),
+                    sealed.as_ref(),
+                )
+                .await?
             } else {
                 // One timestamp for every retry: it tells whether this node's InitCluster
                 // created the record (below).
                 let created_at_ms = clock.now_ms();
                 let key = boot_propose("InitCluster", boot_bound, || {
-                    crate::server::init_cluster(&meta, &cluster_id, node_id, count, created_at_ms)
+                    crate::server::init_cluster(
+                        &meta,
+                        &cluster_id,
+                        node_id,
+                        count,
+                        created_at_ms,
+                        sealed.as_ref(),
+                    )
                 })
                 .await?;
                 // User decision 2026-11-27: a brand-new cluster (blank data dir, and this

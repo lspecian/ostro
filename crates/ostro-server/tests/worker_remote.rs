@@ -804,7 +804,35 @@ async fn selector_routes_gpu_queue_to_the_labelled_worker() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn await_tokens_are_minted_on_the_leader() {
-    let s = server().await;
+    await_tokens_case(server().await).await;
+}
+
+/// p14-fixups-2: the leader re-mints with the key opened from a sealed `__ostro/token-key`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn await_tokens_are_minted_on_the_leader_with_a_sealed_token_key() {
+    let s = TestServer::start_with(ServerOpts::default(), |c| {
+        let p = c.node.data_dir.join("test-sealing.key");
+        std::fs::write(&p, [0x3cu8; 32]).expect("sealing key");
+        c.secrets.sealing_key_file = Some(p);
+    })
+    .await;
+    s.wait_ready(Duration::from_secs(20)).await;
+    let deadline = std::time::Instant::now() + LIMIT; // clock-exempt: test deadline
+    while !s.h().meta().view().read(|m| {
+        matches!(
+            m.get(&ostro_meta::MetaKey::Secret(ostro_meta::TOKEN_KEY_SECRET.into()))
+                .map(|v| v.value),
+            Some(MetaRecord::Secret(ref r)) if r.key_id.starts_with("aes256gcm:")
+        )
+    }) {
+        assert!(std::time::Instant::now() < deadline, "token key not sealed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(s.h().meta().view().read(|m| m.token_key()), None);
+    await_tokens_case(s).await;
+}
+
+async fn await_tokens_case(s: TestServer) {
     s.deploy_guest("tokens", None).await;
     workers_queue(&s, "wq", &[]).await;
     let ws = ServerWorkers::new(Arc::clone(s.h().p7())).await;

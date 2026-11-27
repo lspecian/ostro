@@ -465,10 +465,13 @@ pub(crate) async fn complete_token(
     cp: &ServerControlPlane,
     r: CompleteTokenRequest,
 ) -> Result<CompleteTokenResponse, ApiError> {
+    // p14-fixups-2: the key may be sealed (aes256gcm, `p14::reseal`); the bridge's ring
+    // holds the operator key (env / `[secrets] sealing_key_file`) when one is configured.
     let key = cp
         .meta()
         .view()
-        .read(|s| s.token_key())
+        .read(|s| crate::p14::reseal::token_key(s, cp.bridge.sealed_store()))
+        .map_err(|e| ApiError::unavailable(e.to_string()))?
         .ok_or_else(|| ApiError::unavailable("the cluster token key is not available"))?;
     let parts = ostro_engine::token::verify(&key, &r.token)
         .map_err(|e| ApiError::token_invalid(&e.to_string()))?;

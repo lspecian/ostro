@@ -927,13 +927,14 @@ fn ephemeral_dir() -> Result<TempDir, ServerError> {
 
 /// `InitCluster` with the bound `cluster_id` (the first boot stores it and the await-token
 /// key; later boots and the other voters get `Ok` for the same partition count); returns the
-/// stored token key.
+/// stored token key, opened with `sealed` once `p14::reseal` sealed it (p14-fixups-2).
 pub(crate) async fn init_cluster(
     meta: &MetaHandle,
     cluster_id: &str,
     node_id: u64,
     count: PartitionCount,
     now_ms: u64,
+    sealed: Option<&ostro_bridge::secrets::SealedStore>,
 ) -> Result<[u8; 32], ServerError> {
     let configured = count.get();
     if let Some(stored) = meta
@@ -960,7 +961,8 @@ pub(crate) async fn init_cluster(
         return Err(e.into());
     }
     meta.view()
-        .read(|s| s.token_key())
+        .read(|s| crate::p14::reseal::token_key(s, sealed))
+        .map_err(|e| ServerError::Config(e.to_string()))?
         .ok_or_else(|| ServerError::Invariant("token key missing after InitCluster".into()))
 }
 

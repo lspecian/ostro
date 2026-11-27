@@ -480,8 +480,16 @@ async fn reserved_names_and_short_values_are_refused() {
         delete(&s, "/v1/secrets/__ostro/token-key").await,
         StatusCode::BAD_REQUEST
     );
-    // The token key is still there and never listed.
-    assert!(s.h().meta().view().read(|st| st.token_key()).is_some());
+    // The token key is still there (sealed with the test key by p14::reseal) and never
+    // listed.
+    assert!(
+        s.h()
+            .meta()
+            .view()
+            .read(|st| ostro_server::p14::reseal::token_key(st, s.h().bridge().sealed_store()))
+            .expect("opens")
+            .is_some()
+    );
     let (_, v) = get(&s, "/v1/secrets").await;
     assert!(!v.to_string().contains("__ostro"), "{v}");
     let mut sec = SecretsClient::new(s.channel().await);

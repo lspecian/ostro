@@ -195,7 +195,11 @@ pub async fn init(i: P7Init) -> Result<P7Ctx, P7Error> {
     } = i;
     let profile = tls_profile.unwrap_or_else(|| TlsProfile::of(&config));
     // 13-09: a joined node has no CA key of its own; take the cluster CA from meta first.
-    crate::p13::joiner::import_cluster_ca(&data_dir, &cluster_id, meta.view());
+    let sealed = crate::p14::reseal::cluster_store(&config).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "sealing key unusable for the cluster CA import");
+        None
+    });
+    crate::p13::joiner::import_cluster_ca(&data_dir, &cluster_id, meta.view(), sealed.as_ref());
     let tls = tls::init_with_profile(&config, &data_dir, &cluster_id, profile)?;
     // ACME renewal scheduling reads the injected clock (Phase 10 F5, D-W26). First call
     // wins: in a process that starts several servers (tests) the first clock stays.

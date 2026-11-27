@@ -766,12 +766,32 @@ const CLUSTER_CA_SECRET: &str = "__ostro/cluster-ca";
 /// Write the metadata's cluster CA (`__ostro/cluster-ca`: certificate PEM then key PEM) to
 /// `<data_dir>/tls/ca.{crt,key}`, so the seed keeps the cluster's CA: its own certificate
 /// and the certificates it issues to joiners chain to the same CA (a fresh CA would not match
-/// the stored one). Returns whether a CA was written.
-fn write_stored_ca(state: &MetaState, data_dir: &Path) -> Result<bool, RestoreError> {
+/// the stored one). Returns whether a CA was written. A sealed (aes256gcm, p14-fixups-2) CA
+/// opens with `open` (`RestoreOptions::open_secret`).
+fn write_stored_ca(
+    state: &MetaState,
+    data_dir: &Path,
+    open: Option<&crate::restore::SecretOpener>,
+) -> Result<bool, RestoreError> {
     let Some(secret) = state.secrets().find(|s| s.value.name == CLUSTER_CA_SECRET) else {
         return Ok(false);
     };
-    let text = std::str::from_utf8(&secret.value.ciphertext)
+    let opened;
+    let bytes = if secret.value.key_id == ostro_meta::TOKEN_KEY_PLAINTEXT_ID {
+        secret.value.ciphertext.as_slice()
+    } else {
+        let open = open.ok_or_else(|| {
+            RestoreError::Meta(format!(
+                "{CLUSTER_CA_SECRET} is sealed ({}); set OSTRO_SEALING_KEY to the cluster's \
+                 sealing key to restore it",
+                secret.value.key_id
+            ))
+        })?;
+        opened = (open.0)(&secret.value)
+            .map_err(|e| RestoreError::Meta(format!("{CLUSTER_CA_SECRET}: {e}")))?;
+        opened.as_slice()
+    };
+    let text = std::str::from_utf8(bytes)
         .map_err(|_| RestoreError::Meta(format!("{CLUSTER_CA_SECRET} is not PEM")))?;
     let end = "-----END CERTIFICATE-----";
     let at = text
@@ -1099,7 +1119,7 @@ pub(crate) async fn restore_detected(
         epochs.insert(part.p, e);
     }
     let removed = rewrite_meta(&mut state, cand.index, seed, &epochs, now_ms)?;
-    let ca_kept = write_stored_ca(&state, &data_dir)?;
+    let ca_kept = write_stored_ca(&state, &data_dir, opts.open_secret.as_ref())?;
     let bytes = ostro_meta::encode_snapshot(&state);
     let h = MetaHandle::bootstrap_from_snapshot(&data_dir.join("meta"), seed, cand.index, &bytes)
         .await
@@ -1221,4 +1241,66 @@ async fn open_inspect_cfg(cfg: NodeConfig) -> Result<ostro_partition::Node, Rest
 /// Where a scan directory would live (tests).
 pub fn scan_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(SCAN_DIR)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ostro_meta::{MetaCommand, MetaKey, MetaRecord, SealedSecret};
+
+    use super::*;
+    use crate::restore::SecretOpener;
+
+    const PEM: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n\
+                       -----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----\n";
+
+    fn state_with(ciphertext: &[u8], key_id: &str) -> MetaState {
+        let mut s = MetaState::default();
+        s.apply(
+            1,
+            MetaCommand::Put {
+                key: MetaKey::Secret(CLUSTER_CA_SECRET.to_owned()),
+                expected_version: None,
+                record: MetaRecord::Secret(SealedSecret {
+                    name: CLUSTER_CA_SECRET.to_owned(),
+                    ciphertext: ciphertext.to_vec(),
+                    key_id: key_id.to_owned(),
+                    ext: Vec::new(),
+                }),
+            },
+        );
+        s
+    }
+
+    /// p14-fixups-2: a sealed CA needs the opener; a plaintext-v0 one is written as before.
+    #[test]
+    fn stored_ca_plaintext_and_sealed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plain = state_with(PEM.as_bytes(), ostro_meta::TOKEN_KEY_PLAINTEXT_ID);
+        assert!(write_stored_ca(&plain, &dir.path().join("a"), None).expect("plaintext"));
+        let key = fs::read_to_string(dir.path().join("a/tls/ca.key")).expect("key");
+        assert!(key.contains("BBBB"), "{key}");
+
+        let sealed = state_with(b"\x01opaque", "aes256gcm:0011aabb");
+        let e = write_stored_ca(&sealed, &dir.path().join("b"), None).expect_err("no opener");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("sealed") && msg.contains("OSTRO_SEALING_KEY"),
+            "{msg}"
+        );
+        assert!(!dir.path().join("b/tls/ca.key").exists());
+
+        let open = SecretOpener(Arc::new(|s: &SealedSecret| {
+            assert_eq!(s.ciphertext, b"\x01opaque");
+            Ok(PEM.as_bytes().to_vec())
+        }));
+        assert!(write_stored_ca(&sealed, &dir.path().join("c"), Some(&open)).expect("opened"));
+        let crt = fs::read_to_string(dir.path().join("c/tls/ca.crt")).expect("crt");
+        assert!(crt.contains("AAAA"), "{crt}");
+
+        let bad = SecretOpener(Arc::new(|_: &SealedSecret| Err("wrong key".to_owned())));
+        let e = write_stored_ca(&sealed, &dir.path().join("d"), Some(&bad)).expect_err("bad");
+        assert!(e.to_string().contains("wrong key"), "{e}");
+    }
 }

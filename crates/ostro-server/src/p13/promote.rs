@@ -199,7 +199,7 @@ pub async fn init(ctx: &P13Ctx, r: InitRequest) -> Result<ClusterStatus, ApiErro
 
     put_own_member(ctx, &advertise).await?;
     super::join::ensure_cluster_ca(ctx).await?;
-    if ctx.meta.view().read(super::join::stored_ca).is_none() {
+    if super::join::read_stored_ca(ctx)?.is_none() {
         return Err(ApiError::unavailable(format!(
             "this node holds no usable CA under {}; the cluster CA could not be stored",
             ctx.cfg.node.data_dir.join("tls").display()

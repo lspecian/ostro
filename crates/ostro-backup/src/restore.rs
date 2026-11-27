@@ -126,6 +126,23 @@ pub struct RestoreOptions {
     /// The metadata voter id (`[node] node_id` of the server that will run on the data
     /// directory); `None` = the manifest's node id.
     pub node_id: Option<u64>,
+    /// Opens sealed (aes256gcm) metadata secrets: a cluster restore writes the sealed
+    /// `__ostro/cluster-ca` to `<data_dir>/tls` with it (p14-fixups-2). The binary builds one
+    /// from `OSTRO_SEALING_KEY`; `None` = a sealed CA fails the restore with a clear error.
+    pub open_secret: Option<SecretOpener>,
+}
+
+/// The function behind a [`SecretOpener`]: a sealed record to its plaintext.
+pub type OpenSecretFn = dyn Fn(&ostro_meta::SealedSecret) -> Result<Vec<u8>, String> + Send + Sync;
+
+/// Opens one sealed metadata secret to its plaintext (see [`RestoreOptions::open_secret`]).
+#[derive(Clone)]
+pub struct SecretOpener(pub std::sync::Arc<OpenSecretFn>);
+
+impl std::fmt::Debug for SecretOpener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretOpener")
+    }
 }
 
 impl RestoreOptions {
@@ -137,6 +154,7 @@ impl RestoreOptions {
             takeover: false,
             parallelism: 4,
             node_id: None,
+            open_secret: None,
         }
     }
 }

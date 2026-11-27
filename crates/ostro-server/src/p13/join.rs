@@ -16,11 +16,14 @@
 //!   is signed with the CA from `__ostro/cluster-ca` (SAN URI `ostro://<cluster>/node/<id>`
 //!   assigned by the server, never taken from the CSR, plus the advertised hosts and the
 //!   loopback names; serverAuth + clientAuth; 1 year).
-//! - **CA secret** ([`ensure_cluster_ca`]): `SealedSecret "__ostro/cluster-ca"` (plaintext-v0
-//!   like `__ostro/token-key`; Phase 14 seals it) holding the CA certificate and key PEMs,
-//!   written create-only from this node's `<data>/tls/ca.{crt,key}` (the shared CA of a
-//!   static cluster, the node's own CA, or the CA a joined node imported); never overwritten,
-//!   never logged.
+//! - **CA secret** ([`ensure_cluster_ca`]): `SealedSecret "__ostro/cluster-ca"` holding the
+//!   CA certificate and key PEMs, written create-only from this node's
+//!   `<data>/tls/ca.{crt,key}` (the shared CA of a static cluster, the node's own CA, or the
+//!   CA a joined node imported); never overwritten, never logged. p14-fixups-2: sealed with
+//!   aes256gcm when an operator sealing key is configured (`p14::reseal::cluster_store`;
+//!   `p14::reseal` re-seals a legacy `plaintext-v0` record at startup), `plaintext-v0`
+//!   otherwise; [`stored_ca`] reads both. Only the CA certificate travels to a joiner
+//!   (`JoinResponse.ca_cert_pem`); the key is opened by the member that signs the CSR.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
@@ -49,6 +52,7 @@ use x509_parser::oid_registry::{OID_EC_P256, OID_KEY_TYPE_EC_PUBLIC_KEY, OID_SIG
 use x509_parser::prelude::{FromDer, X509CertificationRequest};
 
 use super::P13Ctx;
+use crate::p14::reseal::{SystemSecretError, cluster_store, open_system_secret};
 use crate::tls::ca::{ClusterCa, LEAF_LIFETIME, NodeIdentity, San, pem_encode, sha256_fingerprint};
 
 /// The secret holding the cluster CA (RESERVATIONS §11, D-P13-10).
@@ -137,18 +141,49 @@ impl StoredCa {
     }
 }
 
-/// The CA stored in meta, if any.
-pub fn stored_ca(state: &MetaState) -> Option<StoredCa> {
+/// The CA stored in meta: `Ok(None)` when absent. A `plaintext-v0` record is read as is; an
+/// aes256gcm record opens with `store` (the node's `p14::reseal::cluster_store`).
+pub fn stored_ca(
+    state: &MetaState,
+    store: Option<&ostro_bridge::secrets::SealedStore>,
+) -> Result<Option<StoredCa>, SystemSecretError> {
+    let Some(v) = open_system_secret(state, CLUSTER_CA_SECRET, store)? else {
+        return Ok(None);
+    };
+    StoredCa::decode(v.expose())
+        .map(Some)
+        .ok_or_else(|| SystemSecretError::Malformed {
+            name: CLUSTER_CA_SECRET.to_owned(),
+            reason: "not a certificate PEM followed by a private key PEM".into(),
+        })
+}
+
+/// Whether `__ostro/cluster-ca` exists (sealed or not).
+pub fn has_stored_ca(state: &MetaState) -> bool {
     state
-        .secrets()
-        .find(|s| s.value.name == CLUSTER_CA_SECRET)
-        .and_then(|s| StoredCa::decode(&s.value.ciphertext))
+        .get(&MetaKey::Secret(CLUSTER_CA_SECRET.to_owned()))
+        .is_some()
+}
+
+fn sealed_store(ctx: &P13Ctx) -> Result<Option<ostro_bridge::secrets::SealedStore>, ApiError> {
+    cluster_store(&ctx.cfg)
+        .map_err(|e| ApiError::unavailable(format!("this node's sealing key: {e}")))
+}
+
+/// [`stored_ca`] with this node's sealing key; a CA it cannot open is `unavailable`.
+pub fn read_stored_ca(ctx: &P13Ctx) -> Result<Option<StoredCa>, ApiError> {
+    let store = sealed_store(ctx)?;
+    ctx.meta
+        .view()
+        .read(|s| stored_ca(s, store.as_ref()))
+        .map_err(|e| ApiError::unavailable(e.to_string()))
 }
 
 /// Store this node's CA (`<data>/tls/ca.{crt,key}`) as `__ostro/cluster-ca` if absent
-/// (create-only, never overwrite). A node without a CA key stores nothing.
+/// (create-only, never overwrite), sealed when an operator sealing key is configured. A
+/// node without a CA key stores nothing.
 pub async fn ensure_cluster_ca(ctx: &P13Ctx) -> Result<(), ApiError> {
-    if ctx.meta.view().read(stored_ca).is_some() {
+    if ctx.meta.view().read(has_stored_ca) {
         return Ok(());
     }
     let dir = ctx.cfg.node.data_dir.join("tls");
@@ -163,17 +198,23 @@ pub async fn ensure_cluster_ca(ctx: &P13Ctx) -> Result<(), ApiError> {
         warn!("this node's CA files are unusable; __ostro/cluster-ca not stored");
         return Ok(());
     }
+    let record = match sealed_store(ctx)? {
+        Some(store) => store
+            .seal(CLUSTER_CA_SECRET, &ca.encode())
+            .map_err(|e| ApiError::internal(format!("sealing the cluster CA: {e}")))?,
+        None => SealedSecret {
+            name: CLUSTER_CA_SECRET.to_owned(),
+            ciphertext: ca.encode(),
+            key_id: TOKEN_KEY_PLAINTEXT_ID.to_owned(),
+            ext: Vec::new(),
+        },
+    };
     let res = ctx
         .meta
         .propose(MetaCommand::Put {
             key: MetaKey::Secret(CLUSTER_CA_SECRET.to_owned()),
             expected_version: None,
-            record: MetaRecord::Secret(SealedSecret {
-                name: CLUSTER_CA_SECRET.to_owned(),
-                ciphertext: ca.encode(),
-                key_id: TOKEN_KEY_PLAINTEXT_ID.to_owned(),
-                ext: Vec::new(),
-            }),
+            record: MetaRecord::Secret(record),
         })
         .await
         .map_err(|e| ApiError::unavailable(format!("storing the cluster CA: {e}")))?;
@@ -194,11 +235,11 @@ pub async fn ensure_cluster_ca(ctx: &P13Ctx) -> Result<(), ApiError> {
 
 /// The stored CA, storing this node's first when absent.
 async fn cluster_ca(ctx: &P13Ctx) -> Result<StoredCa, ApiError> {
-    if let Some(ca) = ctx.meta.view().read(stored_ca) {
+    if let Some(ca) = read_stored_ca(ctx)? {
         return Ok(ca);
     }
     ensure_cluster_ca(ctx).await?;
-    ctx.meta.view().read(stored_ca).ok_or_else(|| {
+    read_stored_ca(ctx)?.ok_or_else(|| {
         ApiError::unavailable(format!(
             "no cluster CA in metadata ({CLUSTER_CA_SECRET}); start a node that holds the CA \
              (`ostro cluster init` or the shared [cluster.tls] CA files)"

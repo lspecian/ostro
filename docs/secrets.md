@@ -137,8 +137,10 @@ AAD = b"ostro/secret/v1" ‖ name ‖ key_id
   nonce reuse is impossible by construction.
 - The AAD binds the record name and the key id. Moving a ciphertext to another name, or
   relabelling its key id, fails authentication.
-- `plaintext-v0` is the legacy Phase 4 encoding of `__ostro/token-key` (the await-token key). It
-  is still readable; `seal` never produces it.
+- `plaintext-v0` is the legacy encoding of the system secrets `__ostro/token-key` (the
+  await-token key) and `__ostro/cluster-ca` from clusters created before Phase 14. It is still
+  readable; `seal` never produces it. With an operator sealing key, the meta leader re-seals both
+  to `aes256gcm` at startup (audit action `system.reseal`), see §7.2.
 - A scan of every file under the data directory (meta log and snapshots included) finds no secret
   value (`bridge_admin::secret_values_are_sealed_at_rest_and_never_returned`).
 
@@ -247,12 +249,35 @@ ostro egress set payments --allow https://api.stripe.com
 ### 7.1 The `__ostro/` prefix
 
 Reserved sealed names used by Ostro itself:
-- `__ostro/token-key`: the await-token signing key (Phase 4, `plaintext-v0`).
+- `__ostro/token-key`: the await-token signing key (§7.2).
+- `__ostro/cluster-ca`: the cluster CA certificate and key that sign joining nodes (§7.2).
+- `__ostro/ui-session-key`: the UI session signing key (sealed whenever a sealing key resolves).
 - `__ostro/presign/<connection>`: the HMAC key of a local object connection's presigned URLs
   (Phase 6), created on first use.
 
 They are not listed by `GET /v1/secrets`, cannot be set or deleted through the API, cannot be
 referenced from a template, and providers refuse the prefix.
+
+### 7.2 Every node needs the same sealing key
+
+`__ostro/token-key` and `__ostro/cluster-ca` are read by every node: the token key at every boot
+and whenever an await token is minted or completed, the CA by the member that signs a joining
+node's certificate, by a joined node importing it for its worker TLS, and by `ostro restore`.
+
+- They are sealed only with an operator-supplied key (`OSTRO_SEALING_KEY` or `[secrets]
+  sealing_key_file`), never with the dev auto-generated `<data_dir>/sealing.key`, which differs
+  per node. Without an operator key they stay `plaintext-v0`.
+- Once they are sealed, **configure the same sealing key on every node of the cluster**, joiners
+  included. A node without the key, or with another key, refuses to start with an error naming
+  the secret, for example: `__ostro/token-key is sealed (aes256gcm:…) and this node has no
+  sealing key: every node of a cluster needs the same sealing key`.
+- The join handshake sends only the CA certificate to the joiner. The joiner opens the sealed
+  records with its own configured key once its metadata has caught up.
+- `ostro restore` of a cluster bucket opens a sealed `__ostro/cluster-ca` with `OSTRO_SEALING_KEY`.
+  Without the key it fails and says so.
+- A node cannot load an old key next to a new one (§5.2). Replacing the key of a cluster whose
+  system secrets are sealed therefore stops every node from starting: keep the key and back it
+  up.
 
 ---
 

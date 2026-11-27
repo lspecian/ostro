@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use ostro_meta::ext::{get_cluster_version, get_replication_policy};
 use ostro_server::ServerHandle;
-use ostro_server::p13::join::stored_ca;
+use ostro_server::p13::join::has_stored_ca;
 use ostro_server::p13::promote::REASON_NOT_SUPPORTED_IN_PROFILE;
 use p12::{assignments, eventually, guest_wasm, hex, start, stop_all, tmp};
 use p13::*;
@@ -129,7 +129,7 @@ async fn init_promotes_a_running_single_node_without_restart() {
     assert_eq!(v["voters"], json!([1]));
     assert_eq!(policy(&seed), Some((3, 2, 5)));
     assert_eq!(finalized(&seed), Some(2));
-    assert!(seed.meta().view().read(stored_ca).is_some(), "CA stored");
+    assert!(seed.meta().view().read(has_stored_ca), "CA stored");
     // No restart, no leadership change, no new epoch.
     assert_eq!(assignments(&seed), before, "partitions untouched by init");
 
@@ -239,7 +239,7 @@ async fn init_crash_after_ca_then_rerun_completes() {
     fail::remove(FP_INIT_AFTER_CA);
     assert_eq!(st, 503, "the failpoint stops init: {v}");
     // Steps 1-2 happened, the policy (written last) did not.
-    assert!(h.meta().view().read(stored_ca).is_some(), "CA stored");
+    assert!(h.meta().view().read(has_stored_ca), "CA stored");
     let (_, s) = get(&h, "/v1/cluster/status").await;
     assert_eq!(member(&s, 1).expect("member")["state"], "active");
     assert_eq!(policy(&h), None, "not initialised yet");

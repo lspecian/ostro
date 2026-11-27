@@ -191,6 +191,8 @@ impl Executor for PlacementExecutor {
 pub struct RemoteRunner {
     shared: Arc<P7Shared>,
     meta: MetaView,
+    /// Opens a sealed `__ostro/token-key` (p14-fixups-2, `p14::reseal::cluster_store`).
+    sealed: Option<ostro_bridge::secrets::SealedStore>,
     hot_wait_ms: u64,
     cancel_wait: Duration,
 }
@@ -331,6 +333,10 @@ impl RemoteRunner {
         Self {
             shared: Arc::clone(&ctx.shared),
             meta: ctx.meta.clone(),
+            sealed: crate::p14::reseal::cluster_store(&ctx.config).unwrap_or_else(|e| {
+                warn!(error = %e, "remote runner: sealing key unusable");
+                None
+            }),
             hot_wait_ms: ms(hot_wait),
             cancel_wait: ctx.lease_ttl.min(MAX_CANCEL_WAIT),
         }
@@ -733,8 +739,13 @@ impl RemoteRunner {
             .iter()
             .position(|e| matches!(e.body, EventBody::AwaitTokenCreated(_)))
         {
-            let Some(key) = self.meta.read(|s| s.token_key()) else {
-                return reply(R::Rejected("the cluster has no token key".into()));
+            let key = match self
+                .meta
+                .read(|s| crate::p14::reseal::token_key(s, self.sealed.as_ref()))
+            {
+                Ok(Some(k)) => k,
+                Ok(None) => return reply(R::Rejected("the cluster has no token key".into())),
+                Err(e) => return reply(R::Rejected(e.to_string())),
             };
             let seq = events[i].seq;
             if let EventBody::AwaitTokenCreated(t) = &mut events[i].body {
