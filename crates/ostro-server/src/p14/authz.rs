@@ -113,10 +113,13 @@ pub const fn required(m: Method) -> Requirement {
         Method::PutGrant => TenantAdmin,
         Method::ListGrants => TenantAdmin,
         Method::DeleteGrant => TenantAdmin,
-        Method::PutConnection => TenantAdmin,
-        Method::GetConnection => TenantAdmin,
-        Method::ListConnections => TenantAdmin,
-        Method::DeleteConnection => TenantAdmin,
+        // Connections are cluster-scoped in 1.0 (14-16 policy; 14-17 aligns authz): system
+        // admins only, so tenant admins get `missing_scope` here instead of passing the scope
+        // check and being refused by the tenant hook.
+        Method::PutConnection => SystemAdmin,
+        Method::GetConnection => SystemAdmin,
+        Method::ListConnections => SystemAdmin,
+        Method::DeleteConnection => SystemAdmin,
         Method::PutEgress => TenantAdmin,
         Method::GetEgress => TenantAdmin,
         Method::ListEgress => TenantAdmin,
@@ -301,6 +304,16 @@ mod tests {
             let spec = m.spec();
             let want = match (m, spec.scope, spec.tenant) {
                 (Method::Ready | Method::WhoAmI, _, _) => Requirement::Authenticated,
+                // 14-17: connections are cluster-scoped in 1.0 (the inventory classes them
+                // tenant-admin; the 14-16 policy makes them system-only).
+                (
+                    Method::PutConnection
+                    | Method::GetConnection
+                    | Method::ListConnections
+                    | Method::DeleteConnection,
+                    _,
+                    _,
+                ) => Requirement::SystemAdmin,
                 (_, Scope::Admin, TenantClass::SystemOnly) => Requirement::SystemAdmin,
                 (_, Scope::Admin, TenantClass::TenantAdmin) => Requirement::TenantAdmin,
                 (_, s, TenantClass::SystemOnly) => Requirement::SystemScope(s),

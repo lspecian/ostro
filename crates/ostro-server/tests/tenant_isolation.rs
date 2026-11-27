@@ -1072,7 +1072,6 @@ async fn names_keys_and_lists_are_per_tenant() {
             "/v1/secrets",
             "/v1/grants",
             "/v1/egress",
-            "/v1/connections",
         ] {
             let (st, v) = api.get(path).await;
             assert_eq!(st, StatusCode::OK, "{path}: {v}");
@@ -1084,11 +1083,14 @@ async fn names_keys_and_lists_are_per_tenant() {
         }
         let (_, v) = api.get("/v1/schedules").await;
         assert_eq!(names(&v["schedules"], "name"), ["nightly"], "{v}");
-        let (_, v) = api.get("/v1/connections").await;
-        assert!(
-            !v.to_string().contains("db.example"),
+        // 14-17: connections are cluster-scoped; authz refuses tenant admins outright.
+        let (st, v) = api.get("/v1/connections").await;
+        assert_eq!(
+            (st, reason(&v)),
+            (StatusCode::FORBIDDEN, "missing_scope"),
             "connections are cluster-scoped: {v}"
         );
+        assert!(!v.to_string().contains("db.example"), "{v}");
     }
     let (_, v) = sys.get("/v1/schedules").await;
     let mut got = names(&v["schedules"], "name");
@@ -1110,9 +1112,13 @@ async fn names_keys_and_lists_are_per_tenant() {
         .read(|st| st.grants().map(|g| g.value.id.clone()).collect());
     assert!(grants.contains(&"secret:a/m:api-key".into()), "{grants:?}");
 
-    // Connections: 404 / 403 for tenants.
-    let (st, _) = a.get("/v1/connections/https://db.example").await;
-    assert_eq!(st, StatusCode::NOT_FOUND);
+    // Connections: system admins only (14-17 authz; 14-16's tenant hook stays behind it).
+    let (st, v) = a.get("/v1/connections/https://db.example").await;
+    assert_eq!(
+        (st, reason(&v)),
+        (StatusCode::FORBIDDEN, "missing_scope"),
+        "{v}"
+    );
     let (st, v) = a
         .put(
             "/v1/connections/https://evil.example",
@@ -1121,7 +1127,7 @@ async fn names_keys_and_lists_are_per_tenant() {
         .await;
     assert_eq!(
         (st, reason(&v)),
-        (StatusCode::FORBIDDEN, "forbidden_tenant"),
+        (StatusCode::FORBIDDEN, "missing_scope"),
         "{v}"
     );
 

@@ -7,6 +7,8 @@
 //! guard denials (scope denials are 14-15's tests). The run fan-out of `delete_tenant` is
 //! exercised on a bare context bound to a fake routed control plane.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -951,3 +953,135 @@ async fn ext_112_needs_finalized_level_2() {
     .await;
 }
 
+// ---------------------------------------------------------------------------------
+// Default tenant `_` tokens (14-15 follow-up): bare names, run starts, isolation
+// ---------------------------------------------------------------------------------
+
+impl Srv {
+    async fn upload(&self, bearer: &str, guest: &str) -> (u16, Value) {
+        let wasm = common::guest_wasm(guest);
+        let sha = sha256_hex(&wasm);
+        let r = self
+            .http
+            .put(format!("{}/v1/modules/{sha}", self.base))
+            .bearer_auth(bearer)
+            .header("content-type", "application/wasm")
+            .body(wasm)
+            .send()
+            .await
+            .expect("PUT module");
+        let st = r.status().as_u16();
+        (st, r.json().await.unwrap_or(Value::Null))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn default_tenant_token_starts_runs_and_stays_in_its_tenant() {
+    use reqwest::Method;
+    let s = Srv::start().await;
+    let tk = s.tokens();
+    let (st, _) = s
+        .admin(Method::POST, "/v1/tenants", Some(json!({"id": "acme"})))
+        .await;
+    assert_eq!(st, 201);
+    let scopes = &["deploy", "trigger", "read"];
+    let (default, acme) = auth::scope(Principal::system(), async {
+        let d = tk
+            .create_token(req("default-ci", scopes, Some("_")))
+            .await
+            .expect("_ token");
+        let a = tk
+            .create_token(req("acme-ci", scopes, Some("acme")))
+            .await
+            .expect("acme token");
+        (d, a)
+    })
+    .await;
+    assert_eq!(default.info.tenant.as_deref(), Some("_"));
+    let (d, a) = (default.bearer.as_str(), acme.bearer.as_str());
+
+    // whoami: a tenant principal of `_`, not system scope
+    let (st, _, w) = s.req(Method::GET, "/v1/auth/whoami", Some(d), None).await;
+    assert_eq!((st, &w["tenant"]), (200, &json!("_")), "{w}");
+
+    // `_` deploys and starts with bare names (this was a 400: tenant "_" forced into the
+    // start request)
+    let (st, v) = s.upload(d, "signals").await;
+    assert!((200..300).contains(&st), "deploy as _: {st} {v}");
+    let (st, _, run) = s
+        .req(
+            Method::POST,
+            "/v1/workflows/signals/runs",
+            Some(d),
+            Some(json!({"input": {"mode": "long_wait"}})),
+        )
+        .await;
+    assert_eq!(st, 201, "start as _: {run}");
+    let run_d = run["run_id"].as_str().unwrap().to_owned();
+    let (st, _, info) = s
+        .req(Method::GET, &format!("/v1/runs/{run_d}"), Some(d), None)
+        .await;
+    assert_eq!(st, 200, "{info}");
+    assert_eq!(info["workflow"], "signals");
+
+    // acme deploys the same guest in its tenant and starts one run
+    let (st, v) = s.upload(a, "signals").await;
+    assert!((200..300).contains(&st), "deploy as acme: {st} {v}");
+    let (st, _, run) = s
+        .req(
+            Method::POST,
+            "/v1/workflows/signals/runs",
+            Some(a),
+            Some(json!({"input": {"mode": "long_wait"}})),
+        )
+        .await;
+    assert_eq!(st, 201, "start as acme: {run}");
+    let run_a = run["run_id"].as_str().unwrap().to_owned();
+
+    // isolation both ways: foreign run ids are 404, listings hold only the own tenant
+    let (st, _, _) = s
+        .req(Method::GET, &format!("/v1/runs/{run_a}"), Some(d), None)
+        .await;
+    assert_eq!(st, 404, "_ must not see acme's run");
+    let (st, _, _) = s
+        .req(Method::GET, &format!("/v1/runs/{run_d}"), Some(a), None)
+        .await;
+    assert_eq!(st, 404, "acme must not see the default tenant's run");
+    let ids = |v: &Value| -> Vec<String> {
+        v["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["run_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (st, _, list) = s
+        .req(Method::GET, "/v1/runs?limit=100", Some(d), None)
+        .await;
+    assert_eq!(st, 200, "{list}");
+    assert_eq!(ids(&list), std::slice::from_ref(&run_d), "{list}");
+    let (st, _, list) = s
+        .req(Method::GET, "/v1/runs?limit=100", Some(a), None)
+        .await;
+    assert_eq!(st, 200, "{list}");
+    assert_eq!(ids(&list), std::slice::from_ref(&run_a), "{list}");
+    // naming another tenant (or qualifying a name) is refused for `_`
+    let (st, _, _) = s
+        .req(Method::GET, "/v1/runs?tenant=acme", Some(d), None)
+        .await;
+    assert_eq!(st, 403);
+    let (st, _, _) = s
+        .req(
+            Method::POST,
+            "/v1/workflows/acme%2Fsignals/runs",
+            Some(d),
+            Some(json!({"input": {"mode": "long_wait"}})),
+        )
+        .await;
+    assert!(st == 400 || st == 404, "qualified name as _: {st}");
+    // the system admin sees both, the acme run under its qualified name
+    let (_, list) = s.admin(Method::GET, "/v1/runs?limit=100", None).await;
+    let all = ids(&list);
+    assert!(all.contains(&run_d) && all.contains(&run_a), "{list}");
+    s.shutdown().await;
+}

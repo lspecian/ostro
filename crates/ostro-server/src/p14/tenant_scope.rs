@@ -12,6 +12,14 @@
 //! tenant principals only; system-scope principals (`tenant = None`: system tokens, `Dev`,
 //! `System`, nodes) pass through unchanged and see every tenant with qualified names.
 //!
+//! **Default tenant (14-17).** A token of the default tenant (`tenant = Some("_")`) is a
+//! tenant principal confined to the default tenant, never system scope: its names stay bare
+//! (the default tenant's storage form), it owns only unqualified names and runs whose tenant
+//! is `None`/`""`, and the request fields the server reads as "`None` = default tenant"
+//! (`UploadModule`, `StartRunRequest`, the secret calls) are forced to `None` instead of
+//! `"_"` (which the server refuses). Filter fields where `None` means "every tenant"
+//! (`ListRunsRequest`, `list_tokens`, `AuditQuery`) and `CreateTokenRequest` keep `"_"`.
+//!
 //! # Rules by tenant class (one `match` over [`Method`], no wildcard)
 //!
 //! - **qualified names**: a client name must be a plain resource name (no `/`, `:` or
@@ -70,7 +78,7 @@ use ostro_api::phase14::{
 use ostro_api::{ApiError, ControlPlane, ErrorCode};
 use ostro_meta::is_resource_name;
 
-use crate::control::names::split_qualified;
+use crate::control::names::{DEFAULT_TENANT_TOKEN, split_qualified};
 
 /// The principal's tenant when it is a tenant principal (`None` = system scope).
 pub fn tenant_of(p: &Principal) -> Option<&str> {
@@ -160,10 +168,29 @@ fn invalid_name(field: &str, raw: &str) -> ApiError {
     .with_details(serde_json::json!({ "field": field, "reason": "invalid_name" }))
 }
 
-/// The plain name `raw`, qualified to `<t>/<raw>`.
+/// 14-17: a principal of the default tenant (`tenant = Some("_")`). It stays a tenant
+/// principal (confined to the default tenant, never system scope), but the default tenant's
+/// storage names are bare and its request tenant fields use the server's default spelling.
+fn is_default(t: &str) -> bool {
+    t == DEFAULT_TENANT_TOKEN
+}
+
+/// Whether a stored/listed tenant value `have` is tenant `t` (`None`, `""` and `_` are the
+/// default tenant).
+fn tenant_is(have: Option<&str>, t: &str) -> bool {
+    match have.filter(|h| !h.is_empty()) {
+        None => is_default(t),
+        Some(h) => h == t,
+    }
+}
+
+/// The plain name `raw`, qualified to `<t>/<raw>` (bare for the default tenant).
 fn qualified(t: &str, field: &str, raw: &str) -> Result<String, ApiError> {
     if !is_resource_name(raw) {
         return Err(invalid_name(field, raw));
+    }
+    if is_default(t) {
+        return Ok(raw.to_owned());
     }
     Ok(format!("{t}/{raw}"))
 }
@@ -194,8 +221,26 @@ fn force(t: &str, field: &str, v: &mut Option<String>) -> Result<(), ApiError> {
     }
 }
 
+/// [`force`] for request fields where the server reads `None` as the default tenant (and
+/// refuses `"_"`): a default-tenant principal's value becomes `None`.
+fn force_default(t: &str, field: &str, v: &mut Option<String>) -> Result<(), ApiError> {
+    if !is_default(t) {
+        return force(t, field, v);
+    }
+    match v.as_deref() {
+        None | Some("") | Some(DEFAULT_TENANT_TOKEN) => {
+            *v = None;
+            Ok(())
+        }
+        Some(_) => Err(forbidden(field)),
+    }
+}
+
 /// Whether the stored (qualified) name belongs to `t`.
 fn owns(t: &str, key: &str) -> bool {
+    if is_default(t) {
+        return split_qualified(key).0.is_none();
+    }
     split_qualified(key).0 == Some(t)
 }
 
@@ -215,7 +260,7 @@ fn strip_opt(t: &str, name: &mut Option<String>) {
 
 /// A run's tenant equals `t` (`None` / `""` is the default tenant, never a tenant principal).
 fn same_tenant(run_tenant: Option<&str>, t: &str) -> bool {
-    run_tenant.is_some_and(|r| r == t)
+    tenant_is(run_tenant, t)
 }
 
 /// The run-id rule: `RunRecord.tenant == t`, else the 404 of a missing run.
@@ -305,7 +350,7 @@ fn q_webhook(t: &str, w: &mut WebhookDto) -> Result<(), ApiError> {
         }
         WebhookActionDto::CompleteToken { .. } => {}
     }
-    if !w.verifier.secret_ref.is_empty() {
+    if !w.verifier.secret_ref.is_empty() && !is_default(t) {
         w.verifier.secret_ref = format!("{t}/{}", w.verifier.secret_ref);
     }
     Ok(())
@@ -358,7 +403,7 @@ async fn scope_request(
         // ---- ControlPlane ----
         UploadModule => {
             let r = req_of::<ostro_api::domain::UploadModule>(m, req)?;
-            force(t, "tenant", &mut r.tenant)?;
+            force_default(t, "tenant", &mut r.tenant)?;
             if let Some(n) = r.name.as_deref().filter(|n| !n.is_empty())
                 && !is_resource_name(n)
             {
@@ -379,7 +424,7 @@ async fn scope_request(
         }
         StartRun => {
             let r = req_of::<StartRunRequest>(m, req)?;
-            force(t, "tenant", &mut r.tenant)?;
+            force_default(t, "tenant", &mut r.tenant)?;
             q(t, "workflow", &mut r.workflow)?;
             q_opt(t, "queue", &mut r.queue)?;
         }
@@ -442,14 +487,14 @@ async fn scope_request(
         }
         PutSecret => {
             let r = req_of::<ostro_api::domain::PutSecret>(m, req)?;
-            force(t, "tenant", &mut r.tenant)?;
+            force_default(t, "tenant", &mut r.tenant)?;
         }
         ListSecrets => {
-            force(t, "tenant", req_of::<Option<String>>(m, req)?)?;
+            force_default(t, "tenant", req_of::<Option<String>>(m, req)?)?;
         }
         DeleteSecret => {
             let r = req_of::<(String, Option<String>)>(m, req)?;
-            force(t, "tenant", &mut r.1)?;
+            force_default(t, "tenant", &mut r.1)?;
         }
         PutGrant => {
             let g = req_of::<GrantInfo>(m, req)?;
@@ -663,7 +708,7 @@ fn scope_response(t: &str, m: Method, resp: &mut dyn Any) -> Result<(), ApiError
             }
         }
         ListSecrets => {
-            resp_of::<Vec<SecretInfo>>(m, resp)?.retain(|s| s.tenant.as_deref() == Some(t));
+            resp_of::<Vec<SecretInfo>>(m, resp)?.retain(|s| tenant_is(s.tenant.as_deref(), t));
         }
         PutGrant => strip_grant(t, resp_of::<GrantInfo>(m, resp)?),
         ListGrants => {
@@ -755,12 +800,12 @@ fn scope_response(t: &str, m: Method, resp: &mut dyn Any) -> Result<(), ApiError
             }
         }
         ListApiTokens => {
-            resp_of::<Vec<TokenInfo>>(m, resp)?.retain(|k| k.tenant.as_deref() == Some(t));
+            resp_of::<Vec<TokenInfo>>(m, resp)?.retain(|k| tenant_is(k.tenant.as_deref(), t));
         }
         QueryAudit => {
             resp_of::<AuditPage>(m, resp)?
                 .records
-                .retain(|r| r.tenant.as_deref() == Some(t));
+                .retain(|r| tenant_is(r.tenant.as_deref(), t));
         }
         // Responses with no tenant data (ids, statuses, counts, policies, streams).
         StartRun | RunHistory | Ready | SignalRun | CancelRun | TerminateRun | RetryRun
@@ -792,6 +837,33 @@ mod tests {
             versions: vec![],
             record_version: 0,
         }
+    }
+
+    #[test]
+    fn default_tenant_principal_keeps_bare_names_and_none_fields() {
+        // 14-17: `_` is a tenant principal confined to the default tenant.
+        assert_eq!(qualified("_", "workflow", "orders").unwrap(), "orders");
+        assert!(qualified("_", "workflow", "acme/orders").is_err());
+        assert!(owns("_", "orders"));
+        assert!(!owns("_", "acme/orders"));
+        assert!(!owns("acme", "orders"));
+        assert!(same_tenant(None, "_") && same_tenant(Some(""), "_"));
+        assert!(!same_tenant(Some("acme"), "_"));
+        assert!(!same_tenant(None, "acme"));
+        for start in [None, Some(String::new()), Some("_".to_owned())] {
+            let mut v = start;
+            force_default("_", "tenant", &mut v).expect("default");
+            assert_eq!(v, None);
+        }
+        let mut v = Some("acme".to_owned());
+        let e = force_default("_", "tenant", &mut v).unwrap_err();
+        assert_eq!(e.reason(), Some(reason::FORBIDDEN_TENANT));
+        let mut v = None;
+        force_default("acme", "tenant", &mut v).expect("tenant");
+        assert_eq!(v.as_deref(), Some("acme"));
+        let mut v = None;
+        force("_", "tenant", &mut v).expect("filter field");
+        assert_eq!(v.as_deref(), Some("_"));
     }
 
     #[test]

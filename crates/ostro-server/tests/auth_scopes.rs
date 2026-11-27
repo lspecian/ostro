@@ -650,7 +650,16 @@ fn inventory_allows(m: Method, scopes: ScopeSet, tenant: Option<&str>) -> bool {
         return true;
     }
     let spec = m.spec();
-    match (spec.scope, spec.tenant) {
+    // 14-17: connections are cluster-scoped in 1.0 (14-16 policy), so all four connection
+    // methods need a system admin although the 14-01 inventory classes them tenant-admin.
+    let tenant_class = match m {
+        Method::PutConnection
+        | Method::GetConnection
+        | Method::ListConnections
+        | Method::DeleteConnection => TenantClass::SystemOnly,
+        _ => spec.tenant,
+    };
+    match (spec.scope, tenant_class) {
         (Scope::Admin, TenantClass::SystemOnly) => {
             tenant.is_none() && scopes.contains(Scope::Admin)
         }
