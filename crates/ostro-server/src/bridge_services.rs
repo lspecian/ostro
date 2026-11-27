@@ -146,6 +146,9 @@ struct ChainSpec {
     file: Option<Arc<dyn SecretProvider>>,
     vault: Option<Arc<dyn SecretProvider>>,
     k8s: Option<Arc<dyn SecretProvider>>,
+    /// Phase 14 (14-18): every resolver reports guest secret access here (the connectors
+    /// hold their own resolvers, so the `Audited` wrapper alone would miss them).
+    audit: Arc<dyn ostro_types::audit::AuditSink>,
 }
 
 impl ChainSpec {
@@ -171,7 +174,8 @@ impl ChainSpec {
     }
 
     fn resolver(&self, tenant: Option<&str>) -> SecretResolver {
-        let r = SecretResolver::new(Arc::clone(&self.meta), self.chain(tenant));
+        let r = SecretResolver::new(Arc::clone(&self.meta), self.chain(tenant))
+            .with_audit(Arc::clone(&self.audit));
         match &self.sealed {
             Some(s) => r.with_sealed_store(s.clone()),
             None => r,
@@ -311,6 +315,7 @@ impl BridgeServices {
             file,
             vault,
             k8s,
+            audit: Arc::clone(&env.audit),
         };
 
         // 4. Default-tenant resolver (operator-owned connection configs, presign keys).

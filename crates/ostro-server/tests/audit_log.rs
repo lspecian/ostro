@@ -1174,6 +1174,91 @@ mod failpoints {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// Part 4: secret access (Task 2)
+// ---------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secret_access_is_coalesced_per_origin_and_never_carries_the_value() {
+    use common::fx::{configure, deploy_fx, wait_terminal};
+    use ostro_testkit::mock_provider::MockProvider;
+
+    let a = MockProvider::start().await;
+    let b = MockProvider::start().await;
+    let mut s = common::start_server_with_bridge(tmpfs_dir(), BridgeTestOpts::default()).await;
+    let audit_dir = s.h().data_dir().join("audit");
+    let module = deploy_fx(&s, "fx-http").await;
+    let canary = "CANARY-secret-access-81c2-value";
+    configure(&s)
+        .secret("canary-key", canary)
+        .grant(
+            &module,
+            "canary-key",
+            &[&a.base_url(), &b.base_url()],
+            false,
+        )
+        .egress(&module, &[&a.base_url(), &b.base_url()])
+        .apply()
+        .await;
+    let req = |url: String| {
+        json!({
+            "method": "GET",
+            "url": url,
+            "headers": [["x-api-key", "{{secret:canary-key}}"]],
+        })
+    };
+    let mut requests: Vec<Value> = (0..20)
+        .map(|i| req(format!("{}/echo/{i}", a.base_url())))
+        .collect();
+    requests.push(req(format!("{}/echo/other", b.base_url())));
+    let run = s
+        .start_rest(
+            "fx-http",
+            json!({ "input": { "requests": requests, "parallel": false } }),
+        )
+        .await;
+    let info = wait_terminal(&s, &run, LIMIT).await;
+    assert_eq!(
+        serde_json::to_value(info.status).expect("status"),
+        "completed",
+        "{info:?}"
+    );
+    // Coalesced records are written when the window ends or at shutdown.
+    s.shutdown().await;
+    let recs = actions(&audit_dir);
+    let access = with_action(&recs, "secret.access");
+    assert_eq!(access.len(), 2, "{access:#?}");
+    let origin_of = |r: &Value| {
+        r["details"]["origin"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let ra = access
+        .iter()
+        .find(|r| origin_of(r) == a.base_url())
+        .expect("origin a");
+    let rb = access
+        .iter()
+        .find(|r| origin_of(r) == b.base_url())
+        .expect("origin b");
+    assert_eq!(ra["count"], 20, "{ra}");
+    assert_eq!(rb["count"], 1, "{rb}");
+    for r in [ra, rb] {
+        assert_eq!(r["target"], "_/canary-key");
+        assert_eq!(r["actor"], format!("run:{run}"));
+        assert_eq!(r["actor_kind"], "system");
+        assert_eq!(r["details"]["module"], module.as_str());
+        assert_eq!(r["details"]["outcome"], "ok");
+        assert!(r["first_ts_ms"].as_u64() <= r["last_ts_ms"].as_u64());
+    }
+    for (_, path) in list_segments(&audit_dir).expect("segments") {
+        let text = std::fs::read_to_string(path).expect("read");
+        assert!(!text.contains(canary), "secret value in the journal");
+    }
+    verify_dir(&audit_dir).expect("verify");
+}
+
 fn webhook(name: &str) -> WebhookDto {
     WebhookDto {
         name: name.into(),

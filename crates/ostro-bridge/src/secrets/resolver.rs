@@ -22,9 +22,19 @@
 //! is `Retryable{kind: secret_not_found}`; `Invalid` (tampered record, file outside its
 //! directory) is `NonRetryable{kind: secret_not_found}`. Messages name the secret and the
 //! provider, never a value.
+//!
+//! # Audit (Phase 14, 14-18)
+//!
+//! A resolver built [`with_audit`](SecretResolver::with_audit) reports every guest-template
+//! resolution ([`SecretResolver::resolve`], granted or not) to the node's audit sink as a
+//! coalesced `secret.access` event ([`super::audited::record_access`]): the connectors
+//! (HTTP per tenant, SQL, object) hold a concrete `SecretResolver`, so the hook lives here
+//! rather than only in the [`super::Audited`] wrapper. Operator and reserved lookups are
+//! never audited per access.
 
 use std::sync::Arc;
 
+use ostro_types::audit::AuditSink;
 use ostro_types::journal::{ErrorInfo, Failure};
 
 use super::grants::check_grant;
@@ -59,6 +69,8 @@ pub struct SecretResolver {
     meta: Arc<dyn MetaView>,
     chain: ProviderChain,
     sealed: Option<SealedStore>,
+    /// Phase 14 (14-18): where guest-template resolutions are audited.
+    audit: Option<Arc<dyn AuditSink>>,
 }
 
 impl std::fmt::Debug for SecretResolver {
@@ -66,6 +78,7 @@ impl std::fmt::Debug for SecretResolver {
         f.debug_struct("SecretResolver")
             .field("chain", &self.chain)
             .field("sealed", &self.sealed.is_some())
+            .field("audited", &self.audit.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -105,7 +118,20 @@ impl SecretResolver {
             meta,
             chain,
             sealed: None,
+            audit: None,
         }
+    }
+
+    /// Phase 14 (14-18): report every [`resolve`](Self::resolve) to `sink` (coalesced
+    /// `secret.access`, see the module docs).
+    pub fn with_audit(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit = Some(sink);
+        self
+    }
+
+    /// The audit sink resolutions are reported to, if any.
+    pub fn audit_sink(&self) -> Option<&Arc<dyn AuditSink>> {
+        self.audit.as_ref()
     }
 
     /// Sets the sealed store used by [`resolve_reserved`](Self::resolve_reserved). Without
@@ -133,8 +159,25 @@ impl SecretResolver {
     }
 
     /// Resolves `{{secret:name}}` for a request of `ctx.module` to `origin` (in the body if
-    /// `in_body`). See the module docs for the order of checks.
+    /// `in_body`). See the module docs for the order of checks. With an audit sink
+    /// ([`with_audit`](Self::with_audit)) the resolution is recorded, granted or not.
     pub async fn resolve(
+        &self,
+        ctx: &ResolveCtx<'_>,
+        name: &str,
+        origin: &Origin,
+        in_body: bool,
+    ) -> Result<SecretValue, Failure> {
+        let res = self.resolve_unaudited(ctx, name, origin, in_body).await;
+        if let Some(sink) = &self.audit {
+            super::audited::record_access(sink.as_ref(), ctx, name, origin, &res);
+        }
+        res
+    }
+
+    /// [`resolve`](Self::resolve) without the audit record ([`super::Audited`] records it
+    /// with its own sink).
+    pub async fn resolve_unaudited(
         &self,
         ctx: &ResolveCtx<'_>,
         name: &str,
