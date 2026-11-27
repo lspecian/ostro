@@ -8,7 +8,10 @@
 //! sealing_key_file`, or the dev `<data>/sealing.key`), [`run`]:
 //!
 //! - creates `__ostro/ui-session-key` (32 random bytes) sealed with aes256gcm if absent;
-//! - re-seals it from `plaintext-v0` to aes256gcm if it was stored in plaintext;
+//! - re-seals it from `plaintext-v0` to aes256gcm if it was stored in plaintext (14-21
+//!   creates it as `plaintext-v0` in token mode); like the secrets below it is cluster-wide
+//!   (a UI session cookie verifies on every node), so (14-21) it is sealed only with an
+//!   operator-supplied key, never the per-node dev key;
 //! - (p14-fixups-2) re-seals `__ostro/token-key` and `__ostro/cluster-ca` from `plaintext-v0`
 //!   to aes256gcm, **only with an operator-supplied key** (`OSTRO_SEALING_KEY` or `[secrets]
 //!   sealing_key_file`, [`cluster_ring`]); they are never created here (InitCluster and
@@ -364,7 +367,10 @@ pub async fn run(ctx: &P14Ctx) -> ResealReport {
         }
         return report;
     };
-    let store = SealedStore::new(Arc::new(ring));
+    // 14-21: the UI session key is cluster-wide too (a cookie issued by one node must
+    // verify on every node), so the per-node dev key never seals it either; without an
+    // operator key it stays `plaintext-v0` (created by `ui_auth::ensure_key`).
+    drop(ring);
     let cluster = match cluster_store(&ctx.cfg) {
         Ok(c) => c,
         Err(e) => {
@@ -377,18 +383,11 @@ pub async fn run(ctx: &P14Ctx) -> ResealReport {
             "{} stay unsealed: only an operator-supplied sealing key (OSTRO_SEALING_KEY or \
              [secrets] sealing_key_file, the same on every node) seals them, never the dev \
              auto-generated key",
-            CLUSTER_WIDE.join(" and ")
+            RESEAL_NOW.join(", ")
         );
     }
     for name in RESEAL_NOW {
-        let st = if CLUSTER_WIDE.contains(&name) {
-            match &cluster {
-                Some(c) => c,
-                None => continue,
-            }
-        } else {
-            &store
-        };
+        let Some(st) = &cluster else { continue };
         match reseal_one(ctx, st, name).await {
             Ok(o) => report.secrets.push((name.to_owned(), o)),
             Err(e) => warn!(secret = name, error = %e, "system secret not sealed"),

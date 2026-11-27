@@ -166,6 +166,10 @@ pub fn router(deps: UiDeps) -> axum::Router {
     r = r.merge(inventory::routes());
     r.layer(axum::middleware::from_fn_with_state(
         state.clone(),
+        auth::viewer,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        state.clone(),
         security::guard,
     ))
     .with_state(state)

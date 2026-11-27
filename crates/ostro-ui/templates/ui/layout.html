@@ -9,10 +9,10 @@
 <script src="/ui/assets/vendor/htmx-2.0.11.min.js" defer></script>
 <script src="/ui/assets/app.js" defer></script>
 </head>
-<body hx-history="false" hx-headers='{"X-Ostro-Csrf":"{{ csrf }}"}'>
+<body hx-history="false" hx-headers='{"X-Ostro-Csrf":"{{ csrf }}"}'{% if !crate::auth::viewer_can_operate() %} class="readonly"{% endif %}>
 <header class="top">
 <a class="brand" href="/ui/">Ostro</a>
-<nav aria-label="Main">
+{% if nav != "login" %}<nav aria-label="Main">
 <a href="/ui/runs"{% if nav == "runs" %} aria-current="page"{% endif %}>Runs</a>
 <a href="/ui/dlq"{% if nav == "dlq" %} aria-current="page"{% endif %}>DLQ</a>
 <a href="/ui/bulk"{% if nav == "bulk" %} aria-current="page"{% endif %}>Bulk</a>
@@ -22,7 +22,14 @@
 <a href="/ui/schedules"{% if nav == "schedules" %} aria-current="page"{% endif %}>Schedules</a>
 <a href="/ui/workers"{% if nav == "workers" %} aria-current="page"{% endif %}>Workers</a>
 <a href="/ui/partitions"{% if nav == "partitions" %} aria-current="page"{% endif %}>Partitions</a>
-</nav>
+</nav>{% endif %}{% if crate::auth::viewer_signed_in() %}
+<div class="session">
+<span class="who">{{ crate::auth::viewer_label() }}</span>
+<form class="logout ui-keep" method="post" action="/ui/logout">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit" class="secondary">Sign out</button>
+</form>
+</div>{% endif %}
 </header>
 <main id="main">
 <div id="flash" class="flash" role="alert" hidden></div>

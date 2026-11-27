@@ -674,6 +674,7 @@ impl UiAuth for ReadOnly {
     fn principal(&self, _parts: &http::request::Parts) -> Result<UiPrincipal, UiReject> {
         Ok(UiPrincipal {
             scopes: vec!["read".to_owned()],
+            ..UiPrincipal::default()
         })
     }
 }

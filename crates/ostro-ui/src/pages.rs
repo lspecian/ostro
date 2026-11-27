@@ -129,6 +129,11 @@ struct ErrorPage {
 impl IntoResponse for UiError {
     fn into_response(self) -> Response {
         let (status, message) = self.status_and_message();
+        // Phase 14 (14-21): no session on a page -> the login page; on htmx / actions ->
+        // 401 plus `HX-Redirect` so htmx navigates there.
+        if status == StatusCode::SEE_OTHER {
+            return Redirect::to(crate::auth::LOGIN_PATH).into_response();
+        }
         let page = ErrorPage {
             title: format!(
                 "{} {}",
@@ -142,7 +147,14 @@ impl IntoResponse for UiError {
         let body = page
             .render()
             .unwrap_or_else(|_| "error page failed to render".to_owned());
-        (status, Html(body)).into_response()
+        let mut resp = (status, Html(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            resp.headers_mut().insert(
+                "hx-redirect",
+                HeaderValue::from_static(crate::auth::LOGIN_PATH),
+            );
+        }
+        resp
     }
 }
 
