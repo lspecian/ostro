@@ -168,7 +168,7 @@ async fn server_upload_selection_and_validation() {
     // A node finalized at 2 (a fresh node at this build's level).
     let mut s = TestServer::start(ServerOpts::default()).await;
     s.wait_ready(Duration::from_secs(30)).await;
-    // The finalizer raises a single node to its level once its version is advertised.
+    // A brand-new node starts finalized at its level (p14-fixups); the wait stays as a bound.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while s
         .h()

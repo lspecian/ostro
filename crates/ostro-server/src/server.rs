@@ -407,6 +407,7 @@ async fn start_inner(
         clock: Arc::clone(&clock),
         transport: cluster_transport,
         api_addr: local_addr,
+        level_max,
     })
     .await?;
     timings.cluster_start = t.elapsed();

@@ -21,8 +21,10 @@
 //!    member is refused).
 //! 2. `join::ensure_cluster_ca`: `__ostro/cluster-ca` from `<data>/tls/ca.{crt,key}`
 //!    (create-only). Failpoint `member::init_after_ca` stops init right after it.
-//! 3. `ClusterInfo` ext `ClusterVersion` = `{finalized: level_max}` when absent (the first
-//!    value; later raises go through 13-04's `upgrade::*`).
+//! 3. `ClusterInfo` ext `ClusterVersion` = `{finalized: level_max}` when absent (later
+//!    raises go through 13-04's `upgrade::*`). A node bootstrapped on a blank data dir
+//!    already holds it (`upgrade::stamp_fresh` at boot, docs/compat.md §1); only data from
+//!    before that rule reaches this write.
 //! 4. Node certificate: hostname SANs are not part of node-to-node authentication (the
 //!    `ostro://<cluster>/node/<id>` URI is), and the cluster listener's identity is fixed at
 //!    boot from `[cluster] advertise`, so an advertised host the current certificate does

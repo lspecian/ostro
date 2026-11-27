@@ -33,7 +33,9 @@
 //!    voters must equal the configured set). The MetaPeer encode/decode limit is
 //!    `[cluster] meta_max_message_bytes` (13-05 consumes it).
 //! 8. `InitCluster` with the bound id (idempotent), `ClusterInfo.cluster_id` must equal it
-//!    (W2); the own `Member` record is upserted. Both retry while no metadata leader is
+//!    (W2); the own `Member` record is upserted. A brand-new cluster (boot mode `Fresh` and
+//!    this node's `InitCluster` created the record) then gets `ClusterVersion` =
+//!    `{finalized: level_max}` (`upgrade::stamp_fresh`, user decision 2026-11-27). Both retry while no metadata leader is
 //!    reachable, bounded by `[cluster] join_timeout` (`boot_propose`, p13-bugs2).
 //! 9. The controller (bootstrap placement of epoch-0 partitions, failover) runs on every
 //!    node and acts only as meta leader; the meta-driven [`MetaAssignments`] source and the
@@ -348,6 +350,9 @@ pub struct ClusterStart<'a> {
     pub transport: Option<Arc<dyn ClusterTransport>>,
     /// The bound API address (the `Member.addr` record).
     pub api_addr: SocketAddr,
+    /// This node's feature level ceiling (Phase 13 `level_max`): a brand-new cluster starts
+    /// finalized at it (step 8).
+    pub level_max: u32,
 }
 
 /// What [`ClusterServices::start`] measured.
@@ -417,6 +422,7 @@ impl ClusterServices {
             clock,
             transport: injected,
             api_addr,
+            level_max,
         } = s;
         // clock-exempt: startup step durations are reported, never used for logic.
         let t0 = std::time::Instant::now(); // clock-exempt: startup timing
@@ -755,10 +761,30 @@ impl ClusterServices {
                 // cluster, so it never proposes InitCluster at all).
                 joined_token_key(&meta, count, cfg.cluster.join_timeout.get()).await?
             } else {
-                boot_propose("InitCluster", boot_bound, || {
-                    crate::server::init_cluster(&meta, &cluster_id, node_id, count, clock.now_ms())
+                // One timestamp for every retry: it tells whether this node's InitCluster
+                // created the record (below).
+                let created_at_ms = clock.now_ms();
+                let key = boot_propose("InitCluster", boot_bound, || {
+                    crate::server::init_cluster(&meta, &cluster_id, node_id, count, created_at_ms)
                 })
-                .await?
+                .await?;
+                // User decision 2026-11-27: a brand-new cluster (blank data dir, and this
+                // node's InitCluster created the record) starts finalized at this binary's
+                // newest level. Existing clusters keep the Phase 13 upgrade rules.
+                let created_here = mode == BootMode::Fresh
+                    && meta.view().read(|s| {
+                        s.cluster()
+                            .is_some_and(|c| c.value.created_at_ms == created_at_ms)
+                    });
+                if created_here
+                    && let Err(e) =
+                        ostro_cluster::upgrade::stamp_fresh(&meta, level_max, clock.now_ms()).await
+                {
+                    // Safe direction: the cluster reads as LEVEL_MIN and the finalizer raises
+                    // it once every member is known.
+                    warn!(error = %e, "new cluster: finalized level not stamped");
+                }
+                key
             };
             let stored = meta
                 .view()

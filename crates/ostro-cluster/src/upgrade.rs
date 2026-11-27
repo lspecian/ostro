@@ -407,3 +407,46 @@ pub async fn release(meta: &MetaHandle, now_ms: u64) -> Result<ClusterVersion, U
     tracing::info!("upgrade hold released");
     Ok(r)
 }
+
+/// The first `ClusterVersion` of a **brand-new** cluster (user decision 2026-11-27): a
+/// cluster this node just created with `InitCluster` starts finalized at `level_max`, the
+/// newest level of the binary that bootstrapped it, instead of `LEVEL_MIN`. The caller
+/// decides "brand-new" (`cluster.rs`: boot mode `Fresh` and this node's `InitCluster`
+/// created the record); existing clusters never come here, so their upgrades keep the
+/// finalizer / hold / fence rules above.
+///
+/// Writes tag 98 only while it is absent (CAS on the record version; a present or
+/// undecodable tag is never touched). Returns the written value, `None` when tag 98 was
+/// already there (another fresh node stamped first, or init already raised it).
+pub async fn stamp_fresh(
+    meta: &MetaHandle,
+    level_max: u32,
+    now_ms: u64,
+) -> Result<Option<ClusterVersion>, UpgradeError> {
+    for _ in 0..CAS_ATTEMPTS {
+        let Some((version, present)) = meta.view().read(|s| {
+            s.cluster()
+                .map(|c| (c.version, !matches!(read_cluster_version(s), Ok(None))))
+        }) else {
+            return Err(UpgradeError::NotReady("cluster not initialized".into()));
+        };
+        if present {
+            return Ok(None);
+        }
+        let next = ClusterVersion {
+            finalized: level_max,
+            hold: None,
+            finalized_at_ms: now_ms,
+        };
+        if put_version(meta, version, &next).await?.is_some() {
+            tracing::info!(
+                finalized = level_max,
+                "new cluster: finalized at this binary's newest level"
+            );
+            return Ok(Some(next));
+        }
+    }
+    Err(UpgradeError::Meta(
+        "cluster record kept changing under the fresh-cluster stamp".into(),
+    ))
+}

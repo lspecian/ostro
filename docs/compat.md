@@ -19,8 +19,46 @@ A **feature level** is a small integer naming a set of on-disk and on-wire novel
 A binary supports `[LEVEL_MIN, LEVEL]`, which is one minor of downgrade window. The cluster has
 one **finalized** level, stored in `ClusterInfo` ext 98 (`ClusterVersion`). Without tag 98,
 finalized = `LEVEL_MIN`. A node never *writes* anything above the finalized level, even when
-its binary could (rule 3). A fresh cluster, `ostro cluster init` and a single node finalize at
-the binary's `level_max`.
+its binary could (rule 3).
+
+### New clusters start at the newest level
+
+User decision (2026-11-27): a **brand-new** cluster starts finalized at the `level_max` of the
+binary that bootstraps it, not at `LEVEL_MIN`. This covers `ostro server` and `ostro dev` on a
+blank data directory (single node, the dev profile and `--ephemeral` included) and a static
+`[[cluster.peers]]` cluster bootstrapped from blank directories. Right after `InitCluster`, at
+boot and before any partition opens, the node writes `ClusterVersion{finalized: level_max}`
+(`ostro_cluster::upgrade::stamp_fresh`, called from `cluster.rs` step 8). It writes it only
+when all three of these hold:
+
+- the boot mode is `Fresh` (blank meta, no partition data, no join marker);
+- this node's own `InitCluster` created the cluster record (the stored `created_at_ms` is the
+  one it proposed). Other fresh static voters see a record they did not create and skip;
+- tag 98 is absent. The write is a CAS on the record version, and a present or undecodable
+  tag is never touched.
+
+So level-2 data is written from the first request. One example is the bootstrap admin token's
+ext 112 `ApiTokenMeta`. If the stamp fails, the node logs a warning and the cluster reads as
+`LEVEL_MIN` until the finalizer raises it. That is the safe direction.
+
+**Existing clusters are unchanged.** A restart is boot mode `Existing`, and a joiner never runs
+`InitCluster`, so neither path stamps. A cluster without tag 98 (for example, one created
+before this rule) stays at `LEVEL_MIN` until §3 finalizes it, and all upgrade, hold and fence
+rules apply as before. `ostro cluster init` (13-16) still writes `{finalized: level_max}` only
+when tag 98 is absent. On a node created under this rule, tag 98 is already present.
+
+**Older binaries.** A node whose `level_max` is below the new cluster's level is refused by the
+existing checks. The join handshake answers 412 `level_mismatch`. The boot fence refuses a node
+prepared by a newer binary but started as an older one (§4). In a static cluster bootstrapped
+from blank directories, the node whose `InitCluster` commits first decides the level, so start
+every node of a new static cluster from the same release.
+
+**Tests that need a level-1 cluster** start it from a level-1 binary explicitly:
+`OSTRO_TEST_LEVEL_MAX=1` (tier C, `ProcOptions.level_max` / `start_static(_, Some(1))`) or
+`ServerOptions::with_level_max_override(Some(1))` (tier B, `start_single_with(_, Some(1))`,
+`version_gate::start_level1_cluster`). A fresh node at an emulated level k starts finalized at
+k, so these kits did not need changes. Tests that build a `MetaHandle` directly (no server
+boot) still see an absent tag 98 = `LEVEL_MIN`.
 
 ### Gate registry
 
@@ -93,7 +131,8 @@ for Phase 13 and unused.
   every non-removed member reports `level_max ≥ target`, every member is live (the meta
   leader's `sample_live`, 3 s window), no hold is set, and the reported levels allow it. An
   unreported member counts as `LEVEL_MIN`. A freshly elected meta leader waits one liveness
-  window before acting. A single node auto-finalizes on restart.
+  window before acting. A single node auto-finalizes on restart. A brand-new cluster needs
+  none of this: it starts at the newest level (§1).
 - **`ostro cluster upgrade status`** (`GET /v1/cluster/upgrade`) shows `finalized`, `hold`,
   `common_level_max`, `auto_finalize` and each member's `level_min` / `level_max`.
 - **`ostro cluster upgrade hold`** sets `hold = finalized` and blocks both auto and manual
