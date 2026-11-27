@@ -1,7 +1,7 @@
 # Binary size (static musl `ostro`)
 
-NFR-2.1 caps the static `x86_64-unknown-linux-musl` release binary at **60 MB**
-(60,000,000 bytes, `scripts/ci-local.sh` step "musl binary size < 60 MB"). This page records
+NFR-2.1 caps the static `x86_64-unknown-linux-musl` release binary at **70 MB**
+(70,000,000 bytes in `scripts/binary-size-limit`, read by the `scripts/ci-local.sh` step "musl binary size limit" and `scripts/release-dry-run.sh`; 60 MB until 2026-11-27, see "Limit raised to 70 MB"). This page records
 where the bytes go and what could be cut. It was measured on 2026-11-23 at `3b5b785` (after
 Phase 10, Phase 11 and most of Phase 12). Option 1 below was applied by size1 the same day;
 see "Applied: option 1" for the result. The breakdown tables are from before that change.
@@ -21,6 +21,9 @@ see "Applied: option 1" for the result. The breakdown tables are from before tha
 | 2026-11-25, `b2d5848` + musl-size (code + profile) | 57.87 MB (57,865,264 bytes): 2.13 MB of headroom |
 | 2026-11-25, `7f60ead` (musl-size landed; + 13-16, p13-fixes) | 58.02 MB (58,017,968 bytes) |
 | **2026-11-25, `7f60ead` + every cold crate at "z"** | **57.48 MB (57,482,608 bytes): 2.52 MB of headroom** |
+| 2026-11-27, `b3e7208` (14-31, Kafka transport; ostro-kafka linked but unused) | 60.37 MB (60,370,032 bytes): over the old 60 MB cap |
+| **2026-11-27, `74e3107` (14-34, Kafka read path), default features (`kafka` on)** | **60.12 MB (60,118,064 bytes): 9.88 MB below the 70 MB cap** |
+| 2026-11-27, `74e3107`, `--no-default-features` (no `kafka`) | 60.10 MB (60,101,616 bytes) |
 
 The binary grew by 2.9 MB since the Phase 10 gate. The new code since then is Phase 11 and
 Phase 12 (bulk/DLQ/UI routes, replication); no per-commit bisection was done. **The next feature of a few hundred kB may trip the gate.**
@@ -41,6 +44,29 @@ The symbols were grouped by the first non-`core`/`alloc`/`std` crate path in the
 name. A generic instantiated for an Ostro type counts toward that Ostro crate. The release
 profile already uses `lto = "fat"`, `codegen-units = 1` and `strip = "debuginfo"`, and the
 shipped binary has no symbol table. So stripping, LTO and codegen units are already maxed out.
+
+## Limit raised to 70 MB (2026-11-27, D-P14-53/54)
+
+The Phase 14 Kafka client (TRIG-04, `ostro-kafka`, default-on `kafka` feature of the `ostro`
+crate) pushed the measured binary past 60 MB, so the user's rule of 2026-11-26 applied: the
+shared limit in `scripts/binary-size-limit` became 70,000,000 bytes (b89e1fb; ci-local and
+release-dry-run read the file, `.github/workflows/ci.yml` has no size step). `kafka` stays
+default-on. Measured by 14-34 locally (`cargo zigbuild --release --locked -p ostro --target
+x86_64-unknown-linux-musl`, then the same with `--no-default-features`, zig 0.17.1 via the
+`ziglang` pip package, cargo-zigbuild 0.24.1):
+
+| Build at `74e3107` | Bytes |
+|---|---|
+| default (`kafka` on) | 60,118,064 (60.12 MB) |
+| `--no-default-features` | 60,101,616 (60.10 MB) |
+| delta of the `kafka` feature | +16,448 (0.02 MB) |
+
+The delta is small because the read path is not called yet: `ostro-server` only anchors the
+crate until 14-32 wires the trigger, and fat LTO drops the unused client. 14-32 must measure
+again with the trigger linked (expected: the client plus the pure-Rust codecs, an estimated
+1-2 MB). The 60 MB crossing itself is not the client's: the binary was already at 60.37 MB at
+`b3e7208` and back at 60.10 MB without `kafka` after later main changes, i.e. ordinary
+Phase 13/14 growth sits right at the old cap.
 
 ## Sections (gated binary)
 

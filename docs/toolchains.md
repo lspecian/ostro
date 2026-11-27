@@ -15,7 +15,7 @@ the ostro binary. The rejected options:
 - **componentize-py / componentize-qjs as crates:** they pull wasmtime, wit-component and
   bincode versions that break the workspace's `cargo deny` bans.
 - **Embedded tool binaries:** they would break the ostro binary size budget (NFR-2.1,
-  under 60 MB).
+  under 70 MB, `scripts/binary-size-limit`).
 - **Wasm-hosted componentizers:** they cannot pre-initialise the guest (snapshotting
   needs a native host).
 

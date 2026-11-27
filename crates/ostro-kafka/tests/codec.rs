@@ -6,7 +6,8 @@
 //! and lz4 beyond 64 MiB) fail with `Protocol`; read_committed skips control batches and
 //! aborted transactions; LogAppendTime batches use the max timestamp; duplicate header keys
 //! stay in order; the broker-captured fixtures (`tests/fixtures/broker-<codec>.bin`, written
-//! by `tests/broker.rs capture_fixtures`, compressed by the Java broker) decode exactly.
+//! by `tests/broker.rs capture_fixtures`, compressed by the Java broker; see their README)
+//! decode exactly.
 
 #![cfg(feature = "testkit")]
 
@@ -345,6 +346,16 @@ fn read_committed_skips_control_and_aborted_batches() {
     let d = decode_committed(&tail, &aborted, 5).unwrap();
     assert!(d.records.is_empty());
     assert_eq!(d.next_offset, Some(16));
+    // A fetch that starts at the ABORT marker (the broker still lists the aborted
+    // transaction): the marker clears the producer, its next transaction is returned.
+    let from_marker = {
+        let mut b = control(7, 15, 0).to_vec();
+        b.extend_from_slice(&c7);
+        Bytes::from(b)
+    };
+    let d = decode_committed(&from_marker, &aborted, 15).unwrap();
+    assert_eq!(d.records.len(), 3, "{:?}", d.records);
+    assert_eq!(d.records[0].offset, 17);
 }
 
 #[test]
@@ -417,13 +428,12 @@ fn broker_captured_fixtures_decode() {
     let mut found = 0;
     for codec in ["gzip", "snappy", "lz4", "zstd"] {
         let path = dir.join(format!("broker-{codec}.bin"));
-        let Ok(bytes) = std::fs::read(&path) else {
-            println!(
-                "fixture missing: {} (capture with tests/broker.rs)",
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "fixture {}: {e} (capture with tests/broker.rs capture_fixtures)",
                 path.display()
-            );
-            continue;
-        };
+            )
+        });
         found += 1;
         let bytes = Bytes::from(bytes);
         let h = peek_batch(&bytes).unwrap().unwrap();
@@ -454,5 +464,6 @@ fn broker_captured_fixtures_decode() {
             assert_eq!(&r.headers, hs, "{codec}");
         }
     }
+    assert_eq!(found, 4);
     println!("broker fixtures decoded: {found}/4");
 }

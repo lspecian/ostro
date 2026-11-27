@@ -432,16 +432,10 @@ pub fn decode_committed(
         pos += h.size;
         out.batches += 1;
         out.next_offset = Some(h.last_offset.saturating_add(1));
-        if h.control {
-            if h.transactional && aborting.contains(&h.producer_id) {
-                let recs = decode_batch(&batch, &h)?;
-                if control_type(&recs) == Some(0) {
-                    aborting.remove(&h.producer_id);
-                }
-            }
-            continue;
-        }
-        if h.transactional {
+        // As the Java consumer: every batch with a producer id (data or control) first
+        // activates the aborted transactions that start at or before its last offset, so a
+        // fetch that starts at an ABORT marker still clears its producer.
+        if h.producer_id >= 0 {
             while let Some(t) = pending.first().copied() {
                 if t.first_offset > h.last_offset {
                     break;
@@ -449,9 +443,18 @@ pub fn decode_committed(
                 pending.pop_first();
                 aborting.insert(t.producer_id);
             }
+        }
+        if h.control {
             if aborting.contains(&h.producer_id) {
-                continue;
+                let recs = decode_batch(&batch, &h)?;
+                if control_type(&recs) == Some(0) {
+                    aborting.remove(&h.producer_id);
+                }
             }
+            continue;
+        }
+        if h.transactional && aborting.contains(&h.producer_id) {
+            continue;
         }
         if h.last_offset < from {
             continue;

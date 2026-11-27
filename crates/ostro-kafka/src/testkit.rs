@@ -407,6 +407,7 @@ where
                         code,
                         codes::COORDINATOR_LOAD_IN_PROGRESS
                             | codes::COORDINATOR_NOT_AVAILABLE
+                            | codes::NOT_COORDINATOR
                             | CONCURRENT_TRANSACTIONS
                     ) =>
             {
@@ -428,14 +429,15 @@ pub async fn produce_transaction(
     records: &[Record],
     commit: bool,
 ) -> Result<i64, KafkaError> {
-    let coord = txn_coordinator(client, txn).await?;
     let tid = TransactionalId(StrBytes::from_string(txn.to_owned()));
     let init = txn_retry(|| {
         let req = InitProducerIdRequest::default()
             .with_transactional_id(Some(tid.clone()))
             .with_transaction_timeout_ms(60_000);
-        let coord = Arc::clone(&coord);
         async move {
+            // The coordinator is looked up per attempt: it moves while __transaction_state
+            // is being created (NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE).
+            let coord = txn_coordinator(client, txn).await?;
             let r = coord.request(&req).await?;
             if r.error_code != 0 {
                 return Err(broker_err("InitProducerId", r.error_code));
@@ -455,8 +457,10 @@ pub async fn produce_transaction(
                     .with_name(TopicName(StrBytes::from_string(topic.to_owned())))
                     .with_partitions(vec![partition]),
             ]);
-        let coord = Arc::clone(&coord);
         async move {
+            // The coordinator is looked up per attempt: it moves while __transaction_state
+            // is being created (NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE).
+            let coord = txn_coordinator(client, txn).await?;
             let r = coord.request(&req).await?;
             for t in &r.results_by_topic_v3_and_below {
                 for p in &t.results_by_partition {
@@ -487,8 +491,10 @@ pub async fn produce_transaction(
             .with_producer_id(ProducerId(pid))
             .with_producer_epoch(epoch)
             .with_committed(commit);
-        let coord = Arc::clone(&coord);
         async move {
+            // The coordinator is looked up per attempt: it moves while __transaction_state
+            // is being created (NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE).
+            let coord = txn_coordinator(client, txn).await?;
             let r = coord.request(&req).await?;
             if r.error_code != 0 {
                 return Err(broker_err("EndTxn", r.error_code));
