@@ -1275,6 +1275,8 @@ fn markdown(matrix: &[(String, Row, Vec<Outcome>)], routed: &BTreeSet<Method>) -
             n.to_string()
         } else if m == Method::Ready {
             "0 (`/readyz`, unauthenticated pass-through)".to_owned()
+        } else if m == Method::PresignedObject {
+            "0 (`/v1/objects/*` as System once the presign signature verifies)".to_owned()
         } else {
             "0 (no client route)".to_owned()
         };

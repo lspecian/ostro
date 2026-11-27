@@ -413,6 +413,8 @@ impl RouteCore {
             ..meta.clone()
         };
         edit(&mut out);
+        // Phase 14 (14-15): the caller's principal travels as `ostro-principal`.
+        peer::stamp_principal(&mut out);
         self.stats.forwarded.fetch_add(1, Ordering::Relaxed);
         let t0 = now();
         let (res, token) = request_meta::scope_with_consistency(out, remote(peer)).await;
@@ -1347,7 +1349,9 @@ pub fn trusted_node(
 /// node-identity layer that rejects every other caller and inserts
 /// [`request_meta::TrustedNode`], so `ostro-partition` / `ostro-partitions` /
 /// `ostro-principal` count and `RequestMeta::from_node` is set. Unknown paths answer gRPC
-/// `UNIMPLEMENTED`.
+/// `UNIMPLEMENTED`. Phase 14 (14-15): the call runs inside `PRINCIPAL.scope` of the
+/// forwarded principal (`p14::principal_fwd::ingest`; none = an internal call as `System`),
+/// for node-local lookups only: the node API is not guarded and never re-authorizes.
 pub fn node_api_router(
     cp: Arc<dyn ControlPlane>,
     ext: ApiExtensions,
@@ -1367,13 +1371,52 @@ pub fn node_api_router(
                     match trusted_node(req.extensions(), &cluster_id) {
                         Ok(id) => {
                             req.extensions_mut().insert(request_meta::TrustedNode(id));
-                            next.run(req).await
+                            match forwarded_principal(req.headers()) {
+                                Ok((p, fwd)) => {
+                                    let call = async move {
+                                        trace_principal(id, fwd);
+                                        next.run(req).await
+                                    };
+                                    ostro_api::auth::PRINCIPAL.scope(p, call).await
+                                }
+                                Err(e) => ostro_api::grpc::to_status(e).into_http(),
+                            }
                         }
                         Err(status) => status.into_http::<axum::body::Body>(),
                     }
                 }
             },
         ))
+}
+
+/// Phase 14 (14-15): the principal of a node-API call (its `ostro-principal` header;
+/// repeated = malformed) and whether one was forwarded.
+fn forwarded_principal(
+    headers: &axum::http::HeaderMap,
+) -> Result<(ostro_api::auth::Principal, bool), ApiError> {
+    let mut values = headers.get_all(request_meta::HEADER_PRINCIPAL).iter();
+    let first = values.next();
+    let bad = || ApiError::invalid_argument("header ostro-principal: repeated or not ASCII");
+    if values.next().is_some() {
+        return Err(bad());
+    }
+    let header = first.map(|v| v.to_str().map_err(|_| bad())).transpose()?;
+    Ok((crate::p14::principal_fwd::ingest(header)?, header.is_some()))
+}
+
+/// The principal a node-API call from node `from` runs as, read back from the task-local
+/// (what node-local lookups see).
+fn trace_principal(from: u64, forwarded: bool) {
+    let p = ostro_api::auth::current();
+    tracing::debug!(
+        target: crate::p14::principal_fwd::TRACE_TARGET,
+        from_node = from,
+        principal = %p.token_id,
+        kind = p.kind.as_str(),
+        tenant = p.tenant.as_deref().unwrap_or("*"),
+        forwarded,
+        "node API call principal"
+    );
 }
 
 /// The `ostro.api.v1.*` services the cluster listener serves to node identities (forwarded

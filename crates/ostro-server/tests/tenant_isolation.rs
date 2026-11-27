@@ -658,11 +658,15 @@ async fn every_method_scopes_its_request_and_response_types() {
             );
         }
     }
-    // System-only methods are refused for tenant principals.
+    // System-only methods are refused for tenant principals (14-15: the scope check
+    // answers first with `missing_scope`, the tenant hook's `forbidden_tenant` backs it).
     for (m, r) in &results {
         if m.spec().tenant == ostro_api::auth::TenantClass::SystemOnly {
             let e = r.as_ref().expect_err("system-only must fail");
-            assert_eq!(e.reason(), Some("forbidden_tenant"), "{m:?}: {e:?}");
+            assert!(
+                matches!(e.reason(), Some("forbidden_tenant" | "missing_scope")),
+                "{m:?}: {e:?}"
+            );
         }
     }
 }

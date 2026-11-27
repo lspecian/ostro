@@ -10,8 +10,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ostro_api::grpc_client::{DEFAULT_MAX_MESSAGE_BYTES, GrpcControlPlane};
+use ostro_api::request_meta::RequestMeta;
 use ostro_api::{ApiError, ApiExtensions, ControlPlane};
 use ostro_cluster::transport::ClusterTransport;
+
+use crate::p14::principal_fwd;
+
+/// Phase 14 (14-15, D-P14-6): set `ostro-principal` of a forwarded call's metadata to the
+/// current principal (the client copies it into the outgoing request, `to_metadata`). Any
+/// inherited value is replaced, so a forwarded call never relays a header; an internal
+/// caller without a principal (`Anonymous`) sends none and the peer treats the call as
+/// internal (`principal_fwd::ingest`).
+pub fn stamp_principal(out: &mut RequestMeta) {
+    let p = ostro_api::auth::current();
+    out.principal = (!p.is_anonymous()).then(|| principal_fwd::encode(&p));
+}
 
 /// One peer's API as the router calls it: the control plane and every extension slot (all
 /// backed by the same gRPC client in production; tests plug fakes in).
