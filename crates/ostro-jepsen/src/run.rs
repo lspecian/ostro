@@ -161,6 +161,15 @@ pub struct RunSpec {
     pub out_dir: PathBuf,
     /// Process options of every node (environment, failpoints: 14-10 nemeses).
     pub proc_options: ProcOptions,
+    /// Faults at fixed points of the fault phase, added to the seeded slots (14-22: one
+    /// quorum-loss window and one rolling restart per gate run): `(at, hold, kind)`. Their
+    /// `pick` is derived from the seed and the entry's position; empty = the seeded
+    /// schedule only (unchanged bytes).
+    pub pinned: Vec<(Duration, Duration, NemesisKind)>,
+    /// Keep the cluster directory after a passing run too (14-22 verifies every node's
+    /// audit journal after the run); its path is in the report notes
+    /// (`cluster directory kept: <path>`) and the caller removes it.
+    pub keep_dirs: bool,
 }
 
 /// A seed from the wall clock and the pid (printed by the caller).
@@ -190,6 +199,8 @@ impl RunSpec {
             partitions: 4,
             out_dir: report::seed_dir(seed),
             proc_options: ProcOptions::default(),
+            pinned: Vec::new(),
+            keep_dirs: false,
         }
     }
 
@@ -245,6 +256,23 @@ impl RunSpec {
                     pick,
                 });
                 t += hold_ms;
+            }
+        }
+        if !self.pinned.is_empty() {
+            for (i, (at, hold, kind)) in self.pinned.iter().enumerate() {
+                let pick = StdRng::seed_from_u64(self.seed ^ 0x7069_6e6e_6564 ^ ((i as u64) << 48))
+                    .random();
+                slots.push(Slot {
+                    index: 0,
+                    at_ms: ms(*at).min(total.saturating_sub(1)),
+                    kind: kind.name(),
+                    hold_ms: ms(*hold),
+                    pick,
+                });
+            }
+            slots.sort_by_key(|s| s.at_ms);
+            for (i, s) in slots.iter_mut().enumerate() {
+                s.index = i;
             }
         }
         Schedule {
@@ -433,7 +461,12 @@ struct Driver {
 
 impl Driver {
     fn kind(&self, name: &str) -> Option<NemesisKind> {
-        self.spec.nemeses.iter().find(|k| k.name() == name).cloned()
+        self.spec
+            .nemeses
+            .iter()
+            .chain(self.spec.pinned.iter().map(|(_, _, k)| k))
+            .find(|k| k.name() == name)
+            .cloned()
     }
 
     /// Execute one slot; `Err` = the cluster could not be restored (abort the fault phase).
@@ -839,7 +872,7 @@ pub async fn run(spec: RunSpec) -> Result<RunReport, String> {
     if !harness.ok() || !harness.notes.is_empty() {
         verdicts.push(harness);
     }
-    if passed {
+    if passed && !spec.keep_dirs {
         drop(root);
     } else {
         let kept = root.keep();
