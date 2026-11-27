@@ -503,7 +503,7 @@ Plans:
 - [x] 14-05-PLAN.md — Signature verifiers (TDD): minisign via minisign-verify, cosign keyed via aws-lc-rs, key fingerprints + re-verification, rsign2 interop vectors (wave 3; SEC-03)
 - [x] 14-06-PLAN.md — Dispatch-side quotas: tenant level in fair.rs (weights clamped), per-tenant concurrency/memory/fuel debt on leadership shares, fairness evidence (wave 3; DISP-06)
 - [x] 14-07-PLAN.md — Fuzzing infrastructure + 13 codec/apply/storage/parser targets, stable corpus replay, fuzz-smoke, scheduled fuzz workflow (wave 4; SEC-05)
-- [ ] 14-08-PLAN.md — Wasm fuzz targets: evil_guest (malformed WIT values) and wasm-smith components (wave 3; SEC-05)
+- [x] 14-08-PLAN.md — Wasm fuzz targets: evil_guest (malformed WIT values) and wasm-smith components (wave 3; SEC-05)
 - [x] 14-09-PLAN.md — Jepsen-style harness core: workload with consistency tokens, partition/kill nemeses, lost/duplicate/fencing checkers with self-tests (wave 3; QA-05)
 - [x] 14-10-PLAN.md — Fault knobs: failpoints-only re-anchoring skew clock + runtime failpoints endpoint, clock and disk-stall nemeses, negative control (wave 4; QA-05)
 - [x] 14-11-PLAN.md — Release dry run (static musl, reproducible tarballs, SHA256SUMS + minisign), verified install.sh with local tests, release.yml with macOS notarized pkg and gated pushes (wave 3; DIST-01)
