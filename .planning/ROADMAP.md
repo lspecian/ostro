@@ -511,7 +511,7 @@ Plans:
 - [ ] 14-13-PLAN.md — Helm chart (StatefulSet, workers, KEDA 2.21, NetworkPolicies) validated offline with helm lint + kubeconform (wave 3; DIST-02)
 - [ ] 14-14-PLAN.md — Migration guides: cron/queue tables, Temporal, Restate (wave 3; DIST-03)
 - [ ] 14-15-PLAN.md — Scope enforcement with an exact route x scope matrix (REST + gRPC descriptor set) + export, join-token separation, principal propagation over forwarding (wave 4; SEC-02)
-- [ ] 14-16-PLAN.md — Tenant scoping (qualify/strip, 404, tenant-field force/reject, filtered lists), tenant run index, per-tenant module registration, tenant-correct StartRun sites and triggers (wave 4; SEC-02)
+- [x] 14-16-PLAN.md — Tenant scoping (qualify/strip, 404, tenant-field force/reject, filtered lists), tenant run index, per-tenant module registration, tenant-correct StartRun sites and triggers (wave 4; SEC-02)
 - [ ] 14-17-PLAN.md — Tenant and API-token admin services (otk_ only) + ostro-client + CLI verbs (wave 4; SEC-02, DISP-06)
 - [ ] 14-18-PLAN.md — Audit capture through the guard (fail closed), coalesced secret-access audit, cluster audit query + CLI (wave 4; SEC-04)
 - [ ] 14-19-PLAN.md — Signed-module enforcement at upload (before existing-sha), activation and version selection with cluster-wide policy, security API/CLI, deploy --signature, system-secret reseal (wave 4; SEC-03)
