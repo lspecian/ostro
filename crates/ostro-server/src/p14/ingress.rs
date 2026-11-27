@@ -10,12 +10,15 @@
 //! (routed requests reach the partition's leader first), and the tenant they pass is the
 //! scoped one (the start's request tenant after `tenant_scope`, the run record's tenant for
 //! signals and tokens), so a tenant cannot spend another tenant's budget. Webhook deliveries
-//! (`__hook/` keys), schedule trigger-now (`__cron/`) and Kafka-triggered starts
-//! (`__kafka/`, 14-32) go through the same start path and arrive with their
-//! [`TriggerKind`]; they are charged exactly like an API start (the Kafka driver pauses its
-//! partition on 429/403 and retries the record; it never skips). Schedule **fires** bypass
-//! the API (the cron driver builds its `StartRun` in `control/schedules.rs`): they reach
-//! [`cron_fire_gate`] instead, which refuses fires of a suspended tenant.
+//! (`__hook/` keys) and Kafka-triggered starts (`__kafka/`, 14-32) go through the same start
+//! path and arrive with their [`TriggerKind`]; they are charged exactly like an API start
+//! (the Kafka driver pauses its partition on 429/403 and retries the record; it never
+//! skips). Schedule trigger-now (`__cron/<name>/manual/…`) builds its `StartRun` in
+//! `control/schedules.rs` and never calls `start_run`: its handler calls [`cron_fire_gate`]
+//! and then [`admit`] itself with `TriggerKind::Cron` (dedupe hits free), so it is charged
+//! like an API start too (p14-fixups-3). Schedule **fires** bypass the API as well (the cron
+//! driver builds its `StartRun` in `control/schedules.rs`): they reach only
+//! [`cron_fire_gate`], which refuses fires of a suspended tenant; they are not charged.
 //!
 //! # Rules, in order
 //!
@@ -256,7 +259,7 @@ pub async fn admit(ctx: &P14Ctx, kind: IngressKind, tenant: Option<&str>) -> Res
 /// `kind="cron"`); the cron driver drops that fire (its bounded `Skip` path) and fires
 /// again on the schedule's next due time after the resume. Fires are not charged against
 /// `event_rate` (D-P14-14 lists start, signal, token completion, webhook and Kafka
-/// deliveries).
+/// deliveries). Trigger-now calls this first and is then charged through [`admit`].
 pub fn cron_fire_gate(meta: &MetaView, tenant: Option<&str>) -> Result<(), ApiError> {
     let t = tenant.unwrap_or_default();
     match record(meta, t) {

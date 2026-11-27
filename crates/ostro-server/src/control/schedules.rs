@@ -33,6 +33,10 @@
 //! buffered fire returns the run id that will start when the live run ends), except that a
 //! repeated `request_id` is answered by its dedupe row first (apply returns
 //! `Duplicate { existing }`), so a retry while its own run is live returns that run.
+//! Phase 14: trigger-now does not pass `start_run`, so it calls the ingress hooks itself
+//! before anything is written: `cron_fire_gate` (403 `tenant_suspended`), then
+//! `p14::admit_ingress` as a `Cron` start charged against the tenant's `event_rate` (429
+//! `tenant_event_rate`; a repeated `request_id` whose dedupe row exists is free).
 //!
 //! # Schedule source
 //!
@@ -60,6 +64,8 @@ use ostro_partition::leader::cron::{
     FireRequest, ScheduleSource, ScheduleSpec, StartError, StartFuture, incarnation_watermark,
     next_fire_after, parse_spec, schedule_state, schedule_tag,
 };
+use ostro_partition::store::Table;
+use ostro_partition::store::keys::dedupe_key;
 use ostro_types::command::{
     ConflictPolicy, ScheduleFire, ScheduleFireKind, StartRun, cron_manual_idempotency_key,
 };
@@ -149,6 +155,16 @@ fn resolve_workflow(
     })
 }
 
+/// The qualified workflow name a fire of `spec` starts. Phase 14 (14-16, D-P14-7): a tenant
+/// schedule (`<t>/<name>`) starts its runs in `t`, with the workflow qualified in the same
+/// tenant.
+fn schedule_workflow(spec: &ScheduleSpec) -> Result<String, ApiError> {
+    match names::split_qualified(&spec.name).0 {
+        Some(t) => names::qualify_request_name("workflow", Some(t), &spec.workflow),
+        None => policy::policy_key("workflow", &spec.workflow),
+    }
+}
+
 /// The `StartRun` of a fire of `spec`, built like an API start (see the module docs).
 pub async fn build_schedule_start(
     meta: &MetaView,
@@ -158,13 +174,7 @@ pub async fn build_schedule_start(
     req: FireRequest,
 ) -> Result<StartRun, StartError> {
     let skip = |e: ApiError| StartError::Skip(e.message);
-    // Phase 14 (14-16, D-P14-7): a tenant schedule (`<t>/<name>`) starts its runs in `t`,
-    // with the workflow qualified in the same tenant.
-    let workflow = match names::split_qualified(&spec.name).0 {
-        Some(t) => names::qualify_request_name("workflow", Some(t), &spec.workflow),
-        None => policy::policy_key("workflow", &spec.workflow),
-    }
-    .map_err(skip)?;
+    let workflow = schedule_workflow(spec).map_err(skip)?;
     let (tenant, _) = names::split_qualified(&workflow);
     let tenant = tenant.map(str::to_owned);
     // Phase 14 (14-20): a suspended tenant's fire is refused before anything is written
@@ -586,6 +596,28 @@ impl ScheduleApi for ScheduleController {
         let now = self.ctx.now_ms();
         // Phase 14 (14-20): trigger-now of a suspended tenant's schedule is 403.
         crate::p14::ingress::cron_fire_gate(self.ctx.meta.view(), names::split_qualified(&name).0)?;
+        // Phase 14 (p14-fixups-3): trigger-now is an ingress event like an API start, charged
+        // against the tenant's event_rate (429 `tenant_event_rate`) before anything is
+        // written; a repeated `request_id` whose dedupe row exists is free. Cron fires stay
+        // uncharged (`cron_fire_gate`). An unqualifiable workflow is left to
+        // `build_schedule_start` (412, nothing charged).
+        let idempotency_key = cron_manual_idempotency_key(&name, &request_id);
+        if let Some(p14) = crate::p14::ctx_of(cp)?
+            && let Ok(workflow) = schedule_workflow(&spec)
+        {
+            let reader = handle.reader();
+            let dk = dedupe_key(&workflow, idempotency_key.as_bytes());
+            let dedupe_hit = tokio::task::spawn_blocking(move || reader.get(Table::Dedupe, &dk))
+                .await
+                .map_err(super::runs::task_error)?
+                .map_err(super::runs::store_error)?
+                .is_some();
+            let kind = crate::p14::IngressKind::Start {
+                dedupe_hit,
+                trigger: Some(crate::p14::TriggerKind::Cron),
+            };
+            crate::p14::admit_ingress(&p14, kind, names::split_qualified(&workflow).0).await?;
+        }
         let start = build_schedule_start(
             self.ctx.meta.view(),
             &self.ctx.config.runs,
@@ -593,7 +625,7 @@ impl ScheduleApi for ScheduleController {
             &spec,
             FireRequest {
                 run,
-                idempotency_key: cron_manual_idempotency_key(&name, &request_id),
+                idempotency_key,
                 fire_time_ms: now,
                 now_ms: now,
             },

@@ -13,6 +13,8 @@
 //!   `ostro_tenant_ingress_rejected_total{reason="suspended",kind="cron"}`, one per due fire,
 //!   no spin) and fires again after the resume; a run accepted before the suspension is held,
 //!   not failed, and completes after the resume.
+//! - Schedule trigger-now spends the same budget (429 `tenant_event_rate`, counted with
+//!   `kind="cron"`); a repeated `request_id` is free (p14-fixups-3).
 
 mod common;
 
@@ -490,6 +492,57 @@ async fn signals_tokens_webhooks_and_kafka_share_the_budget() {
         let got = rejected(&s, "event_rate", kind).await;
         assert!(got >= n, "{kind}: {got}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn schedule_trigger_now_spends_the_budget() {
+    let Fx { s, a, b } = fixture().await;
+    a.deploy("signals").await;
+    b.deploy("signals").await;
+    // Paused (no cron fires; fires are not charged anyway), every manual fire starts.
+    for api in [&a, &b] {
+        let (st, _, v) = api
+            .post(
+                "/v1/schedules",
+                json!({"name": "now", "workflow": "signals", "cron": "0 0 * * * *",
+                       "input": {"mode": "long_wait"}, "paused": true, "overlap": "allow_all"}),
+            )
+            .await;
+        assert_eq!(st, StatusCode::CREATED, "{v}");
+    }
+    // 2 events per minute: the budget does not refill during the test.
+    put_tenant(s.h().meta(), tenant("a", rate(2, 60_000, 2), false)).await;
+    let trigger = |api: &Api, request_id: &'static str| {
+        let api = api.clone();
+        async move {
+            api.post(
+                "/v1/schedules/now/trigger",
+                json!({"request_id": request_id}),
+            )
+            .await
+        }
+    };
+    let (st, _, v) = trigger(&a, "r-1").await;
+    assert_eq!(st, StatusCode::OK, "trigger 1: {v}");
+    let run1 = v["run_id"].as_str().expect("run_id").to_owned();
+    let (st, _, v) = trigger(&a, "r-2").await;
+    assert_eq!(st, StatusCode::OK, "trigger 2: {v}");
+    // Budget spent: trigger-now and a plain start are refused, nothing is started.
+    let before = a.run_count("workflow=signals").await;
+    assert_rate_limited(&trigger(&a, "r-3").await);
+    assert_rate_limited(&a.start("signals", parked()).await);
+    assert_eq!(a.run_count("workflow=signals").await, before);
+    // A repeated request_id (its dedupe row exists) is free: the same run.
+    let (st, _, v) = trigger(&a, "r-1").await;
+    assert_eq!(st, StatusCode::OK, "repeated request_id: {v}");
+    assert_eq!(v["run_id"], run1.as_str());
+    // Tenant b's trigger-now has its own (unlimited) budget.
+    for id in ["r-1", "r-2", "r-3"] {
+        let (st, _, v) = trigger(&b, id).await;
+        assert_eq!(st, StatusCode::OK, "b {id}: {v}");
+    }
+    let got = rejected(&s, "event_rate", "cron").await;
+    assert!(got >= 1, "cron event_rate rejections: {got}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
