@@ -253,6 +253,66 @@ async fn tenant_schedules_fire_in_their_tenant() {
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
+/// p14-fixups-4 (14-23 finding 4): a tenant admin owns the whole schedule lifecycle
+/// (create, update, list, delete) under bare names stored as `<t>/<name>`; a tenant token
+/// without `admin` (the soak's deploy/trigger/read/operate set) may list but not create
+/// (403 `missing_scope`, scope `admin`), and a tenant cannot pass a qualified name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tenant_admins_manage_their_schedules() {
+    let Fx { s, a, sys, .. } = fixture().await;
+    a.deploy("p11-hook").await;
+    let worker = Api {
+        http: a.http.clone(),
+        base: a.base.clone(),
+        bearer: put_token(
+            s.h().meta(),
+            Some("a"),
+            &["deploy", "trigger", "read", "operate"],
+        )
+        .await,
+    };
+    let spec = json!({"name": "nightly", "workflow": "w", "cron": "0 0 3 * * *", "input": {}});
+    let (st, v) = worker.post("/v1/schedules", spec.clone()).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"]["details"]["scope"], "admin", "{v}");
+    let (st, v) = a
+        .post(
+            "/v1/schedules",
+            json!({"name": "a/nightly", "workflow": "w", "cron": "0 0 3 * * *", "input": {}}),
+        )
+        .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a qualified name: {v}");
+    let (st, v) = a.post("/v1/schedules", spec).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert_eq!(v["name"], "nightly", "{v}");
+    let (st, v) = a
+        .call(
+            reqwest::Method::PUT,
+            "/v1/schedules/nightly",
+            Some(json!({"name": "nightly", "workflow": "w", "cron": "0 30 4 * * *", "input": {}})),
+        )
+        .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["cron"], "0 30 4 * * *", "{v}");
+    let (st, v) = worker.get("/v1/schedules").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["schedules"][0]["name"], "nightly", "{v}");
+    assert_eq!(v["schedules"][0]["workflow"], "w", "{v}");
+    let (_, v) = sys.get("/v1/schedules").await;
+    assert_eq!(v["schedules"][0]["name"], "a/nightly", "{v}");
+    assert_eq!(v["schedules"][0]["workflow"], "a/w", "{v}");
+    let (st, v) = worker
+        .call(reqwest::Method::DELETE, "/v1/schedules/nightly", None)
+        .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    let (st, v) = a
+        .call(reqwest::Method::DELETE, "/v1/schedules/nightly", None)
+        .await;
+    assert!(st.is_success(), "{st} {v}");
+    let (_, v) = sys.get("/v1/schedules").await;
+    assert_eq!(v["schedules"].as_array().map(Vec::len), Some(0), "{v}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tenant_webhooks_deliver_to_their_tenant() {
     let Fx { s, a, b, .. } = fixture().await;
