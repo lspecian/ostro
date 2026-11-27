@@ -1,0 +1,34 @@
+# CI: production-shaped values. Every Secret is the operator's (no Secret is rendered),
+# API certificate from cert-manager, KEDA metrics-api scaling with a bearer
+# TriggerAuthentication. Validated offline by scripts/helm-check.sh; never installed.
+server:
+  apiTls:
+    mode: files
+    existingSecret: ostro-api-tls
+  antiAffinity: hard
+auth:
+  existingSecret: ostro-bootstrap-admin
+sealing:
+  existingSecret: ostro-sealing
+  oldKeys:
+    existingSecret: ostro-sealing-old
+    keys: [key-2026-06]
+tls:
+  clusterCa:
+    existingSecret: ostro-cluster-ca
+worker:
+  queues: [default, heavy]
+  labels:
+    pool: heavy
+  slots: 8
+  joinToken:
+    existingSecret: ostro-worker-join
+  caHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+keda:
+  enabled: true
+  scaler: metrics-api
+  target: 8
+  maxReplicas: 50
+  metricsApi:
+    tokenSecret:
+      name: ostro-keda-reader

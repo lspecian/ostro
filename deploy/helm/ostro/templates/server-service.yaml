@@ -1,0 +1,22 @@
+# Client Service: REST, gRPC, /ui, /metrics, the demand endpoint KEDA polls and worker
+# joins (any node answers; requests are routed to the partition leader).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ostro.server" . }}
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  {{- with .Values.server.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.server.service.type }}
+  selector:
+    {{- include "ostro.serverSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.server.ports.client }}
+      targetPort: client
+      protocol: TCP

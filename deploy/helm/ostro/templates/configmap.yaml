@@ -1,0 +1,16 @@
+{{- include "ostro.validate" . }}
+# One node config per StatefulSet ordinal: server pod <fullname>-server-<i> starts with
+# `--config /etc/ostro/config/$(POD_NAME).toml`, so [node] node_id = <i> + 1 and its
+# [[cluster.peers]] (every other ordinal) need no shell or init container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ostro.server" . }}-config
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+data:
+  {{- range $i := until (int .Values.server.replicas) }}
+  {{ include "ostro.server" $ }}-{{ $i }}.toml: |
+    {{- include "ostro.nodeToml" (list $ $i) | nindent 4 }}
+  {{- end }}

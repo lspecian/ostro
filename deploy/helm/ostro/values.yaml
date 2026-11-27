@@ -1,0 +1,214 @@
+# Ostro Helm chart values (Phase 14, 14-13, D-P14-26). Every key is checked by
+# values.schema.json. See README.md for the values table and the NetworkPolicy matrix.
+
+# -- Override the chart name used in resource names and the app.kubernetes.io/name label.
+nameOverride: ""
+# -- Override the full resource name prefix (at most 40 characters).
+fullnameOverride: ""
+# -- Cluster DNS domain (peer addresses are <pod>.<headless>.<namespace>.svc.<domain>).
+clusterDomain: cluster.local
+
+image:
+  # -- Image repository (neutral default; the release workflow publishes the real one).
+  repository: ostro/ostro
+  # -- Image tag (default: the chart appVersion).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets (list of {name: ...}).
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create a ServiceAccount for the server and worker pods (no API token is mounted).
+  create: true
+  # -- Name (default: the full name).
+  name: ""
+  annotations: {}
+
+# -- Pod security context of every Ostro pod (the image runs as uid/gid 65532).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context of every Ostro container.
+securityContext:
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop: ["ALL"]
+
+server:
+  # -- Number of voters: 1, 3 or 5. A static voter set ([[cluster.peers]]) fixed at
+  # install time; grow a running cluster with `ostro cluster join` (README, "Upgrades").
+  replicas: 3
+  # -- [cluster] cluster_id (default: the full name). Bound into every node at first boot.
+  clusterId: ""
+  # -- [node] partitions (fixed at first boot).
+  partitions: 16
+  ports:
+    # -- Client listener: REST + gRPC + UI + /metrics + /healthz + /readyz, worker joins.
+    client: 7700
+    # -- Cluster listener (mTLS): MetaPeer, Replication and the worker protocol.
+    cluster: 7701
+    # -- Dedicated replication listener ([cluster] replication_listen); 0 = off.
+    replication: 7702
+  # -- [log] level.
+  logLevel: info
+  apiTls:
+    # -- [api.tls] mode: self-signed (a certificate issued by the cluster CA), files
+    # (existingSecret, e.g. from cert-manager) or off (plaintext; only behind a mesh).
+    mode: self-signed
+    # -- kubernetes.io/tls Secret (tls.crt, tls.key) for mode=files; reloaded on renewal.
+    existingSecret: ""
+  ui:
+    # -- [ui] enabled: serve /ui (token-mode sign-in, 14-21).
+    enabled: false
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 8Gi
+  storage:
+    # -- PersistentVolumeClaim size per server pod (WAL, state, blobs, meta, audit).
+    size: 20Gi
+    # -- StorageClass (empty: the cluster default).
+    storageClass: ""
+  # -- Pod anti-affinity across nodes: soft (preferred) or hard (required).
+  antiAffinity: soft
+  pdb:
+    # -- Render the PodDisruptionBudget (only when replicas > 1).
+    enabled: true
+    # -- Keep a metadata quorum: 2 of 3 voters.
+    minAvailable: 2
+  # -- SIGTERM starts a controlled shutdown (partition handoff, up to
+  # [cluster] shutdown_handoff_timeout = 30 s); no preStop hook.
+  terminationGracePeriodSeconds: 60
+  service:
+    type: ClusterIP
+    annotations: {}
+  # -- Extra environment variables (e.g. OSTRO_<SECTION>__<KEY> overrides).
+  extraEnv: []
+  # -- Raw TOML appended to every node's config. Only sections the chart does not render
+  # ([engine], [replication], [backup], [telemetry], [tenants], [audit], [security.modules],
+  # ...); repeating a rendered table is a TOML error.
+  extraConfig: ""
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+
+worker:
+  # -- Render the worker Deployment (remote workers join through the client listener).
+  enabled: true
+  # -- Replicas when KEDA is off (KEDA owns the count otherwise).
+  replicas: 1
+  # -- Queues served by this pool; KEDA scales on their demand.
+  queues:
+    - default
+  # -- Worker labels (--labels) matched by queue selectors.
+  labels: {}
+  # -- Concurrent activation slots per worker (--slots); keep keda.target equal to it.
+  slots: 4
+  # -- Engine memory budget in bytes (OSTRO_WORKER_MEMORY_BYTES; default 1 GiB).
+  memoryBytes: 1073741824
+  joinToken:
+    # -- Secret holding a wkr_ join token (`ostro worker token create`); default
+    # <fullname>-worker-join. The chart never creates it: workers start once it exists.
+    existingSecret: ""
+    key: token
+  # -- sha256:<hex> of the cluster CA (pinned during the join). Read from the generated
+  # CA Secret when empty; required with tls.clusterCa.existingSecret.
+  caHash: ""
+  # -- SIGTERM drains (stop taking work, finish or hand back in-flight activations).
+  terminationGracePeriodSeconds: 120
+  # -- AOT module cache (emptyDir) size limit.
+  cacheSize: 2Gi
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      memory: 2Gi
+  extraEnv: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+
+auth:
+  # -- [auth] mode: token (bearer API tokens) or none (needs allowInsecureNone).
+  mode: token
+  # -- [auth] allow_insecure_none (mode=none on a pod listener).
+  allowInsecureNone: false
+  # -- Secret holding the bootstrap admin bearer (OSTRO_BOOTSTRAP_TOKEN). Preferred.
+  existingSecret: ""
+  existingSecretKey: token
+  # -- Literal bootstrap admin bearer (ostro_otk_..._...). DEV ONLY: it lands in the
+  # release manifest. When neither this nor existingSecret is set, one is generated at
+  # install (kept across upgrades, never regenerated): read it from the <fullname>-auth
+  # Secret.
+  bootstrapToken: ""
+
+sealing:
+  # -- Secret holding the base64 32-byte sealing key (OSTRO_SEALING_KEY). Preferred; when
+  # empty a key is generated at install into <fullname>-sealing (kept, never regenerated).
+  existingSecret: ""
+  existingSecretKey: key
+  oldKeys:
+    # -- Secret holding older sealing keys for a rotation ([secrets] old_sealing_key_files).
+    existingSecret: ""
+    # -- Keys of that Secret, one file per old key.
+    keys: []
+
+tls:
+  clusterCa:
+    # -- Secret holding the shared cluster CA ([cluster.tls] ca_cert_file / ca_key_file).
+    # Its CN must be "ostro cluster <clusterId>". When empty an ECDSA P-256 CA is generated
+    # at install into <fullname>-cluster-ca (kept, never regenerated).
+    existingSecret: ""
+    certKey: ca.crt
+    keyKey: ca.key
+
+keda:
+  # -- Render a KEDA 2.21 ScaledObject for the worker Deployment.
+  enabled: false
+  # -- prometheus (sum of ostro_queue_worker_demand over the servers) or metrics-api
+  # (GET /v1/queues/<q>/demand with a bearer TriggerAuthentication).
+  scaler: prometheus
+  minReplicas: 0
+  maxReplicas: 10
+  # -- Demand per replica (targetValue / threshold); equal to worker.slots.
+  target: 4
+  pollingInterval: 15
+  cooldownPeriod: 120
+  prometheus:
+    # -- Prometheus base URL, e.g. http://prometheus-operated.monitoring.svc:9090.
+    serverAddress: ""
+  metricsApi:
+    tokenSecret:
+      # -- Secret holding a read-scoped bearer (`ostro auth token create --name keda --scope read --system`).
+      name: ""
+      key: token
+    # -- Skip certificate verification (the self-signed listener certificate does not
+    # name the Service). Prefer server.apiTls.mode=files with a certificate for
+    # <fullname>-server.<namespace>.svc.
+    unsafeSsl: false
+
+networkPolicy:
+  # -- Render the five NetworkPolicies (README, "NetworkPolicy matrix").
+  enabled: false
+  # -- Namespaces (names) allowed to reach the client port, besides the release namespace
+  # (e.g. ingress, keda, monitoring).
+  clientFromNamespaces: []
+  # -- Namespace of the cluster DNS (egress port 53 UDP/TCP).
+  dnsNamespace: kube-system
+  # -- Extra server egress rules (NetworkPolicyEgressRule list): connectors, backup
+  # bucket, OTLP collector, secret providers.
+  serverEgress: []
+  # -- Extra worker egress rules (default: servers + DNS only).
+  workerEgress: []

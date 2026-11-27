@@ -1,0 +1,150 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $p := .Values.server.ports }}
+# Five NetworkPolicies (D-P14-26). Policies are additive: the server pods accept the union
+# of 1-3 and nothing else; worker and server egress are limited by 4 and 5.
+# The worker protocol shares the cluster listener with MetaPeer (Phase 12, D-P12-13), so
+# policy 3 opens only that port to workers; the replication port stays server-only.
+#
+# 1. client port: from the release namespace and networkPolicy.clientFromNamespaces
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ostro.server" . }}-client
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ostro.serverSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+        {{- with .Values.networkPolicy.clientFromNamespaces }}
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  {{- toYaml . | nindent 18 }}
+        {{- end }}
+      ports:
+        - port: {{ $p.client }}
+          protocol: TCP
+---
+# 2. cluster and replication ports: only from server pods (MetaPeer, Replication)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ostro.server" . }}-peers
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ostro.serverSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ostro.serverSelectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ $p.cluster }}
+          protocol: TCP
+        {{- if $p.replication }}
+        - port: {{ $p.replication }}
+          protocol: TCP
+        {{- end }}
+---
+# 3. worker port (the worker protocol on the cluster listener): only from worker pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ostro.server" . }}-workers
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ostro.serverSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ostro.workerSelectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ $p.cluster }}
+          protocol: TCP
+---
+# 4. worker egress: only to the servers (join on the client port, sessions on the cluster
+#    port) and DNS (+ networkPolicy.workerEgress)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ostro.worker" . }}-egress
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ostro.workerSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ostro.serverSelectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ $p.client }}
+          protocol: TCP
+        - port: {{ $p.cluster }}
+          protocol: TCP
+    {{- include "ostro.dnsEgress" . | nindent 4 }}
+    {{- with .Values.networkPolicy.workerEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+# 5. server egress: peers (cluster, replication), DNS and networkPolicy.serverEgress
+#    (connectors, backup bucket, OTLP, secret providers)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ostro.server" . }}-egress
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ostro.serverSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ostro.serverSelectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ $p.client }}
+          protocol: TCP
+        - port: {{ $p.cluster }}
+          protocol: TCP
+        {{- if $p.replication }}
+        - port: {{ $p.replication }}
+          protocol: TCP
+        {{- end }}
+    {{- include "ostro.dnsEgress" . | nindent 4 }}
+    {{- with .Values.networkPolicy.serverEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

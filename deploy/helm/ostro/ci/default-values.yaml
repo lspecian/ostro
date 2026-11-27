@@ -1,0 +1,4 @@
+# CI: chart defaults (3 voters, worker pool, generated sealing key / bootstrap bearer /
+# cluster CA). Validated offline by scripts/helm-check.sh; never installed.
+server:
+  replicas: 3

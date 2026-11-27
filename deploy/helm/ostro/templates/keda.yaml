@@ -1,0 +1,75 @@
+{{- if .Values.keda.enabled }}
+{{- include "ostro.validate" . }}
+# KEDA 2.21 scaling of the worker Deployment (D-W12, D-P14-26).
+#
+# demand(queue) = runs executing on workers + ready runs admissible for workers.
+# - Activation 0 -> 1 when the value is strictly above the activation value ("0"): the
+#   first ready run wakes the pool. 1 -> N: ceil(value / target) replicas.
+# - N -> 0 only after cooldownPeriod at 0; demand counts runs still executing on workers,
+#   so the pool is never scaled to zero under load.
+# - prometheus: sum over the servers of ostro_queue_worker_demand{queue} (each node exports
+#   the share of the partitions it leads). metrics-api: GET /v1/queues/<q>/demand on the
+#   client Service (any node answers for the cluster) with a read-scoped bearer; one
+#   trigger per queue (KEDA takes the maximum).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "ostro.worker" . }}
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: {{ include "ostro.worker" . }}
+  minReplicaCount: {{ .Values.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.keda.maxReplicas }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  triggers:
+    {{- if eq .Values.keda.scaler "prometheus" }}
+    {{- $qs := list }}
+    {{- range .Values.worker.queues }}{{ $qs = append $qs (regexQuoteMeta .) }}{{ end }}
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.keda.prometheus.serverAddress | quote }}
+        query: {{ printf "sum(ostro_queue_worker_demand{queue=~\"%s\"})" (join "|" $qs) | quote }}
+        threshold: {{ .Values.keda.target | toString | quote }}
+        activationThreshold: "0"
+    {{- else }}
+    {{- $root := . }}
+    {{- range .Values.worker.queues }}
+    - type: metrics-api
+      metadata:
+        url: {{ printf "%s://%s:%d/v1/queues/%s/demand" (include "ostro.clientScheme" $root) (include "ostro.clientHost" $root) (int $root.Values.server.ports.client) (urlquery .) | quote }}
+        valueLocation: demand
+        targetValue: {{ $root.Values.keda.target | toString | quote }}
+        activationTargetValue: "0"
+        {{- if eq $root.Values.auth.mode "token" }}
+        authMode: bearer
+        {{- end }}
+        {{- if $root.Values.keda.metricsApi.unsafeSsl }}
+        unsafeSsl: "true"
+        {{- end }}
+      {{- if eq $root.Values.auth.mode "token" }}
+      authenticationRef:
+        name: {{ include "ostro.worker" $root }}-demand
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- if and (eq .Values.keda.scaler "metrics-api") (eq .Values.auth.mode "token") }}
+---
+# Bearer for the demand endpoint (read scope); the Secret is the operator's.
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "ostro.worker" . }}-demand
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  secretTargetRef:
+    - parameter: bearerToken
+      name: {{ .Values.keda.metricsApi.tokenSecret.name }}
+      key: {{ .Values.keda.metricsApi.tokenSecret.key }}
+{{- end }}
+{{- end }}

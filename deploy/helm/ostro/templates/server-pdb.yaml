@@ -1,0 +1,14 @@
+{{- if and .Values.server.pdb.enabled (gt (int .Values.server.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "ostro.server" . }}
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  minAvailable: {{ .Values.server.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "ostro.serverSelectorLabels" . | nindent 6 }}
+{{- end }}

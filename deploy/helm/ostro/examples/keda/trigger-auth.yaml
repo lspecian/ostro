@@ -1,0 +1,26 @@
+# Bearer KEDA sends to Ostro's demand endpoint (release `ostro`, namespace `ostro`).
+# Create a read-scoped system token and store it in the Secret:
+#
+#   ostro auth token create --name keda --scope read --system
+#
+# PLACEHOLDER ONLY: replace the value before applying (or create the Secret with kubectl
+# and drop it from this file). Never commit a real bearer.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ostro-keda-reader
+  namespace: ostro
+type: Opaque
+stringData:
+  token: "REPLACE-WITH-AN-ostro_otk_-BEARER"
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: ostro-worker-demand
+  namespace: ostro
+spec:
+  secretTargetRef:
+    - parameter: bearerToken
+      name: ostro-keda-reader
+      key: token

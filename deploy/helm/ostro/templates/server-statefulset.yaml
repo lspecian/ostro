@@ -1,0 +1,206 @@
+{{- include "ostro.validate" . }}
+# Ostro server voters (Phase 12 static bootstrap, D-P14-26).
+#
+# - Node id: pod <fullname>-server-<i> reads ConfigMap key <fullname>-server-<i>.toml
+#   (`--config /etc/ostro/config/$(POD_NAME).toml`, POD_NAME from the downward API), which
+#   sets [node] node_id = <i> + 1 and lists the other ordinals as [[cluster.peers]]. The
+#   image has no shell, so there is no entrypoint script or init container.
+# - All voters share the cluster CA Secret ([cluster.tls] ca_cert_file / ca_key_file);
+#   each issues its own node certificate for its headless DNS name at boot.
+# - podManagementPolicy Parallel: the voters must start together to elect metadata.
+# - SIGTERM = controlled shutdown (partition handoff, Phase 13); no preStop hook.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ostro.server" . }}
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  serviceName: {{ include "ostro.headless" . }}
+  replicas: {{ .Values.server.replicas }}
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "ostro.serverSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ostro.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ostro.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # No docker-link env vars (OSTRO_SERVER_* from the Service name).
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.server.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      affinity:
+        podAntiAffinity:
+          {{- if eq .Values.server.antiAffinity "hard" }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "ostro.serverSelectorLabels" . | nindent 18 }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "ostro.serverSelectorLabels" . | nindent 20 }}
+          {{- end }}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: {{ include "ostro.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - server
+            - --config
+            - /etc/ostro/config/$(POD_NAME).toml
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OSTRO_SEALING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ostro.sealingSecret" . }}
+                  key: {{ .Values.sealing.existingSecretKey }}
+            {{- if eq .Values.auth.mode "token" }}
+            - name: OSTRO_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ostro.authSecret" . }}
+                  key: {{ .Values.auth.existingSecretKey }}
+            {{- end }}
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: client
+              containerPort: {{ .Values.server.ports.client }}
+              protocol: TCP
+            - name: cluster
+              containerPort: {{ .Values.server.ports.cluster }}
+              protocol: TCP
+            {{- if .Values.server.ports.replication }}
+            - name: replication
+              containerPort: {{ .Values.server.ports.replication }}
+              protocol: TCP
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: client
+              scheme: {{ include "ostro.clientScheme" . | upper }}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: client
+              scheme: {{ include "ostro.clientScheme" . | upper }}
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: client
+              scheme: {{ include "ostro.clientScheme" . | upper }}
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/ostro/config
+              readOnly: true
+            - name: cluster-ca
+              mountPath: /etc/ostro/cluster-ca
+              readOnly: true
+            {{- if .Values.sealing.oldKeys.existingSecret }}
+            - name: sealing-old
+              mountPath: /etc/ostro/sealing-old
+              readOnly: true
+            {{- end }}
+            {{- if eq .Values.server.apiTls.mode "files" }}
+            - name: api-tls
+              mountPath: /etc/ostro/api-tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: config
+          configMap:
+            name: {{ include "ostro.server" . }}-config
+        - name: cluster-ca
+          secret:
+            secretName: {{ include "ostro.caSecret" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.tls.clusterCa.certKey }}
+                path: {{ .Values.tls.clusterCa.certKey }}
+              - key: {{ .Values.tls.clusterCa.keyKey }}
+                path: {{ .Values.tls.clusterCa.keyKey }}
+        {{- if .Values.sealing.oldKeys.existingSecret }}
+        - name: sealing-old
+          secret:
+            secretName: {{ .Values.sealing.oldKeys.existingSecret }}
+            defaultMode: 0440
+            items:
+              {{- range .Values.sealing.oldKeys.keys }}
+              - key: {{ . }}
+                path: {{ . }}
+              {{- end }}
+        {{- end }}
+        {{- if eq .Values.server.apiTls.mode "files" }}
+        - name: api-tls
+          secret:
+            secretName: {{ .Values.server.apiTls.existingSecret }}
+            defaultMode: 0440
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "ostro.serverSelectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.server.storage.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.server.storage.size }}

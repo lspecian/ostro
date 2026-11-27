@@ -1,0 +1,35 @@
+# Standalone KEDA 2.21 ScaledObject (metrics-api scaler) for the chart's worker
+# Deployment, release `ostro` in namespace `ostro` (rendered equivalent: keda.enabled=true,
+# keda.scaler=metrics-api). Supersedes deploy/keda/scaledobject-metrics-api.yaml (Phase 7).
+#
+# KEDA polls GET /v1/queues/<queue>/demand on the client Service and reads `demand`. Since
+# Phase 14 the endpoint needs a bearer with the read scope (trigger-auth.yaml). Any server
+# answers for the whole cluster. One trigger per queue; KEDA scales on the maximum.
+#
+# TLS: the client listener's certificate must name ostro-server.ostro.svc for KEDA to
+# verify it (server.apiTls.mode=files with a cert-manager certificate). With the chart's
+# default self-signed listener certificate set unsafeSsl: "true" instead.
+#
+# Validated offline only (scripts/helm-check.sh). Applying it is a human step.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ostro-worker
+  namespace: ostro
+spec:
+  scaleTargetRef:
+    name: ostro-worker
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 120
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: "https://ostro-server.ostro.svc.cluster.local:7700/v1/queues/default/demand"
+        valueLocation: demand
+        targetValue: "4"
+        activationTargetValue: "0"
+        authMode: bearer
+      authenticationRef:
+        name: ostro-worker-demand

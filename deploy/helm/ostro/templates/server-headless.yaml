@@ -1,0 +1,27 @@
+# Headless Service: stable per-pod DNS names for [cluster] advertise and
+# [[cluster.peers]]. publishNotReadyAddresses lets the voters find each other before
+# /readyz passes (readiness needs a metadata quorum).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ostro.headless" . }}
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "ostro.serverSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.server.ports.client }}
+      targetPort: client
+    - name: cluster
+      port: {{ .Values.server.ports.cluster }}
+      targetPort: cluster
+    {{- if .Values.server.ports.replication }}
+    - name: replication
+      port: {{ .Values.server.ports.replication }}
+      targetPort: replication
+    {{- end }}

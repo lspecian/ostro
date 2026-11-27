@@ -1,0 +1,40 @@
+Ostro {{ .Chart.AppVersion }}: {{ .Values.server.replicas }} server voter(s) in {{ .Release.Namespace }}.
+
+Client endpoint (REST, gRPC{{ if .Values.server.ui.enabled }}, /ui{{ end }}, /metrics):
+  {{ include "ostro.clientScheme" . }}://{{ include "ostro.clientHost" . }}:{{ .Values.server.ports.client }}
+
+{{- if eq .Values.auth.mode "token" }}
+
+Bootstrap admin bearer (Secret {{ include "ostro.authSecret" . }}, key {{ .Values.auth.existingSecretKey }}):
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "ostro.authSecret" . }} -o jsonpath='{.data.{{ .Values.auth.existingSecretKey }}}' | base64 -d
+{{- if not .Values.auth.existingSecret }}
+  (chart-generated or from values: dev only. Create scoped tokens and use existingSecret in production.)
+{{- end }}
+{{- end }}
+{{- if not (and .Values.sealing.existingSecret .Values.tls.clusterCa.existingSecret) }}
+
+Generated at install and kept across upgrades (helm.sh/resource-policy: keep; NOT deleted
+by `helm uninstall`; back them up):
+{{- if not .Values.sealing.existingSecret }}
+  - sealing key: Secret {{ include "ostro.sealingSecret" . }}
+{{- end }}
+{{- if not .Values.tls.clusterCa.existingSecret }}
+  - cluster CA:  Secret {{ include "ostro.caSecret" . }} (key ca-hash = the worker --ca-hash)
+{{- end }}
+{{- end }}
+{{- if .Values.worker.enabled }}
+
+Workers start once their join token exists:
+  ostro worker token create --ttl 720h          # against the client endpoint, as admin
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ include "ostro.workerTokenSecret" . }} --from-literal={{ .Values.worker.joinToken.key }}=<wkr_ token>
+{{- end }}
+{{- if .Values.keda.enabled }}
+
+KEDA ({{ .Values.keda.scaler }}) scales {{ include "ostro.worker" . }} between {{ .Values.keda.minReplicas }} and {{ .Values.keda.maxReplicas }} replicas on the demand of: {{ join ", " .Values.worker.queues }}.
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+
+NetworkPolicies are on: add namespaces that must reach the client port (ingress, keda,
+monitoring) to networkPolicy.clientFromNamespaces and connector/backup destinations to
+networkPolicy.serverEgress.
+{{- end }}

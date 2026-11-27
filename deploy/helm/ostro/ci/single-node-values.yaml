@@ -1,0 +1,8 @@
+# CI: one voter, no worker pool (embedded executor only), no PodDisruptionBudget.
+# Validated offline by scripts/helm-check.sh; never installed.
+server:
+  replicas: 1
+  ui:
+    enabled: true
+worker:
+  enabled: false

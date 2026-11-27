@@ -1,0 +1,30 @@
+# Standalone KEDA 2.21 ScaledObject (prometheus scaler) for the chart's worker Deployment,
+# for a release named `ostro` in namespace `ostro` (rendered equivalent: keda.enabled=true,
+# keda.scaler=prometheus). Supersedes deploy/keda/scaledobject-prometheus.yaml (Phase 7).
+#
+# Each server exports ostro_queue_worker_demand{queue} for the partitions it leads; the sum
+# over the servers is the cluster demand (runs executing on workers + ready runs
+# admissible for workers). Activation when the value is above activationThreshold ("0"),
+# ceil(value / threshold) replicas, scale to zero only after cooldownPeriod at 0.
+# threshold = the workers' slots (worker.slots).
+#
+# Validated offline only (scripts/helm-check.sh). Applying it is a human step.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ostro-worker
+  namespace: ostro
+spec:
+  scaleTargetRef:
+    name: ostro-worker
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 120
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: "http://prometheus-operated.monitoring.svc:9090"
+        query: 'sum(ostro_queue_worker_demand{queue=~"default"})'
+        threshold: "4"
+        activationThreshold: "0"

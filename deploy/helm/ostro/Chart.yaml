@@ -1,0 +1,17 @@
+apiVersion: v2
+name: ostro
+description: Ostro durable Wasm workflow engine (3-voter server StatefulSet, worker pool, optional KEDA scaling and NetworkPolicies)
+type: application
+version: 1.0.0-rc.1
+appVersion: "1.0.0-rc.1"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/lspecian/ostro
+sources:
+  - https://github.com/lspecian/ostro
+keywords:
+  - workflow
+  - durable-execution
+  - wasm
+annotations:
+  artifacthub.io/license: Apache-2.0
+  licenses: Apache-2.0

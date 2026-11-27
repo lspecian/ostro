@@ -1,0 +1,14 @@
+# Patterns ignored when packaging the chart (helm package).
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+# CI values files and standalone examples are not part of the packaged chart.
+ci/
+examples/

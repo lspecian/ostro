@@ -1,0 +1,106 @@
+{{- if .Values.worker.enabled }}
+{{- include "ostro.validate" . }}
+# Remote worker pool (Phase 7, WORK-01/05). Configured entirely through OSTRO_WORKER_*
+# (no secret on argv): it joins through the client Service with a wkr_ join token
+# (`ostro worker token create`, stored in the join Secret), pins the cluster CA by hash,
+# then dials the advertised cluster listeners (mTLS). SIGTERM drains: the worker stops
+# taking work, finishes or hands back in-flight activations and exits 0 within
+# terminationGracePeriodSeconds. No Service: workers only dial out.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ostro.worker" . }}
+  labels:
+    {{- include "ostro.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.keda.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "ostro.workerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ostro.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      {{- with .Values.worker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ostro.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # No docker-link env vars (OSTRO_SERVER_* from the Service name).
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "ostro.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - worker
+          env:
+            - name: OSTRO_WORKER_JOIN
+              value: {{ printf "%s://%s:%d" (include "ostro.clientScheme" .) (include "ostro.clientHost" .) (int .Values.server.ports.client) | quote }}
+            - name: OSTRO_WORKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ostro.workerTokenSecret" . }}
+                  key: {{ .Values.worker.joinToken.key }}
+            {{- if .Values.worker.caHash }}
+            - name: OSTRO_WORKER_CA_HASH
+              value: {{ .Values.worker.caHash | quote }}
+            {{- else if not .Values.tls.clusterCa.existingSecret }}
+            - name: OSTRO_WORKER_CA_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ostro.caSecret" . }}
+                  key: ca-hash
+            {{- end }}
+            - name: OSTRO_WORKER_SLOTS
+              value: {{ .Values.worker.slots | quote }}
+            - name: OSTRO_WORKER_MEMORY_BYTES
+              value: {{ int64 .Values.worker.memoryBytes | toString | quote }}
+            - name: OSTRO_WORKER_CACHE_DIR
+              value: /cache
+            {{- with .Values.worker.labels }}
+            - name: OSTRO_WORKER_LABELS
+              value: {{ include "ostro.labelList" . | quote }}
+            {{- end }}
+            {{- with .Values.worker.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # AOT-compiled module cache; rebuilt on demand, so an emptyDir is enough.
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.worker.cacheSize }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+{{- end }}
